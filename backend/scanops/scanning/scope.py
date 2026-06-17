@@ -27,11 +27,17 @@ def parse_scope(spec: str) -> list[ipaddress._BaseNetwork]:
 
 
 def _in_scope(host: str, nets: list[ipaddress._BaseNetwork]) -> bool:
+    # 단일 IP 는 멤버십, CIDR 토큰은 허용망의 서브넷인지로 판정.
     try:
         ip = ipaddress.ip_address(host)
+        return any(ip in n for n in nets)
     except ValueError:
-        return False  # IP 가 아니면(호스트명/복합문법) 범위 검증 불가 → scope 모드에선 불허
-    return any(ip in n for n in nets)
+        pass
+    try:
+        net = ipaddress.ip_network(host, strict=False)
+        return any(net.version == n.version and net.subnet_of(n) for n in nets)
+    except ValueError:
+        return False  # IP/CIDR 가 아니면(호스트명/복합문법) 범위 검증 불가 → scope 모드에선 불허
 
 
 def check_scope(hosts: list[str], spec: str | None = None) -> None:

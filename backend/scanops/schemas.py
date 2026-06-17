@@ -53,6 +53,11 @@ class ScanRunIn(BaseModel):
     batch_size: int = 256          # 청킹 배치당 호스트 수(중지/이어가기 단위)
 
 
+class RawCommandIn(BaseModel):
+    name: str = ""
+    command: str          # 사용자가 직접 입력한 nmap 명령(출력 플래그는 서버가 -oA 로 강제 교체)
+
+
 class ScanOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

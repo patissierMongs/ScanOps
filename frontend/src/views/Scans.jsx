@@ -32,8 +32,11 @@ export default function Scans({ user }) {
   const [progress, setProgress] = useState({});   // { [scanId]: { percent, etc, remaining, elapsed, hosts_up, last_line } }
   const [targets, setTargets] = useState("");
   const [name, setName] = useState("");
-  const [opt, setOpt] = useState({ options: [], ports: "" });
+  const [opt, setOpt] = useState({ options: [], ports: "", command: "" });
   const [batchSize, setBatchSize] = useState(256);
+  const [rawMode, setRawMode] = useState(false);   // 직접 명령 입력 모드
+  const [rawCmd, setRawCmd] = useState("");
+  const [rawEdited, setRawEdited] = useState(false);
   const [est, setEst] = useState(null);
   const [busy, setBusy] = useState(false);
   const folderRef = useRef(null);
@@ -124,7 +127,21 @@ export default function Scans({ user }) {
     if (files.length) importFiles(files);
   }
 
+  // 직접 명령 모드 진입 시(또는 옵션 변경 시) 사용자가 손대기 전까진 조립된 명령을 따라간다.
+  useEffect(() => {
+    if (rawMode && !rawEdited) setRawCmd(opt.command || "");
+  }, [rawMode, rawEdited, opt.command]);
+
   function runScan() {
+    if (rawMode) {
+      if (!rawCmd.trim()) { toast("명령을 입력하세요", { type: "err" }); return; }
+      setBusy(true);
+      api("/scans/run-command", { method: "POST", json: { name, command: rawCmd } })
+        .then((s) => { toast(`직접 명령 스캔 시작됨 · #${s.id} (단발 실행 — 이어가기 미지원)`); load(); })
+        .catch((e2) => toast(e2.message, { type: "err" }))
+        .finally(() => setBusy(false));
+      return;
+    }
     if (!targetList.length) { toast("타겟을 입력하세요", { type: "err" }); return; }
     setBusy(true);
     api("/scans/run", { method: "POST", json: { name, options: opt.options, ports: opt.ports, targets: targetList, batch_size: batchSize } })
@@ -149,34 +166,64 @@ export default function Scans({ user }) {
     <div className="content">
       {canRun && (
         <div className="panel">
-          <h3>스캔 실행 (서버 nmap)</h3>
-          <div className="row" style={{ marginBottom: 12 }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <h3 style={{ margin: 0 }}>스캔 실행 (서버 nmap)</h3>
+            <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}>
+              <input type="checkbox" checked={rawMode}
+                     onChange={(e) => { setRawMode(e.target.checked); setRawEdited(false); }} />
+              명령 직접 입력 (고급)
+            </label>
+          </div>
+          <div className="row" style={{ marginBottom: 12, marginTop: 10 }}>
             <input placeholder="이름(선택)" value={name} onChange={(e) => setName(e.target.value)} />
-            <input style={{ flex: 1, minWidth: 240 }} placeholder="타겟 (예: 10.0.12.0/24 10.0.13.5)"
-                   value={targets} onChange={(e) => setTargets(e.target.value)} />
+            {!rawMode && (
+              <input style={{ flex: 1, minWidth: 240 }} placeholder="타겟 (예: 10.0.12.0/24 10.0.13.5)"
+                     value={targets} onChange={(e) => setTargets(e.target.value)} />
+            )}
           </div>
 
-          <ScanOptions targets={targetList} onState={setOpt} />
+          {rawMode ? (
+            <div style={{ marginBottom: 4 }}>
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <span className="cb-label">nmap 명령 — 직접 편집 (출력 플래그는 서버가 -oA 로 강제 교체)</span>
+                <button type="button" className="sm" onClick={() => { setRawCmd(opt.command || ""); setRawEdited(false); }}>
+                  옵션 빌더에서 채우기
+                </button>
+              </div>
+              <textarea className="mono" rows={3} value={rawCmd}
+                        onChange={(e) => { setRawCmd(e.target.value); setRawEdited(true); }}
+                        placeholder="nmap -sV -p 22,80,443 10.0.12.0/24"
+                        style={{ width: "100%", resize: "vertical", fontSize: 12.5 }} />
+              <div className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                단발 실행입니다 — 배치 청킹/이어가기는 미지원(중지만 가능). 셸 메타문자(; | &amp; $ ` 등)는 차단되고,
+                허용 대역(scope)이 설정돼 있으면 그 밖의 IP 는 거절됩니다.
+              </div>
+            </div>
+          ) : (
+            <>
+              <ScanOptions targets={targetList} onState={setOpt} />
 
-          <div style={{ marginTop: 12 }}>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <span className="cb-label">배치 크기 — 중지·이어가기 단위 (넓은 대역을 이만큼씩 쪼개 스캔)</span>
-              <span className="mono">{batchSize} 호스트 / 배치</span>
-            </div>
-            <input type="range" min={16} max={1024} step={16} value={batchSize}
-                   onChange={(e) => setBatchSize(Number(e.target.value))} style={{ width: "100%" }} />
-            <div className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
-              {est
-                ? `${est.host_count} 호스트 / ${est.batch_count} 배치` +
-                  (est.basis === "history" && est.est_seconds != null
-                    ? ` · 예상 ~${fmtDur(est.est_seconds)} (과거 동일설정 ${est.sample_count}건 기준·근사)`
-                    : " · 예상시간: 동일설정 이력 없음 → 실행 후 배치 기준으로 정밀 추정")
-                : (targetList.length ? "예상 계산 중…" : "타겟을 입력하면 호스트·배치 수와 예상시간을 보여줍니다")}
-            </div>
-          </div>
+              <div style={{ marginTop: 12 }}>
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <span className="cb-label">배치 크기 — 중지·이어가기 단위 (넓은 대역을 이만큼씩 쪼개 스캔)</span>
+                  <span className="mono">{batchSize} 호스트 / 배치</span>
+                </div>
+                <input type="range" min={16} max={1024} step={16} value={batchSize}
+                       onChange={(e) => setBatchSize(Number(e.target.value))} style={{ width: "100%" }} />
+                <div className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                  {est
+                    ? `${est.host_count} 호스트 / ${est.batch_count} 배치` +
+                      (est.basis === "history" && est.est_seconds != null
+                        ? ` · 예상 ~${fmtDur(est.est_seconds)} (과거 동일설정 ${est.sample_count}건 기준·근사)`
+                        : " · 예상시간: 동일설정 이력 없음 → 실행 후 배치 기준으로 정밀 추정")
+                    : (targetList.length ? "예상 계산 중…" : "타겟을 입력하면 호스트·배치 수와 예상시간을 보여줍니다")}
+                </div>
+              </div>
+            </>
+          )}
 
           <div className="row" style={{ marginTop: 14 }}>
-            <button className="primary" disabled={busy || !targetList.length} onClick={runScan}>
+            <button className="primary" disabled={busy || (rawMode ? !rawCmd.trim() : !targetList.length)} onClick={runScan}>
               {busy ? "시작 중…" : "스캔 실행"}
             </button>
             <label className="linkbtn">

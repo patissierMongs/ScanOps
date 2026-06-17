@@ -22,8 +22,6 @@ export default function ScanOptions({ targets = [], portsAuto = "", onState }) {
     return () => { live = false; };
   }, []);
 
-  useEffect(() => { onState && onState({ options: [...sel], ports }); }, [sel, ports]);
-
   const command = useMemo(() => {
     const flags = registry.filter((o) => sel.has(o.key)).flatMap((o) => o.flags);
     const p = (ports || portsAuto).trim();
@@ -33,6 +31,9 @@ export default function ScanOptions({ targets = [], portsAuto = "", onState }) {
     if (targets.length) parts.push(...targets);
     return parts.join(" ");
   }, [sel, ports, portsAuto, targets, registry]);
+
+  // 부모(Scans)가 직접 명령 편집을 prefill 할 수 있도록 조립된 명령도 함께 올린다.
+  useEffect(() => { onState && onState({ options: [...sel], ports, command }); }, [sel, ports, command]);
 
   const groups = useMemo(() => {
     const g = {};
