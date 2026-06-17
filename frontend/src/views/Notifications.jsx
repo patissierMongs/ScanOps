@@ -4,7 +4,7 @@ import { downloadText } from "../lib/download.js";
 import { useToast } from "../ui/Toast.jsx";
 import { asDate, dday, today } from "../lib/format.js";
 
-const STATUSES = ["미조치", "처리중", "재발", "정상처리"];
+const STATUSES = ["미조치", "처리중", "정상처리"];
 const TPL_KEY = "scanops_notify_templates";
 const loadTpls = () => { try { return JSON.parse(localStorage.getItem(TPL_KEY)) || []; } catch { return []; } };
 
@@ -42,7 +42,7 @@ export default function Notifications({ user }) {
   const [depts, setDepts] = useState([]);
   const [dept, setDept] = useState("");
   const [findings, setFindings] = useState([]);
-  const [statusSel, setStatusSel] = useState(() => new Set(["미조치", "처리중", "재발"]));
+  const [statusSel, setStatusSel] = useState(() => new Set(["미조치", "처리중"]));
   const [deadlineMode, setDeadlineMode] = useState("all");
   const [tpl, setTpl] = useState(DEFAULT_TPL);
   const [tpls, setTpls] = useState(loadTpls);

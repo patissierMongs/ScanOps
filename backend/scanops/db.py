@@ -50,8 +50,12 @@ def _migrate() -> None:
         cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(findings)").fetchall()}
         if "owner" not in cols:  # 자산대장 담당자명 전파용 컬럼
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN owner VARCHAR(128) DEFAULT ''")
+        if "reopened" not in cols:  # 재발 태그 컬럼
+            conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN reopened INTEGER DEFAULT 0")
         # 예외승인 폐지 → 정상처리로 통합
         conn.exec_driver_sql("UPDATE findings SET status='정상처리' WHERE status='예외승인'")
+        # 재발 상태 폐지 → 미조치 + reopened 태그로 전환
+        conn.exec_driver_sql("UPDATE findings SET reopened=1, status='미조치' WHERE status='재발'")
 
 
 def get_db() -> Iterator[Session]:

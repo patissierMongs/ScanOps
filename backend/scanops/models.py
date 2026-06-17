@@ -27,7 +27,8 @@ def _now() -> datetime:
 
 # ---- 역할/상태 상수 (자유 문자열이지만 의미 고정) ----
 ROLES = ("admin", "auditor", "viewer")
-FINDING_STATUSES = ("미조치", "처리중", "정상처리", "재발")
+# 재발은 더 이상 별도 상태가 아니다 — 재발한 발견은 미조치로 되돌리고 reopened 플래그(태그)로만 표시.
+FINDING_STATUSES = ("미조치", "처리중", "정상처리")
 # banned(금지) = 조직이 명시 금지한 서비스. 상(high)/중(medium)/하(low)/정보(info)는 KISA·NIS 기준.
 RISK_LEVELS = ("banned", "high", "medium", "low", "info")
 RISK_LABELS_KO = {"banned": "금지", "high": "상", "medium": "중", "low": "하", "info": "정보"}
@@ -116,6 +117,8 @@ class Finding(Base):
 
     # --- 운영 상태(사람이 갱신, 스캔 간 영속) ---
     status: Mapped[str] = mapped_column(String(16), default="미조치", index=True)
+    # 재발 태그 — 정상처리됐다가 다시 열린 적이 있으면 1(상태는 미조치로 되돌아감). 닫히면 0으로 해제.
+    reopened: Mapped[int] = mapped_column(Integer, default=0, index=True)
     owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     dept: Mapped[str] = mapped_column(String(128), default="")

@@ -45,7 +45,7 @@
 - **Finding**(id, **finding_key**(uniq), host_ip, hostname, port, proto, state[open/closed/filtered], service, product, version, banner, cpe, rtt,
   identification[확인/추측/tcpwrapped/미확인], category, usage, risk_level[high/medium/low/info], remarks, nse_json, compliance_json,
   first_scan_id, last_scan_id, first_seen, last_seen,
-  status[미조치/처리중/정상처리/예외승인/재발], owner_user_id, deadline, dept,
+  status[미조치/처리중/정상처리], reopened(재발 태그 — 정상처리 후 다시 열리면 1, 상태는 미조치로 복귀), owner_user_id, deadline, dept,
   created_at, updated_at)
 - **FindingEvent**(id, finding_id, scan_id, type[NEW_OPEN/CLOSED/REOPENED/SERVICE_CHANGED/VERSION_CHANGED/STATUS_CHANGE/ASSIGN/DEADLINE/NOTE/EXCEPTION], detail, actor_user_id, created_at) — 이력 타임라인 + 감사 추적.
 - **RiskRule**(id, kind[banned_service/port_rule], service, port, risk_level, note, created_by) — taxonomy 위에 얹는 조직 커스텀 규칙.

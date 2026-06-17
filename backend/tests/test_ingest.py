@@ -73,11 +73,33 @@ def test_reopen_marks_recurrence():
         # 135 닫힘
         s2 = _scan(db)
         ingest(db, s2, [f for f in fs if f["port"] != 135], {"127.0.0.1"})
-        # 135 다시 열림 → REOPENED + 재발
+        # 135 다시 열림 → REOPENED. 재발은 별도 상태가 아니라 태그(reopened=1) + 미조치로 복귀.
         s3 = _scan(db)
         counts = ingest(db, s3, fs, {"127.0.0.1"})
         assert counts["reopened"] == 1
         row = db.query(Finding).filter_by(port=135).first()
-        assert row.state == "open" and row.status == "재발"
+        assert row.state == "open" and row.status == "미조치" and row.reopened == 1
+    finally:
+        db.close()
+
+
+def test_legacy_reopen_status_migrated():
+    """기존 DB의 '재발' 상태 → 미조치 + reopened 태그로 전환(경량 마이그레이션)."""
+    from scanops.db import _migrate
+    init_db()
+    db = SessionLocal()
+    try:
+        row = Finding(finding_key="1.1.1.1|22|tcp", host_ip="1.1.1.1", port=22,
+                      proto="tcp", state="open", status="재발", reopened=0)
+        db.add(row)
+        db.commit()
+        rid = row.id
+    finally:
+        db.close()
+    _migrate()
+    db = SessionLocal()
+    try:
+        row = db.get(Finding, rid)
+        assert row.status == "미조치" and row.reopened == 1
     finally:
         db.close()

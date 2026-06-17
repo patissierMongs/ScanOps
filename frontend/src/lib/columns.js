@@ -27,6 +27,7 @@ export const ALL_COLUMNS = [
   { key: "remarks", label: "비고", get: (f) => f.remarks },
   { key: "compliance", label: "컴플라이언스근거", get: (f) => joinCompliance(f.compliance_json) },
   { key: "status", label: "운영상태", get: (f) => f.status, badge: "status" },
+  { key: "reopened", label: "재발", get: (f) => (f.reopened ? "재발" : "") },
   { key: "dept", label: "부서", get: (f) => f.dept },
   { key: "contact", label: "연락처", get: (f) => f.contact, mono: true },
   { key: "deadline", label: "마감", get: (f) => fmtDate(f.deadline), mono: true },

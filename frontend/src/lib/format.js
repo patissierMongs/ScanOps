@@ -23,5 +23,4 @@ export const STATUS_CLASS = {
   미조치: "high",
   처리중: "medium",
   정상처리: "low",
-  재발: "high",
 };

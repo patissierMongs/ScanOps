@@ -106,6 +106,7 @@ class FindingOut(BaseModel):
     remarks: str
     compliance_json: list | None
     status: str
+    reopened: int
     owner_user_id: int | None
     deadline: datetime | None
     dept: str

@@ -58,8 +58,11 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
 
         if reopened:
             _event(db, row.id, scan_id, "REOPENED", "닫혔던 포트가 다시 열림", when=when)
+            # 재발은 별도 상태가 아니라 태그 — 정상처리됐던 건 미조치로 되돌려 다시 조치 대상으로,
+            # reopened 플래그로 '재발' 사실만 표시한다.
+            row.reopened = 1
             if row.status == "정상처리":
-                row.status = "재발"
+                row.status = "미조치"
             counts["reopened"] += 1
         elif old_service != f["service"]:
             _event(db, row.id, scan_id, "SERVICE_CHANGED", f"{old_service} → {f['service']}", when=when)
@@ -83,6 +86,7 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
             row.state = "closed"
             row.last_scan_id = scan_id
             row.last_seen = when
+            row.reopened = 0   # 다시 닫혔으므로 재발 태그 해제
             # 마감/배정이 걸려 있던 항목이 닫힘 → 조치 완료 자동 검증
             verified = row.status == "처리중" or row.deadline is not None
             row.status = "정상처리"
