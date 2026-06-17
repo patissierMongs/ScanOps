@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScanOps · 시간축 히트맵 리포트 (목업)</title>
+<style>
+  :root{
+    --bg:oklch(0.962 0.004 258); --surface:oklch(0.995 0.001 262);
+    --ink:oklch(0.28 0.012 262); --ink-soft:oklch(0.42 0.012 262); --muted:oklch(0.58 0.012 262);
+    --line:oklch(0.91 0.005 262); --line-soft:oklch(0.945 0.004 262);
+    --accent:oklch(0.55 0.17 264); --accent-ink:oklch(0.48 0.17 264); --accent-bg:oklch(0.955 0.03 264);
+    --mono:"IBM Plex Mono",ui-monospace,monospace; --sans:"IBM Plex Sans",system-ui,"Malgun Gothic",sans-serif;
+    --radius:12px; --shadow:0 1px 2px oklch(0.5 0.02 262/.04),0 4px 16px oklch(0.5 0.02 262/.05);
+    /* nmapParser 4-state 히트맵 색 이식 */
+    --new-open:oklch(0.62 0.2 25);       /* 신규 열림 = 빨강 */
+    --persist-open:oklch(0.58 0.13 255); /* 지속 열림 = 파랑 */
+    --new-closed:oklch(0.55 0.16 300);   /* 신규 닫힘 = 보라 */
+    --persist-closed:oklch(0.9 0.01 262);/* 지속 닫힘 = 연회색 */
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px}
+  .wrap{max-width:1120px;margin:0 auto;padding:28px 22px 60px}
+  .banner{font-size:12px;color:var(--muted);margin-bottom:14px}
+  h1{font-size:20px;margin:0 0 4px} h3{font-size:15px;margin:0}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px 20px;margin-bottom:18px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .between{justify-content:space-between}
+  .muted{color:var(--muted)} .small{font-size:12px} .mono{font-family:var(--mono)}
+  .btn{border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:8px 14px;font:inherit;cursor:pointer}
+  .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  select{font:inherit;border:1px solid var(--line);border-radius:8px;padding:6px 9px;background:var(--surface);color:var(--ink)}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:6px}
+  .card{border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .card b{font-size:22px;display:block} .card span{font-size:12px;color:var(--muted)}
+  .hm{border-collapse:separate;border-spacing:3px;font-size:12px}
+  .hm th{font-size:11px;color:var(--muted);font-weight:600;padding:2px 6px;text-align:center;white-space:nowrap}
+  .hm td.lbl{text-align:left;font-family:var(--mono);color:var(--ink-soft);white-space:nowrap;padding-right:10px}
+  .hm .cell{width:74px;height:26px;border-radius:5px;text-align:center;color:#fff;font-family:var(--mono);font-size:11px;line-height:26px}
+  .no{background:var(--new-open)} .po{background:var(--persist-open)} .nc{background:var(--new-closed)}
+  .pc{background:var(--persist-closed);color:var(--muted)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin-top:12px}
+  .legend i{display:inline-block;width:13px;height:13px;border-radius:3px;margin-right:5px;vertical-align:-2px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--bg)}
+  .seg button{border:0;background:transparent;padding:6px 13px;font:inherit;cursor:pointer;color:var(--ink-soft)}
+  .seg button.on{background:var(--accent);color:#fff}
+  .tbl-scroll{overflow:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="banner">목업(mockup) · 실제 동작 아님 · nmapParser「시간축 보고서」를 ScanOps 웹 UI로 이식</div>
+  <h1>시간축 히트맵 리포트</h1>
+  <p class="muted small" style="margin:0 0 18px">여러 스캔 시점을 IP·포트별로 한 장에 — 포트가 언제 열리고 닫혔는지 4색으로. 엑셀(.xlsx)로도 내보내기.</p>
+
+  <div class="panel">
+    <div class="row between">
+      <div class="row">
+        <label class="small muted">대상 스캔</label>
+        <select><option>#138 · #141 · #142 (최근 3개)</option><option>직접 선택…</option></select>
+        <label class="small muted">병합</label>
+        <select><option>IP·포트 (기본)</option><option>대역(/24)·포트</option></select>
+      </div>
+      <div class="seg"><button class="on">히트맵</button><button>현재 포트현황</button><button>시점 비교</button></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3 style="margin-bottom:12px">요약</h3>
+    <div class="cards">
+      <div class="card" style="border-left:3px solid var(--new-open)"><b>23</b><span>신규 열림 (이번에 처음)</span></div>
+      <div class="card" style="border-left:3px solid var(--persist-open)"><b>184</b><span>지속 열림</span></div>
+      <div class="card" style="border-left:3px solid var(--new-closed)"><b>9</b><span>신규 닫힘 (조치 추정)</span></div>
+      <div class="card" style="border-left:3px solid var(--accent)"><b>31</b><span>금지 서비스 노출</span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="row between" style="margin-bottom:12px">
+      <h3>히트맵 — 포트 상태 추이</h3>
+      <button class="btn">📊 엑셀로 내보내기</button>
+    </div>
+    <div class="tbl-scroll">
+      <table class="hm">
+        <thead><tr><th class="lbl">IP : 포트 / 서비스</th><th>05-02</th><th>05-19</th><th>06-03</th><th>06-17</th></tr></thead>
+        <tbody>
+          <tr><td class="lbl">10.0.12.18 : 23 / telnet 🚫</td><td class="cell pc">—</td><td class="cell no">open</td><td class="cell po">open</td><td class="cell po">open</td></tr>
+          <tr><td class="lbl">10.0.12.18 : 3389 / rdp</td><td class="cell po">open</td><td class="cell po">open</td><td class="cell nc">closed</td><td class="cell pc">—</td></tr>
+          <tr><td class="lbl">10.0.12.51 : 443 / https</td><td class="cell pc">—</td><td class="cell pc">—</td><td class="cell no">open</td><td class="cell po">open</td></tr>
+          <tr><td class="lbl">10.0.12.10 : 22 / ssh</td><td class="cell po">open</td><td class="cell po">open</td><td class="cell po">open</td><td class="cell po">open</td></tr>
+          <tr><td class="lbl">10.0.13.5 : 445 / smb 🚫</td><td class="cell no">open</td><td class="cell po">open</td><td class="cell po">open</td><td class="cell nc">closed</td></tr>
+          <tr><td class="lbl">10.0.13.5 : 161 / snmp</td><td class="cell pc">—</td><td class="cell no">open</td><td class="cell nc">closed</td><td class="cell pc">—</td></tr>
+          <tr><td class="lbl">10.0.99.7 : 21 / ftp</td><td class="cell po">open</td><td class="cell po">open</td><td class="cell po">open</td><td class="cell po">open</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="legend">
+      <span><i class="no" style="background:var(--new-open)"></i>신규 열림</span>
+      <span><i style="background:var(--persist-open)"></i>지속 열림</span>
+      <span><i style="background:var(--new-closed)"></i>신규 닫힘</span>
+      <span><i style="background:var(--persist-closed)"></i>지속 닫힘/부재</span>
+      <span class="muted">🚫 = 금지 서비스</span>
+    </div>
+    <p class="small muted" style="margin-top:12px">셀 클릭 → 그 시점 스캔의 해당 발견 상세로 이동. ScanOps는 발견 안정키(host|port|proto)로 시점들을 자동 정렬하므로, 가져온 과거 XML도 같은 축에 얹힙니다.</p>
+  </div>
+</div>
+</body>
+</html>
