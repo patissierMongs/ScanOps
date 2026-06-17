@@ -1,0 +1,128 @@
+{
+ "sheetNames": [
+  "Sheet1"
+ ],
+ "mergeCount": 3,
+ "detectedHeaderRow": 2,
+ "headerRowText": [
+  "부서명",
+  "팀",
+  "종류",
+  "제조사",
+  "운영체제",
+  "담당자",
+  "사번",
+  "IP주소 상세",
+  "관리번호\r\n신규"
+ ],
+ "columns": [
+  {
+   "idx": 0,
+   "header": "부서명",
+   "sample": "보안"
+  },
+  {
+   "idx": 1,
+   "header": "팀",
+   "sample": "1"
+  },
+  {
+   "idx": 2,
+   "header": "종류",
+   "sample": "PC"
+  },
+  {
+   "idx": 3,
+   "header": "제조사",
+   "sample": "마이크로소프트"
+  },
+  {
+   "idx": 4,
+   "header": "운영체제",
+   "sample": "WINDOWS 11"
+  },
+  {
+   "idx": 5,
+   "header": "담당자",
+   "sample": "좋은시스템, 김일번, 010-0000-0001"
+  },
+  {
+   "idx": 6,
+   "header": "사번",
+   "sample": "1"
+  },
+  {
+   "idx": 7,
+   "header": "IP주소 상세",
+   "sample": "1.1.1.1"
+  },
+  {
+   "idx": 8,
+   "header": "관리번호\r\n신규",
+   "sample": "AAA-001"
+  }
+ ],
+ "autoMap": {
+  "dept": 0,
+  "owner": 5,
+  "ip": 7,
+  "asset_no": 8
+ },
+ "mappedFieldNames": {
+  "dept": "부서명",
+  "owner": "담당자",
+  "ip": "IP주소 상세",
+  "asset_no": "관리번호\r\n신규"
+ },
+ "records": [
+  {
+   "ip": "1.1.1.1",
+   "asset_no": "AAA-001",
+   "dept": "보안",
+   "owner": "좋은시스템, 김일번, 010-0000-0001",
+   "hostname": ""
+  },
+  {
+   "ip": "1.1.1.2",
+   "asset_no": "AAA-002",
+   "dept": "보안",
+   "owner": "좋은시스템, 이이번, 010-0000-0002",
+   "hostname": ""
+  },
+  {
+   "ip": "1.1.1.3",
+   "asset_no": "AAA-003",
+   "dept": "인사",
+   "owner": "좋은시스템, 심삼번, 010-0000-0003",
+   "hostname": ""
+  },
+  {
+   "ip": "1.1.1.4",
+   "asset_no": "AAA-004",
+   "dept": "인사",
+   "owner": "JOATEC, 서사번, 010-0000-0004",
+   "hostname": ""
+  },
+  {
+   "ip": "1.1.1.5",
+   "asset_no": "AAA-005",
+   "dept": "인프라",
+   "owner": "JOATEC, 오오번, 010-0000-0005",
+   "hostname": ""
+  },
+  {
+   "ip": "1.1.1.6",
+   "asset_no": "AAA-006",
+   "dept": "인프라",
+   "owner": "JOATEC, 육육번, 010-0000-0006",
+   "hostname": ""
+  },
+  {
+   "ip": "1.1.1.7",
+   "asset_no": "AAA-007",
+   "dept": "인프라",
+   "owner": "JOATEC, 천칠번, 010-0000-0007",
+   "hostname": ""
+  }
+ ]
+}

@@ -1,0 +1,24 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+
+# 운영/런타임 데이터 — 절대 커밋 금지 (DB·관리자 비밀번호·시크릿키·스캔결과)
+backend/data/
+/data/
+/demo_data/
+*.db
+*.db-shm
+*.db-wal
+INITIAL_ADMIN.txt
+secret.key
+samples/.token
+
+# Frontend
+frontend/node_modules/
+# frontend/dist 는 에어갭 배포용으로 커밋(빌드 산출물 동봉)
+
+# 패키징 wheelhouse 는 에어갭 배포용으로 포함
+
+# Claude Code 로컬 설정(머신별)
+.claude/settings.local.json

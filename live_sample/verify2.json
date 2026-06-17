@@ -1,0 +1,17 @@
+{
+ "rescan_command": "C:\\Program Files (x86)\\Nmap\\nmap.exe -sV -Pn -p 23 -oA C:\\Users\\upica\\claude\\ScanOps\\data\\scans\\scan_2 127.0.0.1",
+ "counts": {
+  "new": 0,
+  "reopened": 0,
+  "service_changed": 0,
+  "version_changed": 0,
+  "unchanged": 0,
+  "closed": 1
+ },
+ "telnet_state": "closed",
+ "telnet_status": "정상처리",
+ "http_state": "open",
+ "http_status": "미조치",
+ "scope_ok": true,
+ "verify_ok": true
+}

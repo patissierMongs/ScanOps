@@ -1,0 +1,1182 @@
+[
+ {
+  "service_name": "ssh",
+  "category": "원격접속",
+  "usage": "관리",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 원격관리 프로토콜 사용 제한"
+   },
+   {
+    "std": "NIS",
+    "ref": "원격 접속 통제"
+   }
+  ],
+  "desc": "SSH 원격 셸/관리 접속"
+ },
+ {
+  "service_name": "telnet",
+  "category": "원격접속",
+  "usage": "관리",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 원격관리 프로토콜 사용 제한"
+   },
+   {
+    "std": "NIS",
+    "ref": "원격 접속 통제"
+   }
+  ],
+  "desc": "Telnet 평문 원격"
+ },
+ {
+  "service_name": "rdp",
+  "category": "원격접속",
+  "usage": "관리",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 원격관리 프로토콜 사용 제한"
+   },
+   {
+    "std": "NIS",
+    "ref": "원격 접속 통제"
+   }
+  ],
+  "desc": "Microsoft RDP"
+ },
+ {
+  "service_name": "ms-wbt-server",
+  "category": "원격접속",
+  "usage": "관리",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 원격관리 프로토콜 사용 제한"
+   },
+   {
+    "std": "NIS",
+    "ref": "원격 접속 통제"
+   }
+  ],
+  "desc": "Microsoft RDP"
+ },
+ {
+  "service_name": "vnc",
+  "category": "원격접속",
+  "usage": "관리",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 원격관리 프로토콜 사용 제한"
+   },
+   {
+    "std": "NIS",
+    "ref": "원격 접속 통제"
+   }
+  ],
+  "desc": "VNC 원격 화면"
+ },
+ {
+  "service_name": "vnc-http",
+  "category": "원격접속",
+  "usage": "관리",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 원격관리 프로토콜 사용 제한"
+   },
+   {
+    "std": "NIS",
+    "ref": "원격 접속 통제"
+   }
+  ],
+  "desc": "VNC over HTTP"
+ },
+ {
+  "service_name": "xrdp",
+  "category": "원격접속",
+  "usage": "관리",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 원격관리 프로토콜 사용 제한"
+   },
+   {
+    "std": "NIS",
+    "ref": "원격 접속 통제"
+   }
+  ],
+  "desc": "xrdp (Linux RDP)"
+ },
+ {
+  "service_name": "http",
+  "category": "웹",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "HTTP 웹 서버"
+ },
+ {
+  "service_name": "http-alt",
+  "category": "웹",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "HTTP 대체 포트"
+ },
+ {
+  "service_name": "https",
+  "category": "웹",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "HTTPS 암호화 웹"
+ },
+ {
+  "service_name": "https-alt",
+  "category": "웹",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "HTTPS 대체 포트"
+ },
+ {
+  "service_name": "ssl/http",
+  "category": "웹",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "HTTPS 암호화 웹"
+ },
+ {
+  "service_name": "ssl/https",
+  "category": "웹",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "HTTPS 암호화 웹"
+ },
+ {
+  "service_name": "ajp13",
+  "category": "웹",
+  "usage": "내부통신",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "AJP13 Tomcat 백엔드"
+ },
+ {
+  "service_name": "http-proxy",
+  "category": "프록시",
+  "usage": "인프라",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "HTTP 프록시 (Squid 등)"
+ },
+ {
+  "service_name": "socks",
+  "category": "프록시",
+  "usage": "인프라",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "SOCKS 프록시"
+ },
+ {
+  "service_name": "ipp",
+  "category": "인쇄",
+  "usage": "사용자",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "IPP 인쇄 (HTTP 기반)"
+ },
+ {
+  "service_name": "printer",
+  "category": "인쇄",
+  "usage": "사용자",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "LPD 인쇄"
+ },
+ {
+  "service_name": "lpd",
+  "category": "인쇄",
+  "usage": "사용자",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "LPD 인쇄"
+ },
+ {
+  "service_name": "mysql",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "MySQL/MariaDB"
+ },
+ {
+  "service_name": "mariadb",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "MariaDB"
+ },
+ {
+  "service_name": "postgresql",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "PostgreSQL"
+ },
+ {
+  "service_name": "postgres",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "PostgreSQL"
+ },
+ {
+  "service_name": "mongodb",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "MongoDB"
+ },
+ {
+  "service_name": "mongo",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "MongoDB"
+ },
+ {
+  "service_name": "redis",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "Redis 키-값"
+ },
+ {
+  "service_name": "ms-sql-s",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "Microsoft SQL Server"
+ },
+ {
+  "service_name": "ms-sql-m",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "Microsoft SQL Server (monitor)"
+ },
+ {
+  "service_name": "oracle-tns",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "Oracle TNS Listener"
+ },
+ {
+  "service_name": "elasticsearch",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "Elasticsearch 검색엔진"
+ },
+ {
+  "service_name": "couchdb",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "Apache CouchDB"
+ },
+ {
+  "service_name": "neo4j",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "Neo4j 그래프 DB"
+ },
+ {
+  "service_name": "influxdb",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "InfluxDB 시계열"
+ },
+ {
+  "service_name": "memcache",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "Memcached"
+ },
+ {
+  "service_name": "memcached",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "Memcached"
+ },
+ {
+  "service_name": "cassandra",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "Cassandra"
+ },
+ {
+  "service_name": "hbase",
+  "category": "DBMS",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "DB 서비스 외부 직접 노출 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "DB 접근통제"
+   }
+  ],
+  "desc": "HBase"
+ },
+ {
+  "service_name": "amqp",
+  "category": "메시지큐",
+  "usage": "내부통신",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "RabbitMQ AMQP"
+ },
+ {
+  "service_name": "mqtt",
+  "category": "메시지큐",
+  "usage": "내부통신",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "MQTT"
+ },
+ {
+  "service_name": "nats",
+  "category": "메시지큐",
+  "usage": "내부통신",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "NATS"
+ },
+ {
+  "service_name": "kafka",
+  "category": "메시지큐",
+  "usage": "내부통신",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "Kafka"
+ },
+ {
+  "service_name": "smtp",
+  "category": "메일",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "SMTP 송신"
+ },
+ {
+  "service_name": "submission",
+  "category": "메일",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "SMTP submission"
+ },
+ {
+  "service_name": "smtps",
+  "category": "메일",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "SMTPS"
+ },
+ {
+  "service_name": "pop3",
+  "category": "메일",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "POP3"
+ },
+ {
+  "service_name": "pop3s",
+  "category": "메일",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "POP3S"
+ },
+ {
+  "service_name": "imap",
+  "category": "메일",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "IMAP"
+ },
+ {
+  "service_name": "imaps",
+  "category": "메일",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "IMAPS"
+ },
+ {
+  "service_name": "ldap",
+  "category": "디렉토리",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "LDAP 익명 바인드 점검"
+   }
+  ],
+  "desc": "LDAP 디렉토리"
+ },
+ {
+  "service_name": "ldaps",
+  "category": "디렉토리",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "LDAP 익명 바인드 점검"
+   }
+  ],
+  "desc": "LDAPS"
+ },
+ {
+  "service_name": "kerberos-sec",
+  "category": "인증",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "NIS",
+    "ref": "인증 서비스 접근통제"
+   }
+  ],
+  "desc": "Kerberos KDC"
+ },
+ {
+  "service_name": "kpasswd",
+  "category": "인증",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "NIS",
+    "ref": "인증 서비스 접근통제"
+   }
+  ],
+  "desc": "Kerberos kpasswd"
+ },
+ {
+  "service_name": "domain",
+  "category": "DNS",
+  "usage": "인프라",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "DNS"
+ },
+ {
+  "service_name": "dns",
+  "category": "DNS",
+  "usage": "인프라",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "DNS"
+ },
+ {
+  "service_name": "microsoft-ds",
+  "category": "파일공유",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "불필요한 파일공유 서비스 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "공유 폴더 접근통제"
+   }
+  ],
+  "desc": "SMB Microsoft 파일공유"
+ },
+ {
+  "service_name": "netbios-ssn",
+  "category": "파일공유",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "불필요한 파일공유 서비스 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "공유 폴더 접근통제"
+   }
+  ],
+  "desc": "NetBIOS Session"
+ },
+ {
+  "service_name": "netbios-ns",
+  "category": "파일공유",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "불필요한 파일공유 서비스 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "공유 폴더 접근통제"
+   }
+  ],
+  "desc": "NetBIOS Name"
+ },
+ {
+  "service_name": "nbstat",
+  "category": "파일공유",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "불필요한 파일공유 서비스 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "공유 폴더 접근통제"
+   }
+  ],
+  "desc": "NetBIOS Status"
+ },
+ {
+  "service_name": "nfs",
+  "category": "파일공유",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "불필요한 파일공유 서비스 차단"
+   },
+   {
+    "std": "NIS",
+    "ref": "공유 폴더 접근통제"
+   }
+  ],
+  "desc": "NFS"
+ },
+ {
+  "service_name": "ftp",
+  "category": "파일전송",
+  "usage": "사용자",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 파일전송(FTP/TFTP) 노출 점검"
+   }
+  ],
+  "desc": "FTP"
+ },
+ {
+  "service_name": "ftps",
+  "category": "파일전송",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 파일전송(FTP/TFTP) 노출 점검"
+   }
+  ],
+  "desc": "FTPS"
+ },
+ {
+  "service_name": "tftp",
+  "category": "파일전송",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 파일전송(FTP/TFTP) 노출 점검"
+   }
+  ],
+  "desc": "TFTP"
+ },
+ {
+  "service_name": "sftp",
+  "category": "파일전송",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "평문 파일전송(FTP/TFTP) 노출 점검"
+   }
+  ],
+  "desc": "SFTP"
+ },
+ {
+  "service_name": "ntp",
+  "category": "시간동기",
+  "usage": "인프라",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "NTP"
+ },
+ {
+  "service_name": "snmp",
+  "category": "모니터링",
+  "usage": "모니터링",
+  "risk_level": "high",
+  "compliance": [],
+  "desc": "SNMP"
+ },
+ {
+  "service_name": "snmptrap",
+  "category": "모니터링",
+  "usage": "모니터링",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "SNMP Trap"
+ },
+ {
+  "service_name": "zabbix-agent",
+  "category": "모니터링",
+  "usage": "모니터링",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Zabbix Agent"
+ },
+ {
+  "service_name": "zabbix-trapper",
+  "category": "모니터링",
+  "usage": "모니터링",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Zabbix Trapper"
+ },
+ {
+  "service_name": "prometheus",
+  "category": "모니터링",
+  "usage": "모니터링",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Prometheus"
+ },
+ {
+  "service_name": "grafana",
+  "category": "모니터링",
+  "usage": "사용자",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Grafana"
+ },
+ {
+  "service_name": "syslog",
+  "category": "로그수집",
+  "usage": "시스템",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Syslog"
+ },
+ {
+  "service_name": "splunk",
+  "category": "로그분석",
+  "usage": "보안",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Splunk"
+ },
+ {
+  "service_name": "isakmp",
+  "category": "VPN",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "IKE/IPsec"
+ },
+ {
+  "service_name": "ipsec-nat-t",
+  "category": "VPN",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "IPsec NAT-T"
+ },
+ {
+  "service_name": "openvpn",
+  "category": "VPN",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "OpenVPN"
+ },
+ {
+  "service_name": "sip",
+  "category": "VoIP",
+  "usage": "사용자",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "SIP"
+ },
+ {
+  "service_name": "rtsp",
+  "category": "미디어",
+  "usage": "사용자",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "RTSP"
+ },
+ {
+  "service_name": "ssdp",
+  "category": "네트워크검색",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "SSDP UPnP"
+ },
+ {
+  "service_name": "upnp",
+  "category": "네트워크검색",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "UPnP"
+ },
+ {
+  "service_name": "mdns",
+  "category": "네트워크검색",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "Multicast DNS"
+ },
+ {
+  "service_name": "msrpc",
+  "category": "RPC",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "Microsoft RPC"
+ },
+ {
+  "service_name": "rpcbind",
+  "category": "RPC",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [],
+  "desc": "ONC RPC portmapper"
+ },
+ {
+  "service_name": "sunrpc",
+  "category": "RPC",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "ONC RPC"
+ },
+ {
+  "service_name": "nfs-or-iis",
+  "category": "RPC",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "Microsoft RPC / NFS"
+ },
+ {
+  "service_name": "ipmi",
+  "category": "관리",
+  "usage": "관리",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "IPMI BMC 관리"
+ },
+ {
+  "service_name": "wsdapi",
+  "category": "관리",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "WS-Discovery"
+ },
+ {
+  "service_name": "vmware-auth",
+  "category": "관리",
+  "usage": "관리",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "VMware Authentication Daemon"
+ },
+ {
+  "service_name": "modbus",
+  "category": "산업제어",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "NIS",
+    "ref": "제어시스템 망분리"
+   }
+  ],
+  "desc": "Modbus"
+ },
+ {
+  "service_name": "enip",
+  "category": "산업제어",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "NIS",
+    "ref": "제어시스템 망분리"
+   }
+  ],
+  "desc": "EtherNet/IP"
+ },
+ {
+  "service_name": "bacnet",
+  "category": "산업제어",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "NIS",
+    "ref": "제어시스템 망분리"
+   }
+  ],
+  "desc": "BACnet"
+ },
+ {
+  "service_name": "s7",
+  "category": "산업제어",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "NIS",
+    "ref": "제어시스템 망분리"
+   }
+  ],
+  "desc": "Siemens S7"
+ },
+ {
+  "service_name": "opcua",
+  "category": "산업제어",
+  "usage": "시스템",
+  "risk_level": "high",
+  "compliance": [
+   {
+    "std": "NIS",
+    "ref": "제어시스템 망분리"
+   }
+  ],
+  "desc": "OPC UA"
+ },
+ {
+  "service_name": "chargen",
+  "category": "진단",
+  "usage": "시스템",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Character Generator (RFC 864)"
+ },
+ {
+  "service_name": "echo",
+  "category": "진단",
+  "usage": "시스템",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Echo (RFC 862)"
+ },
+ {
+  "service_name": "discard",
+  "category": "진단",
+  "usage": "시스템",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Discard (RFC 863)"
+ },
+ {
+  "service_name": "finger",
+  "category": "정보조회",
+  "usage": "시스템",
+  "risk_level": "medium",
+  "compliance": [
+   {
+    "std": "KISA",
+    "ref": "SNMP 기본 community/정보노출 점검"
+   }
+  ],
+  "desc": "Finger"
+ },
+ {
+  "service_name": "git",
+  "category": "버전관리",
+  "usage": "개발",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Git"
+ },
+ {
+  "service_name": "svn",
+  "category": "버전관리",
+  "usage": "개발",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Subversion"
+ },
+ {
+  "service_name": "zookeeper",
+  "category": "분산조정",
+  "usage": "내부통신",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "ZooKeeper"
+ },
+ {
+  "service_name": "etcd",
+  "category": "분산조정",
+  "usage": "내부통신",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "etcd"
+ },
+ {
+  "service_name": "docker",
+  "category": "컨테이너",
+  "usage": "관리",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "Docker API"
+ },
+ {
+  "service_name": "kubernetes",
+  "category": "컨테이너",
+  "usage": "관리",
+  "risk_level": "medium",
+  "compliance": [],
+  "desc": "Kubernetes API"
+ },
+ {
+  "service_name": "jenkins",
+  "category": "CI/CD",
+  "usage": "개발",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Jenkins"
+ },
+ {
+  "service_name": "gitlab",
+  "category": "CI/CD",
+  "usage": "개발",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "GitLab"
+ },
+ {
+  "service_name": "nessus",
+  "category": "보안도구",
+  "usage": "보안",
+  "risk_level": "low",
+  "compliance": [],
+  "desc": "Nessus"
+ }
+]

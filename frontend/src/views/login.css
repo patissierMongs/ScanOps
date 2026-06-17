@@ -1,0 +1,406 @@
+/* ScanOps · 로그인 — "레이더 스캔 콘솔" 비주얼.
+   nmap 네트워크 스캐닝을 회전 레이더 스윕 + HUD 뷰파인더로 형상화.
+   에어갭: 번들된 IBM Plex Mono/Sans 만 사용(한글은 시스템 폴백), 외부 자산 0. */
+.lg-root {
+  --lg-bg0: oklch(0.145 0.018 264);
+  --lg-bg1: oklch(0.185 0.024 264);
+  --lg-surface: oklch(0.215 0.026 266);
+  --lg-line: oklch(1 0 0 / 0.085);
+  --lg-line-2: oklch(1 0 0 / 0.17);
+  --lg-ink: oklch(0.95 0.008 264);
+  --lg-muted: oklch(0.7 0.02 264);
+  --lg-faint: oklch(0.55 0.022 266);
+  --lg-accent: oklch(0.57 0.22 266);
+  --lg-accent-hi: oklch(0.69 0.2 266);
+  --lg-scan: oklch(0.84 0.15 168);
+  --lg-scan-dim: oklch(0.84 0.15 168 / 0.12);
+  --lg-red: oklch(0.7 0.2 25);
+  --lg-amber: oklch(0.83 0.15 85);
+  --lg-green: oklch(0.8 0.16 152);
+  --lg-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --lg-sans: "IBM Plex Sans", system-ui, "Malgun Gothic", sans-serif;
+
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  font-family: var(--lg-sans);
+  color: var(--lg-ink);
+  background:
+    radial-gradient(1200px 800px at 18% 42%, oklch(0.24 0.05 266 / 0.55), transparent 60%),
+    radial-gradient(900px 700px at 88% 88%, oklch(0.22 0.06 286 / 0.4), transparent 55%),
+    linear-gradient(150deg, var(--lg-bg0), oklch(0.125 0.02 270) 55%, oklch(0.16 0.03 280));
+}
+/* 미세 도트 그리드 — 네트워크 노드 느낌 */
+.lg-root::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  background-image: radial-gradient(var(--lg-line) 1px, transparent 1.4px);
+  background-size: 26px 26px;
+  mask: radial-gradient(circle at 50% 48%, #000 0%, transparent 78%);
+  opacity: 0.5;
+  pointer-events: none;
+}
+/* 필름 그레인 — feTurbulence 인라인(외부 자산 없음) */
+.lg-grain {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+  opacity: 0.045;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ---- 무대: 히어로(레이더) + 패널(인증) ---- */
+.lg-stage {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  width: min(1040px, 92vw);
+  min-height: 560px;
+  border: 1px solid var(--lg-line-2);
+  border-radius: 18px;
+  background: linear-gradient(180deg, oklch(0.2 0.022 266 / 0.55), oklch(0.16 0.02 266 / 0.62));
+  backdrop-filter: blur(8px);
+  box-shadow:
+    0 1px 0 oklch(1 0 0 / 0.05) inset,
+    0 40px 120px -30px oklch(0.05 0.04 280 / 0.9),
+    0 0 0 1px oklch(0 0 0 / 0.3);
+  overflow: hidden;
+  animation: lg-stage-in 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+/* ---- 히어로 / 레이더 ---- */
+.lg-hero {
+  position: relative;
+  padding: 30px 32px;
+  border-right: 1px solid var(--lg-line);
+  overflow: hidden;
+}
+.lg-radar {
+  position: absolute;
+  width: 620px;
+  height: 620px;
+  left: -120px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  overflow: hidden;
+  -webkit-mask: radial-gradient(circle at center, #000 60%, transparent 73%);
+  mask: radial-gradient(circle at center, #000 60%, transparent 73%);
+  opacity: 0;
+  animation: lg-fade 1.1s ease 0.15s forwards;
+}
+.lg-rings {
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-radial-gradient(circle at center, var(--lg-line) 0 1px, transparent 1px 58px),
+    radial-gradient(circle at center, var(--lg-scan-dim), transparent 64%);
+}
+.lg-cross {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(var(--lg-line), var(--lg-line)) center / 100% 1px no-repeat,
+    linear-gradient(var(--lg-line), var(--lg-line)) center / 1px 100% no-repeat;
+}
+/* 회전 스윕 — conic 의 360→0 급변으로 선명한 선두 엣지 */
+.lg-sweep {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    oklch(0.84 0.15 168 / 0) 0deg,
+    oklch(0.84 0.15 168 / 0) 264deg,
+    oklch(0.84 0.15 168 / 0.05) 312deg,
+    oklch(0.84 0.15 168 / 0.26) 352deg,
+    oklch(0.86 0.16 168 / 0.6) 360deg
+  );
+  animation: lg-spin 4.4s linear infinite;
+}
+.lg-scanline {
+  position: absolute;
+  left: 0; right: 0;
+  height: 2px;
+  top: 50%;
+  background: linear-gradient(90deg, transparent, oklch(0.86 0.15 168 / 0.5), transparent);
+  filter: blur(0.3px);
+  animation: lg-scanline 3.6s ease-in-out infinite;
+}
+.lg-core {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 7px; height: 7px;
+  margin: -3.5px;
+  border-radius: 50%;
+  background: var(--lg-scan);
+  box-shadow: 0 0 14px 3px oklch(0.84 0.15 168 / 0.7);
+}
+.lg-blip {
+  position: absolute;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--lg-scan);
+  box-shadow: 0 0 10px 2px oklch(0.84 0.15 168 / 0.65);
+  opacity: 0;
+  animation: lg-blip 4.4s ease-out infinite;
+}
+.lg-blip.r { background: var(--lg-red); box-shadow: 0 0 10px 2px oklch(0.7 0.2 25 / 0.6); }
+.lg-blip.a { background: var(--lg-amber); box-shadow: 0 0 10px 2px oklch(0.83 0.15 85 / 0.6); }
+
+/* HUD 판독부 (히어로 위) */
+.lg-hud {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  height: 100%;
+  justify-content: flex-end;
+  font-family: var(--lg-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.lg-hud .lg-tag {
+  align-self: flex-start;
+  font-size: 10px;
+  color: var(--lg-scan);
+  border: 1px solid oklch(0.84 0.15 168 / 0.35);
+  background: oklch(0.84 0.15 168 / 0.07);
+  padding: 3px 9px;
+  border-radius: 5px;
+  margin-bottom: auto;
+  animation: lg-up 0.6s ease 0.25s both;
+}
+.lg-hud-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--lg-faint);
+  animation: lg-up 0.6s ease both;
+}
+.lg-hud-row:nth-child(2) { animation-delay: 0.5s; }
+.lg-hud-row:nth-child(3) { animation-delay: 0.6s; }
+.lg-hud-row:nth-child(4) { animation-delay: 0.7s; }
+.lg-hud-row b { color: var(--lg-ink); font-weight: 500; }
+.lg-hud-row .k { width: 92px; color: var(--lg-faint); }
+.lg-hud-row .bar { flex: 1; height: 1px; background: var(--lg-line-2); }
+
+/* 코너 뷰파인더 틱 */
+.lg-tick { position: absolute; width: 14px; height: 14px; z-index: 4; border-color: var(--lg-line-2); }
+.lg-tick.tl { left: 14px; top: 14px; border-left: 1px solid; border-top: 1px solid; }
+.lg-tick.bl { left: 14px; bottom: 14px; border-left: 1px solid; border-bottom: 1px solid; }
+
+/* ---- 인증 패널 ---- */
+.lg-panel {
+  position: relative;
+  z-index: 3;
+  padding: 44px 40px 32px;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, oklch(0.22 0.022 266 / 0.35), oklch(0.18 0.02 266 / 0.2));
+}
+.lg-brand { display: flex; align-items: center; gap: 11px; animation: lg-up 0.6s ease 0.2s both; }
+.lg-dots { display: flex; gap: 5px; }
+.lg-dots i { width: 9px; height: 9px; border-radius: 50%; display: block; }
+.lg-dots i:nth-child(1) { background: var(--lg-red); box-shadow: 0 0 9px oklch(0.7 0.2 25 / 0.6); }
+.lg-dots i:nth-child(2) { background: var(--lg-amber); box-shadow: 0 0 9px oklch(0.83 0.15 85 / 0.6); }
+.lg-dots i:nth-child(3) { background: var(--lg-green); box-shadow: 0 0 9px oklch(0.8 0.16 152 / 0.6); }
+.lg-word {
+  font-family: var(--lg-mono);
+  font-weight: 600;
+  font-size: 27px;
+  letter-spacing: -0.02em;
+  color: #fff;
+}
+.lg-word b { color: var(--lg-accent-hi); font-weight: 600; }
+.lg-tagline {
+  margin: 9px 0 2px;
+  font-size: 12.5px;
+  color: var(--lg-muted);
+  animation: lg-up 0.6s ease 0.28s both;
+}
+.lg-rule {
+  height: 1px;
+  margin: 22px 0 24px;
+  background: linear-gradient(90deg, var(--lg-line-2), transparent);
+  animation: lg-up 0.6s ease 0.34s both;
+}
+
+.lg-form { display: flex; flex-direction: column; gap: 16px; }
+.lg-field { display: flex; flex-direction: column; gap: 7px; }
+.lg-field:nth-of-type(1) { animation: lg-up 0.6s ease 0.4s both; }
+.lg-field:nth-of-type(2) { animation: lg-up 0.6s ease 0.48s both; }
+.lg-label {
+  font-family: var(--lg-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--lg-faint);
+}
+.lg-input {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 46px;
+  padding: 0 14px;
+  border: 1px solid var(--lg-line-2);
+  border-radius: 11px;
+  background: oklch(0.13 0.015 266 / 0.6);
+  transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+}
+.lg-input:focus-within {
+  border-color: var(--lg-accent);
+  background: oklch(0.14 0.02 266 / 0.85);
+  box-shadow: 0 0 0 3px oklch(0.64 0.18 264 / 0.18), 0 0 22px -6px oklch(0.64 0.18 264 / 0.6);
+}
+.lg-prompt {
+  font-family: var(--lg-mono);
+  color: var(--lg-accent-hi);
+  font-size: 15px;
+  line-height: 1;
+  transition: color 0.18s, transform 0.18s;
+}
+.lg-input:focus-within .lg-prompt { color: var(--lg-scan); transform: translateX(1px); }
+.lg-input input {
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--lg-ink);
+  font-family: var(--lg-mono);
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
+.lg-input input::placeholder { color: oklch(0.5 0.02 266); letter-spacing: 0.04em; }
+
+.lg-err {
+  font-family: var(--lg-mono);
+  font-size: 11.5px;
+  color: var(--lg-red);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid oklch(0.7 0.2 25 / 0.35);
+  background: oklch(0.7 0.2 25 / 0.08);
+  border-radius: 9px;
+  animation: lg-shake 0.34s ease;
+}
+.lg-err::before { content: "!"; font-weight: 700; }
+
+.lg-go {
+  position: relative;
+  margin-top: 6px;
+  height: 48px;
+  border: 0;
+  border-radius: 11px;
+  cursor: pointer;
+  font-family: var(--lg-mono);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: oklch(0.99 0 0);
+  background: linear-gradient(180deg, var(--lg-accent-hi), var(--lg-accent) 70%, oklch(0.5 0.22 268));
+  box-shadow: 0 12px 34px -10px oklch(0.57 0.24 266 / 0.95), 0 0 0 1px oklch(0.7 0.2 266 / 0.5) inset, 0 1px 0 oklch(1 0 0 / 0.3) inset;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  transition: transform 0.14s, box-shadow 0.18s, filter 0.18s;
+  animation: lg-up 0.6s ease 0.56s both;
+}
+.lg-go:hover { transform: translateY(-1px); filter: brightness(1.06); box-shadow: 0 16px 38px -12px oklch(0.64 0.18 264 / 0.95); }
+.lg-go:active { transform: translateY(0); }
+.lg-go:disabled { filter: grayscale(0.5) brightness(0.8); cursor: default; box-shadow: none; }
+.lg-go .ar { transition: transform 0.18s; }
+.lg-go:hover .ar { transform: translateX(4px); }
+/* 호버 시 가로지르는 스캔 광택 */
+.lg-go::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; width: 40%;
+  left: -60%;
+  background: linear-gradient(90deg, transparent, oklch(1 0 0 / 0.28), transparent);
+  transform: skewX(-18deg);
+}
+.lg-go:hover::after { animation: lg-sheen 0.7s ease; }
+.lg-go.busy { pointer-events: none; }
+.lg-go.busy::after { left: -60%; animation: lg-sheen 1s linear infinite; }
+
+.lg-foot {
+  margin-top: auto;
+  padding-top: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--lg-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--lg-faint);
+  animation: lg-up 0.6s ease 0.7s both;
+}
+.lg-stat { display: flex; align-items: center; gap: 8px; }
+.lg-led {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--lg-green);
+  box-shadow: 0 0 9px 1px oklch(0.8 0.16 152 / 0.8);
+  animation: lg-pulse 2s ease-in-out infinite;
+}
+
+/* ---- 키프레임 ---- */
+@keyframes lg-spin { to { transform: rotate(360deg); } }
+@keyframes lg-fade { to { opacity: 1; } }
+@keyframes lg-stage-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.992); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes lg-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes lg-scanline {
+  0% { top: 12%; opacity: 0; }
+  20% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { top: 88%; opacity: 0; }
+}
+@keyframes lg-blip {
+  0%, 100% { opacity: 0; transform: scale(0.6); }
+  6% { opacity: 1; transform: scale(1); }
+  40% { opacity: 0.35; }
+  70% { opacity: 0; transform: scale(0.7); }
+}
+@keyframes lg-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+@keyframes lg-sheen { from { left: -60%; } to { left: 130%; } }
+@keyframes lg-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
+}
+
+/* ---- 반응형 ---- */
+@media (max-width: 720px) {
+  .lg-stage { grid-template-columns: 1fr; min-height: 0; width: 94vw; }
+  .lg-hero { height: 168px; border-right: 0; border-bottom: 1px solid var(--lg-line); padding: 18px; }
+  .lg-radar { width: 360px; height: 360px; left: 50%; transform: translate(-50%, -50%); top: 50%; }
+  .lg-hud { justify-content: flex-end; }
+  .lg-hud-row .k { width: 78px; }
+  .lg-panel { padding: 30px 24px 24px; }
+}
+
+/* ---- 모션 최소화 존중 ---- */
+@media (prefers-reduced-motion: reduce) {
+  .lg-sweep, .lg-scanline, .lg-blip, .lg-led, .lg-go.busy::after { animation: none; }
+  .lg-stage, .lg-radar, .lg-hud .lg-tag, .lg-hud-row, .lg-brand, .lg-tagline,
+  .lg-rule, .lg-field, .lg-go, .lg-foot { animation: none; opacity: 1; transform: none; }
+  .lg-sweep { background: conic-gradient(from 300deg, transparent 0deg, oklch(0.84 0.15 168 / 0.22) 60deg); }
+}

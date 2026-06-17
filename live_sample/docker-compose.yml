@@ -1,0 +1,33 @@
+# ScanOps live sample — expose a realistic mix of services on localhost so a
+# real nmap -sV scan produces varied findings (normal + high-risk banned svcs).
+# Brought up, scanned, then torn down. Ports map to standard service ports.
+services:
+  http-nginx:
+    image: nginx:alpine
+    ports: ["80:80"]
+    restart: "no"
+
+  cache-redis:
+    image: redis:alpine
+    ports: ["6379:6379"]
+    restart: "no"
+
+  db-postgres:
+    image: postgres:alpine
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports: ["5432:5432"]
+    restart: "no"
+
+  legacy-telnet:
+    image: busybox
+    command: telnetd -F -p 23 -l /bin/sh
+    ports: ["23:23"]
+    restart: "no"
+
+  legacy-ftp:
+    image: delfer/alpine-ftp-server
+    environment:
+      USERS: "scan|scanpw"
+    ports: ["21:21"]
+    restart: "no"

@@ -1,0 +1,14 @@
+import { connect } from "./cdp.mjs";
+import { setTimeout as sleep } from "node:timers/promises";
+import { readFileSync } from "node:fs";
+const TOKEN = readFileSync("samples/.token", "utf8").trim();
+const c = await connect();
+await c.navigate("http://localhost:8770/");
+await sleep(500);
+await c.evaluate(`localStorage.setItem("scanops_token", ${JSON.stringify(TOKEN)}); return true;`);
+await c.navigate("http://localhost:8770/");
+await sleep(1500);
+await c.send("Page.bringToFront");
+const v = await c.evaluate(`return document.querySelector(".topbar h2")?.innerText || "(?)";`);
+console.log("열림 — 현재 화면:", v);
+c.close();

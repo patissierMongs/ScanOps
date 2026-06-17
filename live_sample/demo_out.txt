@@ -1,0 +1,7 @@
+자산: 신규 7 / 갱신 0
+스캔: {'new': 20, 'reopened': 0, 'service_changed': 0, 'version_changed': 0, 'unchanged': 0, 'closed': 0}
+규칙: telnet 금지 (매칭 2건)
+
+발견 20건 · 부서별 {'보안': 7, '인사': 4, '인프라': 9} · 위험별 {'medium': 4, 'high': 13, 'banned': 2, 'info': 1}
+예시(telnet): 1.1.1.5 부서=인프라 연락처=010-0000-0005 위험=banned
+대시보드: {"open_total": 20, "by_risk": {"banned": 2, "high": 13, "info": 1, "medium": 4}, "by_status": {"미조치": 20}, "by_dept": [{"dept": "인프라", "count": 9}, {"dept": "보안", "count": 7}, {"dept": "인사", "count": 4}], "overdue": 0, "recent_scans": [{"id": 1, "name": "가져오기: asset_scan_sample.xml", "status": "done", "host_count": 7, "port_count": 20, "started_at": "2026-06-16T08:59:17.556938"}]}

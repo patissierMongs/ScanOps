@@ -1,0 +1,412 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/bin/../share/nmap/nmap.xsl" type="text/xsl"?>
+<!-- Nmap 7.94SVN scan initiated Tue Jun 16 13:24:32 2026 as: nmap -Pn -p 1-120 -&#45;scan-delay 25ms -&#45;max-hostgroup 1 -oA r 127.0.0.1-40 -->
+<nmaprun scanner="nmap" args="nmap -Pn -p 1-120 -&#45;scan-delay 25ms -&#45;max-hostgroup 1 -oA r 127.0.0.1-40" start="1781583872" startstr="Tue Jun 16 13:24:32 2026" version="7.94SVN" xmloutputversion="1.05">
+<scaninfo type="connect" protocol="tcp" numservices="120" services="1-120"/>
+<verbose level="0"/>
+<debugging level="0"/>
+<host starttime="1781583873" endtime="1781583876"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.1" addrtype="ipv4"/>
+<hostnames>
+<hostname name="localhost" type="PTR"/>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="295" rttvar="59" to="100000"/>
+</host>
+<host starttime="1781583876" endtime="1781583879"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.2" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="366" rttvar="187" to="100000"/>
+</host>
+<host starttime="1781583880" endtime="1781583883"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.3" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="193" rttvar="35" to="100000"/>
+</host>
+<host starttime="1781583883" endtime="1781583887"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.4" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="229" rttvar="27" to="100000"/>
+</host>
+<host starttime="1781583887" endtime="1781583890"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.5" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="253" rttvar="23" to="100000"/>
+</host>
+<host starttime="1781583890" endtime="1781583893"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.6" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="210" rttvar="28" to="100000"/>
+</host>
+<host starttime="1781583893" endtime="1781583896"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.7" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="214" rttvar="33" to="100000"/>
+</host>
+<host starttime="1781583896" endtime="1781583899"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.8" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="242" rttvar="36" to="100000"/>
+</host>
+<host starttime="1781583899" endtime="1781583902"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.9" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="284" rttvar="90" to="100000"/>
+</host>
+<host starttime="1781583902" endtime="1781583905"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.10" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="218" rttvar="31" to="100000"/>
+</host>
+<host starttime="1781583905" endtime="1781583908"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.11" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="267" rttvar="60" to="100000"/>
+</host>
+<host starttime="1781583908" endtime="1781583911"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.12" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="234" rttvar="27" to="100000"/>
+</host>
+<host starttime="1781583911" endtime="1781583914"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.13" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="223" rttvar="38" to="100000"/>
+</host>
+<host starttime="1781583914" endtime="1781583917"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.14" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="249" rttvar="47" to="100000"/>
+</host>
+<host starttime="1781583917" endtime="1781583921"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.15" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="252" rttvar="30" to="100000"/>
+</host>
+<host starttime="1781583921" endtime="1781583924"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.16" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="215" rttvar="43" to="100000"/>
+</host>
+<host starttime="1781583924" endtime="1781583927"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.17" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="227" rttvar="29" to="100000"/>
+</host>
+<host starttime="1781583927" endtime="1781583930"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.18" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="221" rttvar="34" to="100000"/>
+</host>
+<host starttime="1781583930" endtime="1781583933"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.19" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="239" rttvar="39" to="100000"/>
+</host>
+<host starttime="1781583933" endtime="1781583936"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.20" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="239" rttvar="24" to="100000"/>
+</host>
+<host starttime="1781583936" endtime="1781583939"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.21" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="233" rttvar="39" to="100000"/>
+</host>
+<host starttime="1781583939" endtime="1781583942"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.22" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="228" rttvar="46" to="100000"/>
+</host>
+<host starttime="1781583942" endtime="1781583945"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.23" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="258" rttvar="30" to="100000"/>
+</host>
+<host starttime="1781583945" endtime="1781583948"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.24" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="216" rttvar="21" to="100000"/>
+</host>
+<host starttime="1781583948" endtime="1781583952"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.25" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="249" rttvar="36" to="100000"/>
+</host>
+<host starttime="1781583952" endtime="1781583955"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.26" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="243" rttvar="21" to="100000"/>
+</host>
+<host starttime="1781583955" endtime="1781583958"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.27" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="225" rttvar="28" to="100000"/>
+</host>
+<host starttime="1781583958" endtime="1781583961"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.28" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="251" rttvar="45" to="100000"/>
+</host>
+<host starttime="1781583961" endtime="1781583964"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.29" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="246" rttvar="37" to="100000"/>
+</host>
+<host starttime="1781583964" endtime="1781583967"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.30" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="244" rttvar="31" to="100000"/>
+</host>
+<host starttime="1781583967" endtime="1781583970"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.31" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="240" rttvar="47" to="100000"/>
+</host>
+<host starttime="1781583970" endtime="1781583973"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.32" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="257" rttvar="58" to="100000"/>
+</host>
+<host starttime="1781583973" endtime="1781583976"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.33" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="224" rttvar="24" to="100000"/>
+</host>
+<host starttime="1781583976" endtime="1781583979"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.34" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="239" rttvar="24" to="100000"/>
+</host>
+<host starttime="1781583979" endtime="1781583982"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.35" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="228" rttvar="30" to="100000"/>
+</host>
+<host starttime="1781583982" endtime="1781583986"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.36" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="226" rttvar="51" to="100000"/>
+</host>
+<host starttime="1781583986" endtime="1781583989"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.37" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="236" rttvar="35" to="100000"/>
+</host>
+<host starttime="1781583989" endtime="1781583992"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.38" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="201" rttvar="15" to="100000"/>
+</host>
+<host starttime="1781583992" endtime="1781583995"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.39" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="242" rttvar="48" to="100000"/>
+</host>
+<host starttime="1781583995" endtime="1781583998"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.40" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="120">
+<extrareasons reason="conn-refused" count="120" proto="tcp" ports="1-120"/>
+</extraports>
+</ports>
+<times srtt="290" rttvar="187" to="100000"/>
+</host>
+<runstats><finished time="1781583998" timestr="Tue Jun 16 13:26:38 2026" summary="Nmap done at Tue Jun 16 13:26:38 2026; 38 IP addresses (38 hosts up) scanned in 118.42 seconds" elapsed="118.42" exit="success"/><hosts up="38" down="0" total="38"/>
+</runstats>
+</nmaprun>
