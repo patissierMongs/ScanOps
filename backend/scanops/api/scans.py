@@ -128,8 +128,8 @@ def _chunk_worker(scan_id: int) -> None:
         b_base = Path(str(base) + f".b{cursor}")
         b_log = Path(str(b_base) + ".log")
         try:
-            if st.get("options"):
-                argv = nmap_runner.build_command_opts(nmap, st["options"], st.get("ports", ""), batch, b_base)
+            if st.get("options") or st.get("nse"):
+                argv = nmap_runner.build_command_opts(nmap, st.get("options") or [], st.get("ports", ""), batch, b_base, nse=st.get("nse"))
             else:
                 argv = nmap_runner.build_command(nmap, st.get("preset", "quick"), batch, b_base)
         except ValueError:
@@ -227,8 +227,14 @@ def list_scans(_: User = Depends(current_user), db: Session = Depends(get_db)):
 
 @router.get("/options")
 def list_scan_options(_: User = Depends(current_user)):
-    """스캔 옵션 화이트리스트 — UI 가 토글을 그리고 명령을 실시간 조립."""
-    return {"options": scan_options.SCAN_OPTIONS, "default": scan_options.DEFAULT_KEYS}
+    """스캔 옵션 화이트리스트 — UI 가 토글을 그리고 명령을 실시간 조립. NSE 스크립트 목록 포함."""
+    return {
+        "options": scan_options.SCAN_OPTIONS,
+        "default": scan_options.DEFAULT_KEYS,
+        "nse": scan_options.NSE_SCRIPTS,
+        "nse_default": scan_options.NSE_DEFAULT_KEYS,
+        "udp_default_ports": scan_options.UDP_DEFAULT_PORTS,
+    }
 
 
 @router.get("/{scan_id}", response_model=ScanOut)
@@ -286,9 +292,9 @@ def run_scan(
             raise ValueError("유효한 타겟이 없습니다.")
         scope.check_scope(hosts)   # 허용 대역(scope) 밖이면 시작 전에 거절
         batches = chunker.make_batches(hosts, body.batch_size)
-        # 옵션/프리셋·포트 사전 검증(첫 배치로) — 잘못된 입력은 시작 전에 거절.
-        if body.options:
-            argv0 = nmap_runner.build_command_opts(nmap, body.options, body.ports, batches[0], _basename(0))
+        # 옵션/프리셋·포트·NSE 사전 검증(첫 배치로) — 잘못된 입력은 시작 전에 거절.
+        if body.options or body.nse:
+            argv0 = nmap_runner.build_command_opts(nmap, body.options, body.ports, batches[0], _basename(0), nse=body.nse)
         else:
             argv0 = nmap_runner.build_command(nmap, body.preset, batches[0], _basename(0))
     except ValueError as e:
@@ -301,7 +307,7 @@ def run_scan(
     base = _basename(scan.id)
     chunker.write_state(base, {
         "batches": batches, "cursor": 0, "stop": False, "active_seconds": 0,
-        "options": body.options, "ports": body.ports, "preset": body.preset,
+        "options": body.options, "ports": body.ports, "preset": body.preset, "nse": body.nse,
     })
     # 명령 표기는 대표(타겟·-oA 제외) — 호스트 수/배치 수를 덧붙여 가독.
     parts, skip = [], False

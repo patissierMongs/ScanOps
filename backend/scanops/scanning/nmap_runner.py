@@ -61,15 +61,18 @@ def build_command(nmap: str, preset: str, targets: list[str], out_basename: Path
 
 
 def build_command_opts(nmap: str, option_keys: list[str], ports: str,
-                       targets: list[str], out_basename: Path) -> list[str]:
-    """옵션 키 화이트리스트 + 포트 + 타겟 → 검증된 nmap argv (-oA 강제)."""
+                       targets: list[str], out_basename: Path,
+                       nse: list[str] | None = None) -> list[str]:
+    """옵션 키 화이트리스트 + 포트 + (선택)NSE 스크립트 + 타겟 → 검증된 nmap argv (-oA 강제)."""
     scan_options.validate_keys(option_keys)
     flags = scan_options.flags_for(option_keys)
     port_spec = scan_options.validate_ports(ports)
+    script_flags = scan_options.script_flag(nse or [])
     validate_targets(targets)
     argv = [nmap, *STATS_FLAGS, *flags]
     if port_spec:
         argv += ["-p", port_spec]
+    argv += script_flags
     argv += ["-oA", str(out_basename), *targets]
     return argv
 

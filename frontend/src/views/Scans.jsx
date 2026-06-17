@@ -32,7 +32,7 @@ export default function Scans({ user }) {
   const [progress, setProgress] = useState({});   // { [scanId]: { percent, etc, remaining, elapsed, hosts_up, last_line } }
   const [targets, setTargets] = useState("");
   const [name, setName] = useState("");
-  const [opt, setOpt] = useState({ options: [], ports: "", command: "" });
+  const [opt, setOpt] = useState({ options: [], ports: "", nse: [], command: "" });
   const [batchSize, setBatchSize] = useState(256);
   const [rawMode, setRawMode] = useState(false);   // 직접 명령 입력 모드
   const [rawCmd, setRawCmd] = useState("");
@@ -144,7 +144,7 @@ export default function Scans({ user }) {
     }
     if (!targetList.length) { toast("타겟을 입력하세요", { type: "err" }); return; }
     setBusy(true);
-    api("/scans/run", { method: "POST", json: { name, options: opt.options, ports: opt.ports, targets: targetList, batch_size: batchSize } })
+    api("/scans/run", { method: "POST", json: { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, batch_size: batchSize } })
       .then((s) => { toast(`스캔 시작됨 · #${s.id} (백그라운드 실행 — 진행률은 아래 표)`); setTargets(""); setName(""); load(); })
       .catch((e2) => toast(e2.message, { type: "err" }))
       .finally(() => setBusy(false));

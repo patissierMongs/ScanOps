@@ -61,3 +61,30 @@ def test_unknown_preset_rejected():
 def test_target_validation_blocks_injection():
     with pytest.raises(ValueError):
         r.build_command("nmap", "quick", ["127.0.0.1; rm -rf /"], Path("/s/x"))
+
+
+def test_build_with_nse_scripts():
+    from pathlib import Path
+    cmd = r.build_command_opts("nmap", ["version"], "443", ["10.0.0.1"], Path("/s/x"),
+                               nse=["ssl-cert", "http-title"])
+    assert "--script" in cmd
+    i = cmd.index("--script")
+    # 레지스트리 순서로 정렬·중복제거 (http-title 가 ssl-cert 보다 앞)
+    assert cmd[i + 1] == "http-title,ssl-cert"
+
+
+def test_build_rejects_unknown_nse():
+    import pytest
+    from pathlib import Path
+    with pytest.raises(ValueError):
+        r.build_command_opts("nmap", ["version"], "", ["10.0.0.1"], Path("/s/x"), nse=["evil-script"])
+
+
+def test_options_endpoint_exposes_nse(client=None):
+    from scanops.scanning import scan_options as s
+    assert len(s.NSE_SCRIPTS) >= 27
+    assert "ssl-cert" in s.NSE_DEFAULT_KEYS
+    # phase1 옵션 키가 레지스트리에 모두 존재
+    keys = {o["key"] for o in s.SCAN_OPTIONS}
+    for k in ["t0", "t1", "t2", "max_retries", "min_hostgroup", "max_parallel", "defeat_rst"]:
+        assert k in keys

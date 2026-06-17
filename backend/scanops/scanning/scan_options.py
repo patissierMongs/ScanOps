@@ -60,19 +60,79 @@ SCAN_OPTIONS = [
      "desc": "진행 로그를 더 자세히 출력. 큰 스캔의 진행 파악에 유용."},
 
     # ── 타이밍 (하나만 선택) ──
+    {"key": "t0", "label": "Paranoid (-T0)", "flags": ["-T0"], "group": "타이밍 (택1)", "default": False,
+     "note": "초저속", "desc": "5분 간격으로 한 패킷씩. IDS 완전 회피용이지만 극도로 느리다."},
+    {"key": "t1", "label": "Sneaky (-T1)", "flags": ["-T1"], "group": "타이밍 (택1)", "default": False,
+     "note": "저속", "desc": "15초 간격. 탐지를 늦추는 은밀한 속도."},
+    {"key": "t2", "label": "Polite (-T2)", "flags": ["-T2"], "group": "타이밍 (택1)", "default": False,
+     "desc": "대상 부하를 줄이는 정중한 속도. 민감한 장비에."},
     {"key": "t3", "label": "표준 타이밍 (-T3)", "flags": ["-T3"], "group": "타이밍 (택1)", "default": False,
      "desc": "nmap 기본 속도. 안정적이고 무난하다."},
     {"key": "fast", "label": "빠른 타이밍 (-T4)", "flags": ["-T4"], "group": "타이밍 (택1)", "default": True,
      "desc": "사내망에 권장. 속도와 정확도의 균형."},
     {"key": "t5", "label": "매우 빠름 (-T5)", "flags": ["-T5"], "group": "타이밍 (택1)", "default": False,
-     "note": "누락 위험", "desc": "최대 속도. 혼잡하거나 느린 망에서는 결과가 누락될 수 있다."},
+     "note": "누락 위험", "desc": "최대 속도(Insane). 혼잡하거나 느린 망에서는 결과가 누락될 수 있다."},
+
+    # ── 성능·안정 ──
+    {"key": "max_retries", "label": "재시도 제한 (--max-retries 2)", "flags": ["--max-retries", "2"], "group": "성능·안정", "default": False,
+     "desc": "프로브 재전송을 2회로 제한해 느린 호스트에서 시간을 절약한다."},
+    {"key": "min_hostgroup", "label": "호스트 그룹 64 (--min-hostgroup 64)", "flags": ["--min-hostgroup", "64"], "group": "성능·안정", "default": False,
+     "desc": "한 번에 64대씩 병렬 처리해 넓은 대역 스캔을 가속한다."},
+    {"key": "max_parallel", "label": "병렬 100 (--max-parallelism 100)", "flags": ["--max-parallelism", "100"], "group": "성능·안정", "default": False,
+     "desc": "동시 프로브 수 상한을 100으로. 빠르지만 장비/회선 부하가 커진다."},
+    {"key": "defeat_rst", "label": "RST 율제한 우회 (--defeat-rst-ratelimit)", "flags": ["--defeat-rst-ratelimit"], "group": "성능·안정", "default": False,
+     "desc": "RST 율제한을 무시해 닫힌 포트 판정을 빠르게. 정확도가 약간 떨어질 수 있다."},
 
     # ── 방화벽 진단 ──
     {"key": "fragment", "label": "패킷 분할 (-f)", "flags": ["-f"], "group": "방화벽 진단", "default": False,
      "desc": "패킷을 잘게 쪼개 단순 패킷필터의 차단/탐지를 시험한다. 방화벽·IDS 점검용."},
 ]
 
+# ── NSE 스크립트 화이트리스트 (nmapParser 포팅) ──
+# 선택한 스크립트들은 서버가 `--script a,b,c` 한 줄로 조립한다. 임의 스크립트 주입은 막고
+# 이 목록의 이름만 허용. nmap_default 는 nmapParser 기본 활성(19+banner) 표시(자동선택 아님).
+NSE_SCRIPTS = [
+    {"key": "http-headers", "group": "HTTP", "nmap_default": True, "desc": "HTTP 응답 헤더 수집"},
+    {"key": "http-server-header", "group": "HTTP", "nmap_default": True, "desc": "Server 헤더(웹서버 종류·버전)"},
+    {"key": "http-title", "group": "HTTP", "nmap_default": True, "desc": "페이지 제목"},
+    {"key": "ssl-cert", "group": "TLS/SSL", "nmap_default": True, "desc": "인증서 주체/발급자/유효기간(TLS_CN)"},
+    {"key": "ssl-enum-ciphers", "group": "TLS/SSL", "nmap_default": True, "desc": "지원 암호 스위트·등급"},
+    {"key": "tls-alpn", "group": "TLS/SSL", "nmap_default": True, "desc": "ALPN 프로토콜 협상(h2 등)"},
+    {"key": "ssh-hostkey", "group": "SSH", "nmap_default": True, "desc": "SSH 호스트키 지문"},
+    {"key": "ssh-auth-methods", "group": "SSH", "nmap_default": False, "desc": "허용 인증 방식"},
+    {"key": "ssh2-enum-algos", "group": "SSH", "nmap_default": False, "desc": "지원 알고리즘 목록"},
+    {"key": "nbstat", "group": "SMB/NetBIOS", "nmap_default": True, "desc": "NetBIOS 이름·MAC"},
+    {"key": "smb-os-discovery", "group": "SMB/NetBIOS", "nmap_default": True, "desc": "SMB OS/컴퓨터명(SMB_OS)"},
+    {"key": "smb-protocols", "group": "SMB/NetBIOS", "nmap_default": True, "desc": "지원 SMB 버전(SMBv1 등)"},
+    {"key": "oracle-tns-version", "group": "DB", "nmap_default": True, "desc": "Oracle TNS 리스너 버전"},
+    {"key": "ms-sql-info", "group": "DB", "nmap_default": False, "desc": "MS-SQL 인스턴스 정보(1433/1434 외 부작용 주의)"},
+    {"key": "ldap-rootdse", "group": "DB", "nmap_default": False, "desc": "LDAP RootDSE(디렉터리 정보)"},
+    {"key": "rdp-ntlm-info", "group": "RDP", "nmap_default": True, "desc": "RDP NTLM 컴퓨터/도메인(NTLM_Computer)"},
+    {"key": "snmp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "desc": "SNMP 시스템 정보"},
+    {"key": "snmp-sysdescr", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "desc": "SNMP sysDescr"},
+    {"key": "ike-version", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "desc": "IKE(VPN) 버전"},
+    {"key": "sip-methods", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "desc": "SIP 지원 메서드"},
+    {"key": "ntp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "desc": "NTP 서버 정보"},
+    {"key": "ntp-monlist", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "desc": "NTP monlist(증폭 취약)"},
+    {"key": "rpcinfo", "group": "RPC", "nmap_default": True, "desc": "RPC 서비스 목록"},
+    {"key": "fingerprint-strings", "group": "기타", "nmap_default": True, "desc": "미식별 서비스 원시 응답"},
+    {"key": "banner", "group": "기타", "nmap_default": True, "desc": "서비스 배너 수집"},
+    {"key": "ftp-anon", "group": "FTP", "nmap_default": True, "desc": "익명 FTP 접속 허용 여부"},
+    {"key": "ftp-syst", "group": "FTP", "nmap_default": True, "desc": "FTP SYST/STAT 정보"},
+    {"key": "telnet-encryption", "group": "Telnet", "nmap_default": True, "desc": "Telnet 암호화 지원 여부"},
+    {"key": "dns-recursion", "group": "DNS", "nmap_default": True, "desc": "개방 재귀 DNS 여부"},
+    {"key": "dns-nsid", "group": "DNS", "nmap_default": True, "desc": "DNS 서버 식별(NSID)"},
+    {"key": "vnc-info", "group": "VNC", "nmap_default": True, "desc": "VNC 보안 타입"},
+    {"key": "vnc-title", "group": "VNC", "nmap_default": True, "desc": "VNC 데스크톱 제목"},
+]
+
+# nmapParser phase1 기본 활성 NSE(자동선택은 아님 — '정밀 프리셋' 버튼이 참조)
+NSE_DEFAULT_KEYS = [s["key"] for s in NSE_SCRIPTS if s["nmap_default"]]
+# nmapParser 기본 UDP 포트 집합(포트 프리셋용)
+UDP_DEFAULT_PORTS = "7,53,67,68,69,88,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
+
 _BY_KEY = {o["key"]: o for o in SCAN_OPTIONS}
+_NSE_KEYS = {s["key"] for s in NSE_SCRIPTS}
 DEFAULT_KEYS = [o["key"] for o in SCAN_OPTIONS if o["default"]]
 
 # 포트 스펙: 숫자/범위/콤마 + T:/U: 프로토콜 접두만 허용
@@ -94,6 +154,24 @@ def flags_for(keys: list[str]) -> list[str]:
         if o["key"] in sel:
             out.extend(o["flags"])
     return out
+
+
+def validate_nse(keys: list[str]) -> list[str]:
+    bad = [k for k in keys if k not in _NSE_KEYS]
+    if bad:
+        raise ValueError(f"알 수 없는 NSE 스크립트: {bad}")
+    return keys
+
+
+def script_flag(keys: list[str]) -> list[str]:
+    """선택한 NSE 스크립트들을 `--script a,b,c` 한 줄로(레지스트리 순서, 중복 제거).
+    화이트리스트 밖 이름은 거절 → 임의 스크립트 주입 차단."""
+    if not keys:
+        return []
+    validate_nse(keys)
+    sel = set(keys)
+    ordered = [s["key"] for s in NSE_SCRIPTS if s["key"] in sel]
+    return ["--script", ",".join(ordered)]
 
 
 def validate_ports(ports: str) -> str:
