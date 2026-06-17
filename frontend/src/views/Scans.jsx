@@ -5,14 +5,16 @@ import ScanOptions from "../ui/ScanOptions.jsx";
 
 // 스캔 상태 → 표시 라벨/색
 const STATUS = {
-  running:   { label: "실행 중", cls: "info" },
-  canceling: { label: "중지 중", cls: "medium" },
-  canceled:  { label: "중지됨", cls: "medium" },
-  failed:    { label: "실패",   cls: "high" },
-  done:      { label: "완료",   cls: "low" },
+  running:     { label: "실행 중", cls: "info" },
+  canceling:   { label: "중지 중", cls: "medium" },
+  canceled:    { label: "중지됨", cls: "medium" },
+  interrupted: { label: "중단됨(재시작)", cls: "high" },
+  failed:      { label: "실패",   cls: "high" },
+  done:        { label: "완료",   cls: "low" },
 };
 const isActive = (s) => s === "running" || s === "canceling";
-const canResume = (s) => s === "canceled" || s === "failed";
+// 중단됨(interrupted): 서버 재시작으로 워커가 사라진 실행 — 자동 복구는 안 하고 수동 이어하기만.
+const canResume = (s) => s === "canceled" || s === "failed" || s === "interrupted";
 
 // 초 → 사람 읽기 좋은 시간 문자열
 function fmtDur(sec) {

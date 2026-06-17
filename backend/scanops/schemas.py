@@ -71,6 +71,18 @@ class IngestSummary(BaseModel):
     counts: dict
 
 
+# ---- audit ----
+class AuditOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    actor_name: str
+    action: str
+    target: str
+    detail: str
+    ok: int
+    created_at: datetime
+
+
 # ---- finding ----
 class FindingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)

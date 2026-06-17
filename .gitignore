@@ -20,5 +20,12 @@ frontend/node_modules/
 
 # 패키징 wheelhouse 는 에어갭 배포용으로 포함
 
+# 데모/검증 스크립트의 런타임 산출물 — 스크립트로 재생성되므로 커밋 안 함
+# (스크립트 .py/.mjs/.sh 와 큐레이션된 샘플 XML·스크린샷은 그대로 추적)
+live_sample/demo_out.txt
+live_sample/sample1_*.json
+live_sample/scan_live.xml
+live_sample/verify*.json
+
 # Claude Code 로컬 설정(머신별)
 .claude/settings.local.json

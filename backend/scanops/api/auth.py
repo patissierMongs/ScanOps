@@ -9,6 +9,7 @@ from ..db import get_db
 from ..models import User
 from ..schemas import LoginIn, PasswordChange, TokenOut, UserOut
 from ..security import hash_password, make_token, verify_password
+from .audit import record
 from .deps import _SECRET, current_user
 
 _MIN_PASSWORD_LEN = 8
@@ -21,10 +22,13 @@ _settings = get_settings()
 def login(body: LoginIn, db: Session = Depends(get_db)) -> TokenOut:
     user = db.query(User).filter(User.username == body.username).first()
     if user is None or not verify_password(body.password, user.password_hash):
+        record(db, user, "LOGIN", target=body.username, detail="실패", ok=False)
         raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
     if not user.is_active:
+        record(db, user, "LOGIN", target=body.username, detail="비활성 계정", ok=False)
         raise HTTPException(status_code=403, detail="비활성화된 계정입니다.")
     token = make_token(user.id, _SECRET, _settings.token_ttl_hours)
+    record(db, user, "LOGIN", target=body.username)
     return TokenOut(token=token, role=user.role, display_name=user.display_name)
 
 

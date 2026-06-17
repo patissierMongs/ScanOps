@@ -17,9 +17,10 @@ from ..config import get_settings
 from ..db import SessionLocal, get_db
 from ..models import ScanRun, User
 from ..schemas import IngestSummary, ScanOut, ScanRunIn
-from ..scanning import chunker, nmap_runner, scan_options, taxonomy
+from ..scanning import chunker, nmap_runner, scan_options, scope, taxonomy
 from ..scanning.ingest import ingest
 from ..scanning.nmap_parse import parse_xml, scan_start, up_hosts
+from .audit import record
 from .deps import current_user, require_role
 
 router = APIRouter()
@@ -41,6 +42,24 @@ def _profile(options: list[str], ports: str, preset: str) -> tuple:
     이게 같은 과거 스캔만 기준으로 삼는다."""
     pn = (ports or "").replace(" ", "")
     return ("opt", tuple(sorted(options)), pn) if options else ("preset", preset or "quick", pn)
+
+
+def reconcile_orphans() -> int:
+    """서버 부팅 시 호출 — 워커가 사라져 고아가 된 실행(running/canceling)을 interrupted 로 정직하게
+    표기한다. 자동 복구는 하지 않는다(이어하기는 사용자가 수동으로). 좀비 '실행 중' 박제를 막는 게 목적.
+    반환: 정리된 건수."""
+    db = SessionLocal()
+    try:
+        orphans = db.query(ScanRun).filter(ScanRun.status.in_(("running", "canceling"))).all()
+        for scan in orphans:
+            scan.status = "interrupted"
+            if scan.finished_at is None:
+                scan.finished_at = datetime.now(timezone.utc)
+        if orphans:
+            db.commit()
+        return len(orphans)
+    finally:
+        db.close()
 
 
 def _mark(scan_id: int, status: str) -> None:
@@ -203,7 +222,9 @@ async def import_xml(
     except Exception as e:
         scan.status = "failed"
         db.commit()
+        record(db, user, "SCAN_IMPORT", target=file.filename or "", detail=f"#{scan.id} 실패", ok=False)
         raise HTTPException(status_code=400, detail=f"XML 파싱 실패: {e}")
+    record(db, user, "SCAN_IMPORT", target=file.filename or "", detail=f"#{scan.id}")
     return IngestSummary(scan_id=scan.id, counts=counts)
 
 
@@ -224,6 +245,7 @@ def run_scan(
         hosts = chunker.expand_targets(body.targets)
         if not hosts:
             raise ValueError("유효한 타겟이 없습니다.")
+        scope.check_scope(hosts)   # 허용 대역(scope) 밖이면 시작 전에 거절
         batches = chunker.make_batches(hosts, body.batch_size)
         # 옵션/프리셋·포트 사전 검증(첫 배치로) — 잘못된 입력은 시작 전에 거절.
         if body.options:
@@ -257,6 +279,8 @@ def run_scan(
     scan.command = f"{' '.join(parts)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
     db.commit()
     db.refresh(scan)
+    record(db, user, "SCAN_RUN", target=scan.targets,
+           detail=f"#{scan.id} · {len(hosts)}호스트 / {len(batches)}배치")
     threading.Thread(target=_chunk_worker, args=(scan.id,), daemon=True).start()
     return scan
 
@@ -285,6 +309,7 @@ def stop_scan(
     if proc is not None:
         proc.terminate()        # 현재 배치 즉시 중단(그 배치는 버려지고 커서 유지)
     db.refresh(scan)
+    record(db, user, "SCAN_STOP", target=scan.targets, detail=f"#{scan.id}")
     return scan
 
 
@@ -317,6 +342,8 @@ def resume_scan(
     scan.finished_at = None
     db.commit()
     db.refresh(scan)
+    record(db, user, "SCAN_RESUME", target=scan.targets,
+           detail=f"#{scan.id} · 배치 {state.get('cursor', 0)}부터")
     threading.Thread(target=_chunk_worker, args=(scan_id,), daemon=True).start()
     return scan
 
@@ -365,6 +392,7 @@ def estimate_scan(body: ScanRunIn, _: User = Depends(current_user), db: Session 
     호스트당 평균시간(중앙값)으로 대략적 소요시간을 낸다. 없으면 basis='none'."""
     try:
         hosts = chunker.expand_targets(body.targets)
+        scope.check_scope(hosts)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     host_count = len(hosts)

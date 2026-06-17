@@ -36,14 +36,25 @@ packaging\start.bat                                             # 서버 실행 
 - 팀은 `http://<서버IP>:8770/` 브라우저 접속.
 
 ## 역할
-- **admin** — 사용자 관리 + 전체 권한
+- **admin** — 사용자 관리 + 전체 권한 + 감사 로그 열람
 - **auditor** — 스캔 실행·발견 운영(상태/담당/마감)·통보
 - **viewer** — 열람 전용
 
+## 보안/운영
+- **스캔 허용 대역(scope)** — `SCANOPS_SCAN_SCOPE` 에 CIDR/IP 를 콤마·공백으로 지정하면
+  그 범위 밖 타겟은 스캔 시작 전에 거절된다(오타·잘못 붙여넣은 사외 대역 스캔 사고 방지).
+  비우면 제한 없음(하위호환). 예: `SCANOPS_SCAN_SCOPE="10.0.0.0/8 192.168.0.0/16"`.
+- **감사 로그** — 로그인(성공/실패)·스캔 실행/중지/이어하기/가져오기·규칙 변경을
+  `누가·언제·무엇`으로 기록. `GET /api/audit`(admin 전용)로 조회.
+- **재시작 안전성** — 서버가 재시작되면 워커가 사라진 실행은 `interrupted` 로 정직하게
+  표기된다(좀비 '실행 중' 방지). 자동 복구는 하지 않으며, 필요 시 **[이어하기]** 로 수동 재개.
+
 ## 테스트
 ```powershell
+cd backend && .venv\Scripts\python -m pip install -r requirements-dev.txt
 cd backend && .venv\Scripts\python -m pytest -q
 ```
+CI(`.github/workflows/ci.yml`)에서 백엔드 pytest + 프론트 빌드를 PR마다 자동 검증.
 
 ## 자산 출처
 스캔·식별·분류 도메인 로직(서비스 taxonomy 105종, 추측/확인 식별, NSE 추출)은

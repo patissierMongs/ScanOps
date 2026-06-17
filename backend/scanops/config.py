@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # 비우면 표준 위치 자동 탐지(find_nmap_exe). 지정 시 그 경로 사용.
     nmap_path: str = ""
 
+    # 스캔 허용 대역(scope) — 콤마/공백 구분 CIDR·IP 목록(예: "10.0.0.0/8 192.168.0.0/16").
+    # 비우면 제한 없음(하위호환). 지정 시 이 범위 밖 타겟은 스캔 시작 전에 거절 →
+    # 실수로 사외/타조직 대역을 스캔하는 사고를 막는다.
+    scan_scope: str = ""
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "scanops.db"

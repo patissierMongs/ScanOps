@@ -24,6 +24,12 @@ async def lifespan(_app: FastAPI):
     except Exception:
         # 시드 모듈이 아직 없거나 실패해도 앱 부팅은 막지 않는다(개발 단계).
         pass
+    # 재시작으로 고아가 된 실행을 interrupted 로 정직하게 표기(자동 복구 안 함, 좀비 방지).
+    try:
+        from .api.scans import reconcile_orphans
+        reconcile_orphans()
+    except Exception:
+        pass
     yield
 
 
@@ -38,6 +44,7 @@ def health() -> dict:
 def _mount_routers() -> None:
     """라우터는 생성되는 대로 여기서 등록(아직 일부만)."""
     from .api import assets as assets_api
+    from .api import audit as audit_api
     from .api import auth as auth_api
     from .api import dashboard as dashboard_api
     from .api import events as events_api
@@ -57,6 +64,7 @@ def _mount_routers() -> None:
     app.include_router(reports_api.router, prefix="/api/reports", tags=["reports"])
     app.include_router(rules_api.router, prefix="/api/rules", tags=["rules"])
     app.include_router(events_api.router, prefix="/api/events", tags=["events"])
+    app.include_router(audit_api.router, prefix="/api/audit", tags=["audit"])
 
 
 _mount_routers()

@@ -67,7 +67,9 @@ class ScanRun(Base):
     name: Mapped[str] = mapped_column(String(128), default="")
     targets: Mapped[str] = mapped_column(Text, default="")
     command: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(16), default="running")  # running/done/failed/canceled
+    # running/done/failed/canceling/canceled/interrupted
+    # interrupted = 서버 재시작 등으로 워커가 사라져 고아가 된 실행(자동 복구 안 함, 수동 이어하기 가능)
+    status: Mapped[str] = mapped_column(String(16), default="running")
     started_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     raw_xml_path: Mapped[str] = mapped_column(Text, default="")
@@ -181,3 +183,20 @@ class Notification(Base):
     channel: Mapped[str] = mapped_column(String(16), default="file")  # clipboard/file/log
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     sent_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class AuditLog(Base):
+    """전역 감사 로그 — 민감 행위(스캔 실행/중지, 규칙 변경, 로그인)를 '누가·언제·무엇'으로 기록.
+
+    FindingEvent 가 발견 단위 이력이라면, 이건 시스템 행위 단위 추적. 스캐너는 그 자체로
+    민감 도구이므로 누가 어떤 대역을 스캔했는지 남기는 게 운영·감사의 기본.
+    """
+    __tablename__ = "audit_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    actor_name: Mapped[str] = mapped_column(String(64), default="")  # 사용자 삭제 후에도 보존
+    action: Mapped[str] = mapped_column(String(32), index=True)      # SCAN_RUN/SCAN_STOP/.../LOGIN
+    target: Mapped[str] = mapped_column(String(256), default="")     # 대상(타겟 대역·규칙·계정)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    ok: Mapped[int] = mapped_column(Integer, default=1)              # 성공/실패(로그인 실패 추적)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
