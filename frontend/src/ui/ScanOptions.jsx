@@ -77,16 +77,30 @@ export default function ScanOptions({ targets = [], portsAuto = "", onState }) {
       </div>
 
       {Object.entries(groups).map(([grp, opts]) => (
-        <div key={grp} style={{ marginBottom: 8 }}>
+        <div key={grp} style={{ marginBottom: 12 }}>
           <div className="cb-label">{grp}</div>
-          <div className="row" style={{ gap: 14, flexWrap: "wrap" }}>
-            {opts.map((o) => (
-              <label key={o.key} className="row" style={{ gap: 5, fontSize: 12.5 }}>
-                <input type="checkbox" checked={sel.has(o.key)} onChange={() => toggle(o.key)} />
-                {o.label}
-                {o.note && <span className="muted" style={{ fontSize: 10.5 }}>· {o.note}</span>}
-              </label>
-            ))}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(290px, 1fr))", gap: 8 }}>
+            {opts.map((o) => {
+              const on = sel.has(o.key);
+              return (
+                <label key={o.key} title={o.desc || ""}
+                       style={{
+                         display: "flex", gap: 8, padding: "8px 10px", cursor: "pointer",
+                         border: "1px solid var(--line)", borderRadius: 9,
+                         background: on ? "var(--accent-bg)" : "var(--surface)",
+                         borderColor: on ? "var(--accent)" : "var(--line)",
+                       }}>
+                  <input type="checkbox" checked={on} onChange={() => toggle(o.key)} style={{ marginTop: 2 }} />
+                  <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 600 }}>
+                      {o.label}
+                      {o.note && <span className="pill medium" style={{ marginLeft: 6, fontSize: 10, padding: "0 6px" }}>{o.note}</span>}
+                    </span>
+                    {o.desc && <span className="muted" style={{ fontSize: 11.5, lineHeight: 1.45 }}>{o.desc}</span>}
+                  </span>
+                </label>
+              );
+            })}
           </div>
         </div>
       ))}
