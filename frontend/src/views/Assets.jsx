@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useToast } from "../ui/Toast.jsx";
 import {
@@ -139,6 +139,34 @@ export default function Assets({ user }) {
   const candidateExtra = imp ? imp.cols.filter((c) => !usedCols.has(c.index)) : [];
   const records = imp ? buildAssetRecords(imp.cols, imp.mapping, imp.extraCols) : [];
   const preview = records[0] || null;
+
+  // ---- 커밋 전 변경 미리보기(diff) — 현재 대장과 비교(신규/수정/동일/대장에만). 업서트 의미와 동일하게
+  //      '비어있지 않고 값이 다른' 입력만 변경으로 센다. 기존 가져오기 동작은 그대로(여기선 표시만). ----
+  const CMP = [["hostname", "호스트명"], ["dept", "부서"], ["owner", "담당자"], ["contact", "연락처"], ["asset_no", "자산번호"], ["note", "비고"]];
+  const existingByIp = useMemo(() => { const m = {}; assets.forEach((a) => { m[a.ip] = a; }); return m; }, [assets]);
+  const diff = useMemo(() => {
+    const res = { neu: [], changed: [], same: 0, missing: 0 };
+    const seen = new Set();
+    records.forEach((r) => {
+      const ip = (r.ip || "").trim();
+      if (!ip) return;
+      seen.add(ip);
+      const cur = existingByIp[ip];
+      if (!cur) { res.neu.push(r); return; }
+      const changes = [];
+      CMP.forEach(([f, label]) => {
+        const nv = (r[f] ?? "").toString().trim();
+        if (nv && nv !== (cur[f] ?? "").toString()) changes.push({ label, old: cur[f] || "", neu: nv });
+      });
+      Object.entries(r.extra || {}).forEach(([k, v]) => {
+        const ov = cur.extra ? (cur.extra[k] ?? "") : "";
+        if (String(v).trim() && String(v) !== String(ov)) changes.push({ label: k, old: ov, neu: v });
+      });
+      if (changes.length) res.changed.push({ ip: r.ip, changes }); else res.same += 1;
+    });
+    res.missing = assets.filter((a) => !seen.has(a.ip)).length;
+    return res;
+  }, [records, existingByIp, assets]);
   const dataRows = imp ? (imp.cols[0]?.values.length || 0) : 0;
   const skipped = imp ? Math.max(0, dataRows - records.length) : 0;
 
@@ -243,6 +271,53 @@ extra    : ${Object.keys(preview.extra).length ? JSON.stringify(preview.extra, n
               <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
                 가져올 행 {records.length}건{skipped > 0 && <span className="err"> · IP 없어 제외 {skipped}행</span>}
               </div>
+
+              {imp.mapping.ip != null && records.length > 0 && (
+                <div style={{ marginTop: 12, border: "1px solid var(--line)", borderRadius: 8, padding: "12px 14px" }}>
+                  <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+                    <span className="cb-label" style={{ margin: 0 }}>변경 미리보기 — 현재 대장과 비교 (커밋 전, DB 미반영)</span>
+                    <span className="row" style={{ gap: 6, fontSize: 12 }}>
+                      <span className="pill low">신규 {diff.neu.length}</span>
+                      <span className="pill medium">수정 {diff.changed.length}</span>
+                      <span className="pill info">동일 {diff.same}</span>
+                      {diff.missing > 0 && <span className="pill" title="시트에 없는 기존 자산 — 삭제하지 않고 유지">대장에만 {diff.missing}</span>}
+                    </span>
+                  </div>
+                  {(diff.neu.length === 0 && diff.changed.length === 0) ? (
+                    <div className="muted" style={{ fontSize: 12 }}>변경 없음 — 모두 기존과 동일합니다.</div>
+                  ) : (
+                    <div style={{ maxHeight: 220, overflow: "auto", fontSize: 12 }}>
+                      {diff.changed.slice(0, 100).map((c) => (
+                        <div key={"c" + c.ip} style={{ padding: "4px 0", borderBottom: "1px solid var(--line-soft)" }}>
+                          <span className="pill medium" style={{ fontSize: 10 }}>수정</span>{" "}
+                          <span className="mono">{c.ip}</span>{" — "}
+                          {c.changes.map((ch, i) => (
+                            <span key={i} style={{ marginRight: 8 }}>
+                              {ch.label}: <span style={{ color: "var(--high)", textDecoration: "line-through", opacity: 0.7 }}>{ch.old || "—"}</span>
+                              {" → "}<span style={{ color: "var(--low)", fontWeight: 600 }}>{ch.neu}</span>
+                            </span>
+                          ))}
+                        </div>
+                      ))}
+                      {diff.neu.slice(0, 100).map((r) => (
+                        <div key={"n" + r.ip} style={{ padding: "4px 0", borderBottom: "1px solid var(--line-soft)" }}>
+                          <span className="pill low" style={{ fontSize: 10 }}>신규</span>{" "}
+                          <span className="mono">{r.ip}</span>
+                          <span className="muted">{"  "}{[r.hostname, r.dept, r.owner].filter(Boolean).join(" · ")}</span>
+                        </div>
+                      ))}
+                      {(diff.changed.length > 100 || diff.neu.length > 100) && (
+                        <div className="muted" style={{ paddingTop: 6 }}>…목록 일부만 표시 (요약 칩이 전체 건수)</div>
+                      )}
+                    </div>
+                  )}
+                  {diff.missing > 0 && (
+                    <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
+                      ※ 시트에 없는 기존 자산 {diff.missing}건은 <b>삭제하지 않고 그대로 유지</b>됩니다(가져오기는 업서트).
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div style={{ overflowX: "auto", border: "1px solid var(--line)", borderRadius: 8, marginTop: 12 }}>
                 <table className="tbl">
