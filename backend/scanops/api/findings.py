@@ -49,6 +49,7 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("risk_level", "위험등급", lambda f: RISK_LABELS_KO.get(f.risk_level, f.risk_level)),
     ("remarks", "비고", lambda f: f.remarks),
     ("status", "운영상태", lambda f: f.status),
+    ("reopened", "재발", lambda f: "재발" if f.reopened else ""),
     ("dept", "부서", lambda f: f.dept),
     ("contact", "연락처", lambda f: f.contact),
     ("deadline", "마감", lambda f: f.deadline.strftime("%Y-%m-%d") if f.deadline else ""),

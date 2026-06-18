@@ -49,8 +49,14 @@ class ScanRunIn(BaseModel):
     preset: str = "quick"          # 옵션 미지정 시 사용(하위호환)
     options: list[str] = []        # 스캔 옵션 키(화이트리스트) — 지정 시 우선
     ports: str = ""                # 포트 스펙(예: 22,80,443 또는 1-1024)
+    nse: list[str] = []            # NSE 스크립트 키(화이트리스트) — 선택 시 --script 조립
     targets: list[str]
     batch_size: int = 256          # 청킹 배치당 호스트 수(중지/이어가기 단위)
+
+
+class RawCommandIn(BaseModel):
+    name: str = ""
+    command: str          # 사용자가 직접 입력한 nmap 명령(출력 플래그는 서버가 -oA 로 강제 교체)
 
 
 class ScanOut(BaseModel):
@@ -69,6 +75,18 @@ class ScanOut(BaseModel):
 class IngestSummary(BaseModel):
     scan_id: int
     counts: dict
+
+
+# ---- audit ----
+class AuditOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    actor_name: str
+    action: str
+    target: str
+    detail: str
+    ok: int
+    created_at: datetime
 
 
 # ---- finding ----
@@ -94,6 +112,7 @@ class FindingOut(BaseModel):
     remarks: str
     compliance_json: list | None
     status: str
+    reopened: int
     owner_user_id: int | None
     deadline: datetime | None
     dept: str

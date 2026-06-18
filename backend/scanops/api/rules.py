@@ -13,6 +13,7 @@ from ..db import get_db
 from ..models import RISK_LEVELS, Finding, RiskRule, User
 from ..schemas import RuleIn, RuleOut
 from ..scanning import taxonomy
+from .audit import record
 from .deps import current_user, require_role
 
 router = APIRouter()
@@ -70,18 +71,22 @@ def create_rule(
     db.commit()
     db.refresh(rule)
     taxonomy.reclassify_all(db)  # 기존 발견에 즉시 반영(금지 승격 등)
+    record(db, user, "RULE_CREATE", target=f"{rule.kind}:{rule.service or rule.port}",
+           detail=f"#{rule.id} → {rule.risk_level}")
     return _out(db, rule)
 
 
 @router.delete("/{rule_id}", status_code=204)
 def delete_rule(
     rule_id: int,
-    _: User = Depends(require_role("auditor")),
+    user: User = Depends(require_role("auditor")),
     db: Session = Depends(get_db),
 ):
     rule = db.get(RiskRule, rule_id)
     if rule is None:
         raise HTTPException(status_code=404, detail="규칙을 찾을 수 없습니다.")
+    label = f"{rule.kind}:{rule.service or rule.port}"
     db.delete(rule)
     db.commit()
     taxonomy.reclassify_all(db)  # 규칙 제거 후 등급 원복
+    record(db, user, "RULE_DELETE", target=label, detail=f"#{rule_id}")

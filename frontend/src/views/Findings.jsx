@@ -164,7 +164,7 @@ export default function Findings({ user }) {
           </select>
           <select value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">상태 전체</option>
-            {["미조치", "처리중", "정상처리", "재발"].map((s) => <option key={s} value={s}>{s}</option>)}
+            {["미조치", "처리중", "정상처리"].map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
           <label className="row" style={{ gap: 5 }}>
             <input type="checkbox" checked={hideNormal} onChange={(e) => setHideNormal(e.target.checked)} />
@@ -253,7 +253,12 @@ function renderCell(finding, key, displayModes) {
   const mode = displayModes[key] || "badge";
   if (mode === "text") return <span>{val}</span>;
   if (col.badge === "risk") return <span className={"pill " + (finding.risk_level || "info")}>{RISK_LABEL[finding.risk_level] || val}</span>;
-  if (col.badge === "status") return <span className={"pill " + (STATUS_CLASS[finding.status] || "info")}>{val}</span>;
+  if (col.badge === "status") return (
+    <span>
+      <span className={"pill " + (STATUS_CLASS[finding.status] || "info")}>{val}</span>
+      {finding.reopened ? <span className="tag" style={{ marginLeft: 4, color: "var(--high)" }}>재발</span> : null}
+    </span>
+  );
   return <span>{val}</span>;
 }
 
@@ -280,6 +285,7 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
         <div className="muted" style={{ marginBottom: 10 }}>{finding.service} {finding.version}</div>
         <div className="row" style={{ marginBottom: 8 }}>
           <span className={"pill " + (finding.risk_level || "info")}>{RISK_LABEL[finding.risk_level]}</span>
+          {finding.reopened ? <span className="tag" style={{ color: "var(--high)" }}>재발</span> : null}
           <span className="tag">{finding.category || "미분류"}</span>
           <span className="tag">{finding.identification}</span>
           {finding.dept && <span className="tag">{finding.dept}</span>}
@@ -290,7 +296,7 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
             <div className="row">
               <label className="field">상태
                 <select value={status} onChange={(e) => setStatus(e.target.value)}>
-                  {["미조치", "처리중", "정상처리", "재발"].map((s) => <option key={s}>{s}</option>)}
+                  {["미조치", "처리중", "정상처리"].map((s) => <option key={s}>{s}</option>)}
                 </select>
               </label>
               <label className="field">마감

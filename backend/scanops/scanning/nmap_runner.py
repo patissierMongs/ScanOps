@@ -1,8 +1,10 @@
 """nmap 실행 — subprocess(shell=False)로 명령 주입 차단. XML 산출."""
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -11,6 +13,12 @@ from .presets import PRESETS
 
 # 타겟 화이트리스트: IPv4/CIDR/호스트명/범위. shell 미사용이라도 입력은 검증.
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_.:/\-]+$")
+
+# 직접 명령 입력에서 거절할 셸 메타문자 — shell=False 라 해석은 안 되지만, 의도치 않은
+# 토큰이 nmap 인자로 새는 걸 막고 명확히 거절한다.
+_SHELL_META = set(";|&`$<>\n\r")
+# 사용자가 준 출력 플래그는 무시(경로 traversal·형식 충돌 방지) — ScanOps 가 -oA 를 강제 주입.
+_OUT_FLAGS = {"-oX", "-oN", "-oG", "-oS", "-oA"}
 
 # 주기적 진행 보고 — nmap 이 stdout 에 "About X% done; ETC ..." 를 10초마다 출력.
 # --resume 은 원본 명령을 그대로 이어받으므로 이 플래그도 자동 승계된다(가시성 유지).
@@ -53,15 +61,18 @@ def build_command(nmap: str, preset: str, targets: list[str], out_basename: Path
 
 
 def build_command_opts(nmap: str, option_keys: list[str], ports: str,
-                       targets: list[str], out_basename: Path) -> list[str]:
-    """옵션 키 화이트리스트 + 포트 + 타겟 → 검증된 nmap argv (-oA 강제)."""
+                       targets: list[str], out_basename: Path,
+                       nse: list[str] | None = None) -> list[str]:
+    """옵션 키 화이트리스트 + 포트 + (선택)NSE 스크립트 + 타겟 → 검증된 nmap argv (-oA 강제)."""
     scan_options.validate_keys(option_keys)
     flags = scan_options.flags_for(option_keys)
     port_spec = scan_options.validate_ports(ports)
+    script_flags = scan_options.script_flag(nse or [])
     validate_targets(targets)
     argv = [nmap, *STATS_FLAGS, *flags]
     if port_spec:
         argv += ["-p", port_spec]
+    argv += script_flags
     argv += ["-oA", str(out_basename), *targets]
     return argv
 
@@ -69,6 +80,60 @@ def build_command_opts(nmap: str, option_keys: list[str], ports: str,
 def run_opts(nmap: str, option_keys: list[str], ports: str, targets: list[str],
              out_basename: Path, log_path: Path | None = None, timeout: int = 3600) -> int:
     return _spawn(build_command_opts(nmap, option_keys, ports, targets, out_basename), log_path, timeout)
+
+
+def _is_ip_like(token: str) -> bool:
+    try:
+        ipaddress.ip_address(token)
+        return True
+    except ValueError:
+        pass
+    try:
+        ipaddress.ip_network(token, strict=False)
+        return True
+    except ValueError:
+        return False
+
+
+def parse_raw_command(command: str) -> list[str]:
+    """사용자 직접 입력 명령 → 토큰 리스트. 셸 메타문자 거절, 선두 nmap 토큰 제거."""
+    if any(c in command for c in _SHELL_META):
+        raise ValueError("명령에 허용되지 않는 문자가 있습니다 (; | & $ ` < > 등).")
+    try:
+        toks = shlex.split(command, posix=True)
+    except ValueError as e:
+        raise ValueError(f"명령을 해석할 수 없습니다: {e}")
+    if not toks:
+        raise ValueError("빈 명령입니다.")
+    if Path(toks[0]).name.lower() in ("nmap", "nmap.exe"):
+        toks = toks[1:]
+    if not toks:
+        raise ValueError("스캔 인자가 없습니다.")
+    return toks
+
+
+def build_command_raw(nmap: str, command: str, out_basename: Path) -> tuple[list[str], list[str]]:
+    """직접 입력 명령 → 검증된 argv. 출력 플래그 제거 후 -oA 강제, stats 주입.
+
+    반환: (argv, ip_유사_타겟토큰들). 타겟 토큰은 scope 검사에 쓴다."""
+    toks = parse_raw_command(command)
+    cleaned: list[str] = []
+    skip = False
+    for t in toks:
+        if skip:               # 직전이 출력 플래그 → 그 값(경로)도 버림
+            skip = False
+            continue
+        if t in _OUT_FLAGS:
+            skip = True
+            continue
+        cleaned.append(t)
+    argv = [nmap]
+    if not any(t == "--stats-every" for t in cleaned):
+        argv += STATS_FLAGS
+    argv += cleaned
+    argv += ["-oA", str(out_basename)]
+    ip_tokens = [t for t in cleaned if _is_ip_like(t)]
+    return argv, ip_tokens
 
 
 def build_resume_command(nmap: str, out_basename: Path) -> list[str]:

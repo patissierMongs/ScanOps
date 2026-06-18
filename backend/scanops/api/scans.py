@@ -16,10 +16,11 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import SessionLocal, get_db
 from ..models import ScanRun, User
-from ..schemas import IngestSummary, ScanOut, ScanRunIn
-from ..scanning import chunker, nmap_runner, scan_options, taxonomy
+from ..schemas import IngestSummary, RawCommandIn, ScanOut, ScanRunIn
+from ..scanning import chunker, nmap_runner, scan_options, scope, taxonomy
 from ..scanning.ingest import ingest
 from ..scanning.nmap_parse import parse_xml, scan_start, up_hosts
+from .audit import record
 from .deps import current_user, require_role
 
 router = APIRouter()
@@ -41,6 +42,24 @@ def _profile(options: list[str], ports: str, preset: str) -> tuple:
     이게 같은 과거 스캔만 기준으로 삼는다."""
     pn = (ports or "").replace(" ", "")
     return ("opt", tuple(sorted(options)), pn) if options else ("preset", preset or "quick", pn)
+
+
+def reconcile_orphans() -> int:
+    """서버 부팅 시 호출 — 워커가 사라져 고아가 된 실행(running/canceling)을 interrupted 로 정직하게
+    표기한다. 자동 복구는 하지 않는다(이어하기는 사용자가 수동으로). 좀비 '실행 중' 박제를 막는 게 목적.
+    반환: 정리된 건수."""
+    db = SessionLocal()
+    try:
+        orphans = db.query(ScanRun).filter(ScanRun.status.in_(("running", "canceling"))).all()
+        for scan in orphans:
+            scan.status = "interrupted"
+            if scan.finished_at is None:
+                scan.finished_at = datetime.now(timezone.utc)
+        if orphans:
+            db.commit()
+        return len(orphans)
+    finally:
+        db.close()
 
 
 def _mark(scan_id: int, status: str) -> None:
@@ -109,8 +128,8 @@ def _chunk_worker(scan_id: int) -> None:
         b_base = Path(str(base) + f".b{cursor}")
         b_log = Path(str(b_base) + ".log")
         try:
-            if st.get("options"):
-                argv = nmap_runner.build_command_opts(nmap, st["options"], st.get("ports", ""), batch, b_base)
+            if st.get("options") or st.get("nse"):
+                argv = nmap_runner.build_command_opts(nmap, st.get("options") or [], st.get("ports", ""), batch, b_base, nse=st.get("nse"))
             else:
                 argv = nmap_runner.build_command(nmap, st.get("preset", "quick"), batch, b_base)
         except ValueError:
@@ -149,6 +168,45 @@ def _chunk_worker(scan_id: int) -> None:
         chunker.write_state(base, st)
 
 
+def _command_worker(scan_id: int) -> None:
+    """직접 입력 명령 스캔 — 단발 실행(청킹/이어가기 없음). nmap → XML → 인입.
+    중지(stop)면 프로세스 종료 후 canceled."""
+    base = _basename(scan_id)
+    state = chunker.read_state(base) or {}
+    argv = state.get("raw_argv")
+    if not argv:
+        _mark(scan_id, "failed")
+        return
+    log = Path(str(base) + ".log")
+    _set_current_log(scan_id, log)
+    if (chunker.read_state(base) or {}).get("stop"):
+        _mark(scan_id, "canceled")
+        return
+    try:
+        proc = nmap_runner.popen(argv, log)
+    except OSError:
+        _mark(scan_id, "failed")
+        return
+    with _LOCK:
+        _PROCS[scan_id] = proc
+    rc = proc.wait()
+    with _LOCK:
+        _PROCS.pop(scan_id, None)
+    if (chunker.read_state(base) or {}).get("stop"):
+        _mark(scan_id, "canceled")
+        return
+    xml_path = nmap_runner.xml_of(base)
+    if rc != 0 or not xml_path.exists():
+        _mark(scan_id, "failed")
+        return
+    try:
+        _ingest_batch(scan_id, xml_path.read_bytes())
+    except Exception:
+        _mark(scan_id, "failed")
+        return
+    _mark(scan_id, "done")
+
+
 def _ingest_xml(db: Session, scan: ScanRun, xml_bytes: bytes, scan_date=None) -> dict:
     findings = taxonomy.enrich_all(db, parse_xml(xml_bytes))
     counts = ingest(db, scan.id, findings, up_hosts(xml_bytes), scan_date=scan_date)
@@ -169,8 +227,14 @@ def list_scans(_: User = Depends(current_user), db: Session = Depends(get_db)):
 
 @router.get("/options")
 def list_scan_options(_: User = Depends(current_user)):
-    """스캔 옵션 화이트리스트 — UI 가 토글을 그리고 명령을 실시간 조립."""
-    return {"options": scan_options.SCAN_OPTIONS, "default": scan_options.DEFAULT_KEYS}
+    """스캔 옵션 화이트리스트 — UI 가 토글을 그리고 명령을 실시간 조립. NSE 스크립트 목록 포함."""
+    return {
+        "options": scan_options.SCAN_OPTIONS,
+        "default": scan_options.DEFAULT_KEYS,
+        "nse": scan_options.NSE_SCRIPTS,
+        "nse_default": scan_options.NSE_DEFAULT_KEYS,
+        "udp_default_ports": scan_options.UDP_DEFAULT_PORTS,
+    }
 
 
 @router.get("/{scan_id}", response_model=ScanOut)
@@ -203,7 +267,9 @@ async def import_xml(
     except Exception as e:
         scan.status = "failed"
         db.commit()
+        record(db, user, "SCAN_IMPORT", target=file.filename or "", detail=f"#{scan.id} 실패", ok=False)
         raise HTTPException(status_code=400, detail=f"XML 파싱 실패: {e}")
+    record(db, user, "SCAN_IMPORT", target=file.filename or "", detail=f"#{scan.id}")
     return IngestSummary(scan_id=scan.id, counts=counts)
 
 
@@ -224,10 +290,11 @@ def run_scan(
         hosts = chunker.expand_targets(body.targets)
         if not hosts:
             raise ValueError("유효한 타겟이 없습니다.")
+        scope.check_scope(hosts)   # 허용 대역(scope) 밖이면 시작 전에 거절
         batches = chunker.make_batches(hosts, body.batch_size)
-        # 옵션/프리셋·포트 사전 검증(첫 배치로) — 잘못된 입력은 시작 전에 거절.
-        if body.options:
-            argv0 = nmap_runner.build_command_opts(nmap, body.options, body.ports, batches[0], _basename(0))
+        # 옵션/프리셋·포트·NSE 사전 검증(첫 배치로) — 잘못된 입력은 시작 전에 거절.
+        if body.options or body.nse:
+            argv0 = nmap_runner.build_command_opts(nmap, body.options, body.ports, batches[0], _basename(0), nse=body.nse)
         else:
             argv0 = nmap_runner.build_command(nmap, body.preset, batches[0], _basename(0))
     except ValueError as e:
@@ -240,7 +307,7 @@ def run_scan(
     base = _basename(scan.id)
     chunker.write_state(base, {
         "batches": batches, "cursor": 0, "stop": False, "active_seconds": 0,
-        "options": body.options, "ports": body.ports, "preset": body.preset,
+        "options": body.options, "ports": body.ports, "preset": body.preset, "nse": body.nse,
     })
     # 명령 표기는 대표(타겟·-oA 제외) — 호스트 수/배치 수를 덧붙여 가독.
     parts, skip = [], False
@@ -257,7 +324,40 @@ def run_scan(
     scan.command = f"{' '.join(parts)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
     db.commit()
     db.refresh(scan)
+    record(db, user, "SCAN_RUN", target=scan.targets,
+           detail=f"#{scan.id} · {len(hosts)}호스트 / {len(batches)}배치")
     threading.Thread(target=_chunk_worker, args=(scan.id,), daemon=True).start()
+    return scan
+
+
+@router.post("/run-command", response_model=ScanOut)
+def run_command(
+    body: RawCommandIn,
+    user: User = Depends(require_role("auditor")),
+    db: Session = Depends(get_db),
+):
+    """직접 입력한 nmap 명령으로 스캔(고급) — 단발 실행. 출력 플래그는 서버가 -oA 로 강제 교체,
+    셸 메타문자 차단, IP 타겟은 scope 검사. 청킹/이어가기는 미지원(중지만 가능)."""
+    nmap = nmap_runner.find_nmap(_settings.nmap_path)
+    if not nmap:
+        raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
+    try:
+        _, ip_tokens = nmap_runner.build_command_raw(nmap, body.command, _basename(0))
+        scope.check_scope(ip_tokens)   # IP/CIDR 타겟이 허용 대역 밖이면 거절
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    scan = ScanRun(name=body.name or "직접 명령 스캔", targets=" ".join(ip_tokens),
+                   command=body.command.strip(), status="running", created_by=user.id)
+    db.add(scan)
+    db.commit()
+    base = _basename(scan.id)
+    argv, _ = nmap_runner.build_command_raw(nmap, body.command, base)
+    chunker.write_state(base, {"raw_argv": argv, "stop": False})
+    db.refresh(scan)
+    record(db, user, "SCAN_RUN", target=scan.targets,
+           detail=f"#{scan.id} 직접명령: {body.command.strip()[:160]}")
+    threading.Thread(target=_command_worker, args=(scan.id,), daemon=True).start()
     return scan
 
 
@@ -285,6 +385,7 @@ def stop_scan(
     if proc is not None:
         proc.terminate()        # 현재 배치 즉시 중단(그 배치는 버려지고 커서 유지)
     db.refresh(scan)
+    record(db, user, "SCAN_STOP", target=scan.targets, detail=f"#{scan.id}")
     return scan
 
 
@@ -304,9 +405,9 @@ def resume_scan(
         raise HTTPException(status_code=400, detail="이미 실행 중인 스캔입니다.")
     base = _basename(scan_id)
     state = chunker.read_state(base)
-    if state is None:
+    if state is None or "batches" not in state:
         raise HTTPException(status_code=400,
-                            detail="배치 상태가 없어 이어갈 수 없습니다(이 버전 이전 스캔).")
+                            detail="이어가기를 지원하지 않는 스캔입니다(직접 명령 또는 이전 버전).")
     if state.get("cursor", 0) >= len(state["batches"]):
         raise HTTPException(status_code=400, detail="이미 모든 배치가 완료되었습니다.")
     if not nmap_runner.find_nmap(_settings.nmap_path):
@@ -317,6 +418,8 @@ def resume_scan(
     scan.finished_at = None
     db.commit()
     db.refresh(scan)
+    record(db, user, "SCAN_RESUME", target=scan.targets,
+           detail=f"#{scan.id} · 배치 {state.get('cursor', 0)}부터")
     threading.Thread(target=_chunk_worker, args=(scan_id,), daemon=True).start()
     return scan
 
@@ -330,8 +433,9 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
     log_path = Path(scan.log_path) if scan.log_path else _basename(scan_id)
     prog = nmap_runner.parse_progress(log_path)   # 현재 배치의 percent/ETC/경과
     state = chunker.read_state(_basename(scan_id))
-    total = len(state["batches"]) if state else 1
-    done = state.get("cursor", 0) if state else (1 if scan.status == "done" else 0)
+    has_batches = bool(state) and "batches" in state
+    total = len(state["batches"]) if has_batches else 1
+    done = state.get("cursor", 0) if has_batches else (1 if scan.status == "done" else 0)
     in_batch = (prog["percent"] or 0) / 100.0
     if scan.status == "done":
         overall = 100.0
@@ -365,6 +469,7 @@ def estimate_scan(body: ScanRunIn, _: User = Depends(current_user), db: Session 
     호스트당 평균시간(중앙값)으로 대략적 소요시간을 낸다. 없으면 basis='none'."""
     try:
         hosts = chunker.expand_targets(body.targets)
+        scope.check_scope(hosts)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     host_count = len(hosts)

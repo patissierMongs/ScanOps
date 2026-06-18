@@ -1,0 +1,4 @@
+# 개발/CI 전용 의존성(운영 설치엔 불필요). 운영은 requirements.txt 만.
+-r requirements.txt
+pytest==8.3.4
+httpx==0.28.1

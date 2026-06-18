@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScanOps · 자산대장 스프레드시트 미리보기 (목업)</title>
+<style>
+  :root{
+    --bg:oklch(0.962 0.004 258); --surface:oklch(0.995 0.001 262);
+    --ink:oklch(0.28 0.012 262); --ink-soft:oklch(0.42 0.012 262); --muted:oklch(0.58 0.012 262);
+    --line:oklch(0.91 0.005 262); --line-soft:oklch(0.945 0.004 262);
+    --accent:oklch(0.55 0.17 264); --accent-ink:oklch(0.48 0.17 264); --accent-bg:oklch(0.955 0.03 264);
+    --high:oklch(0.6 0.21 25); --high-bg:oklch(0.95 0.045 25);
+    --medium:oklch(0.68 0.15 65); --medium-bg:oklch(0.95 0.05 75);
+    --low:oklch(0.62 0.14 150); --low-bg:oklch(0.95 0.05 150);
+    --mono:"IBM Plex Mono",ui-monospace,monospace; --sans:"IBM Plex Sans",system-ui,"Malgun Gothic",sans-serif;
+    --radius:12px; --shadow:0 1px 2px oklch(0.5 0.02 262/.04),0 4px 16px oklch(0.5 0.02 262/.05);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px}
+  .wrap{max-width:1080px;margin:0 auto;padding:28px 22px 60px}
+  .banner{font-size:12px;color:var(--muted);margin-bottom:14px}
+  h1{font-size:20px;margin:0 0 4px} h3{font-size:15px;margin:0}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px 20px;margin-bottom:18px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .between{justify-content:space-between}
+  .muted{color:var(--muted)} .small{font-size:12px} .mono{font-family:var(--mono)}
+  .btn{border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:8px 14px;font:inherit;cursor:pointer}
+  .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .pill{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600}
+  .pill.add{background:var(--low-bg);color:var(--low)} .pill.chg{background:var(--medium-bg);color:var(--medium)}
+  .pill.del{background:var(--high-bg);color:var(--high)} .pill.same{background:oklch(0.95 0.004 262);color:var(--muted)}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line-soft);white-space:nowrap}
+  th{font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;position:sticky;top:0;background:var(--surface)}
+  .tbl-scroll{overflow:auto;max-height:330px;border:1px solid var(--line);border-radius:10px}
+  tr.add td{background:var(--low-bg)} tr.del td{background:var(--high-bg)}
+  td.chg{background:var(--medium-bg)}
+  .old{color:var(--high);text-decoration:line-through;opacity:.7;margin-right:6px}
+  .new{color:var(--low);font-weight:600}
+  .cell-edit{border:1px dashed var(--accent);border-radius:6px;padding:2px 6px;background:var(--accent-bg)}
+  .map{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:8px}
+  .map label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted)}
+  select,input{font:inherit;border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:var(--surface);color:var(--ink)}
+  .stat{display:flex;gap:18px;margin:2px 0 14px}
+  .stat b{font-size:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="banner">목업(mockup) · 실제 동작 아님 · 자산대장 갱신 — 스프레드시트 미리보기 + 커밋 전 diff</div>
+  <h1>자산대장 가져오기</h1>
+  <p class="muted small" style="margin:0 0 18px">엑셀/CSV를 올리면 <b>커밋 전에</b> 시트 그대로 미리보고, 기존 대장과 비교한 변경(신규·수정·삭제)을 한눈에. 셀은 그 자리에서 수정 가능.</p>
+
+  <div class="panel">
+    <div class="row between" style="margin-bottom:14px">
+      <h3>1) 업로드 &amp; 열 매핑</h3>
+      <span class="pill same">assets_2026Q2.xlsx · 시트: 자산목록 · 412행</span>
+    </div>
+    <div class="map">
+      <label>IP<select><option>C: IP주소 ✓</option></select></label>
+      <label>호스트명<select><option>D: 장비명 ✓</option></select></label>
+      <label>부서<select><option>F: 관리부서 ✓</option></select></label>
+      <label>담당자<select><option>G: 담당자 ✓</option></select></label>
+      <label>연락처<select><option>H: 연락처</option></select></label>
+      <label>자산번호<select><option>B: 자산코드</option></select></label>
+      <label>비고<select><option>(매핑 안 함)</option></select></label>
+      <label>키 컬럼<select><option>IP (중복 판정)</option></select></label>
+    </div>
+    <div class="small muted">매핑 안 한 열(예: 제조사·OS·구매일)은 <span class="mono">extra</span> 로 함께 보존됩니다.</div>
+  </div>
+
+  <div class="panel">
+    <div class="row between" style="margin-bottom:6px">
+      <h3>2) 미리보기 &amp; 변경 비교</h3>
+      <div class="row small">
+        <span class="pill add">신규 38</span><span class="pill chg">수정 11</span>
+        <span class="pill del">삭제 4</span><span class="pill same">동일 359</span>
+      </div>
+    </div>
+    <div class="stat small muted">
+      <span><b>412</b> 들어옴</span><span><b>49</b> 변경</span><span><b>4</b> 사라짐</span>
+    </div>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th></th><th>IP</th><th>호스트명</th><th>부서</th><th>담당자</th><th>연락처</th><th>자산번호</th></tr></thead>
+        <tbody>
+          <tr class="add"><td><span class="pill add">신규</span></td><td class="mono">10.0.12.51</td><td>web-prod-07</td><td>인프라운영팀</td><td>김도윤</td><td class="mono">010-2231-7781</td><td class="mono">AST-22451</td></tr>
+          <tr><td><span class="pill chg">수정</span></td><td class="mono">10.0.12.18</td><td>db-core-02</td><td class="chg"><span class="old">DB팀</span><span class="new">데이터플랫폼팀</span></td><td class="chg"><span class="old">박서준</span><span class="new">이하늘</span></td><td class="mono">010-5521-1042</td><td class="mono">AST-10882</td></tr>
+          <tr><td><span class="pill same">동일</span></td><td class="mono">10.0.12.10</td><td>gw-edge-01</td><td>보안팀</td><td>최민서</td><td class="mono">010-7781-2201</td><td class="mono">AST-09001</td></tr>
+          <tr><td><span class="pill chg">수정</span></td><td class="mono">10.0.13.5</td><td>app-batch-01</td><td>서비스개발팀</td><td class="chg"><span class="cell-edit">정유진 ✎</span></td><td class="mono">010-3312-8890</td><td class="mono">AST-15523</td></tr>
+          <tr class="del"><td><span class="pill del">삭제</span></td><td class="mono">10.0.99.250</td><td>legacy-fax</td><td>총무팀</td><td>—</td><td class="mono">—</td><td class="mono">AST-00412</td></tr>
+          <tr><td><span class="pill same">동일</span></td><td class="mono">10.0.12.22</td><td>mail-relay</td><td>인프라운영팀</td><td>김도윤</td><td class="mono">010-2231-7781</td><td class="mono">AST-11920</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="small muted" style="margin-top:8px">셀 클릭 → 그 자리에서 수정(<span class="cell-edit">✎</span>). 삭제행은 체크 해제로 보존 가능. 변경은 커밋 전까지 DB에 반영되지 않음.</div>
+
+    <div class="row between" style="margin-top:16px">
+      <label class="row small" style="gap:6px"><input type="checkbox" checked> 대장에 없고 시트에도 없는 자산은 그대로 둠(삭제 안 함)</label>
+      <div class="row">
+        <button class="btn">취소</button>
+        <button class="btn primary">변경 49건 커밋</button>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
