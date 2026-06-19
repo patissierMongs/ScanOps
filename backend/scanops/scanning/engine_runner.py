@@ -64,7 +64,22 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
     }
     if rescan_ports is not None:
         spec["targets_ports"] = {ip: list(ps) for ip, ps in rescan_ports.items()}
+        spec["stages"]["service"]["confirm"] = True   # 재스캔: 1차에 안 잡히면 retries↑ 2-pass 재확인
     return spec
+
+
+def rescan_targets(findings: list[tuple]) -> tuple[dict, set]:
+    """[(host_ip, port, finding_key)] → ({ip: [ports]}, scope_keys).
+
+    호스트별로 그 호스트의 포트만 모은다(기존 동기 재스캔의 host×port 교차곱 제거).
+    scope_keys 는 닫힘 판정을 선택 발견으로만 한정하는 데 쓴다(다른 포트 거짓 닫힘 방지).
+    """
+    ports_by_ip: dict[str, set] = {}
+    keys: set = set()
+    for ip, port, key in findings:
+        ports_by_ip.setdefault(ip, set()).add(int(port))
+        keys.add(key)
+    return {ip: sorted(ps) for ip, ps in ports_by_ip.items()}, keys
 
 
 def describe(spec: dict) -> str:

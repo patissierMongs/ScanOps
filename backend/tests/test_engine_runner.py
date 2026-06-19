@@ -39,6 +39,23 @@ def test_build_job_spec_defaults_and_rescan():
     assert spec["targets_ports"] == {"10.0.0.5": [6379, 22]}
 
 
+def test_rescan_targets_groups_per_host():
+    ports, keys = engine_runner.rescan_targets([
+        ("10.0.0.5", 6379, "10.0.0.5|6379|tcp"),
+        ("10.0.0.5", 22, "10.0.0.5|22|tcp"),
+        ("10.0.0.6", 80, "10.0.0.6|80|tcp"),
+    ])
+    assert ports == {"10.0.0.5": [22, 6379], "10.0.0.6": [80]}   # 호스트별, 교차곱 없음
+    assert keys == {"10.0.0.5|6379|tcp", "10.0.0.5|22|tcp", "10.0.0.6|80|tcp"}
+
+
+def test_build_job_spec_rescan_enables_confirm():
+    spec = engine_runner.build_job_spec(1, [], [], [], "", [], "/tmp/x", 256,
+                                        rescan_ports={"10.0.0.5": [22]})
+    assert spec["stages"]["service"]["confirm"] is True
+    assert spec["targets_ports"] == {"10.0.0.5": [22]}
+
+
 def test_describe():
     spec = engine_runner.build_job_spec(1, ["10.0.0.0/24"], [], ["udp"], "", [], "/tmp/x", 256)
     d = engine_runner.describe(spec)

@@ -166,6 +166,52 @@ def test_rescan_command_empty(client):
     assert r.json()["command"] == ""
 
 
+# ---- 백그라운드 엔진 재스캔(Stage3-only) ----
+
+def test_rescan_run_starts_engine_job(client, monkeypatch):
+    """동기→백그라운드 전환: scan_id 반환 + spec.json 에 targets_ports·confirm·scope_keys.
+
+    엔진 워커(spawn)는 막아 실제 nmap 이 안 돌게 한다 — 검증 대상은 job 구성.
+    """
+    import json
+    import scanops.api.scans as scans_mod
+    from scanops.config import get_settings
+    monkeypatch.setattr(scans_mod, "_engine_worker", lambda scan_id: None)
+
+    h = _auth(client)
+    findings = _seed_findings(client, h)
+    ids = [f["id"] for f in findings[:2]]
+    r = client.post("/api/findings/rescan", headers=h, json={"finding_ids": ids})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["scan_id"] >= 1
+    assert len(out["hosts"]) >= 1 and len(out["ports"]) >= 1
+
+    spec = json.loads((get_settings().scans_dir / f"scan_{out['scan_id']}" / "spec.json")
+                      .read_text(encoding="utf-8"))
+    assert spec["targets_ports"]                          # 호스트별 포트 직접 지정(발견·찾기 생략)
+    assert spec["stages"]["service"]["confirm"] is True   # 2-pass 정밀 확인
+    assert spec["scanops"]["scope_keys"]                  # 닫힘 판정 한정 키
+
+
+def test_rescan_due_picks_in_progress(client, monkeypatch):
+    import scanops.api.scans as scans_mod
+    monkeypatch.setattr(scans_mod, "_engine_worker", lambda scan_id: None)
+    h = _auth(client)
+    findings = _seed_findings(client, h)
+    client.patch(f"/api/findings/{findings[0]['id']}", headers=h, json={"status": "처리중"})
+    r = client.post("/api/findings/rescan-due", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["scan_id"] >= 1
+
+
+def test_rescan_due_empty(client):
+    h = _auth(client)
+    _seed_findings(client, h)   # 전부 미조치·마감없음 → due 없음
+    r = client.post("/api/findings/rescan-due", headers=h)
+    assert r.status_code == 400
+
+
 # ---- 자산 연락처/커스텀필드 + 발견 전파 ----
 
 def test_asset_contact_extra_and_propagation(client):

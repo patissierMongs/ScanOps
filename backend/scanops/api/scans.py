@@ -231,6 +231,14 @@ def _engine_worker(scan_id: int) -> None:
     if not spec_path.exists():
         _mark(scan_id, "failed")
         return
+    # 타겟 재스캔이면 spec 에 scope_keys 가 들어있음 → 닫힘 판정을 그 발견으로만 한정.
+    scope_keys = None
+    try:
+        sk = (json.loads(spec_path.read_text(encoding="utf-8")).get("scanops") or {}).get("scope_keys")
+        if sk:
+            scope_keys = set(sk)
+    except (OSError, ValueError):
+        pass
     try:
         proc = engine_runner.spawn(spec_path, out_dir, out_dir / "engine.log")
     except OSError:
@@ -248,7 +256,7 @@ def _engine_worker(scan_id: int) -> None:
     try:
         scan = db.get(ScanRun, scan_id)
         if scan is not None:
-            engine_runner.ingest_results(db, scan, out_dir)
+            engine_runner.ingest_results(db, scan, out_dir, scope_keys=scope_keys)
             scan.status = "done"
             scan.finished_at = datetime.now(timezone.utc)
             db.commit()
