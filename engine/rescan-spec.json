@@ -1,0 +1,12 @@
+{
+  "job_id": "rescan",
+  "targets_ports": { "172.30.0.12": [6379], "172.30.0.13": [21] },
+  "out_dir": "./engine-out/rescan",
+  "sudo": "auto",
+  "stages": {
+    "service": {
+      "enabled": true, "confirm": true, "max_retries": 4,
+      "nse": ["banner", "redis-info", "ftp-anon"]
+    }
+  }
+}
