@@ -99,13 +99,24 @@ export default function Findings({ user }) {
     const ids = [...selected];
     if (!ids.length) { toast("발견을 선택하세요", { type: "err" }); return; }
     setRescanBusy(true);
+    // 백그라운드 단계 엔진 재스캔(Stage3-only) — scan_id 즉시 반환, 진행은 스캔 페이지 단계 타임라인.
     api("/findings/rescan", { method: "POST", json: { finding_ids: ids, options: rescanOpt.options, ports: rescanOpt.ports } })
       .then((r) => {
-        const c = r.counts;
-        toast(`재스캔 완료 · 닫힘 ${c.closed || 0} / 재발 ${c.reopened || 0} / 변경 ${(c.service_changed || 0) + (c.version_changed || 0)}`);
+        toast(`타겟 재스캔 시작 · #${r.scan_id} (백그라운드 · ${r.hosts.length}호스트/${r.ports.length}포트 — 완료 후 새로고침)`);
         setShowRescan(false);
         setSelected(new Set());
-        load();
+      })
+      .catch((e) => toast(e.message, { type: "err" }))
+      .finally(() => setRescanBusy(false));
+  }
+
+  function runRescanDue() {
+    setRescanBusy(true);
+    // 마감 지났거나 처리중인 '열린' 발견을 서버가 모아 일괄 재검증(라이프사이클 구동).
+    api("/findings/rescan-due", { method: "POST", json: {} })
+      .then((r) => {
+        toast(`마감·처리중 일괄 재검증 시작 · #${r.scan_id} (${r.hosts.length}호스트 — 닫혔으면 자동 정상처리)`);
+        setSelected(new Set());
       })
       .catch((e) => toast(e.message, { type: "err" }))
       .finally(() => setRescanBusy(false));
@@ -180,6 +191,12 @@ export default function Findings({ user }) {
               선택 재스캔 ({selected.size})
             </button>
           )}
+          {canEdit && (
+            <button className="sm" disabled={rescanBusy} onClick={runRescanDue}
+                    title="마감 지났거나 처리중인 열린 발견을 일괄 재검증">
+              마감·처리중 재검증
+            </button>
+          )}
         </div>
 
         {canEdit && showRescan && selected.size > 0 && (
@@ -188,10 +205,10 @@ export default function Findings({ user }) {
             <ScanOptions targets={selHosts} portsAuto={portsAuto} onState={setRescanOpt} />
             <div className="row" style={{ marginTop: 12 }}>
               <button className="primary" disabled={rescanBusy} onClick={runRescan}>
-                {rescanBusy ? "재스캔 실행 중…" : "재스캔 실행 (조치 검증)"}
+                {rescanBusy ? "시작 중…" : "재스캔 시작 (백그라운드 · 조치 검증)"}
               </button>
               <button onClick={() => setShowRescan(false)}>닫기</button>
-              <span className="muted" style={{ fontSize: 11.5 }}>선택한 포트만 검증 — 닫혔으면 자동 정상처리</span>
+              <span className="muted" style={{ fontSize: 11.5 }}>발견·찾기 생략 → 선택 포트만 정밀 확인(2-pass) — 닫혔으면 자동 정상처리</span>
             </div>
           </div>
         )}
