@@ -52,4 +52,7 @@ class RunState:
         return bool(self.data.get("stop"))
 
     def save(self):
+        # 외부(ScanOps)가 디스크에 쓴 stop=true 를 엔진의 저장이 덮어쓰지 않도록 보존한다.
+        if self.stopped():
+            self.data["stop"] = True
         self.path.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")

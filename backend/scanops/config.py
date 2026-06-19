@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     data_dir: Path = _default_data_dir()
     # 프론트 빌드 산출물(에어갭 배포 시 동봉). 없으면 정적 서빙 생략(API만).
     frontend_dist: Path = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    # 단계분리 스캔 엔진 패키지 경로(별도 프로젝트). subprocess 로 실행하며 PYTHONPATH 로 주입한다.
+    engine_dir: Path = Path(__file__).resolve().parents[2] / "engine"
 
     # 서버
     host: str = "0.0.0.0"

@@ -77,6 +77,8 @@ class ScanRun(Base):
     log_path: Mapped[str] = mapped_column(Text, default="")
     host_count: Mapped[int] = mapped_column(Integer, default=0)
     port_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 단계분리 엔진 스캔의 단계별 요약(상태/소요/카운트/에러) — 진행 타임라인·이력용. 청킹 스캔은 빈 값.
+    stages_json: Mapped[list | None] = mapped_column(JSON, default=list)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
