@@ -234,6 +234,7 @@ def list_scan_options(_: User = Depends(current_user)):
         "nse": scan_options.NSE_SCRIPTS,
         "nse_default": scan_options.NSE_DEFAULT_KEYS,
         "udp_default_ports": scan_options.UDP_DEFAULT_PORTS,
+        "default_ports": scan_options.DEFAULT_PORTS,
     }
 
 

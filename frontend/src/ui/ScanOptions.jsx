@@ -19,18 +19,23 @@ export default function ScanOptions({ targets = [], portsAuto = "", onState }) {
   const [nseSel, setNseSel] = useState(() => new Set());
   const [nseDefault, setNseDefault] = useState([]);
   const [udpPorts, setUdpPorts] = useState("");
-  const [showNse, setShowNse] = useState(false);
+  const [showOpts, setShowOpts] = useState(false);   // 스캔 옵션 빌더 — 기본 접힘
+  const [showNse, setShowNse] = useState(false);     // NSE 패널 — 기본 접힘
   const [presets, setPresets] = useState(loadPresets);
   const [presetId, setPresetId] = useState("");
+  const [touchedPorts, setTouchedPorts] = useState(false);
 
   useEffect(() => {
     let live = true;
     api("/scans/options")
       .then((r) => {
         if (!live) return;
+        // '정밀 식별' 기본 프로파일: 추천 옵션 + 전체 TCP·주요 UDP 포트 + 정체 식별형 NSE 21종.
         setRegistry(r.options); setSel(new Set(r.default));
         setNseReg(r.nse || []); setNseDefault(r.nse_default || []);
+        setNseSel(new Set(r.nse_default || []));
         setUdpPorts(r.udp_default_ports || "");
+        if (!touchedPorts) setPorts(r.default_ports || "");
       })
       .catch(() => {});
     return () => { live = false; };
@@ -105,74 +110,85 @@ export default function ScanOptions({ targets = [], portsAuto = "", onState }) {
     setPresetId("");
   }
 
+  const SUMMARY_BG = { background: "var(--bg)", border: "1px solid var(--line)", borderRadius: 9, padding: "8px 12px", width: "100%", textAlign: "left", cursor: "pointer", fontSize: 12.5 };
+
   return (
     <div>
-      <div className="row" style={{ marginBottom: 10 }}>
-        <select value={presetId} onChange={(e) => applyPreset(e.target.value)}>
-          <option value="">프리셋 선택…</option>
-          {presets.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-        <button type="button" className="sm" onClick={savePreset}>현재 구성 저장</button>
-        {presetId && <button type="button" className="sm" onClick={delPreset}>삭제</button>}
-        <button type="button" className="sm" onClick={applyPhase1} title="nmapParser 기본 정밀 스캔 구성을 한 번에 적용">⚡ 정밀(phase1)</button>
-      </div>
+      {/* ── 스캔 옵션 빌더 (기본 접힘) ── */}
+      <button type="button" style={SUMMARY_BG} onClick={() => setShowOpts((v) => !v)}>
+        {showOpts ? "▾" : "▸"} 스캔 옵션 — 정밀 식별 기본값{" "}
+        <span className="muted">· 선택 {sel.size}개 · 포트 {ports ? (ports.length > 24 ? "지정됨" : ports) : "기본"}</span>
+      </button>
 
-      {Object.entries(groups).map(([grp, opts]) => (
-        <div key={grp} style={{ marginBottom: 12 }}>
-          <div className="cb-label">{grp}</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(290px, 1fr))", gap: 8 }}>
-            {opts.map((o) => {
-              const on = sel.has(o.key);
-              return (
-                <label key={o.key} title={o.desc || ""}
-                       style={{
-                         display: "flex", gap: 8, padding: "8px 10px", cursor: "pointer",
-                         border: "1px solid var(--line)", borderRadius: 9,
-                         background: on ? "var(--accent-bg)" : "var(--surface)",
-                         borderColor: on ? "var(--accent)" : "var(--line)",
-                       }}>
-                  <input type="checkbox" checked={on} onChange={() => toggle(o.key)} style={{ marginTop: 2 }} />
-                  <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 600 }}>
-                      {o.label}
-                      {o.note && <span className="pill medium" style={{ marginLeft: 6, fontSize: 10, padding: "0 6px" }}>{o.note}</span>}
-                    </span>
-                    {o.desc && <span className="muted" style={{ fontSize: 11.5, lineHeight: 1.45 }}>{o.desc}</span>}
-                  </span>
-                </label>
-              );
-            })}
+      {showOpts && (
+        <div style={{ marginTop: 10 }}>
+          <div className="row" style={{ marginBottom: 10 }}>
+            <select value={presetId} onChange={(e) => applyPreset(e.target.value)}>
+              <option value="">프리셋 선택…</option>
+              {presets.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <button type="button" className="sm" onClick={savePreset}>현재 구성 저장</button>
+            {presetId && <button type="button" className="sm" onClick={delPreset}>삭제</button>}
+            <button type="button" className="sm" onClick={applyPhase1} title="nmapParser 기본 정밀 스캔 구성을 한 번에 적용">⚡ 정밀(phase1)</button>
+          </div>
+
+          {Object.entries(groups).map(([grp, opts]) => (
+            <div key={grp} style={{ marginBottom: 12 }}>
+              <div className="cb-label">{grp}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(290px, 1fr))", gap: 8 }}>
+                {opts.map((o) => {
+                  const on = sel.has(o.key);
+                  return (
+                    <label key={o.key} title={o.desc || ""}
+                           style={{
+                             display: "flex", gap: 8, padding: "8px 10px", cursor: "pointer",
+                             border: "1px solid var(--line)", borderRadius: 9,
+                             background: on ? "var(--accent-bg)" : "var(--surface)",
+                             borderColor: on ? "var(--accent)" : "var(--line)",
+                           }}>
+                      <input type="checkbox" checked={on} onChange={() => toggle(o.key)} style={{ marginTop: 2 }} />
+                      <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 600 }}>
+                          {o.label}
+                          {o.note && <span className="pill medium" style={{ marginLeft: 6, fontSize: 10, padding: "0 6px" }}>{o.note}</span>}
+                        </span>
+                        {o.desc && <span className="muted" style={{ fontSize: 11.5, lineHeight: 1.45 }}>{o.desc}</span>}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+
+          <label className="field" style={{ marginTop: 6 }}>
+            포트 {portsAuto && <span className="muted">(비우면 {portsAuto})</span>}
+            <input placeholder={portsAuto || "예: 22,80,443 또는 1-1024 (비우면 nmap 기본)"}
+                   value={ports} onChange={(e) => { setTouchedPorts(true); setPorts(e.target.value); }} />
+          </label>
+          <div className="row" style={{ gap: 6, marginTop: 6 }}>
+            <span className="muted" style={{ fontSize: 11.5 }}>포트 프리셋:</span>
+            <button type="button" className="sm" onClick={() => setPortPreset(tcpAll)}>TCP 전체(1-65535)</button>
+            {udpPorts && <button type="button" className="sm" onClick={() => setPortPreset(`U:${udpPorts}`)}>UDP 주요(26)</button>}
+            {udpPorts && <button type="button" className="sm" onClick={() => setPortPreset(`${tcpAll},U:${udpPorts}`)}>TCP+UDP</button>}
+            {ports && <button type="button" className="sm" onClick={() => setPortPreset("")}>지우기</button>}
           </div>
         </div>
-      ))}
+      )}
 
-      <label className="field" style={{ marginTop: 6 }}>
-        포트 {portsAuto && <span className="muted">(비우면 {portsAuto})</span>}
-        <input placeholder={portsAuto || "예: 22,80,443 또는 1-1024 (비우면 nmap 기본)"}
-               value={ports} onChange={(e) => setPorts(e.target.value)} />
-      </label>
-      <div className="row" style={{ gap: 6, marginTop: 6 }}>
-        <span className="muted" style={{ fontSize: 11.5 }}>포트 프리셋:</span>
-        <button type="button" className="sm" onClick={() => setPortPreset(tcpAll)}>TCP 전체(1-65535)</button>
-        {udpPorts && <button type="button" className="sm" onClick={() => setPortPreset(`U:${udpPorts}`)}>UDP 주요(26)</button>}
-        {udpPorts && <button type="button" className="sm" onClick={() => setPortPreset(`${tcpAll},U:${udpPorts}`)}>TCP+UDP</button>}
-        {ports && <button type="button" className="sm" onClick={() => setPortPreset("")}>지우기</button>}
-      </div>
-
-      {/* NSE 스크립트 패널 — 선택 시 --script 로 조립. 기본 미선택(스캔 기본 동작 보존). */}
-      <div style={{ marginTop: 14 }}>
-        <div className="row between" style={{ justifyContent: "space-between" }}>
-          <button type="button" className="sm" onClick={() => setShowNse((v) => !v)}>
-            {showNse ? "▾" : "▸"} NSE 스크립트 {nseSel.size > 0 && <span className="pill accent" style={{ marginLeft: 4 }}>{nseSel.size}</span>}
-          </button>
-          {showNse && (
-            <span className="row" style={{ gap: 6 }}>
-              <button type="button" className="sm" onClick={() => setNseAll(nseReg.map((s) => s.key))}>전체</button>
-              <button type="button" className="sm" onClick={() => setNseAll(nseDefault)}>기본(19)</button>
-              <button type="button" className="sm" onClick={() => setNseAll([])}>해제</button>
-            </span>
-          )}
-        </div>
+      {/* ── NSE 스크립트 패널 (기본 접힘) — 선택 시 --script 로 조립 ── */}
+      <div style={{ marginTop: 10 }}>
+        <button type="button" style={SUMMARY_BG} onClick={() => setShowNse((v) => !v)}>
+          {showNse ? "▾" : "▸"} NSE 스크립트 — 정체 식별형 기본값{" "}
+          <span className="muted">· 선택 {nseSel.size}개</span>
+        </button>
+        {showNse && (
+          <div className="row" style={{ gap: 6, margin: "8px 0", justifyContent: "flex-end" }}>
+            <button type="button" className="sm" onClick={() => setNseAll(nseReg.map((s) => s.key))}>전체</button>
+            <button type="button" className="sm" onClick={() => setNseAll(nseDefault)}>기본({nseDefault.length})</button>
+            <button type="button" className="sm" onClick={() => setNseAll([])}>해제</button>
+          </div>
+        )}
         {showNse && Object.entries(nseGroups).map(([grp, scripts]) => (
           <div key={grp} style={{ marginTop: 8 }}>
             <div className="cb-label">{grp}</div>
@@ -191,7 +207,7 @@ export default function ScanOptions({ targets = [], portsAuto = "", onState }) {
                     <span style={{ display: "flex", flexDirection: "column", gap: 1 }}>
                       <span className="mono" style={{ fontSize: 11.5, fontWeight: 600 }}>
                         {s.key}
-                        {s.nmap_default === false && <span className="muted" style={{ marginLeft: 5, fontSize: 10 }}>· 부작용 주의</span>}
+                        {s.nmap_default === false && <span className="muted" style={{ marginLeft: 5, fontSize: 10 }}>· 기본 제외</span>}
                       </span>
                       {s.desc && <span className="muted" style={{ fontSize: 11, lineHeight: 1.4 }}>{s.desc}</span>}
                     </span>
