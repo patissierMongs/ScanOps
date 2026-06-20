@@ -34,6 +34,9 @@ export default function Scans({ user }) {
   const [name, setName] = useState("");
   const [opt, setOpt] = useState({ options: [], ports: "", nse: [], command: "" });
   const [batchSize, setBatchSize] = useState(256);
+  const [staged, setStaged] = useState(false);     // 단계 분리 엔진 스캔(발견→포트→서비스)
+  const [discovery, setDiscovery] = useState("sn");
+  const [stages, setStages] = useState({});        // { [scanId]: { stages, overall } } — 단계 타임라인
   const [rawMode, setRawMode] = useState(false);   // 직접 명령 입력 모드
   const [rawCmd, setRawCmd] = useState("");
   const [rawEdited, setRawEdited] = useState(false);
@@ -76,6 +79,16 @@ export default function Scans({ user }) {
         setProgress((prev) => {
           const m = { ...prev };
           entries.filter(Boolean).forEach(([id, p]) => { m[id] = p; });
+          return m;
+        });
+        // 단계 엔진 스캔이면 단계 타임라인도 폴링(없는 스캔은 빈 stages → 무시).
+        const stageEntries = await Promise.all(
+          act.map((s) => api(`/scans/${s.id}/stages`).then((st) => [s.id, st]).catch(() => null))
+        );
+        if (!alive) return;
+        setStages((prev) => {
+          const m = { ...prev };
+          stageEntries.filter(Boolean).forEach(([id, st]) => { m[id] = st; });
           return m;
         });
       } catch { /* 일시 오류는 다음 틱에 회복 */ }
@@ -144,8 +157,11 @@ export default function Scans({ user }) {
     }
     if (!targetList.length) { toast("타겟을 입력하세요", { type: "err" }); return; }
     setBusy(true);
-    api("/scans/run", { method: "POST", json: { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, batch_size: batchSize } })
-      .then((s) => { toast(`스캔 시작됨 · #${s.id} (백그라운드 실행 — 진행률은 아래 표)`); setTargets(""); setName(""); load(); })
+    const endpoint = staged ? "/scans/run-staged" : "/scans/run";
+    const body = { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, batch_size: batchSize };
+    if (staged) body.discovery = discovery;
+    api(endpoint, { method: "POST", json: body })
+      .then((s) => { toast(`${staged ? "단계 " : ""}스캔 시작됨 · #${s.id} (백그라운드 — 진행은 아래 표)`); setTargets(""); setName(""); load(); })
       .catch((e2) => toast(e2.message, { type: "err" }))
       .finally(() => setBusy(false));
   }
@@ -168,11 +184,18 @@ export default function Scans({ user }) {
         <div className="panel">
           <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
             <h3 style={{ margin: 0 }}>스캔 실행 (서버 nmap)</h3>
-            <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}>
-              <input type="checkbox" checked={rawMode}
-                     onChange={(e) => { setRawMode(e.target.checked); setRawEdited(false); }} />
-              명령 직접 입력 (고급)
-            </label>
+            <div className="row" style={{ gap: 14 }}>
+              <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}>
+                <input type="checkbox" checked={staged} disabled={rawMode}
+                       onChange={(e) => setStaged(e.target.checked)} />
+                단계 분리 (발견→포트→서비스)
+              </label>
+              <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}>
+                <input type="checkbox" checked={rawMode}
+                       onChange={(e) => { setRawMode(e.target.checked); setRawEdited(false); }} />
+                명령 직접 입력 (고급)
+              </label>
+            </div>
           </div>
           <div className="row" style={{ marginBottom: 12, marginTop: 10 }}>
             <input placeholder="이름(선택)" value={name} onChange={(e) => setName(e.target.value)} />
@@ -219,6 +242,19 @@ export default function Scans({ user }) {
                     : (targetList.length ? "예상 계산 중…" : "타겟을 입력하면 호스트·배치 수와 예상시간을 보여줍니다")}
                 </div>
               </div>
+
+              {staged && (
+                <div className="row" style={{ marginTop: 12, alignItems: "center", gap: 8 }}>
+                  <span className="cb-label">발견 단계</span>
+                  <select value={discovery} onChange={(e) => setDiscovery(e.target.value)}>
+                    <option value="sn">핑 스윕 (-sn)</option>
+                    <option value="pn">생략 (-Pn · ICMP 차단망)</option>
+                  </select>
+                  <span className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                    내부적으로 발견→TCP 찾기→(UDP)→열린 포트에만 서비스 probe. 진행은 단계 타임라인으로.
+                  </span>
+                </div>
+              )}
             </>
           )}
 
@@ -261,7 +297,9 @@ export default function Scans({ user }) {
                     <td>{s.name}</td>
                     <td className="mono" style={{ fontSize: 11, maxWidth: 300, whiteSpace: "normal", color: "var(--muted)" }}>{s.command}</td>
                     <td><span className={`pill ${st.cls}`}>{st.label}</span></td>
-                    <td>{isActive(s.status) ? <Progress p={p} /> : <span className="muted">—</span>}</td>
+                    <td>{stages[s.id]?.stages?.length
+                      ? <StageTimeline s={stages[s.id]} />
+                      : isActive(s.status) ? <Progress p={p} /> : <span className="muted">—</span>}</td>
                     <td className="mono">{s.host_count}</td>
                     <td className="mono">{s.port_count}</td>
                     <td>
@@ -303,6 +341,42 @@ function Progress({ p }) {
         {total > 1 ? ` · 배치 ${p.batches_done}/${total}` : ""}
         {p.eta_seconds != null ? ` · ~남음 ${fmtDur(p.eta_seconds)}` : (p.remaining ? ` · 남음 ${p.remaining}` : "")}
         {p.elapsed ? ` · 경과 ${p.elapsed}` : ""}
+      </div>
+    </div>
+  );
+}
+
+// 단계 타임라인 — 단계분리 엔진 스캔의 발견/TCP/UDP/서비스 진행을 색 칩으로(이벤트 기반).
+const STAGE_LABEL = { discovery: "발견", tcp: "TCP", udp: "UDP", service: "서비스" };
+const STAGE_CLS = { pending: "info", running: "info", done: "low", stopped: "medium", error: "high" };
+
+function StageTimeline({ s }) {
+  const list = s?.stages || [];
+  if (!list.length) return <span className="muted">…</span>;
+  const overall = s.overall?.percent;
+  const known = overall != null;
+  return (
+    <div style={{ minWidth: 220 }}>
+      <div style={{ height: 6, borderRadius: 4, background: "var(--line)", overflow: "hidden" }}>
+        <div style={{
+          width: known ? `${Math.min(overall, 100)}%` : "12%",
+          height: "100%", background: "var(--accent)", transition: "width .4s", opacity: known ? 1 : 0.45,
+        }} />
+      </div>
+      <div className="row" style={{ gap: 4, marginTop: 4, flexWrap: "wrap" }}>
+        {list.map((st) => {
+          const c = st.counts || {};
+          const extra = st.status === "running" && st.percent != null ? ` ${Math.round(st.percent)}%`
+            : c.live != null ? ` ${c.live}대`
+            : c.open_ports != null ? ` ${c.open_ports}p`
+            : c.services != null ? ` ${c.services}svc` : "";
+          return (
+            <span key={st.stage} className={`pill ${STAGE_CLS[st.status] || "info"}`}
+                  title={st.error || ""} style={{ fontSize: 10.5 }}>
+              {STAGE_LABEL[st.stage] || st.stage}{extra}{st.status === "error" ? " ⚠" : ""}
+            </span>
+          );
+        })}
       </div>
     </div>
   );

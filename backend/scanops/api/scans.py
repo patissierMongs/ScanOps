@@ -6,6 +6,7 @@ POST /{id}/resume 로 이어가기를 호출한다. (status: running/done/failed
 """
 from __future__ import annotations
 
+import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,7 @@ from ..config import get_settings
 from ..db import SessionLocal, get_db
 from ..models import ScanRun, User
 from ..schemas import IngestSummary, RawCommandIn, ScanOut, ScanRunIn
-from ..scanning import chunker, nmap_runner, scan_options, scope, taxonomy
+from ..scanning import chunker, engine_runner, nmap_runner, scan_options, scope, taxonomy
 from ..scanning.ingest import ingest
 from ..scanning.nmap_parse import parse_xml, scan_start, up_hosts
 from .audit import record
@@ -207,6 +208,65 @@ def _command_worker(scan_id: int) -> None:
     _mark(scan_id, "done")
 
 
+def _persist_stages(scan_id: int, out_dir: Path) -> None:
+    """엔진 이벤트를 단계 요약으로 접어 ScanRun.stages_json 에 영속(완료·중지·실패 공통)."""
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        if scan is not None:
+            scan.stages_json = engine_runner.parse_events(out_dir)["stages"]
+            db.commit()
+    finally:
+        db.close()
+
+
+def _engine_worker(scan_id: int) -> None:
+    """단계분리 엔진 실행 — spec.json 으로 엔진 spawn → 대기 → 단계요약 영속 + 결과 인입.
+
+    중지는 run-state.json 의 stop 플래그로(graceful, 단계/호스트 경계). 엔진 프로세스는
+    자기 nmap 자식을 관리하므로 ScanOps 가 강제 종료하지 않는다(고아 nmap 방지).
+    """
+    out_dir = _settings.scans_dir / f"scan_{scan_id}"
+    spec_path = out_dir / "spec.json"
+    if not spec_path.exists():
+        _mark(scan_id, "failed")
+        return
+    # 타겟 재스캔이면 spec 에 scope_keys 가 들어있음 → 닫힘 판정을 그 발견으로만 한정.
+    scope_keys = None
+    try:
+        sk = (json.loads(spec_path.read_text(encoding="utf-8")).get("scanops") or {}).get("scope_keys")
+        if sk:
+            scope_keys = set(sk)
+    except (OSError, ValueError):
+        pass
+    try:
+        proc = engine_runner.spawn(spec_path, out_dir, out_dir / "engine.log")
+    except OSError:
+        _mark(scan_id, "failed")
+        return
+    proc.wait()
+    _persist_stages(scan_id, out_dir)
+    if engine_runner.stopped(out_dir):
+        _mark(scan_id, "canceled")
+        return
+    if not engine_runner.is_done(out_dir):
+        _mark(scan_id, "failed")
+        return
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        if scan is not None:
+            engine_runner.ingest_results(db, scan, out_dir, scope_keys=scope_keys)
+            scan.status = "done"
+            scan.finished_at = datetime.now(timezone.utc)
+            db.commit()
+    except Exception:
+        db.rollback()
+        _mark(scan_id, "failed")
+    finally:
+        db.close()
+
+
 def _ingest_xml(db: Session, scan: ScanRun, xml_bytes: bytes, scan_date=None) -> dict:
     findings = taxonomy.enrich_all(db, parse_xml(xml_bytes))
     counts = ingest(db, scan.id, findings, up_hosts(xml_bytes), scan_date=scan_date)
@@ -361,6 +421,47 @@ def run_command(
     return scan
 
 
+@router.post("/run-staged", response_model=ScanOut)
+def run_staged(
+    body: ScanRunIn,
+    user: User = Depends(require_role("auditor")),
+    db: Session = Depends(get_db),
+):
+    """단계분리 엔진 스캔 시작 — 발견→TCP→UDP→서비스 probe 를 별도 엔진이 단계로 실행.
+
+    즉시 ScanRun(running) 반환. 진행은 GET /{id}/stages(이벤트 기반 단계 타임라인),
+    중지/이어가기는 기존 /stop·/resume 이 run-state 플래그로 처리한다.
+    """
+    if not nmap_runner.find_nmap(_settings.nmap_path):
+        raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
+    try:
+        hosts = chunker.expand_targets(body.targets)
+        if not hosts:
+            raise ValueError("유효한 타겟이 없습니다.")
+        scope.check_scope(hosts)
+        scan_options.validate_keys(body.options)
+        scan_options.validate_nse(body.nse)
+        scan_options.validate_ports(body.ports)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    scan = ScanRun(name=body.name or "단계 스캔", targets=" ".join(body.targets),
+                   status="running", created_by=user.id)
+    db.add(scan)
+    db.commit()
+    out_dir = _settings.scans_dir / f"scan_{scan.id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    spec = engine_runner.build_job_spec(scan.id, body.targets, [], body.options, body.ports,
+                                        body.nse, out_dir, body.batch_size, discovery=body.discovery)
+    (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    scan.command = f"{engine_runner.describe(spec)}  ·  {len(hosts)}호스트"
+    db.commit()
+    db.refresh(scan)
+    record(db, user, "SCAN_RUN", target=scan.targets, detail=f"#{scan.id} 단계스캔 · {len(hosts)}호스트")
+    threading.Thread(target=_engine_worker, args=(scan.id,), daemon=True).start()
+    return scan
+
+
 @router.post("/{scan_id}/stop", response_model=ScanOut)
 def stop_scan(
     scan_id: int,
@@ -378,6 +479,8 @@ def stop_scan(
     if state is not None:
         state["stop"] = True
         chunker.write_state(base, state)
+    # 엔진 스캔이면 run-state 에 graceful stop 플래그(엔진이 단계/호스트 경계에서 감지). 무해.
+    engine_runner.signal_stop(_settings.scans_dir / f"scan_{scan_id}")
     scan.status = "canceling"   # 워커가 배치 종료를 감지하면 canceled 로 확정
     db.commit()
     with _LOCK:
@@ -403,6 +506,21 @@ def resume_scan(
         already = scan_id in _PROCS
     if already or scan.status in ("running", "canceling"):
         raise HTTPException(status_code=400, detail="이미 실행 중인 스캔입니다.")
+    # 엔진 스캔 이어가기 — run-state 의 완료 단계·호스트를 건너뛰고 재실행(엔진이 알아서 재개).
+    out_dir = _settings.scans_dir / f"scan_{scan_id}"
+    if engine_runner.is_engine_scan(out_dir):
+        if engine_runner.is_done(out_dir):
+            raise HTTPException(status_code=400, detail="이미 모든 단계가 완료되었습니다.")
+        if not nmap_runner.find_nmap(_settings.nmap_path):
+            raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
+        engine_runner.clear_stop(out_dir)
+        scan.status = "running"
+        scan.finished_at = None
+        db.commit()
+        db.refresh(scan)
+        record(db, user, "SCAN_RESUME", target=scan.targets, detail=f"#{scan.id} 엔진 이어가기")
+        threading.Thread(target=_engine_worker, args=(scan_id,), daemon=True).start()
+        return scan
     base = _basename(scan_id)
     state = chunker.read_state(base)
     if state is None or "batches" not in state:
@@ -461,6 +579,25 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
         "eta_seconds": eta,
     })
     return prog
+
+
+@router.get("/{scan_id}/stages")
+def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Depends(get_db)):
+    """단계분리 엔진 스캔의 단계 타임라인 — events.ndjson 에서 라이브 derive(없으면 영속 stages_json)."""
+    scan = db.get(ScanRun, scan_id)
+    if scan is None:
+        raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
+    out_dir = _settings.scans_dir / f"scan_{scan_id}"
+    derived = engine_runner.parse_events(out_dir)
+    return {
+        "scan_id": scan_id,
+        "status": scan.status,
+        "stages": derived["stages"] or (scan.stages_json or []),
+        "overall": derived["overall"],
+        "host_count": scan.host_count,
+        "port_count": scan.port_count,
+        "finished_at": scan.finished_at,
+    }
 
 
 @router.post("/estimate")

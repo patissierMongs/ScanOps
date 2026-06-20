@@ -1,0 +1,18 @@
+{
+  "job_id": "lab",
+  "targets": ["172.30.0.0/24"],
+  "exclude": ["172.30.0.1"],
+  "out_dir": "./engine-out/lab",
+  "batch_size": 256,
+  "sudo": "auto",
+  "stages": {
+    "discovery": { "enabled": true, "mode": "sn" },
+    "tcp": { "enabled": true, "ports": "1-65535", "timing": "-T4", "min_rate": 1000, "max_retries": 2 },
+    "udp": { "enabled": false, "ports": "53,161,123,137,500,5353", "timing": "-T3" },
+    "service": {
+      "enabled": true, "version_all": false, "max_retries": 4, "confirm": false,
+      "nse": ["banner", "http-headers", "http-title", "http-server-header",
+              "ssl-cert", "ssh-hostkey", "ftp-anon", "redis-info"]
+    }
+  }
+}

@@ -56,6 +56,10 @@ def _migrate() -> None:
         conn.exec_driver_sql("UPDATE findings SET status='정상처리' WHERE status='예외승인'")
         # 재발 상태 폐지 → 미조치 + reopened 태그로 전환
         conn.exec_driver_sql("UPDATE findings SET reopened=1, status='미조치' WHERE status='재발'")
+        # 단계분리 엔진 스캔의 단계 요약 컬럼(기존 DB 보강)
+        sc_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(scan_runs)").fetchall()}
+        if "stages_json" not in sc_cols:
+            conn.exec_driver_sql("ALTER TABLE scan_runs ADD COLUMN stages_json JSON")
 
 
 def get_db() -> Iterator[Session]:
