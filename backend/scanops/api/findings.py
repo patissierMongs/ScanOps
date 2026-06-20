@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+import threading
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -15,9 +18,7 @@ from ..models import FINDING_STATUSES, RISK_LABELS_KO, Finding, FindingEvent, Sc
 from ..schemas import (
     EventOut, FindingOut, FindingPatch, RescanIn, RescanOut, RescanRunIn, RescanRunOut,
 )
-from ..scanning import nmap_runner, scan_options, taxonomy
-from ..scanning.ingest import ingest
-from ..scanning.nmap_parse import parse_xml, up_hosts
+from ..scanning import engine_runner, nmap_runner
 from ..spreadsheet import safe_cell
 from .deps import current_user, require_role
 
@@ -163,61 +164,74 @@ def rescan_command(
     return RescanOut(command=command, hosts=hosts, ports=ports, finding_count=len(rows))
 
 
+def _start_engine_rescan(db: Session, user: User, rows: list[Finding], options: list[str]):
+    """선택 발견 → 백그라운드 단계 엔진 재스캔(Stage3-only). 호스트별 정밀 -p(교차곱 제거),
+    2-pass 확인, scope_keys 로 닫힘 판정 한정. scan_id 즉시 반환(진행은 /scans/{id}/stages)."""
+    if not nmap_runner.find_nmap(_settings.nmap_path):
+        raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
+    rescan_ports, scope_keys = engine_runner.rescan_targets(
+        [(f.host_ip, f.port, f.finding_key) for f in rows])
+    hosts = sorted(rescan_ports)
+    ports = sorted({p for ps in rescan_ports.values() for p in ps})
+
+    scan = ScanRun(name=f"타겟 재스캔: {len(rows)}건", targets=" ".join(hosts),
+                   status="running", created_by=user.id)
+    db.add(scan)
+    db.commit()
+    out_dir = _settings.scans_dir / f"scan_{scan.id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    spec = engine_runner.build_job_spec(scan.id, [], [], options or [], "", [],
+                                        out_dir, 256, rescan_ports=rescan_ports)
+    spec["scanops"] = {"scope_keys": sorted(scope_keys)}   # 워커가 읽어 ingest 닫힘 판정에 사용
+    (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    scan.command = engine_runner.describe(spec)
+    db.commit()
+    db.refresh(scan)
+    from .audit import record
+    from .scans import _engine_worker
+    record(db, user, "SCAN_RUN", target=scan.targets, detail=f"#{scan.id} 타겟 재스캔 {len(rows)}건")
+    threading.Thread(target=_engine_worker, args=(scan.id,), daemon=True).start()
+    return scan, hosts, ports
+
+
 @router.post("/rescan", response_model=RescanRunOut)
 def rescan_run(
     body: RescanRunIn,
     user: User = Depends(require_role("auditor")),
     db: Session = Depends(get_db),
 ):
-    """선택 발견의 호스트/포트로 실제 nmap 타겟 스캔 실행 → ingest(조치 자동검증).
+    """선택 발견을 백그라운드 단계 엔진으로 재스캔 — 발견·찾기 생략, Stage3 만(호스트별 정밀).
 
-    닫힘 판정은 선택한 포트(scope_keys)로만 한정 — 다른 포트 거짓 닫힘 방지.
+    구버전 동기 블로킹(최대 1시간 HTTP 점유)에서 백그라운드로 전환: scan_id 즉시 반환,
+    진행은 GET /scans/{id}/stages. 닫힘 판정은 선택 발견(scope_keys)으로 한정 →
+    ingest 자동검증(처리중/마감 → 정상처리).
     """
     rows = db.query(Finding).filter(Finding.id.in_(body.finding_ids)).all() if body.finding_ids else []
     if not rows:
         raise HTTPException(status_code=400, detail="재스캔할 발견을 선택하세요.")
-    hosts = sorted({f.host_ip for f in rows})
-    ports = sorted({f.port for f in rows})
-    scope_keys = {f.finding_key for f in rows}
+    scan, hosts, ports = _start_engine_rescan(db, user, rows, body.options)
+    return RescanRunOut(scan_id=scan.id, command=scan.command, counts={}, hosts=hosts, ports=ports)
 
-    nmap = nmap_runner.find_nmap(_settings.nmap_path)
-    if not nmap:
-        raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
-    opts = body.options or scan_options.DEFAULT_KEYS
-    port_spec = body.ports.strip() or ",".join(str(p) for p in ports)
 
-    scan = ScanRun(name=f"타겟 재스캔: {len(rows)}건", targets=" ".join(hosts),
-                   status="running", created_by=user.id)
-    db.add(scan)
-    db.commit()
-    basename = _settings.scans_dir / f"scan_{scan.id}"
-    xml_path = nmap_runner.xml_of(basename)
-    log_path = _settings.scans_dir / f"scan_{scan.id}.log"
-    try:
-        argv = nmap_runner.build_command_opts(nmap, opts, port_spec, hosts, basename)
-        scan.command = " ".join(argv)
-        db.commit()
-        rc = nmap_runner._spawn(argv, log_path, 3600)
-        if rc != 0 or not xml_path.exists():
-            scan.status = "failed"
-            db.commit()
-            raise HTTPException(status_code=500, detail=f"재스캔 실패 (코드 {rc}).")
-        scan.raw_xml_path = str(xml_path)
-        xml_bytes = xml_path.read_bytes()
-        enriched = taxonomy.enrich_all(db, parse_xml(xml_bytes))
-        counts = ingest(db, scan.id, enriched, up_hosts(xml_bytes), scope_keys=scope_keys)
-        from .assets import match_assets
-        match_assets(db)
-        scan.host_count = len(hosts)
-        scan.port_count = len(enriched)
-        scan.status = "done"
-        scan.finished_at = datetime.now(timezone.utc)
-        db.commit()
-    except ValueError as e:
-        scan.status = "failed"
-        db.commit()
-        raise HTTPException(status_code=400, detail=str(e))
-    return RescanRunOut(scan_id=scan.id, command=scan.command, counts=counts, hosts=hosts, ports=ports)
+@router.post("/rescan-due", response_model=RescanRunOut)
+def rescan_due(
+    user: User = Depends(require_role("auditor")),
+    db: Session = Depends(get_db),
+):
+    """마감 지났거나 처리중인 '열린' 발견을 일괄 재검증 — 라이프사이클 구동 재스캔.
+
+    닫혔으면 ingest 가 정상처리 자동 확정(조치 완료 검증), 여전히 열렸으면 그대로 남는다.
+    """
+    now = datetime.now(timezone.utc)
+    rows = db.query(Finding).filter(
+        Finding.state == "open",
+        or_(and_(Finding.deadline.isnot(None), Finding.deadline <= now),
+            Finding.status == "처리중"),
+    ).all()
+    if not rows:
+        raise HTTPException(status_code=400, detail="재검증할 마감·처리중 발견이 없습니다.")
+    scan, hosts, ports = _start_engine_rescan(db, user, rows, [])
+    return RescanRunOut(scan_id=scan.id, command=scan.command, counts={}, hosts=hosts, ports=ports)
 
 
 @router.get("/{fid}", response_model=FindingOut)

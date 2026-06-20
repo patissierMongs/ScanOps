@@ -52,6 +52,7 @@ class ScanRunIn(BaseModel):
     nse: list[str] = []            # NSE 스크립트 키(화이트리스트) — 선택 시 --script 조립
     targets: list[str]
     batch_size: int = 256          # 청킹 배치당 호스트 수(중지/이어가기 단위)
+    discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
 
 
 class RawCommandIn(BaseModel):

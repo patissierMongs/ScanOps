@@ -1,0 +1,67 @@
+# ScanOps 샘플 랩 — 172.30.0.0/24 docker 서브넷에 다양한 포트 프로필 호스트.
+# 포트는 host 로 publish 하지 않는다(ports: 없음) → labnet 브리지에서만 보임.
+# WSL 호스트는 게이트웨이(172.30.0.1)로 브리지에 직접 붙어 있어 컨테이너 IP를 그대로 스캔한다.
+# 토글: docker compose -f lab/docker-compose.yml stop cache   (열린→닫힘 전이 생성)
+name: scanops-lab
+
+networks:
+  labnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1
+
+services:
+  web:
+    image: nginx:alpine
+    container_name: lab-web
+    restart: unless-stopped
+    networks:
+      labnet:
+        ipv4_address: 172.30.0.10
+
+  db:
+    image: postgres:alpine
+    container_name: lab-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: lab
+    networks:
+      labnet:
+        ipv4_address: 172.30.0.11
+
+  cache:
+    image: redis:alpine
+    container_name: lab-cache
+    restart: unless-stopped
+    networks:
+      labnet:
+        ipv4_address: 172.30.0.12
+
+  ftp:
+    image: delfer/alpine-ftp-server:latest
+    container_name: lab-ftp
+    restart: unless-stopped
+    environment:
+      USERS: "labuser|labpass"
+    networks:
+      labnet:
+        ipv4_address: 172.30.0.13
+
+  web2:
+    image: nginx:alpine
+    container_name: lab-web2
+    restart: unless-stopped
+    networks:
+      labnet:
+        ipv4_address: 172.30.0.14
+
+  dark:
+    image: busybox:latest
+    container_name: lab-dark
+    restart: unless-stopped
+    command: ["sh", "-c", "while true; do sleep 3600; done"]
+    networks:
+      labnet:
+        ipv4_address: 172.30.0.15
