@@ -182,8 +182,8 @@ export default function Scans({ user }) {
             )}
           </div>
 
-          {rawMode ? (
-            <div style={{ marginBottom: 4 }}>
+          {rawMode && (
+            <div style={{ marginBottom: 12 }}>
               <div className="row" style={{ justifyContent: "space-between" }}>
                 <span className="cb-label">nmap 명령 — 직접 편집 (출력 플래그는 서버가 -oA 로 강제 교체)</span>
                 <button type="button" className="sm" onClick={() => { setRawCmd(opt.command || ""); setRawEdited(false); }}>
@@ -195,32 +195,33 @@ export default function Scans({ user }) {
                         placeholder="nmap -sV -p 22,80,443 10.0.12.0/24"
                         style={{ width: "100%", resize: "vertical", fontSize: 12.5 }} />
               <div className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
-                단발 실행입니다 — 배치 청킹/이어가기는 미지원(중지만 가능). 셸 메타문자(; | &amp; $ ` 등)는 차단되고,
-                허용 대역(scope)이 설정돼 있으면 그 밖의 IP 는 거절됩니다.
+                단발 실행입니다 — 배치 청킹은 미지원(중지 후 [이어하기]는 전체 재실행). 셸 메타문자(; | &amp; $ ` 등)는 차단되고,
+                허용 대역(scope) 설정 시 IP/CIDR 타겟을 명시해야 하며 그 밖이면 거절됩니다.
               </div>
             </div>
-          ) : (
-            <>
-              <ScanOptions targets={targetList} onState={setOpt} />
-
-              <div style={{ marginTop: 12 }}>
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <span className="cb-label">배치 크기 — 중지·이어가기 단위 (넓은 대역을 이만큼씩 쪼개 스캔)</span>
-                  <span className="mono">{batchSize} 호스트 / 배치</span>
-                </div>
-                <input type="range" min={16} max={1024} step={16} value={batchSize}
-                       onChange={(e) => setBatchSize(Number(e.target.value))} style={{ width: "100%" }} />
-                <div className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
-                  {est
-                    ? `${est.host_count} 호스트 / ${est.batch_count} 배치` +
-                      (est.basis === "history" && est.est_seconds != null
-                        ? ` · 예상 ~${fmtDur(est.est_seconds)} (과거 동일설정 ${est.sample_count}건 기준·근사)`
-                        : " · 예상시간: 동일설정 이력 없음 → 실행 후 배치 기준으로 정밀 추정")
-                    : (targetList.length ? "예상 계산 중…" : "타겟을 입력하면 호스트·배치 수와 예상시간을 보여줍니다")}
-                </div>
-              </div>
-            </>
           )}
+
+          {/* 옵션 빌더는 raw 모드에서도 마운트 유지(숨김만) — opt.command 가 최신이라 '채우기'가 정확하게 동작 */}
+          <div style={{ display: rawMode ? "none" : "block" }}>
+            <ScanOptions targets={targetList} onState={setOpt} />
+
+            <div style={{ marginTop: 12 }}>
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <span className="cb-label">배치 크기 — 중지·이어가기 단위 (넓은 대역을 이만큼씩 쪼개 스캔)</span>
+                <span className="mono">{batchSize} 호스트 / 배치</span>
+              </div>
+              <input type="range" min={16} max={1024} step={16} value={batchSize}
+                     onChange={(e) => setBatchSize(Number(e.target.value))} style={{ width: "100%" }} />
+              <div className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                {est
+                  ? `${est.host_count} 호스트 / ${est.batch_count} 배치` +
+                    (est.basis === "history" && est.est_seconds != null
+                      ? ` · 예상 ~${fmtDur(est.est_seconds)} (과거 동일설정 ${est.sample_count}건 기준·근사)`
+                      : " · 예상시간: 동일설정 이력 없음 → 실행 후 배치 기준으로 정밀 추정")
+                  : (targetList.length ? "예상 계산 중…" : "타겟을 입력하면 호스트·배치 수와 예상시간을 보여줍니다")}
+              </div>
+            </div>
+          </div>
 
           <div className="row" style={{ marginTop: 14 }}>
             <button className="primary" disabled={busy || (rawMode ? !rawCmd.trim() : !targetList.length)} onClick={runScan}>

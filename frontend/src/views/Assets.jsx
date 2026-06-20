@@ -156,11 +156,13 @@ export default function Assets({ user }) {
       const changes = [];
       CMP.forEach(([f, label]) => {
         const nv = (r[f] ?? "").toString().trim();
-        if (nv && nv !== (cur[f] ?? "").toString()) changes.push({ label, old: cur[f] || "", neu: nv });
+        const ov = (cur[f] ?? "").toString().trim();   // 기존값도 trim — 공백차만으로 오탐 방지
+        if (nv && nv !== ov) changes.push({ label, old: cur[f] || "", neu: nv });
       });
       Object.entries(r.extra || {}).forEach(([k, v]) => {
-        const ov = cur.extra ? (cur.extra[k] ?? "") : "";
-        if (String(v).trim() && String(v) !== String(ov)) changes.push({ label: k, old: ov, neu: v });
+        const nv = String(v).trim();
+        const ov = String(cur.extra ? (cur.extra[k] ?? "") : "").trim();
+        if (nv && nv !== ov) changes.push({ label: k, old: ov, neu: nv });
       });
       if (changes.length) res.changed.push({ ip: r.ip, changes }); else res.same += 1;
     });
