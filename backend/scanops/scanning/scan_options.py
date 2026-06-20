@@ -82,8 +82,8 @@ SCAN_OPTIONS = [
      "desc": "동시 프로브 수 상한을 100으로. 빠르지만 장비/회선 부하가 커진다."},
     {"key": "defeat_rst", "label": "RST 율제한 우회 (--defeat-rst-ratelimit)", "flags": ["--defeat-rst-ratelimit"], "group": "성능·안정", "default": True,
      "desc": "RST 율제한을 무시해 닫힌 포트 판정을 빠르게. 정확도가 약간 떨어질 수 있다."},
-    {"key": "max_scan_delay", "label": "스캔 지연 상한 5ms (--max-scan-delay 5ms)", "flags": ["--max-scan-delay", "5ms"], "group": "성능·안정", "default": True,
-     "desc": "프로브 간 지연 상한을 5ms로 묶어 속도 저하를 막는다. 방화벽 없는 빠른 내부망에 적합."},
+    {"key": "max_scan_delay", "label": "스캔 지연 상한 5ms (--max-scan-delay 5ms)", "flags": ["--max-scan-delay", "5ms"], "group": "성능·안정", "default": False,
+     "desc": "프로브 간 지연 상한을 5ms로 강제. TCP 가속엔 도움되나 UDP/레거시 장비 정확도를 떨어뜨릴 수 있어 기본 제외(필요 시 선택)."},
 
     # ── 방화벽 진단 ──
     {"key": "fragment", "label": "패킷 분할 (-f)", "flags": ["-f"], "group": "방화벽 진단", "default": False,
