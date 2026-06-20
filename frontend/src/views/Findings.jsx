@@ -148,8 +148,12 @@ export default function Findings({ user }) {
   }
 
   function openDrawer(f) {
-    api(`/findings/${f.id}/events`)
-      .then((events) => setDrawer({ finding: f, events }))
+    // 이벤트 + 용도 근거를 함께 받아 상세에 표시(근거 실패해도 상세는 열림).
+    Promise.all([
+      api(`/findings/${f.id}/events`),
+      api(`/findings/${f.id}/evidence`).then((r) => r.evidence).catch(() => []),
+    ])
+      .then(([events, evidence]) => setDrawer({ finding: f, events, evidence }))
       .catch((e) => toast(e.message, { type: "err" }));
   }
 
@@ -280,7 +284,7 @@ function renderCell(finding, key, displayModes) {
 }
 
 function Drawer({ data, canEdit, onClose, onSaved, toast }) {
-  const { finding, events } = data;
+  const { finding, events, evidence = [] } = data;
   const [status, setStatus] = useState(finding.status);
   const [deadline, setDeadline] = useState(finding.deadline ? String(finding.deadline).slice(0, 10) : "");
   const [note, setNote] = useState(finding.manual_note || "");
@@ -306,6 +310,21 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
           <span className="tag">{finding.category || "미분류"}</span>
           <span className="tag">{finding.identification}</span>
           {finding.dept && <span className="tag">{finding.dept}</span>}
+        </div>
+
+        {/* 용도 근거 — '왜 열렸나/무엇인가' 추정 근거(역DNS·서비스·NSE 추출 등). 관리자 통보의 핵심. */}
+        <div className="panel" style={{ boxShadow: "none", marginBottom: 12, background: "var(--accent-bg)" }}>
+          <div className="cb-label" style={{ marginTop: 0 }}>용도 근거 (이 포트가 무엇이고 왜 열렸나)</div>
+          {evidence.length ? (
+            <ul style={{ margin: "4px 0 0", paddingLeft: 18, fontSize: 12.5, lineHeight: 1.6 }}>
+              {evidence.map((e, i) => <li key={i}>{e}</li>)}
+            </ul>
+          ) : (
+            <div className="muted" style={{ fontSize: 12 }}>
+              수집된 근거가 부족합니다 — -sV/NSE(인증서·SMB·HTTP 등)나 역DNS를 켜고 재스캔하면 채워집니다.
+            </div>
+          )}
+          {finding.owner && <div className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>담당(자산대장): {finding.owner}{finding.contact ? ` · ${finding.contact}` : ""}</div>}
         </div>
 
         {canEdit && (

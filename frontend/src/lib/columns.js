@@ -33,6 +33,8 @@ export const ALL_COLUMNS = [
   { key: "deadline", label: "마감", get: (f) => fmtDate(f.deadline), mono: true },
   { key: "first_seen", label: "등록 날짜", get: (f) => fmtDate(f.first_seen), mono: true },
   { key: "last_seen", label: "스캔 날짜", get: (f) => fmtDate(f.last_seen), mono: true },
+  // 용도근거: 표에선 가용 필드로 근사 표시, 내보내기(CSV/XLSX)는 서버가 NSE 추출까지 포함한 전체를 채운다.
+  { key: "purpose", label: "용도근거", get: (f) => [f.hostname, [f.service, f.product, f.version].filter(Boolean).join(" "), f.usage].filter(Boolean).join(" · ") },
   { key: "manual_note", label: "메모", get: (f) => f.manual_note },
 ];
 
