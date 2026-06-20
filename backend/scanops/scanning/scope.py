@@ -26,6 +26,20 @@ def parse_scope(spec: str) -> list[ipaddress._BaseNetwork]:
     return nets
 
 
+def is_ip_token(token: str) -> bool:
+    """토큰이 IP 또는 CIDR 인지. 호스트명/복합 nmap 문법은 False."""
+    try:
+        ipaddress.ip_address(token)
+        return True
+    except ValueError:
+        pass
+    try:
+        ipaddress.ip_network(token, strict=False)
+        return True
+    except ValueError:
+        return False
+
+
 def _in_scope(host: str, nets: list[ipaddress._BaseNetwork]) -> bool:
     # 단일 IP 는 멤버십, CIDR 토큰은 허용망의 서브넷인지로 판정.
     try:
@@ -53,3 +67,27 @@ def check_scope(hosts: list[str], spec: str | None = None) -> None:
     if bad:
         shown = ", ".join(bad[:5]) + (f" 외 {len(bad) - 5}건" if len(bad) > 5 else "")
         raise ValueError(f"허용된 스캔 대역(scope) 밖의 대상입니다: {shown}")
+
+
+# 직접 명령에서 타겟이 아닌 파일/랜덤 입력 — scope 검증을 우회하므로 scope 설정 시 차단.
+_UNSCOPED_TARGET_FLAGS = ("-iL", "-iR", "--excludefile", "--exclude-file")
+
+
+def check_raw_scope(tokens: list[str], spec: str | None = None) -> None:
+    """직접 입력 명령용 scope 게이트. spec 비면 통과(무제한).
+
+    scope 설정 시: 파일/랜덤 타겟 플래그(-iL/-iR 등) 차단, IP/CIDR 타겟이 최소 1개 있어야 하고,
+    IP/CIDR 타겟은 전부 허용 대역 안이어야 한다. (호스트명만 있는 명령은 검증 불가 → 거절)"""
+    if spec is None:
+        spec = get_settings().scan_scope
+    nets = parse_scope(spec)
+    if not nets:
+        return  # scope 미설정 — 제한 없음
+    if any(t in _UNSCOPED_TARGET_FLAGS for t in tokens):
+        raise ValueError(
+            "스캔 대역(scope)이 설정된 환경에서는 직접 명령에서 파일/랜덤 타겟(-iL/-iR 등)을 쓸 수 없습니다. "
+            "IP/CIDR 로 직접 지정하세요.")
+    ip_tokens = [t for t in tokens if is_ip_token(t)]
+    if not ip_tokens:
+        raise ValueError("스캔 대역(scope)이 설정된 환경에서는 직접 명령에 IP/CIDR 타겟을 명시해야 합니다.")
+    check_scope(ip_tokens, spec)

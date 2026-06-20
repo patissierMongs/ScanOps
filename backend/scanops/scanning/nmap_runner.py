@@ -1,7 +1,6 @@
 """nmap 실행 — subprocess(shell=False)로 명령 주입 차단. XML 산출."""
 from __future__ import annotations
 
-import ipaddress
 import os
 import re
 import shlex
@@ -83,16 +82,8 @@ def run_opts(nmap: str, option_keys: list[str], ports: str, targets: list[str],
 
 
 def _is_ip_like(token: str) -> bool:
-    try:
-        ipaddress.ip_address(token)
-        return True
-    except ValueError:
-        pass
-    try:
-        ipaddress.ip_network(token, strict=False)
-        return True
-    except ValueError:
-        return False
+    from .scope import is_ip_token  # 단일 진실원천(scope) 재사용 — 중복 판별 로직 방지
+    return is_ip_token(token)
 
 
 def parse_raw_command(command: str) -> list[str]:

@@ -103,3 +103,21 @@ def test_legacy_reopen_status_migrated():
         assert row.status == "미조치" and row.reopened == 1
     finally:
         db.close()
+
+
+def test_empty_scope_keys_disables_closure():
+    """직접 명령(no_close)처럼 scope_keys=set() 면 미스캔 포트를 닫지 않는다."""
+    init_db()
+    db = SessionLocal()
+    try:
+        fs = parse_xml(XML)
+        s1 = _scan(db)
+        ingest(db, s1, fs, up_hosts(XML))
+        open_before = db.query(Finding).filter_by(state="open").count()
+        # 같은 호스트를 '포트 없음'으로 재인입하되 scope_keys=set() → 아무것도 닫히면 안 됨
+        s2 = _scan(db)
+        counts = ingest(db, s2, [], {"127.0.0.1"}, scope_keys=set())
+        assert counts["closed"] == 0
+        assert db.query(Finding).filter_by(state="open").count() == open_before
+    finally:
+        db.close()

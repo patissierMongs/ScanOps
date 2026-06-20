@@ -88,14 +88,16 @@ def _set_current_log(scan_id: int, log_path: Path) -> None:
         db.close()
 
 
-def _ingest_batch(scan_id: int, xml_bytes: bytes) -> None:
+def _ingest_batch(scan_id: int, xml_bytes: bytes, no_close: bool = False) -> None:
     """배치 XML 1개 인입 — job scan_id 에 귀속, host/port 카운트 누적(상태는 안 바꿈).
-    닫힘 판정은 ingest 내부에서 '이번 배치가 스캔한 호스트'로만 한정되므로 다른 배치 안전."""
+    닫힘 판정은 ingest 내부에서 '이번 배치가 스캔한 호스트'로만 한정되므로 다른 배치 안전.
+    no_close=True 면 닫힘 판정을 끈다(직접 명령처럼 스캔한 포트 범위를 알 수 없을 때 — 가산만)."""
     db = SessionLocal()
     try:
         scan = db.get(ScanRun, scan_id)
         findings = taxonomy.enrich_all(db, parse_xml(xml_bytes))
-        ingest(db, scan_id, findings, up_hosts(xml_bytes))
+        # no_close: scope_keys=set() → 닫힘 패스가 어떤 포트도 닫지 않음(미스캔 포트 오closure 방지).
+        ingest(db, scan_id, findings, up_hosts(xml_bytes), scope_keys=set() if no_close else None)
         from .assets import match_assets
         match_assets(db)
         scan.host_count = (scan.host_count or 0) + len({f["host_ip"] for f in findings})
@@ -201,7 +203,8 @@ def _command_worker(scan_id: int) -> None:
         _mark(scan_id, "failed")
         return
     try:
-        _ingest_batch(scan_id, xml_path.read_bytes())
+        # 직접 명령은 -p 범위가 불투명 → 닫힘 판정을 끄고 가산만(미스캔 포트 오closure 방지).
+        _ingest_batch(scan_id, xml_path.read_bytes(), no_close=True)
     except Exception:
         _mark(scan_id, "failed")
         return
@@ -294,6 +297,7 @@ def list_scan_options(_: User = Depends(current_user)):
         "nse": scan_options.NSE_SCRIPTS,
         "nse_default": scan_options.NSE_DEFAULT_KEYS,
         "udp_default_ports": scan_options.UDP_DEFAULT_PORTS,
+        "default_ports": scan_options.DEFAULT_PORTS,
     }
 
 
@@ -402,12 +406,15 @@ def run_command(
     if not nmap:
         raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
     try:
-        _, ip_tokens = nmap_runner.build_command_raw(nmap, body.command, _basename(0))
-        scope.check_scope(ip_tokens)   # IP/CIDR 타겟이 허용 대역 밖이면 거절
+        toks = nmap_runner.parse_raw_command(body.command)   # 셸메타 차단 + 토큰화
+        # scope 설정 시: 파일/랜덤 타겟(-iL/-iR) 차단, IP/CIDR 타겟 필수·전부 in-scope.
+        # (호스트명만 있는 명령은 검증 불가라 거절 — /run 과 동일한 엄격성)
+        scope.check_raw_scope(toks)
+        ip_tokens = [t for t in toks if scope.is_ip_token(t)]
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    scan = ScanRun(name=body.name or "직접 명령 스캔", targets=" ".join(ip_tokens),
+    scan = ScanRun(name=body.name or "직접 명령 스캔", targets=" ".join(ip_tokens) or body.command.strip()[:64],
                    command=body.command.strip(), status="running", created_by=user.id)
     db.add(scan)
     db.commit()
@@ -498,7 +505,7 @@ def resume_scan(
     user: User = Depends(require_role("auditor")),
     db: Session = Depends(get_db),
 ):
-    """중단된 청킹 스캔을 다음 미완 배치부터 이어간다(완료 배치는 그대로, 재스캔 안 함)."""
+    """중단된 스캔 재개 — 청킹 스캔은 다음 미완 배치부터, 직접 명령 스캔은 전체 재실행(단발)."""
     scan = db.get(ScanRun, scan_id)
     if scan is None:
         raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
@@ -523,13 +530,27 @@ def resume_scan(
         return scan
     base = _basename(scan_id)
     state = chunker.read_state(base)
-    if state is None or "batches" not in state:
-        raise HTTPException(status_code=400,
-                            detail="이어가기를 지원하지 않는 스캔입니다(직접 명령 또는 이전 버전).")
-    if state.get("cursor", 0) >= len(state["batches"]):
-        raise HTTPException(status_code=400, detail="이미 모든 배치가 완료되었습니다.")
+    if state is None:
+        raise HTTPException(status_code=400, detail="이어갈 스캔 상태가 없습니다(이전 버전 스캔).")
     if not nmap_runner.find_nmap(_settings.nmap_path):
         raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
+
+    # 직접 명령 스캔(raw_argv): 청킹/커서가 없으므로 전체를 다시 실행한다(단발).
+    if "batches" not in state:
+        if "raw_argv" not in state:
+            raise HTTPException(status_code=400, detail="이어가기를 지원하지 않는 스캔입니다.")
+        state["stop"] = False
+        chunker.write_state(base, state)
+        scan.status = "running"
+        scan.finished_at = None
+        db.commit()
+        db.refresh(scan)
+        record(db, user, "SCAN_RESUME", target=scan.targets, detail=f"#{scan.id} 직접명령 재실행")
+        threading.Thread(target=_command_worker, args=(scan_id,), daemon=True).start()
+        return scan
+
+    if state.get("cursor", 0) >= len(state["batches"]):
+        raise HTTPException(status_code=400, detail="이미 모든 배치가 완료되었습니다.")
     state["stop"] = False
     chunker.write_state(base, state)
     scan.status = "running"
@@ -604,9 +625,10 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
 def estimate_scan(body: ScanRunIn, _: User = Depends(current_user), db: Session = Depends(get_db)):
     """실행 전 예상 — 타겟을 호스트/배치 수로, 그리고 '동일 설정' 과거 스캔이 있으면
     호스트당 평균시간(중앙값)으로 대략적 소요시간을 낸다. 없으면 basis='none'."""
+    # 예상치는 정보 제공용(실제 nmap 미실행)이라 scope 를 강제하지 않는다 — 입력 중 호스트명에
+    # 매 키 입력마다 400 이 뜨던 회귀 방지. scope 차단은 실제 실행(run/run-command)에서만.
     try:
         hosts = chunker.expand_targets(body.targets)
-        scope.check_scope(hosts)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     host_count = len(hosts)

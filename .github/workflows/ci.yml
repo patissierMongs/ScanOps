@@ -18,6 +18,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - name: Install nmap
+        # 대부분 테스트는 fixture XML·명령조립만 쓰지만, 단계 엔진 재스캔 테스트는
+        # find_nmap() 가 바이너리를 찾아야 진행되므로 nmap 을 설치한다(워커는 스텁).
+        run: sudo apt-get update && sudo apt-get install -y nmap
       - name: Install deps
         working-directory: backend
         run: |
@@ -25,7 +29,6 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Run tests
         working-directory: backend
-        # 테스트는 nmap 바이너리 없이 fixture XML·명령조립만 검증하므로 nmap 설치 불필요.
         run: python -m pytest -q
 
   frontend:

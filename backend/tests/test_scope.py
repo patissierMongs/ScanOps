@@ -32,3 +32,37 @@ def test_parse_scope_skips_garbage():
 
 def test_multiple_scope_ranges():
     check_scope(["10.0.0.1", "192.168.1.1"], spec="10.0.0.0/8 192.168.0.0/16")
+
+
+def test_is_ip_token():
+    from scanops.scanning.scope import is_ip_token
+    assert is_ip_token("10.0.0.1") and is_ip_token("10.0.0.0/24")
+    assert not is_ip_token("scanme.example.com") and not is_ip_token("-sV")
+
+
+def test_check_raw_scope_no_scope_passes():
+    from scanops.scanning.scope import check_raw_scope
+    check_raw_scope(["-sV", "scanme.example.com"], spec="")   # scope 미설정 → 통과
+
+
+def test_check_raw_scope_requires_ip_target():
+    from scanops.scanning.scope import check_raw_scope
+    with pytest.raises(ValueError):   # 호스트명만 → IP/CIDR 타겟 없음으로 거절
+        check_raw_scope(["-sV", "scanme.example.com"], spec="10.0.0.0/8")
+
+
+def test_check_raw_scope_blocks_file_input():
+    from scanops.scanning.scope import check_raw_scope
+    with pytest.raises(ValueError):   # -iL 파일 타겟 차단
+        check_raw_scope(["-sV", "-iL", "hosts.txt", "10.0.0.5"], spec="10.0.0.0/8")
+
+
+def test_check_raw_scope_in_scope_passes():
+    from scanops.scanning.scope import check_raw_scope
+    check_raw_scope(["-sV", "-p", "22", "10.0.12.5"], spec="10.0.0.0/8")
+
+
+def test_check_raw_scope_out_of_scope_rejected():
+    from scanops.scanning.scope import check_raw_scope
+    with pytest.raises(ValueError):
+        check_raw_scope(["-sV", "8.8.8.8"], spec="10.0.0.0/8")
