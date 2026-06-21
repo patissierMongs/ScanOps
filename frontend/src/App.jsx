@@ -6,6 +6,7 @@ import PasswordModal from "./ui/PasswordModal.jsx";
 import Login from "./views/Login.jsx";
 import Dashboard from "./views/Dashboard.jsx";
 import Findings from "./views/Findings.jsx";
+import Heatmap from "./views/Heatmap.jsx";
 import Rules from "./views/Rules.jsx";
 import History from "./views/History.jsx";
 import Assets from "./views/Assets.jsx";
@@ -16,6 +17,7 @@ import Users from "./views/Users.jsx";
 const NAV = [
   { k: "dashboard", label: "대시보드", ico: "▦" },
   { k: "findings", label: "발견 관리", ico: "⚑", badge: "open" },
+  { k: "heatmap", label: "히트맵", ico: "▥" },
   { k: "rules", label: "위험 규칙", ico: "⚠" },
   { k: "history", label: "이력", ico: "↻" },
   { k: "assets", label: "자산대장", ico: "▤" },
@@ -26,7 +28,7 @@ const NAV = [
 
 const TITLES = {
   dashboard: "대시보드", findings: "발견 관리", rules: "위험 규칙", history: "변경 이력",
-  assets: "자산대장", notify: "부서통보", scans: "스캔", users: "사용자 관리",
+  heatmap: "시간축 히트맵", assets: "자산대장", notify: "부서통보", scans: "스캔", users: "사용자 관리",
 };
 
 export default function App() {
@@ -76,6 +78,7 @@ function Shell({ user, onLogout }) {
   const views = {
     dashboard: <Dashboard onNav={setView} />,
     findings: <Findings user={user} />,
+    heatmap: <Heatmap />,
     rules: <Rules user={user} />,
     history: <History />,
     assets: <Assets user={user} />,

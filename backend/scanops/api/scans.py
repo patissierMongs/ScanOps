@@ -7,7 +7,9 @@ POST /{id}/resume 로 이어가기를 호출한다. (status: running/done/failed
 from __future__ import annotations
 
 import json
+import re
 import threading
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import SessionLocal, get_db
-from ..models import ScanRun, User
+from ..models import Finding, ScanRun, User
 from ..schemas import IngestSummary, RawCommandIn, ScanOut, ScanRunIn
 from ..scanning import chunker, engine_runner, nmap_runner, scan_options, scope, taxonomy
 from ..scanning.ingest import ingest
@@ -32,6 +34,12 @@ _settings = get_settings()
 # 이어가기는 가능(다음 배치부터). 청킹이 native --resume(Windows 깨짐)을 대체한다.
 _PROCS: dict = {}
 _LOCK = threading.Lock()
+AUTO_STAGE_LABELS = {
+    "tcp_discovery": "TCP 전체 포트 발견",
+    "tcp_identify": "발견된 TCP 포트 용도/서비스 식별",
+    "udp_identify": "주요 UDP 서비스 식별",
+}
+STAGE_FILE_RE = re.compile(r"^(?P<base>.+)\.(?P<stage>tcp_discovery|tcp_identify|udp_identify)\.xml$", re.I)
 
 
 def _basename(scan_id: int) -> Path:
@@ -43,6 +51,12 @@ def _profile(options: list[str], ports: str, preset: str) -> tuple:
     이게 같은 과거 스캔만 기준으로 삼는다."""
     pn = (ports or "").replace(" ", "")
     return ("opt", tuple(sorted(options)), pn) if options else ("preset", preset or "quick", pn)
+
+
+def _estimate_profile(body: ScanRunIn) -> tuple:
+    if body.workflow == "auto":
+        return ("auto", (body.ports or "").replace(" ", ""))
+    return _profile(body.options, body.ports, body.preset)
 
 
 def reconcile_orphans() -> int:
@@ -88,6 +102,226 @@ def _set_current_log(scan_id: int, log_path: Path) -> None:
         db.close()
 
 
+def _port_tokens(port_spec: str, proto: str) -> list[str]:
+    current = ""
+    out: list[str] = []
+    for raw in (port_spec or "").replace(" ", "").split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        if ":" in item:
+            prefix, value = item.split(":", 1)
+            if prefix.upper() in {"T", "U"}:
+                current = prefix.upper()
+                item = value
+        if not item:
+            continue
+        if not current:
+            if proto.upper() == "T":
+                out.append(item)
+        elif current == proto.upper():
+            out.append(item)
+    return out
+
+
+def _port_scope(port_spec: str, proto: str) -> set[int] | None:
+    """None means all ports for the protocol were scanned."""
+    tokens = _port_tokens(port_spec, proto)
+    if not tokens:
+        return set()
+    if any(t == "1-65535" for t in tokens):
+        return None
+    ports: set[int] = set()
+    for token in tokens:
+        if "-" in token:
+            lo, hi = token.split("-", 1)
+            try:
+                start, end = int(lo), int(hi)
+            except ValueError:
+                continue
+            ports.update(range(max(1, start), min(65535, end) + 1))
+        else:
+            try:
+                ports.add(int(token))
+            except ValueError:
+                continue
+    return ports
+
+
+def _stage_file_info(filename: str | None) -> tuple[str, str] | None:
+    normalized = (filename or "").replace("\\", "/")
+    m = STAGE_FILE_RE.match(normalized)
+    if not m:
+        return None
+    return m.group("base"), m.group("stage").lower()
+
+
+def _scaninfo_scope(xml_bytes: bytes, proto: str) -> set[int] | None | set:
+    """Read the nmap <scaninfo services=...> range for scoped close decisions."""
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return set()
+    proto = proto.lower()
+    prefix = "T" if proto == "tcp" else "U"
+    scopes: list[set[int] | None] = []
+    for info in root.findall("scaninfo"):
+        if (info.get("protocol") or "").lower() != proto:
+            continue
+        services = (info.get("services") or "").strip()
+        if not services:
+            continue
+        scopes.append(_port_scope(f"{prefix}:{services}", prefix))
+    if not scopes:
+        return set()
+    if any(s is None for s in scopes):
+        return None
+    merged: set[int] = set()
+    for s in scopes:
+        merged.update(s)
+    return merged
+
+
+def _scope_from_stage_xml(stage: str, xml_bytes: bytes) -> tuple[set[int] | None | set, set[int] | None | set]:
+    if stage.startswith("tcp_"):
+        return _scaninfo_scope(xml_bytes, "tcp"), set()
+    if stage == "udp_identify":
+        return set(), _scaninfo_scope(xml_bytes, "udp")
+    return set(), set()
+
+
+def _finding_key(f: dict) -> str:
+    return f"{f['host_ip']}|{f['port']}|{f['proto']}"
+
+
+def _auto_scope_keys(db: Session, scanned_hosts: set[str], findings: list[dict],
+                     tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set) -> set[str]:
+    keys = {_finding_key(f) for f in findings}
+    if not scanned_hosts:
+        return keys
+    rows = db.query(Finding).filter(Finding.state == "open", Finding.host_ip.in_(scanned_hosts)).all()
+    for row in rows:
+        proto = (row.proto or "").lower()
+        if proto == "tcp" and (tcp_scope is None or row.port in tcp_scope):
+            keys.add(row.finding_key)
+        if proto == "udp" and (udp_scope is None or row.port in udp_scope):
+            keys.add(row.finding_key)
+    return keys
+
+
+def _prefer_identified(primary: list[dict], fallback: list[dict]) -> list[dict]:
+    """Keep service-identification rows, but preserve discovery-only open ports."""
+    by_key = {_finding_key(f): f for f in primary}
+    for f in fallback:
+        by_key.setdefault(_finding_key(f), f)
+    return list(by_key.values())
+
+
+def _key_parts(key: str) -> tuple[str, int, str]:
+    host, port, proto = key.split("|", 2)
+    return host, int(port), proto
+
+
+def _port_el(finding: dict) -> ET.Element:
+    port = ET.Element("port", protocol=finding.get("proto") or "tcp", portid=str(finding.get("port") or "0"))
+    ET.SubElement(port, "state", state=finding.get("state") or "open")
+    svc_attrs = {
+        k: str(v)
+        for k, v in {
+            "name": finding.get("service") or "",
+            "product": finding.get("product") or "",
+            "version": finding.get("version") or "",
+        }.items()
+        if v
+    }
+    if svc_attrs:
+        svc_attrs.setdefault("method", "probed" if finding.get("identification") == "확인" else "table")
+        svc = ET.SubElement(port, "service", **svc_attrs)
+        for cpe in str(finding.get("cpe") or "").split(";"):
+            if cpe:
+                ET.SubElement(svc, "cpe").text = cpe
+    for script in finding.get("nse_json") or []:
+        ET.SubElement(
+            port,
+            "script",
+            id=str(script.get("id") or ""),
+            output=str(script.get("output") or ""),
+        )
+    return port
+
+
+def _closed_port_el(port_num: int, proto: str, service: str = "") -> ET.Element:
+    port = ET.Element("port", protocol=proto, portid=str(port_num))
+    ET.SubElement(port, "state", state="closed", reason="scanops-scope")
+    if service:
+        ET.SubElement(port, "service", name=service, method="table")
+    return port
+
+
+def _write_merged_xml(db: Session, xml_path: Path, findings: list[dict], scanned_hosts: set[str],
+                      scope_keys: set[str], scan_date: datetime | None = None) -> None:
+    """Write one XML snapshot that heatmap can read consistently with Finding ingest."""
+    when = scan_date or datetime.now(timezone.utc)
+    root = ET.Element(
+        "nmaprun",
+        scanner="scanops",
+        args="scanops bundled import",
+        start=str(int(when.timestamp())),
+        startstr=when.isoformat(),
+        version="scanops",
+        xmloutputversion="1.05",
+    )
+    by_host: dict[str, dict[str, list]] = {}
+    seen = {_finding_key(f) for f in findings}
+    for f in findings:
+        by_host.setdefault(f["host_ip"], {"open": [], "closed": []})["open"].append(f)
+
+    missing = sorted(scope_keys - seen, key=lambda k: (_key_parts(k)[0], _key_parts(k)[2], _key_parts(k)[1]))
+    existing = {
+        row.finding_key: row
+        for row in db.query(Finding).filter(Finding.finding_key.in_(missing)).all()
+    } if missing else {}
+    for key in missing:
+        host, port_num, proto = _key_parts(key)
+        row = existing.get(key)
+        by_host.setdefault(host, {"open": [], "closed": []})["closed"].append((port_num, proto, row.service if row else ""))
+
+    hosts = sorted(set(scanned_hosts) | set(by_host))
+    for host_ip in hosts:
+        host_el = ET.SubElement(root, "host")
+        ET.SubElement(host_el, "status", state="up")
+        ET.SubElement(host_el, "address", addr=host_ip, addrtype="ipv4")
+        ports_el = ET.SubElement(host_el, "ports")
+        items = by_host.get(host_ip, {"open": [], "closed": []})
+        for f in sorted(items["open"], key=lambda x: (x.get("proto") or "", int(x.get("port") or 0))):
+            ports_el.append(_port_el(f))
+        for port_num, proto, service in items["closed"]:
+            ports_el.append(_closed_port_el(port_num, proto, service))
+    runstats = ET.SubElement(root, "runstats")
+    ET.SubElement(runstats, "finished", time=str(int(when.timestamp())), exit="success")
+    ET.SubElement(runstats, "hosts", up=str(len(hosts)), down="0", total=str(len(hosts)))
+    xml_path.write_bytes(ET.tostring(root, encoding="utf-8", xml_declaration=True))
+
+
+def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hosts: set[str],
+                   tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set,
+                   scan_date: datetime | None = None, raw_xml_path: Path | None = None) -> dict:
+    enriched = taxonomy.enrich_all(db, findings)
+    scope_keys = _auto_scope_keys(db, scanned_hosts, enriched, tcp_scope, udp_scope)
+    if raw_xml_path is not None:
+        _write_merged_xml(db, raw_xml_path, enriched, scanned_hosts, scope_keys, scan_date)
+        scan.raw_xml_path = str(raw_xml_path)
+    counts = ingest(db, scan.id, enriched, scanned_hosts, scope_keys=scope_keys, scan_date=scan_date)
+    from .assets import match_assets
+    match_assets(db)
+    scan.host_count = len({f["host_ip"] for f in enriched})
+    scan.port_count = len(enriched)
+    scan.status = "done"
+    scan.finished_at = datetime.now(timezone.utc)
+    db.commit()
+    return counts
+
+
 def _ingest_batch(scan_id: int, xml_bytes: bytes, no_close: bool = False) -> None:
     """배치 XML 1개 인입 — job scan_id 에 귀속, host/port 카운트 누적(상태는 안 바꿈).
     닫힘 판정은 ingest 내부에서 '이번 배치가 스캔한 호스트'로만 한정되므로 다른 배치 안전.
@@ -105,6 +339,101 @@ def _ingest_batch(scan_id: int, xml_bytes: bytes, no_close: bool = False) -> Non
         db.commit()
     finally:
         db.close()
+
+
+def _ingest_auto_findings(scan_id: int, findings: list[dict], scanned_hosts: set[str],
+                          tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set) -> None:
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        if scan is None:
+            return
+        enriched = taxonomy.enrich_all(db, findings)
+        scope_keys = _auto_scope_keys(db, scanned_hosts, enriched, tcp_scope, udp_scope)
+        ingest(db, scan_id, enriched, scanned_hosts, scope_keys=scope_keys)
+        from .assets import match_assets
+        match_assets(db)
+        scan.host_count = (scan.host_count or 0) + len({f["host_ip"] for f in enriched})
+        scan.port_count = (scan.port_count or 0) + len(enriched)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _run_stage(scan_id: int, argv: list[str], log_path: Path) -> int:
+    _set_current_log(scan_id, log_path)
+    try:
+        proc = nmap_runner.popen(argv, log_path)
+    except OSError:
+        return -1
+    with _LOCK:
+        _PROCS[scan_id] = proc
+    rc = proc.wait()
+    with _LOCK:
+        _PROCS.pop(scan_id, None)
+    return rc
+
+
+def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, state: dict) -> bool:
+    """Run discovery -> identify -> UDP for one batch, then ingest the final observations once."""
+    ports = state.get("ports", "")
+    nse = state.get("nse") if state.get("nse") is not None else scan_options.NSE_DEFAULT_KEYS
+    tcp_port_spec = nmap_runner.auto_tcp_port_spec(ports)
+    udp_port_spec = nmap_runner.auto_udp_port_spec(ports)
+    tcp_scope = _port_scope(tcp_port_spec, "T") if tcp_port_spec else set()
+    udp_scope = _port_scope(udp_port_spec, "U") if udp_port_spec else set()
+    findings: list[dict] = []
+    scanned_hosts: set[str] = set()
+    tcp_discovery_findings: list[dict] = []
+
+    if tcp_port_spec:
+        if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
+            return False
+        discovery_base = Path(str(b_base) + ".tcp_discovery")
+        discovery_log = Path(str(discovery_base) + ".log")
+        argv = nmap_runner.build_auto_command(nmap, "tcp_discovery", batch, discovery_base, ports=ports, nse=nse)
+        if _run_stage(scan_id, argv, discovery_log) != 0:
+            return False
+        discovery_xml = nmap_runner.xml_of(discovery_base)
+        if not discovery_xml.exists():
+            return False
+        scanned_hosts |= up_hosts(discovery_xml)
+        tcp_discovery_findings = parse_xml(discovery_xml)
+        tcp_ports = nmap_runner.open_ports_from_xml(discovery_xml, "tcp")
+        if tcp_ports:
+            if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
+                return False
+            identify_base = Path(str(b_base) + ".tcp_identify")
+            identify_log = Path(str(identify_base) + ".log")
+            argv = nmap_runner.build_auto_command(nmap, "tcp_identify", batch, identify_base, ports=ports, tcp_ports=tcp_ports, nse=nse)
+            if _run_stage(scan_id, argv, identify_log) != 0:
+                return False
+            identify_xml = nmap_runner.xml_of(identify_base)
+            if not identify_xml.exists():
+                return False
+            scanned_hosts |= up_hosts(identify_xml)
+            findings.extend(_prefer_identified(parse_xml(identify_xml), tcp_discovery_findings))
+        else:
+            findings.extend(tcp_discovery_findings)
+
+    if udp_port_spec:
+        if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
+            return False
+        udp_base = Path(str(b_base) + ".udp_identify")
+        udp_log = Path(str(udp_base) + ".log")
+        argv = nmap_runner.build_auto_command(nmap, "udp_identify", batch, udp_base, ports=ports, nse=nse)
+        if _run_stage(scan_id, argv, udp_log) != 0:
+            return False
+        udp_xml = nmap_runner.xml_of(udp_base)
+        if not udp_xml.exists():
+            return False
+        scanned_hosts |= up_hosts(udp_xml)
+        findings.extend(parse_xml(udp_xml))
+
+    if not tcp_port_spec and not udp_port_spec:
+        return False
+    _ingest_auto_findings(scan_id, findings, scanned_hosts, tcp_scope, udp_scope)
+    return True
 
 
 def _chunk_worker(scan_id: int) -> None:
@@ -130,6 +459,24 @@ def _chunk_worker(scan_id: int) -> None:
         batch = batches[cursor]
         b_base = Path(str(base) + f".b{cursor}")
         b_log = Path(str(b_base) + ".log")
+        t0 = datetime.now(timezone.utc)
+        if st.get("workflow") == "auto":
+            try:
+                ok = _run_auto_batch(scan_id, nmap, batch, b_base, st)
+            except ValueError:
+                _mark(scan_id, "failed")
+                return
+            if (chunker.read_state(base) or st).get("stop"):
+                _mark(scan_id, "canceled")
+                return
+            if not ok:
+                _mark(scan_id, "failed")
+                return
+            dt = (datetime.now(timezone.utc) - t0).total_seconds()
+            st["cursor"] = cursor + 1
+            st["active_seconds"] = round(st.get("active_seconds", 0) + dt, 1)
+            chunker.write_state(base, st)
+            continue
         try:
             if st.get("options") or st.get("nse"):
                 argv = nmap_runner.build_command_opts(nmap, st.get("options") or [], st.get("ports", ""), batch, b_base, nse=st.get("nse"))
@@ -139,7 +486,6 @@ def _chunk_worker(scan_id: int) -> None:
             _mark(scan_id, "failed")
             return
         _set_current_log(scan_id, b_log)
-        t0 = datetime.now(timezone.utc)
         try:
             proc = nmap_runner.popen(argv, b_log)
         except OSError:
@@ -270,17 +616,122 @@ def _engine_worker(scan_id: int) -> None:
         db.close()
 
 
-def _ingest_xml(db: Session, scan: ScanRun, xml_bytes: bytes, scan_date=None) -> dict:
-    findings = taxonomy.enrich_all(db, parse_xml(xml_bytes))
-    counts = ingest(db, scan.id, findings, up_hosts(xml_bytes), scan_date=scan_date)
-    from .assets import match_assets
-    match_assets(db)
-    scan.host_count = len({f["host_ip"] for f in findings})
-    scan.port_count = len(findings)
-    scan.status = "done"
-    scan.finished_at = datetime.now(timezone.utc)
+def _ingest_xml(db: Session, scan: ScanRun, xml_bytes: bytes, scan_date=None, filename: str | None = None) -> dict:
+    stage = (_stage_file_info(filename) or ("", ""))[1]
+    findings = parse_xml(xml_bytes)
+    scanned_hosts = up_hosts(xml_bytes)
+    if stage:
+        tcp_scope, udp_scope = _scope_from_stage_xml(stage, xml_bytes)
+    else:
+        tcp_scope = _scaninfo_scope(xml_bytes, "tcp")
+        udp_scope = _scaninfo_scope(xml_bytes, "udp")
+    return _commit_ingest(db, scan, findings, scanned_hosts, tcp_scope, udp_scope, scan_date=scan_date)
+
+
+def _zero_counts() -> dict:
+    return {"new": 0, "reopened": 0, "service_changed": 0, "version_changed": 0, "unchanged": 0, "closed": 0}
+
+
+def _add_counts(total: dict, counts: dict) -> None:
+    for key, value in counts.items():
+        total[key] = total.get(key, 0) + int(value or 0)
+
+
+def _first_scan_date(items: list[dict]) -> datetime | None:
+    dates = []
+    for item in items:
+        try:
+            if dt := scan_start(item["bytes"]):
+                dates.append(dt)
+        except Exception:
+            continue
+    return min(dates) if dates else None
+
+
+def _import_single_xml(db: Session, user: User, name: str, xml_bytes: bytes) -> dict:
+    sdate = scan_start(xml_bytes)
+    scan = ScanRun(name=f"가져오기: {name}", status="running", created_by=user.id)
+    db.add(scan)
     db.commit()
-    return counts
+    if sdate is not None:
+        scan.started_at = sdate
+    xml_path = _settings.scans_dir / f"scan_{scan.id}.xml"
+    xml_path.write_bytes(xml_bytes)
+    scan.raw_xml_path = str(xml_path)
+    try:
+        counts = _ingest_xml(db, scan, xml_bytes, scan_date=sdate, filename=name)
+    except Exception:
+        scan.status = "failed"
+        scan.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise
+    record(db, user, "SCAN_IMPORT", target=name, detail=f"#{scan.id}")
+    return {"scan_id": scan.id, "name": scan.name, "counts": counts, "files": [name]}
+
+
+def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, dict]) -> dict:
+    items = list(stages.values())
+    sdate = _first_scan_date(items)
+    display = Path(base.replace("\\", "/")).name
+    scan = ScanRun(name=f"가져오기: {display} 자동 스캔 묶음", status="running", created_by=user.id)
+    scan.command = "자동 스캔 XML 묶음 · TCP 발견 → TCP 식별 → UDP 식별"
+    db.add(scan)
+    db.commit()
+    if sdate is not None:
+        scan.started_at = sdate
+
+    try:
+        scanned_hosts: set[str] = set()
+        tcp_scope: set[int] | None | set = set()
+        udp_scope: set[int] | None | set = set()
+        tcp_discovery_findings: list[dict] = []
+        tcp_identified_findings: list[dict] = []
+        udp_findings: list[dict] = []
+
+        for stage, item in stages.items():
+            (_settings.scans_dir / f"scan_{scan.id}.{stage}.xml").write_bytes(item["bytes"])
+
+        if item := stages.get("tcp_discovery"):
+            xml_bytes = item["bytes"]
+            scanned_hosts |= up_hosts(xml_bytes)
+            tcp_scope = _scaninfo_scope(xml_bytes, "tcp")
+            tcp_discovery_findings = parse_xml(xml_bytes)
+        if item := stages.get("tcp_identify"):
+            xml_bytes = item["bytes"]
+            scanned_hosts |= up_hosts(xml_bytes)
+            if tcp_scope == set():
+                tcp_scope = _scaninfo_scope(xml_bytes, "tcp")
+            tcp_identified_findings = parse_xml(xml_bytes)
+        if item := stages.get("udp_identify"):
+            xml_bytes = item["bytes"]
+            scanned_hosts |= up_hosts(xml_bytes)
+            udp_scope = _scaninfo_scope(xml_bytes, "udp")
+            udp_findings = parse_xml(xml_bytes)
+
+        tcp_findings = _prefer_identified(tcp_identified_findings, tcp_discovery_findings)
+        findings = [*tcp_findings, *udp_findings]
+        if not scanned_hosts:
+            scanned_hosts = {f["host_ip"] for f in findings if f.get("host_ip")}
+
+        merged_path = _settings.scans_dir / f"scan_{scan.id}.xml"
+        counts = _commit_ingest(
+            db,
+            scan,
+            findings,
+            scanned_hosts,
+            tcp_scope,
+            udp_scope,
+            scan_date=sdate,
+            raw_xml_path=merged_path,
+        )
+    except Exception:
+        scan.status = "failed"
+        scan.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise
+    files = [stages[k]["name"] for k in sorted(stages)]
+    record(db, user, "SCAN_IMPORT_BUNDLE", target=display, detail=f"#{scan.id} · {len(files)} files")
+    return {"scan_id": scan.id, "name": scan.name, "counts": counts, "files": files}
 
 
 @router.get("", response_model=list[ScanOut])
@@ -327,7 +778,7 @@ async def import_xml(
     xml_path.write_bytes(xml_bytes)
     scan.raw_xml_path = str(xml_path)
     try:
-        counts = _ingest_xml(db, scan, xml_bytes, scan_date=sdate)
+        counts = _ingest_xml(db, scan, xml_bytes, scan_date=sdate, filename=file.filename)
     except Exception as e:
         scan.status = "failed"
         db.commit()
@@ -335,6 +786,64 @@ async def import_xml(
         raise HTTPException(status_code=400, detail=f"XML 파싱 실패: {e}")
     record(db, user, "SCAN_IMPORT", target=file.filename or "", detail=f"#{scan.id}")
     return IngestSummary(scan_id=scan.id, counts=counts)
+
+
+@router.post("/import-bundle")
+async def import_xml_bundle(
+    files: list[UploadFile] = File(...),
+    user: User = Depends(require_role("auditor")),
+    db: Session = Depends(get_db),
+):
+    payloads = []
+    for f in files:
+        name = f.filename or "scan.xml"
+        if not name.lower().endswith(".xml"):
+            continue
+        payloads.append({"name": name, "bytes": await f.read()})
+    if not payloads:
+        raise HTTPException(status_code=400, detail="가져올 XML 파일이 없습니다.")
+
+    grouped: dict[str, dict[str, dict]] = {}
+    units: list[dict] = []
+    for item in payloads:
+        info = _stage_file_info(item["name"])
+        if not info:
+            units.append({"kind": "single", "sort": item["name"], "item": item})
+            continue
+        base, stage = info
+        grouped.setdefault(base, {})[stage] = item
+    for base, stages in grouped.items():
+        if len(stages) >= 2:
+            units.append({"kind": "bundle", "sort": base, "base": base, "stages": stages})
+        else:
+            only = next(iter(stages.values()))
+            units.append({"kind": "single", "sort": only["name"], "item": only})
+
+    total = _zero_counts()
+    imported = []
+    failed = []
+    for unit in sorted(units, key=lambda u: str(u["sort"]).lower()):
+        try:
+            if unit["kind"] == "bundle":
+                result = _import_stage_bundle(db, user, unit["base"], unit["stages"])
+            else:
+                item = unit["item"]
+                result = _import_single_xml(db, user, item["name"], item["bytes"])
+            imported.append(result)
+            _add_counts(total, result["counts"])
+        except Exception as e:
+            failed.append({"name": str(unit["sort"]), "error": str(e)})
+            record(db, user, "SCAN_IMPORT", target=str(unit["sort"]), detail="실패", ok=False)
+    if not imported and failed:
+        raise HTTPException(status_code=400, detail=f"XML 파싱 실패: {failed[0]['error']}")
+    return {
+        "imported": len(imported),
+        "failed": len(failed),
+        "file_count": len(payloads),
+        "counts": total,
+        "scans": imported,
+        "errors": failed,
+    }
 
 
 @router.post("/run", response_model=ScanOut)
@@ -351,13 +860,24 @@ def run_scan(
     if not nmap:
         raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
     try:
+        if body.workflow not in ("auto", "manual"):
+            raise ValueError("workflow 는 auto 또는 manual 이어야 합니다.")
         hosts = chunker.expand_targets(body.targets)
         if not hosts:
             raise ValueError("유효한 타겟이 없습니다.")
         scope.check_scope(hosts)   # 허용 대역(scope) 밖이면 시작 전에 거절
         batches = chunker.make_batches(hosts, body.batch_size)
         # 옵션/프리셋·포트·NSE 사전 검증(첫 배치로) — 잘못된 입력은 시작 전에 거절.
-        if body.options or body.nse:
+        if body.workflow == "auto":
+            tcp_spec = nmap_runner.auto_tcp_port_spec(body.ports)
+            udp_spec = nmap_runner.auto_udp_port_spec(body.ports)
+            if not tcp_spec and not udp_spec:
+                raise ValueError("자동 스캔에 사용할 TCP 또는 UDP 포트가 없습니다.")
+            if tcp_spec:
+                argv0 = nmap_runner.build_auto_command(nmap, "tcp_discovery", batches[0], _basename(0), ports=body.ports, nse=body.nse)
+            else:
+                argv0 = nmap_runner.build_auto_command(nmap, "udp_identify", batches[0], _basename(0), ports=body.ports, nse=body.nse)
+        elif body.options or body.nse:
             argv0 = nmap_runner.build_command_opts(nmap, body.options, body.ports, batches[0], _basename(0), nse=body.nse)
         else:
             argv0 = nmap_runner.build_command(nmap, body.preset, batches[0], _basename(0))
@@ -371,21 +891,29 @@ def run_scan(
     base = _basename(scan.id)
     chunker.write_state(base, {
         "batches": batches, "cursor": 0, "stop": False, "active_seconds": 0,
-        "options": body.options, "ports": body.ports, "preset": body.preset, "nse": body.nse,
+        "workflow": body.workflow, "options": body.options, "ports": body.ports, "preset": body.preset, "nse": body.nse,
     })
     # 명령 표기는 대표(타겟·-oA 제외) — 호스트 수/배치 수를 덧붙여 가독.
-    parts, skip = [], False
-    for t in argv0:
-        if skip:
-            skip = False
-            continue
-        if t == "-oA":
-            skip = True
-            continue
-        if t in batches[0]:
-            continue
-        parts.append(t)
-    scan.command = f"{' '.join(parts)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
+    if body.workflow == "auto":
+        stages = []
+        if nmap_runner.auto_tcp_port_spec(body.ports):
+            stages.extend([AUTO_STAGE_LABELS["tcp_discovery"], AUTO_STAGE_LABELS["tcp_identify"]])
+        if nmap_runner.auto_udp_port_spec(body.ports):
+            stages.append(AUTO_STAGE_LABELS["udp_identify"])
+        scan.command = f"자동 스캔 · {' → '.join(stages)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
+    else:
+        parts, skip = [], False
+        for t in argv0:
+            if skip:
+                skip = False
+                continue
+            if t == "-oA":
+                skip = True
+                continue
+            if t in batches[0]:
+                continue
+            parts.append(t)
+        scan.command = f"{' '.join(parts)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
     db.commit()
     db.refresh(scan)
     record(db, user, "SCAN_RUN", target=scan.targets,
@@ -635,13 +1163,14 @@ def estimate_scan(body: ScanRunIn, _: User = Depends(current_user), db: Session 
     size = max(1, body.batch_size)
     batch_count = (host_count + size - 1) // size if host_count else 0
 
-    want = _profile(body.options, body.ports, body.preset)
+    want = _estimate_profile(body)
     rates: list[float] = []
     for s in db.query(ScanRun).filter(ScanRun.status == "done").order_by(ScanRun.id.desc()).limit(50):
         st = chunker.read_state(_basename(s.id))
         if not st:
             continue
-        if _profile(st.get("options") or [], st.get("ports", ""), st.get("preset", "quick")) != want:
+        if (("auto", (st.get("ports", "") or "").replace(" ", "")) if st.get("workflow") == "auto"
+                else _profile(st.get("options") or [], st.get("ports", ""), st.get("preset", "quick"))) != want:
             continue
         nh = sum(len(b) for b in st.get("batches", []))
         sec = st.get("active_seconds", 0)

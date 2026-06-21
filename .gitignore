@@ -30,6 +30,9 @@ live_sample/verify*.json
 # 스캔 엔진/랩 런타임 산출물 — 스캔으로 재생성(XML·이벤트·상태). 하니스 코드는 추적.
 engine/engine-out/
 lab/samples/
+# Standalone scanner outputs
+scanops_scans/
+scanner/scanops_scans/
 
 # Claude Code 로컬 설정(머신별)
 .claude/settings.local.json
