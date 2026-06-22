@@ -26,14 +26,15 @@ STATS_EVERY_DEFAULT = "10s"
 UDP_DEFAULT_PORTS = "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 용도 식별형 NSE만(취약점/노이즈/부작용 스크립트 제외) — 빠르고 부작용 적게 '무엇/왜' 파악.
-# 제외: ssl-enum-ciphers·ntp-monlist·fingerprint-strings·dns-recursion·vnc-title
+# 제외: ssl-enum-ciphers·ntp-monlist·dns-recursion·vnc-title
 # DB 찌르는 스크립트(oracle-tns-version·ms-sql-info 등)는 장애 위험(티베로 등 호환DB 다운)으로 기본 제외.
+# fingerprint-strings: -sV 가 식별 못 한 포트의 원시 응답을 찍어 사람이 판단 → 미식별 포트 조사용.
 # TCP 식별용(2단계): TCP portrule 스크립트만. UDP portrule(snmp/nbstat/ike 등)은 UDP_NSE_SCRIPTS 로 분리.
 DEFAULT_NSE_SCRIPTS = (
     "http-headers,http-server-header,http-title,ssl-cert,"
     "tls-alpn,ssh-hostkey,smb-os-discovery,smb-protocols,"
     "rdp-ntlm-info,sip-methods,rpcinfo,banner,"
-    "ftp-anon,ftp-syst,telnet-encryption,dns-nsid,vnc-info"
+    "ftp-anon,ftp-syst,telnet-encryption,dns-nsid,vnc-info,fingerprint-strings"
 )
 # UDP 식별용(3단계): UDP 기본 포트(53·111·123·137·161·500·5060 등)에 실제 매칭되는 스크립트만.
 # rpcinfo 는 UDP 111(포트맵퍼)에서 RPC/NFS(2049) 프로그램 매핑 → 정체 파악에 유효.

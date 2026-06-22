@@ -125,7 +125,7 @@ NSE_SCRIPTS = [
     {"key": "ntp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "udp", "desc": "NTP 서버 정보(monlist 아님, 양성 readvar)"},
     {"key": "ntp-monlist", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "NTP monlist(증폭 취약 점검용)"},
     {"key": "rpcinfo", "group": "RPC", "nmap_default": True, "proto": "both", "desc": "RPC 서비스 목록"},
-    {"key": "fingerprint-strings", "group": "기타", "nmap_default": False, "proto": "both", "desc": "미식별 서비스 원시 응답"},
+    {"key": "fingerprint-strings", "group": "기타", "nmap_default": True, "proto": "tcp", "desc": "미식별 서비스 원시 응답(-sV 가 식별 못 한 포트 조사)"},
     {"key": "banner", "group": "기타", "nmap_default": True, "proto": "tcp", "desc": "서비스 배너 수집"},
     {"key": "ftp-anon", "group": "FTP", "nmap_default": True, "proto": "tcp", "desc": "익명 FTP 접속 허용 여부"},
     {"key": "ftp-syst", "group": "FTP", "nmap_default": True, "proto": "tcp", "desc": "FTP SYST/STAT 정보"},
