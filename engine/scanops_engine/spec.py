@@ -17,8 +17,9 @@ _TIMINGS = {"-T0", "-T1", "-T2", "-T3", "-T4", "-T5"}
 DEFAULT_UDP_PORTS = ("7,53,67,68,69,88,123,135,137,138,139,161,162,389,400,500,"
                      "514,520,623,1900,2049,4500,5060,5353,5355,11211")
 # 서비스 probe 기본 NSE — 타겟형(portrule 안 맞으면 자동 skip). 원본의 20종 전수 대신 핵심만.
+# DB 찌르는 스크립트(redis-info·oracle-tns-version·ms-sql-info 등)는 장애 위험으로 기본 제외.
 DEFAULT_NSE = ["banner", "http-headers", "http-title", "http-server-header",
-               "ssl-cert", "ssh-hostkey", "ftp-anon", "redis-info",
+               "ssl-cert", "ssh-hostkey", "ftp-anon",
                "smb-os-discovery", "snmp-info"]
 
 

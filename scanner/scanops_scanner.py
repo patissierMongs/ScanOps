@@ -27,10 +27,11 @@ UDP_DEFAULT_PORTS = "7,53,67,68,69,88,123,135,137,138,139,161,162,389,400,500,51
 PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 용도 식별형 NSE만(취약점/노이즈/부작용 스크립트 제외) — 빠르고 부작용 적게 '무엇/왜' 파악.
 # 제외: ssl-enum-ciphers·ntp-info·ntp-monlist·fingerprint-strings·dns-recursion·vnc-title
+# DB 찌르는 스크립트(oracle-tns-version·ms-sql-info 등)는 장애 위험(티베로 등 호환DB 다운)으로 기본 제외.
 DEFAULT_NSE_SCRIPTS = (
     "http-headers,http-server-header,http-title,ssl-cert,"
     "tls-alpn,ssh-hostkey,nbstat,smb-os-discovery,smb-protocols,"
-    "oracle-tns-version,rdp-ntlm-info,snmp-info,ike-version,sip-methods,"
+    "rdp-ntlm-info,snmp-info,ike-version,sip-methods,"
     "rpcinfo,banner,ftp-anon,ftp-syst,telnet-encryption,dns-nsid,vnc-info"
 )
 # 발견 단계 호스트 디스커버리: ICMP 막은 서버도 흔한 서비스 포트로 잡고, 죽은 IP 는 건너뛴다
