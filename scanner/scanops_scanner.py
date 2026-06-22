@@ -45,8 +45,11 @@ UDP_NSE_SCRIPTS = (
 # 발견 단계 호스트 디스커버리: ICMP 막은 서버도 흔한 서비스 포트로 잡고, 죽은 IP 는 건너뛴다
 # (-Pn 전수보다 듬성한 대역에서 빠르고 누락 적음). -sS 라 raw 소켓(관리자) 전제.
 DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"
+# --open 은 discovery 에 쓰지 않는다: 열린 TCP 가 0개인 up 호스트(UDP 전용: DNS/SNMP/NTP 등)를
+# nmap 이 XML 에서 통째로 빼버려 live_hosts 에서 누락 → 그 호스트가 UDP 식별을 못 받게 된다.
+# 닫힌 포트는 어차피 <extraports> 로 요약되어 XML 이 커지지 않고, 열린 포트 추출에도 영향 없다.
 AUTO_TCP_DISCOVERY_FLAGS = [
-    "-sS", DISCOVERY_PS, "-n", "-T4", "--open", "--reason",
+    "-sS", DISCOVERY_PS, "-n", "-T4", "--reason",
     "--min-hostgroup", "64", "--max-retries", "2",
     "--defeat-rst-ratelimit", "--max-parallelism", "100",
     "-p", "T:1-65535",
@@ -456,6 +459,9 @@ def live_hosts_from_xml(path: Path) -> list[str]:
         if status is None or (status.get("state") or "").lower() != "up":
             continue
         for addr in host.findall("address"):
+            # MAC(addrtype="mac")은 TARGET_RE 에 매치되지만 nmap 타깃이 될 수 없어 제외.
+            if (addr.get("addrtype") or "").lower() == "mac":
+                continue
             ip = addr.get("addr") or ""
             # nmap 자체 출력이지만 argv 주입 전 한 번 더 검증.
             if ip and ip not in seen and TARGET_RE.match(ip):

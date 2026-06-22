@@ -103,9 +103,13 @@ def up_hosts(source) -> set[str]:
         status = host.find("status")
         if status is not None and status.get("state") != "up":
             continue
+        # IP 만 — MAC(addrtype="mac")이 타깃/스코프로 새지 않게 ipv4 우선, 없으면 첫 비-MAC 주소.
         addr_el = host.find("address[@addrtype='ipv4']")
         if addr_el is None:
-            addr_el = host.find("address")
+            for a in host.findall("address"):
+                if (a.get("addrtype") or "").lower() != "mac":
+                    addr_el = a
+                    break
         if addr_el is not None:
             ips.add(addr_el.get("addr"))
     return ips
