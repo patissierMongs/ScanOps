@@ -378,6 +378,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
     """Run discovery -> identify -> UDP for one batch, then ingest the final observations once."""
     ports = state.get("ports", "")
     nse = state.get("nse") if state.get("nse") is not None else scan_options.NSE_DEFAULT_KEYS
+    udp_all_targets = bool(state.get("udp_all_targets"))
     tcp_port_spec = nmap_runner.auto_tcp_port_spec(ports)
     udp_port_spec = nmap_runner.auto_udp_port_spec(ports)
     tcp_scope = _port_scope(tcp_port_spec, "T") if tcp_port_spec else set()
@@ -421,13 +422,15 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             findings.extend(tcp_discovery_findings)
 
     # discovery 를 돌렸는데 생존 호스트가 0이면 UDP 도 스킵(죽은 대역에 -Pn UDP 낭비 방지).
-    if udp_port_spec and (not tcp_port_spec or discovery_live):
+    # udp_all_targets(opt-in)면 discovery 결과 무관하게 원본 배치 전체로 UDP(죽은 IP 비용 감수,
+    # TCP/ICMP/ACK 다 침묵하지만 UDP만 여는 호스트·부분 누락까지 보장). 아니면 생존 호스트로 제한,
+    # discovery 를 돌렸는데 생존 0이면 skip(죽은 대역 UDP 낭비 방지).
+    if udp_port_spec and (udp_all_targets or not tcp_port_spec or discovery_live):
         if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
             return False
         udp_base = Path(str(b_base) + ".udp_identify")
         udp_log = Path(str(udp_base) + ".log")
-        # discovery 를 돌렸으면 생존 호스트로만 UDP 식별, 아니면(UDP-only) 배치 전체.
-        udp_targets = discovery_live or batch
+        udp_targets = batch if udp_all_targets else (discovery_live or batch)
         argv = nmap_runner.build_auto_command(nmap, "udp_identify", udp_targets, udp_base, ports=ports, nse=nse)
         if _run_stage(scan_id, argv, udp_log) != 0:
             return False
@@ -899,6 +902,7 @@ def run_scan(
     chunker.write_state(base, {
         "batches": batches, "cursor": 0, "stop": False, "active_seconds": 0,
         "workflow": body.workflow, "options": body.options, "ports": body.ports, "preset": body.preset, "nse": body.nse,
+        "udp_all_targets": body.udp_all_targets,
     })
     # 명령 표기는 대표(타겟·-oA 제외) — 호스트 수/배치 수를 덧붙여 가독.
     if body.workflow == "auto":
@@ -906,7 +910,10 @@ def run_scan(
         if nmap_runner.auto_tcp_port_spec(body.ports):
             stages.extend([AUTO_STAGE_LABELS["tcp_discovery"], AUTO_STAGE_LABELS["tcp_identify"]])
         if nmap_runner.auto_udp_port_spec(body.ports):
-            stages.append(AUTO_STAGE_LABELS["udp_identify"])
+            label = AUTO_STAGE_LABELS["udp_identify"]
+            if body.udp_all_targets:
+                label += "(전체 타깃)"
+            stages.append(label)
         scan.command = f"자동 스캔 · {' → '.join(stages)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
     else:
         parts, skip = [], False
