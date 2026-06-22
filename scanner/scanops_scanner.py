@@ -26,31 +26,41 @@ STATS_EVERY_DEFAULT = "10s"
 UDP_DEFAULT_PORTS = "7,53,67,68,69,88,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 용도 식별형 NSE만(취약점/노이즈/부작용 스크립트 제외) — 빠르고 부작용 적게 '무엇/왜' 파악.
-# 제외: ssl-enum-ciphers·ntp-info·ntp-monlist·fingerprint-strings·dns-recursion·vnc-title
+# 제외: ssl-enum-ciphers·ntp-monlist·fingerprint-strings·dns-recursion·vnc-title
 # DB 찌르는 스크립트(oracle-tns-version·ms-sql-info 등)는 장애 위험(티베로 등 호환DB 다운)으로 기본 제외.
+# TCP 식별용(2단계): TCP portrule 스크립트만. UDP portrule(snmp/nbstat/ike 등)은 UDP_NSE_SCRIPTS 로 분리.
 DEFAULT_NSE_SCRIPTS = (
     "http-headers,http-server-header,http-title,ssl-cert,"
-    "tls-alpn,ssh-hostkey,nbstat,smb-os-discovery,smb-protocols,"
-    "rdp-ntlm-info,snmp-info,ike-version,sip-methods,"
-    "rpcinfo,banner,ftp-anon,ftp-syst,telnet-encryption,dns-nsid,vnc-info"
+    "tls-alpn,ssh-hostkey,smb-os-discovery,smb-protocols,"
+    "rdp-ntlm-info,sip-methods,rpcinfo,banner,"
+    "ftp-anon,ftp-syst,telnet-encryption,dns-nsid,vnc-info"
+)
+# UDP 식별용(3단계): UDP 기본 포트(53·123·137·161·500·5060 등)에 실제 매칭되는 스크립트만.
+# 부작용 제외: dhcp-discover(리스 요청)·snmp-interfaces(장황·느림)·ntp-monlist(증폭).
+UDP_NSE_SCRIPTS = (
+    "snmp-info,snmp-sysdescr,nbstat,ike-version,dns-nsid,ntp-info,sip-methods"
 )
 # 발견 단계 호스트 디스커버리: ICMP 막은 서버도 흔한 서비스 포트로 잡고, 죽은 IP 는 건너뛴다
 # (-Pn 전수보다 듬성한 대역에서 빠르고 누락 적음). -sS 라 raw 소켓(관리자) 전제.
 DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"
 AUTO_TCP_DISCOVERY_FLAGS = [
     "-sS", DISCOVERY_PS, "-n", "-T4", "--open", "--reason",
-    "--min-hostgroup", "64", "--max-retries", "1",
+    "--min-hostgroup", "64", "--max-retries", "2",
     "--defeat-rst-ratelimit", "--max-parallelism", "100",
-    "--max-scan-delay", "5ms", "-p", "T:1-65535",
+    "-p", "T:1-65535",
 ]
+# identify 단계는 discovery 에서 살아난 호스트만 타깃(execute_auto 가 live_hosts 주입)이라
+# -Pn(전수 live 취급)이 안전. -n 제거 → 역DNS 켜서 호스트명 확보(용도 식별 근거).
 AUTO_TCP_IDENTIFY_FLAGS = [
-    "-sS", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason", "-T4",
+    "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
     "--max-retries", "2", "--script", DEFAULT_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
+# UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 백오프를 막아 open|filtered 오판).
+# 역DNS 는 TCP identify 가 같은 호스트에서 이미 끝냄 → 중복 PTR 피하려 -n 유지.
 AUTO_UDP_IDENTIFY_FLAGS = [
     "-sU", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason", "-T4",
-    "--max-retries", "1", "--max-scan-delay", "5ms", "-p", f"U:{UDP_DEFAULT_PORTS}",
-    "--script", DEFAULT_NSE_SCRIPTS, "--script-timeout", "10s",
+    "--max-retries", "2", "-p", f"U:{UDP_DEFAULT_PORTS}",
+    "--script", UDP_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
 AUTO_STAGES = [
     ("tcp_discovery", "TCP 전체 포트 발견"),
@@ -67,7 +77,7 @@ PRESETS: dict[str, list[str]] = {
         "-T4", "--max-retries", "2", "--min-hostgroup", "64",
         "--max-parallelism", "100", "--defeat-rst-ratelimit",
         "-p", PRECISION_PORTS,
-        "--script", DEFAULT_NSE_SCRIPTS,
+        "--script", DEFAULT_NSE_SCRIPTS + "," + UDP_NSE_SCRIPTS,
     ],
 }
 
@@ -377,15 +387,18 @@ def output_base(plan: dict, index: int, stage_id: str = "") -> Path:
     return out_dir / f"{name}.b{index:04d}{suffix}"
 
 
-def build_command(plan: dict, index: int, stage_id: str = "", tcp_ports: list[int] | None = None) -> list[str]:
+def build_command(plan: dict, index: int, stage_id: str = "", tcp_ports: list[int] | None = None,
+                  targets: list[str] | None = None) -> list[str]:
     base = output_base(plan, index, stage_id)
     flags = build_auto_flags(plan, stage_id, tcp_ports) if stage_id else plan["base_flags"]
+    # identify 단계는 discovery 생존 호스트(targets)로 좁힌다. 없으면 원본 배치 전체.
+    scan_targets = targets if targets else plan["batches"][index]
     return [
         plan["nmap"],
         "--stats-every", plan["stats_every"],
         *flags,
         "-oA", str(base),
-        *plan["batches"][index],
+        *scan_targets,
     ]
 
 
@@ -422,6 +435,29 @@ def open_ports_from_xml(path: Path, protocol: str = "tcp") -> list[int]:
         except ValueError:
             continue
     return sorted(ports)
+
+
+def live_hosts_from_xml(path: Path) -> list[str]:
+    """discovery XML 에서 status=up 인 호스트 주소만 추출(identify 타깃 좁히기)."""
+    if not path.exists():
+        return []
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        return []
+    hosts: list[str] = []
+    seen: set[str] = set()
+    for host in root.findall(".//host"):
+        status = host.find("status")
+        if status is None or (status.get("state") or "").lower() != "up":
+            continue
+        for addr in host.findall("address"):
+            ip = addr.get("addr") or ""
+            # nmap 자체 출력이지만 argv 주입 전 한 번 더 검증.
+            if ip and ip not in seen and TARGET_RE.match(ip):
+                seen.add(ip)
+                hosts.append(ip)
+    return hosts
 
 
 def run_stage_name(stage_id: str) -> str:
@@ -600,8 +636,9 @@ def finish_plan(plan: dict, state_path: Path, zip_outputs: bool) -> None:
         print(f"zip: {zip_path}")
 
 
-def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", tcp_ports: list[int] | None = None) -> int:
-    cmd = build_command(plan, idx, stage_id, tcp_ports)
+def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", tcp_ports: list[int] | None = None,
+                   targets: list[str] | None = None) -> int:
+    cmd = build_command(plan, idx, stage_id, tcp_ports, targets)
     base = output_base(plan, idx, stage_id)
     started = now_iso()
     stage_label = f" {run_stage_name(stage_id)}" if stage_id else ""
@@ -653,9 +690,11 @@ def execute_auto(plan: dict, state_path: Path, zip_outputs: bool) -> int:
 
             discovery_xml = Path(str(output_base(plan, idx, "tcp_discovery")) + ".xml")
             tcp_ports = open_ports_from_xml(discovery_xml, "tcp")
+            # identify 는 발견된 살아있는 호스트만 타깃(죽은 IP 재스캔 방지). 비면 원본 배치로 폴백.
+            live_hosts = live_hosts_from_xml(discovery_xml) or None
             if tcp_ports:
                 if not stage_succeeded(plan, idx, "tcp_identify"):
-                    rc = run_nmap_stage(plan, idx, state_path, "tcp_identify", tcp_ports)
+                    rc = run_nmap_stage(plan, idx, state_path, "tcp_identify", tcp_ports, live_hosts)
                     if rc != 0:
                         return fail_plan(plan, state_path, rc)
             else:
@@ -664,19 +703,29 @@ def execute_auto(plan: dict, state_path: Path, zip_outputs: bool) -> int:
         else:
             append_skipped_stage(plan, idx, "tcp_discovery", "사용자가 지정한 포트에 TCP 포트가 없습니다.")
             append_skipped_stage(plan, idx, "tcp_identify", "사용자가 지정한 포트에 TCP 포트가 없습니다.")
+            live_hosts = None
             write_json(state_path, plan)
 
         if plan.get("tcp_only"):
             append_skipped_stage(plan, idx, "udp_identify", "TCP만 옵션이 선택되었습니다.")
             write_json(state_path, plan)
-        elif auto_udp_ports(plan):
-            if not stage_succeeded(plan, idx, "udp_identify"):
-                rc = run_nmap_stage(plan, idx, state_path, "udp_identify")
-                if rc != 0:
-                    return fail_plan(plan, state_path, rc)
-        else:
+        elif not auto_udp_ports(plan):
             append_skipped_stage(plan, idx, "udp_identify", "사용자가 지정한 포트에 UDP 포트가 없습니다.")
             write_json(state_path, plan)
+        elif auto_tcp_discovery_ports(plan):
+            # discovery 를 돌렸으면 생존 호스트로만 UDP 식별(죽은 IP 재스캔 방지).
+            if not live_hosts:
+                append_skipped_stage(plan, idx, "udp_identify", "tcp_discovery 에서 살아있는 호스트를 찾지 못했습니다.")
+                write_json(state_path, plan)
+            elif not stage_succeeded(plan, idx, "udp_identify"):
+                rc = run_nmap_stage(plan, idx, state_path, "udp_identify", targets=live_hosts)
+                if rc != 0:
+                    return fail_plan(plan, state_path, rc)
+        elif not stage_succeeded(plan, idx, "udp_identify"):
+            # discovery 를 안 돌렸으면 생존 정보가 없으므로 원본 배치 전체로 UDP 식별.
+            rc = run_nmap_stage(plan, idx, state_path, "udp_identify")
+            if rc != 0:
+                return fail_plan(plan, state_path, rc)
 
         plan["cursor"] = idx + 1
         write_json(state_path, plan)
