@@ -405,12 +405,16 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
         scanned_hosts |= set(discovery_live)
         tcp_discovery_findings = parse_xml(discovery_xml)
         tcp_ports = nmap_runner.open_ports_from_xml(discovery_xml, "tcp")
-        if tcp_ports:
+        # 취약 DB 포트(오라클/티베로 TNS)는 -sV/NSE 프로브에서 제외 — 리스너 다운 방지.
+        # 발견(SYN)으로 '열림'만 잡혔고 discovery findings 에 이미 있으니 결과엔 그대로 남는다.
+        no_probe = set(state.get("no_probe_ports") or scan_options.NO_PROBE_PORTS)
+        probe_ports = [p for p in tcp_ports if p not in no_probe]
+        if probe_ports:
             if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
                 return False
             identify_base = Path(str(b_base) + ".tcp_identify")
             identify_log = Path(str(identify_base) + ".log")
-            argv = nmap_runner.build_auto_command(nmap, "tcp_identify", discovery_live or batch, identify_base, ports=ports, tcp_ports=tcp_ports, nse=nse, version_all=version_all)
+            argv = nmap_runner.build_auto_command(nmap, "tcp_identify", discovery_live or batch, identify_base, ports=ports, tcp_ports=probe_ports, nse=nse, version_all=version_all)
             if _run_stage(scan_id, argv, identify_log) != 0:
                 return False
             identify_xml = nmap_runner.xml_of(identify_base)
@@ -419,6 +423,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             scanned_hosts |= up_hosts(identify_xml)
             findings.extend(_prefer_identified(parse_xml(identify_xml), tcp_discovery_findings))
         else:
+            # 열린 포트가 없거나 전부 무프로브(DB) → 식별 생략, discovery 의 '열림'만 기록.
             findings.extend(tcp_discovery_findings)
 
     # discovery 를 돌렸는데 생존 호스트가 0이면 UDP 도 스킵(죽은 대역에 -Pn UDP 낭비 방지).
