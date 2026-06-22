@@ -32,14 +32,14 @@ AUTO_TCP_DISCOVERY_FLAGS = [
     "--defeat-rst-ratelimit", "--max-parallelism", "100",
 ]
 # 식별은 발견된 생존 호스트만 대상(scans.py 가 discovery_live 주입)이라 -Pn 안전, -n 제거 → 역DNS 로
-# 호스트명 확보(용도 식별 근거). --version-all(intensity 9)로 rarity 높은 서비스(redis 등)까지 식별.
+# 호스트명 확보(용도 식별 근거). 기본은 -sV(intensity 7, nmap 표준). 전수 probe 는 별도 프리셋/옵션.
 AUTO_TCP_IDENTIFY_FLAGS = [
-    "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
+    "-sS", "-Pn", "-sV", "--open", "--reason",
     "-T4", "--max-retries", "2", "--script-timeout", "10s",
 ]
 # UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 적응형 백오프를 막아 open|filtered 오판).
 AUTO_UDP_IDENTIFY_FLAGS = [
-    "-sU", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason",
+    "-sU", "-Pn", "-n", "-sV", "--open", "--reason",
     "-T4", "--max-retries", "2", "--script-timeout", "10s",
 ]
 

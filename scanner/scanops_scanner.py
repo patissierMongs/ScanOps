@@ -53,16 +53,15 @@ AUTO_TCP_DISCOVERY_FLAGS = [
 ]
 # identify 단계는 discovery 에서 살아난 호스트만 타깃(execute_auto 가 live_hosts 주입)이라
 # -Pn(전수 live 취급)이 안전. -n 제거 → 역DNS 켜서 호스트명 확보(용도 식별 근거).
-# --version-all(intensity 9): rarity 높은 서비스(redis 등 rarity 8)까지 식별. 포트스캔에 죽는
-# 서비스는 그 자체가 취약점 → 강도를 낮추기보다 정상 식별하고 조치를 압박한다.
+# 기본은 -sV(intensity 7, nmap 표준). --version-all 전수 probe 는 phase1 프리셋 등으로 선택.
 AUTO_TCP_IDENTIFY_FLAGS = [
-    "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
+    "-sS", "-Pn", "-sV", "--open", "--reason", "-T4",
     "--max-retries", "2", "--script", DEFAULT_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
 # UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 백오프를 막아 open|filtered 오판).
 # 역DNS 는 TCP identify 가 같은 호스트에서 이미 끝냄 → 중복 PTR 피하려 -n 유지.
 AUTO_UDP_IDENTIFY_FLAGS = [
-    "-sU", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason", "-T4",
+    "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
     "--max-retries", "2", "-p", f"U:{UDP_DEFAULT_PORTS}",
     "--script", UDP_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
