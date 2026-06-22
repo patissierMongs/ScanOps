@@ -52,15 +52,16 @@ AUTO_TCP_DISCOVERY_FLAGS = [
 ]
 # identify 단계는 discovery 에서 살아난 호스트만 타깃(execute_auto 가 live_hosts 주입)이라
 # -Pn(전수 live 취급)이 안전. -n 제거 → 역DNS 켜서 호스트명 확보(용도 식별 근거).
-# 기본은 -sV(intensity 7); --version-all(전수 probe)은 느려서 --version-all 옵션으로만 추가.
+# --version-all(intensity 9): rarity 높은 서비스(redis 등 rarity 8)까지 식별. 포트스캔에 죽는
+# 서비스는 그 자체가 취약점 → 강도를 낮추기보다 정상 식별하고 조치를 압박한다.
 AUTO_TCP_IDENTIFY_FLAGS = [
-    "-sS", "-Pn", "-sV", "--open", "--reason", "-T4",
+    "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
     "--max-retries", "2", "--script", DEFAULT_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
 # UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 백오프를 막아 open|filtered 오판).
 # 역DNS 는 TCP identify 가 같은 호스트에서 이미 끝냄 → 중복 PTR 피하려 -n 유지.
 AUTO_UDP_IDENTIFY_FLAGS = [
-    "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
+    "-sU", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason", "-T4",
     "--max-retries", "2", "-p", f"U:{UDP_DEFAULT_PORTS}",
     "--script", UDP_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
@@ -356,9 +357,6 @@ def apply_auto_modifiers(flags: list[str], plan: dict) -> list[str]:
         flags = strip_flags(flags, {"--open"})
     if plan.get("open_only") and "--open" not in flags:
         flags.append("--open")
-    # 정밀 식별: -sV 단계에만 --version-all(intensity 9) 추가. discovery 엔 -sV 가 없어 무영향.
-    if plan.get("version_all") and "-sV" in flags and "--version-all" not in flags:
-        flags.append("--version-all")
     return flags
 
 
@@ -549,7 +547,6 @@ def create_plan(args: argparse.Namespace) -> dict:
         "tcp_only": args.tcp_only,
         "no_scripts": args.no_scripts,
         "nse_default": args.nse_default,
-        "version_all": args.version_all,
         "scripts": validate_scripts(args.scripts),
         "open_only": args.open_only,
         "include_closed": args.include_closed,
@@ -788,7 +785,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--nse-default", action="store_true", help="Run the built-in NSE script set.")
     p.add_argument("--scripts", default="", help="Comma-separated NSE script names. Overrides --nse-default script list.")
     p.add_argument("--no-scripts", action="store_true", help="Disable NSE scripts for profiles that include them.")
-    p.add_argument("--version-all", action="store_true", help="Add --version-all (intensity 9) to auto identify stages. Slower; for precision rescans. Default is -sV.")
     p.add_argument("--open-only", action="store_true", help="Add --open. Faster/smaller, but closed ports are omitted from heatmap XML.")
     p.add_argument("--include-closed", action="store_true", help="Remove --open so closed/filtered ports remain in XML.")
     p.add_argument("--stats-every", default=STATS_EVERY_DEFAULT, help="nmap --stats-every value.")

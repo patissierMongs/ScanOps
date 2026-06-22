@@ -378,7 +378,6 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
     """Run discovery -> identify -> UDP for one batch, then ingest the final observations once."""
     ports = state.get("ports", "")
     nse = state.get("nse") if state.get("nse") is not None else scan_options.NSE_DEFAULT_KEYS
-    version_all = bool(state.get("version_all"))
     tcp_port_spec = nmap_runner.auto_tcp_port_spec(ports)
     udp_port_spec = nmap_runner.auto_udp_port_spec(ports)
     tcp_scope = _port_scope(tcp_port_spec, "T") if tcp_port_spec else set()
@@ -410,7 +409,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
                 return False
             identify_base = Path(str(b_base) + ".tcp_identify")
             identify_log = Path(str(identify_base) + ".log")
-            argv = nmap_runner.build_auto_command(nmap, "tcp_identify", discovery_live or batch, identify_base, ports=ports, tcp_ports=tcp_ports, nse=nse, version_all=version_all)
+            argv = nmap_runner.build_auto_command(nmap, "tcp_identify", discovery_live or batch, identify_base, ports=ports, tcp_ports=tcp_ports, nse=nse)
             if _run_stage(scan_id, argv, identify_log) != 0:
                 return False
             identify_xml = nmap_runner.xml_of(identify_base)
@@ -429,7 +428,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
         udp_log = Path(str(udp_base) + ".log")
         # discovery 를 돌렸으면 생존 호스트로만 UDP 식별, 아니면(UDP-only) 배치 전체.
         udp_targets = discovery_live or batch
-        argv = nmap_runner.build_auto_command(nmap, "udp_identify", udp_targets, udp_base, ports=ports, nse=nse, version_all=version_all)
+        argv = nmap_runner.build_auto_command(nmap, "udp_identify", udp_targets, udp_base, ports=ports, nse=nse)
         if _run_stage(scan_id, argv, udp_log) != 0:
             return False
         udp_xml = nmap_runner.xml_of(udp_base)
