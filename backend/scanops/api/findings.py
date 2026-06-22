@@ -19,11 +19,34 @@ from ..schemas import (
     EventOut, FindingOut, FindingPatch, RescanIn, RescanOut, RescanRunIn, RescanRunOut,
 )
 from ..scanning import engine_runner, nmap_runner
+from ..scanning.nmap_parse import _extract_key_line
 from ..spreadsheet import safe_cell
 from .deps import current_user, require_role
 
 router = APIRouter()
 _settings = get_settings()
+
+
+def _purpose_evidence(f: Finding) -> list[str]:
+    """포트가 '무엇이고 왜 열렸나'를 추정하는 근거를 한데 모은다 — 관리자에게 포트번호만 주던 것을
+    넘어, 호스트명·서비스/제품/버전·식별·분류·NSE 추출(인증서 CN·SMB OS·NTLM·HTTP 제목 등)을 묶어 제시.
+    """
+    ev: list[str] = []
+    if f.hostname:
+        ev.append(f"호스트명(역DNS): {f.hostname}")
+    svc = " ".join(x for x in (f.service, f.product, f.version) if x).strip()
+    if svc:
+        ev.append(f"서비스: {svc}" + (f" ({f.identification})" if f.identification else ""))
+    if f.category or f.usage:
+        ev.append(f"분류/용도: {' · '.join(x for x in (f.category, f.usage) if x)}")
+    # NSE 추출 — 모든 스크립트 출력에서 핵심 한 줄(CN/OS/host/NTLM/title 등)을 뽑아 dedup.
+    for s in (f.nse_json or []):
+        key = _extract_key_line(s.get("id", ""), s.get("output", ""))
+        if key and key not in ev:
+            ev.append(key)
+    if f.cpe:
+        ev.append(f"CPE: {f.cpe}")
+    return ev
 
 
 def _compliance(f: Finding) -> str:
@@ -57,6 +80,7 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("first_seen", "등록 날짜", lambda f: f.first_seen.strftime("%Y-%m-%d")),
     ("last_seen", "스캔 날짜", lambda f: f.last_seen.strftime("%Y-%m-%d")),
     ("compliance", "컴플라이언스근거", _compliance),
+    ("purpose", "용도근거", lambda f: " · ".join(_purpose_evidence(f))),
     ("manual_note", "메모", lambda f: f.manual_note),
 ]
 _COL_MAP = {key: (header, getter) for key, header, getter in COLUMNS}
@@ -247,6 +271,15 @@ def finding_events(fid: int, _: User = Depends(current_user), db: Session = Depe
     if db.get(Finding, fid) is None:
         raise HTTPException(status_code=404, detail="발견을 찾을 수 없습니다.")
     return db.query(FindingEvent).filter_by(finding_id=fid).order_by(FindingEvent.created_at).all()
+
+
+@router.get("/{fid}/evidence")
+def finding_evidence(fid: int, _: User = Depends(current_user), db: Session = Depends(get_db)):
+    """용도 추정 근거 — 발견 상세에서 '왜 열렸나/무엇인가'를 보여줄 근거 줄 목록."""
+    row = db.get(Finding, fid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="발견을 찾을 수 없습니다.")
+    return {"evidence": _purpose_evidence(row)}
 
 
 @router.patch("/{fid}", response_model=FindingOut)

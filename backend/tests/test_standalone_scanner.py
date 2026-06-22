@@ -530,3 +530,30 @@ def test_single_workflow_dry_run_keeps_basic_default(tmp_path):
 
 def test_gui_script_compiles_without_extra_dependencies():
     py_compile.compile(str(GUI_SCRIPT), doraise=True)
+
+
+def test_max_hosts_cap_enforced_without_batching(tmp_path):
+    """--max-hosts 캡은 비배치 모드에서도 적용된다(이전엔 batch-size>0 일 때만 동작하던 버그)."""
+    import pytest
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--max-hosts", "2", "10.0.0.0/24",   # batch-size 기본 0 = 비배치
+    ])
+    with pytest.raises(ValueError):
+        scanner.create_plan(args)
+
+
+def test_auto_discovery_uses_ps_and_curated_nse(tmp_path):
+    """발견 단계는 -PS 호스트 디스커버리(-Pn 아님), 식별 NSE 는 노이즈 제외 정체식별형."""
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1",
+    ])
+    plan = scanner.create_plan(args)
+    disc = scanner.build_command(plan, 0, "tcp_discovery")
+    assert any(t.startswith("-PS") for t in disc) and "-Pn" not in disc
+    ident = scanner.build_command(plan, 0, "tcp_identify", [443])
+    scripts = ident[ident.index("--script") + 1]
+    assert "ssh-hostkey" in scripts and "ssl-cert" in scripts
+    assert "ssl-enum-ciphers" not in scripts and "ntp-monlist" not in scripts

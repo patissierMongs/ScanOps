@@ -28,8 +28,14 @@ SCAN_OPTIONS = [
      "desc": "FIN·PSH·URG 를 동시에 켠 패킷. 방화벽/IDS 의 반응을 관찰하는 스텔스 기법."},
 
     # ── 호스트 발견 ──
-    {"key": "noping", "label": "핑 생략 (-Pn)", "flags": ["-Pn"], "group": "호스트 발견", "default": True,
-     "desc": "ICMP 를 막는 호스트도 살아있다고 보고 바로 포트 스캔. 사내 방화벽 환경에서 호스트 누락을 막는다."},
+    {"key": "disc_ports", "label": "서버포트 발견 (-PS 흔한 포트)",
+     "flags": ["-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"],
+     "group": "호스트 발견", "default": True,
+     "desc": "ICMP 를 막는 서버도 흔한 서비스 포트로 TCP SYN 발견(-PS) → 살아있는 호스트만 정밀 스캔. "
+             "죽은/미할당 IP 를 건너뛰어 듬성한 대역(예: 서버팜 /23)에서 -Pn 보다 훨씬 빠르고 누락도 적다."},
+    {"key": "noping", "label": "핑 생략 (-Pn · 발견 없이 전수)", "flags": ["-Pn"], "group": "호스트 발견", "default": False,
+     "desc": "발견을 건너뛰고 모든 대상을 스캔. 알려진 호스트 목록엔 안전하나, 듬성한 대역에선 죽은 IP 까지 "
+             "전체 포트를 스캔해 매우 느려진다. 같은 L2 면 보통 불필요(서버포트 발견으로 충분)."},
     {"key": "ping_only", "label": "호스트만 탐지 (-sn)", "flags": ["-sn"], "group": "호스트 발견", "default": False,
      "note": "포트스캔과 배타", "desc": "포트 스캔 없이 '어떤 IP 가 살아있나'만 빠르게(핑 스윕). 자산 인벤토리 점검용. 포트 스캔 옵션과 함께 쓰지 말 것."},
     {"key": "dns_no", "label": "역DNS 생략 (-n)", "flags": ["-n"], "group": "호스트 발견", "default": False,
@@ -82,8 +88,8 @@ SCAN_OPTIONS = [
      "desc": "동시 프로브 수 상한을 100으로. 빠르지만 장비/회선 부하가 커진다."},
     {"key": "defeat_rst", "label": "RST 율제한 우회 (--defeat-rst-ratelimit)", "flags": ["--defeat-rst-ratelimit"], "group": "성능·안정", "default": True,
      "desc": "RST 율제한을 무시해 닫힌 포트 판정을 빠르게. 정확도가 약간 떨어질 수 있다."},
-    {"key": "max_scan_delay", "label": "스캔 지연 상한 5ms (--max-scan-delay 5ms)", "flags": ["--max-scan-delay", "5ms"], "group": "성능·안정", "default": True,
-     "desc": "프로브 간 지연 상한을 5ms로 묶어 속도 저하를 막는다. 방화벽 없는 빠른 내부망에 적합."},
+    {"key": "max_scan_delay", "label": "스캔 지연 상한 5ms (--max-scan-delay 5ms)", "flags": ["--max-scan-delay", "5ms"], "group": "성능·안정", "default": False,
+     "desc": "프로브 간 지연 상한을 5ms로 강제. TCP 가속엔 도움되나 UDP/레거시 장비 정확도를 떨어뜨릴 수 있어 기본 제외(필요 시 선택)."},
 
     # ── 방화벽 진단 ──
     {"key": "fragment", "label": "패킷 분할 (-f)", "flags": ["-f"], "group": "방화벽 진단", "default": False,

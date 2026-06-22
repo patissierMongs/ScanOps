@@ -25,15 +25,19 @@ VERSION = "0.1.0"
 STATS_EVERY_DEFAULT = "10s"
 UDP_DEFAULT_PORTS = "7,53,67,68,69,88,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
+# 용도 식별형 NSE만(취약점/노이즈/부작용 스크립트 제외) — 빠르고 부작용 적게 '무엇/왜' 파악.
+# 제외: ssl-enum-ciphers·ntp-info·ntp-monlist·fingerprint-strings·dns-recursion·vnc-title
 DEFAULT_NSE_SCRIPTS = (
-    "http-headers,http-server-header,http-title,ssl-cert,ssl-enum-ciphers,"
+    "http-headers,http-server-header,http-title,ssl-cert,"
     "tls-alpn,ssh-hostkey,nbstat,smb-os-discovery,smb-protocols,"
     "oracle-tns-version,rdp-ntlm-info,snmp-info,ike-version,sip-methods,"
-    "ntp-info,ntp-monlist,rpcinfo,fingerprint-strings,banner,"
-    "ftp-anon,ftp-syst,telnet-encryption,dns-recursion,dns-nsid,vnc-info,vnc-title"
+    "rpcinfo,banner,ftp-anon,ftp-syst,telnet-encryption,dns-nsid,vnc-info"
 )
+# 발견 단계 호스트 디스커버리: ICMP 막은 서버도 흔한 서비스 포트로 잡고, 죽은 IP 는 건너뛴다
+# (-Pn 전수보다 듬성한 대역에서 빠르고 누락 적음). -sS 라 raw 소켓(관리자) 전제.
+DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"
 AUTO_TCP_DISCOVERY_FLAGS = [
-    "-sS", "-Pn", "-n", "-T4", "--open", "--reason",
+    "-sS", DISCOVERY_PS, "-n", "-T4", "--open", "--reason",
     "--min-hostgroup", "64", "--max-retries", "1",
     "--defeat-rst-ratelimit", "--max-parallelism", "100",
     "--max-scan-delay", "5ms", "-p", "T:1-65535",
@@ -472,7 +476,10 @@ def create_plan(args: argparse.Namespace) -> dict:
             raise ValueError("nmap 을 찾을 수 없습니다. PATH 에 추가하거나 --nmap 경로를 지정하세요.")
 
     raw_targets = collect_targets(args)
-    run_targets = expand_targets(raw_targets, args.max_hosts) if args.batch_size > 0 else raw_targets
+    # --max-hosts 캡은 배치 여부와 무관하게 항상 검증(초과 시 expand_targets 가 ValueError).
+    # 비배치 모드는 원본 스펙(CIDR 등)을 그대로 nmap 에 넘기되, 캡 검사만 수행.
+    expanded = expand_targets(raw_targets, args.max_hosts)
+    run_targets = expanded if args.batch_size > 0 else raw_targets
     batches = make_batches(run_targets, args.batch_size)
     out_dir = Path(args.output_dir).resolve()
     name = safe_name(args.name)

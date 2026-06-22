@@ -27,8 +27,8 @@ const NAV = [
 ];
 
 const TITLES = {
-  dashboard: "대시보드", findings: "발견 관리", rules: "위험 규칙", history: "변경 이력",
-  heatmap: "시간축 히트맵", assets: "자산대장", notify: "부서통보", scans: "스캔", users: "사용자 관리",
+  dashboard: "대시보드", findings: "발견 관리", heatmap: "시간축 히트맵", rules: "위험 규칙",
+  history: "변경 이력", assets: "자산대장", notify: "부서통보", scans: "스캔", users: "사용자 관리",
 };
 
 export default function App() {
