@@ -142,9 +142,6 @@ NSE_DEFAULT_KEYS = [s["key"] for s in NSE_SCRIPTS if s["nmap_default"]]
 # 111(포트맵퍼) 포함 → rpcinfo 가 RPC/NFS(2049) 매핑에 유효.
 UDP_DEFAULT_PORTS = "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 DEFAULT_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
-# 취약 DB 리스너 — 자동 식별에서 -sV/NSE 프로브를 절대 안 보낼 포트(오라클/티베로 TNS 다운 방지).
-# 발견(SYN)으로 '열림'만 잡고 종류는 포트번호+호스트명+자산으로. MySQL/PG/MSSQL 은 -sV 견고 → 미포함.
-NO_PROBE_PORTS = {1521, 8629}
 
 _BY_KEY = {o["key"]: o for o in SCAN_OPTIONS}
 _NSE_KEYS = {s["key"] for s in NSE_SCRIPTS}

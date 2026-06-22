@@ -217,45 +217,6 @@ def test_auto_workflow_builds_discovery_identification_and_udp_commands(tmp_path
     assert udp_identify[udp_identify.index("-p") + 1].startswith("U:")
 
 
-def test_no_probe_ports_default_and_parse():
-    scanner = _load_scanner()
-    assert scanner.parse_port_ints(scanner.NO_PROBE_PORTS_DEFAULT) == [1521, 8629]
-    assert scanner.parse_port_ints("") == []
-
-
-def test_tcp_safe_stage_sends_no_probe():
-    scanner = _load_scanner()
-    plan = {"nmap": "nmap", "name": "t", "output_dir": "/tmp/o", "stats_every": "10s",
-            "batches": [["10.0.0.5"]], "no_probe_ports": [1521, 8629]}
-    safe = scanner.build_command(plan, 0, "tcp_safe", [1521, 8629])
-    # 무프로브: -sV/NSE/버전 프로브가 절대 없어야 한다(취약 DB 리스너 보호).
-    assert "-sV" not in safe and "--script" not in safe and "--version-all" not in safe
-    assert safe[safe.index("-p") + 1] == "T:1521,8629"
-
-
-def test_auto_excludes_db_ports_from_identify(tmp_path):
-    scanner = _load_scanner()
-    xml = tmp_path / "scan.tcp_discovery.xml"
-    xml.write_text(
-        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
-        '<address addr="10.0.0.5" addrtype="ipv4"/><ports>'
-        '<port protocol="tcp" portid="22"><state state="open"/></port>'
-        '<port protocol="tcp" portid="1521"><state state="open"/></port>'
-        '</ports></host></nmaprun>',
-        encoding="utf-8",
-    )
-    ports = scanner.open_ports_from_xml(xml, "tcp")
-    no_probe = {1521, 8629}
-    probe = [p for p in ports if p not in no_probe]
-    safe = [p for p in ports if p in no_probe]
-    assert probe == [22] and safe == [1521]
-    identify = scanner.build_command(
-        {"nmap": "nmap", "name": "t", "output_dir": "/tmp/o", "stats_every": "10s",
-         "batches": [["10.0.0.5"]]}, 0, "tcp_identify", probe)
-    # DB 포트가 -sV 대상 포트 목록에 없어야 한다.
-    assert identify[identify.index("-p") + 1] == "T:22"
-
-
 def test_auto_workflow_reads_open_tcp_ports_from_discovery_xml(tmp_path):
     scanner = _load_scanner()
     xml = tmp_path / "scan.tcp_discovery.xml"

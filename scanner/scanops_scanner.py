@@ -64,19 +64,9 @@ AUTO_UDP_IDENTIFY_FLAGS = [
     "--max-retries", "2", "-p", f"U:{UDP_DEFAULT_PORTS}",
     "--script", UDP_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
-# 취약 DB 리스너 기본 포트 — 식별 단계에서 -sV/NSE 프로브를 절대 안 보낸다.
-# 오라클/티베로 TNS 는 버전 프로브(또는 oracle-tns-version)에 다운 사례가 있어 기본 제외.
-# 1521=Oracle/Tibero(호환), 8629=Tibero 기본. MySQL/PG/MSSQL 은 -sV 에 견고 → 기본 미포함(--no-probe-ports 로 추가).
-NO_PROBE_PORTS_DEFAULT = "1521,8629"
-# 무프로브 안전 단계: -sV/NSE 없이 SYN 으로 '열림'만. 페이로드가 안 가서 취약 리스너도 안 죽는다.
-# 역DNS 는 켠다(-n 없음) → DB 전용 호스트도 호스트명 확보(용도 식별 근거).
-AUTO_TCP_SAFE_FLAGS = [
-    "-sS", "-Pn", "--open", "--reason", "-T4", "--max-retries", "2",
-]
 AUTO_STAGES = [
     ("tcp_discovery", "TCP 전체 포트 발견"),
     ("tcp_identify", "발견된 TCP 포트 용도/서비스 식별"),
-    ("tcp_safe", "취약 DB 포트 상태 확인(무프로브)"),
     ("udp_identify", "주요 UDP 서비스 식별"),
 ]
 
@@ -182,22 +172,6 @@ def validate_scripts(scripts: str) -> str:
     if not SCRIPT_RE.match(scripts):
         raise ValueError("NSE script 는 이름만 콤마로 지정하세요. 예: ssl-cert,http-title")
     return scripts
-
-
-def parse_port_ints(spec: str) -> list[int]:
-    """'1521,8629' → [1521, 8629]. 무프로브 포트 목록 파싱(1-65535 정수만)."""
-    out: list[int] = []
-    for tok in (spec or "").replace(" ", "").split(","):
-        if not tok:
-            continue
-        try:
-            n = int(tok)
-        except ValueError:
-            raise ValueError(f"무프로브 포트는 정수만: {tok!r}")
-        if not 1 <= n <= 65535:
-            raise ValueError(f"포트 범위(1-65535) 초과: {n}")
-        out.append(n)
-    return out
 
 
 def validate_stats_every(value: str) -> str:
@@ -399,11 +373,6 @@ def build_auto_flags(plan: dict, stage_id: str, tcp_ports: list[int] | None = No
             raise ValueError("tcp_identify stage requires discovered TCP ports.")
         port_spec = "T:" + ",".join(str(p) for p in tcp_ports)
         flags = [*AUTO_TCP_IDENTIFY_FLAGS, "-p", port_spec]
-    elif stage_id == "tcp_safe":
-        if not tcp_ports:
-            raise ValueError("tcp_safe stage requires discovered TCP ports.")
-        port_spec = "T:" + ",".join(str(p) for p in tcp_ports)
-        flags = [*AUTO_TCP_SAFE_FLAGS, "-p", port_spec]
     elif stage_id == "udp_identify":
         udp_ports = auto_udp_ports(plan)
         if not udp_ports:
@@ -581,7 +550,6 @@ def create_plan(args: argparse.Namespace) -> dict:
         "no_scripts": args.no_scripts,
         "nse_default": args.nse_default,
         "version_all": args.version_all,
-        "no_probe_ports": parse_port_ints(args.no_probe_ports),
         "scripts": validate_scripts(args.scripts),
         "open_only": args.open_only,
         "include_closed": args.include_closed,
@@ -618,9 +586,6 @@ def print_plan(plan: dict) -> None:
                 print(display_command(build_command(plan, idx, "tcp_discovery")))
                 print(f"# {idx + 1}/{len(plan['batches'])} {run_stage_name('tcp_identify')}")
                 print(display_command(build_command(plan, idx, "tcp_identify", [0])).replace("T:0", "T:<open TCP ports from previous step>"))
-                if plan.get("no_probe_ports"):
-                    npp = ",".join(str(p) for p in plan["no_probe_ports"])
-                    print(f"#   ({run_stage_name('tcp_safe')}: 취약 DB 포트 {npp} 가 열려 있으면 -sV/NSE 없이 SYN 으로만 확인)")
             else:
                 print(f"# {idx + 1}/{len(plan['batches'])} TCP 포트가 지정되지 않아 TCP 단계는 건너뜁니다.")
             if not plan.get("tcp_only") and auto_udp_ports(plan):
@@ -733,33 +698,17 @@ def execute_auto(plan: dict, state_path: Path, zip_outputs: bool) -> int:
             tcp_ports = open_ports_from_xml(discovery_xml, "tcp")
             # identify 는 발견된 살아있는 호스트만 타깃(죽은 IP 재스캔 방지). 비면 원본 배치로 폴백.
             live_hosts = live_hosts_from_xml(discovery_xml) or None
-            # 취약 DB 포트는 프로브(-sV/NSE)에서 빼고, 무프로브 SYN 단계로 '열림'만 잡는다.
-            no_probe = set(plan.get("no_probe_ports", []))
-            probe_ports = [p for p in tcp_ports if p not in no_probe]
-            safe_ports = [p for p in tcp_ports if p in no_probe]
-            if probe_ports:
+            if tcp_ports:
                 if not stage_succeeded(plan, idx, "tcp_identify"):
-                    rc = run_nmap_stage(plan, idx, state_path, "tcp_identify", probe_ports, live_hosts)
+                    rc = run_nmap_stage(plan, idx, state_path, "tcp_identify", tcp_ports, live_hosts)
                     if rc != 0:
                         return fail_plan(plan, state_path, rc)
-            elif tcp_ports:
-                append_skipped_stage(plan, idx, "tcp_identify", "열린 TCP 포트가 모두 무프로브 대상(DB)이라 -sV/NSE 를 건너뜁니다.")
-                write_json(state_path, plan)
             else:
                 append_skipped_stage(plan, idx, "tcp_identify", "tcp_discovery 에서 열린 TCP 포트를 찾지 못했습니다.")
-                write_json(state_path, plan)
-            if safe_ports:
-                if not stage_succeeded(plan, idx, "tcp_safe"):
-                    rc = run_nmap_stage(plan, idx, state_path, "tcp_safe", safe_ports, live_hosts)
-                    if rc != 0:
-                        return fail_plan(plan, state_path, rc)
-            else:
-                append_skipped_stage(plan, idx, "tcp_safe", "무프로브 대상(취약 DB) 포트가 열려 있지 않습니다.")
                 write_json(state_path, plan)
         else:
             append_skipped_stage(plan, idx, "tcp_discovery", "사용자가 지정한 포트에 TCP 포트가 없습니다.")
             append_skipped_stage(plan, idx, "tcp_identify", "사용자가 지정한 포트에 TCP 포트가 없습니다.")
-            append_skipped_stage(plan, idx, "tcp_safe", "사용자가 지정한 포트에 TCP 포트가 없습니다.")
             live_hosts = None
             write_json(state_path, plan)
 
@@ -840,8 +789,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--scripts", default="", help="Comma-separated NSE script names. Overrides --nse-default script list.")
     p.add_argument("--no-scripts", action="store_true", help="Disable NSE scripts for profiles that include them.")
     p.add_argument("--version-all", action="store_true", help="Add --version-all (intensity 9) to auto identify stages. Slower; for precision rescans. Default is -sV.")
-    p.add_argument("--no-probe-ports", default=NO_PROBE_PORTS_DEFAULT,
-                   help="Comma TCP ports that get SYN state only (no -sV/NSE) to avoid crashing fragile DB listeners (Oracle/Tibero TNS). Empty to disable.")
     p.add_argument("--open-only", action="store_true", help="Add --open. Faster/smaller, but closed ports are omitted from heatmap XML.")
     p.add_argument("--include-closed", action="store_true", help="Remove --open so closed/filtered ports remain in XML.")
     p.add_argument("--stats-every", default=STATS_EVERY_DEFAULT, help="nmap --stats-every value.")
