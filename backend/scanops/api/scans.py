@@ -378,6 +378,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
     """Run discovery -> identify -> UDP for one batch, then ingest the final observations once."""
     ports = state.get("ports", "")
     nse = state.get("nse") if state.get("nse") is not None else scan_options.NSE_DEFAULT_KEYS
+    version_all = bool(state.get("version_all"))
     tcp_port_spec = nmap_runner.auto_tcp_port_spec(ports)
     udp_port_spec = nmap_runner.auto_udp_port_spec(ports)
     tcp_scope = _port_scope(tcp_port_spec, "T") if tcp_port_spec else set()
@@ -385,6 +386,9 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
     findings: list[dict] = []
     scanned_hosts: set[str] = set()
     tcp_discovery_findings: list[dict] = []
+    # identify 단계는 discovery 에서 살아난 호스트로만 좁힌다(죽은 IP 재스캔·PTR 폭증 방지).
+    # discovery 를 안 돌린 UDP-only 경우엔 비어 있어 배치 전체로 폴백.
+    discovery_live: list[str] = []
 
     if tcp_port_spec:
         if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
@@ -397,7 +401,8 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
         discovery_xml = nmap_runner.xml_of(discovery_base)
         if not discovery_xml.exists():
             return False
-        scanned_hosts |= up_hosts(discovery_xml)
+        discovery_live = sorted(up_hosts(discovery_xml))
+        scanned_hosts |= set(discovery_live)
         tcp_discovery_findings = parse_xml(discovery_xml)
         tcp_ports = nmap_runner.open_ports_from_xml(discovery_xml, "tcp")
         if tcp_ports:
@@ -405,7 +410,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
                 return False
             identify_base = Path(str(b_base) + ".tcp_identify")
             identify_log = Path(str(identify_base) + ".log")
-            argv = nmap_runner.build_auto_command(nmap, "tcp_identify", batch, identify_base, ports=ports, tcp_ports=tcp_ports, nse=nse)
+            argv = nmap_runner.build_auto_command(nmap, "tcp_identify", discovery_live or batch, identify_base, ports=ports, tcp_ports=tcp_ports, nse=nse, version_all=version_all)
             if _run_stage(scan_id, argv, identify_log) != 0:
                 return False
             identify_xml = nmap_runner.xml_of(identify_base)
@@ -416,12 +421,15 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
         else:
             findings.extend(tcp_discovery_findings)
 
-    if udp_port_spec:
+    # discovery 를 돌렸는데 생존 호스트가 0이면 UDP 도 스킵(죽은 대역에 -Pn UDP 낭비 방지).
+    if udp_port_spec and (not tcp_port_spec or discovery_live):
         if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
             return False
         udp_base = Path(str(b_base) + ".udp_identify")
         udp_log = Path(str(udp_base) + ".log")
-        argv = nmap_runner.build_auto_command(nmap, "udp_identify", batch, udp_base, ports=ports, nse=nse)
+        # discovery 를 돌렸으면 생존 호스트로만 UDP 식별, 아니면(UDP-only) 배치 전체.
+        udp_targets = discovery_live or batch
+        argv = nmap_runner.build_auto_command(nmap, "udp_identify", udp_targets, udp_base, ports=ports, nse=nse, version_all=version_all)
         if _run_stage(scan_id, argv, udp_log) != 0:
             return False
         udp_xml = nmap_runner.xml_of(udp_base)

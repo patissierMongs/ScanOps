@@ -29,13 +29,15 @@ AUTO_TCP_DISCOVERY_FLAGS = [
     "--defeat-rst-ratelimit", "--max-parallelism", "100",
     "--max-scan-delay", "5ms",
 ]
+# 기본은 -sV(intensity 7); --version-all(전수 probe)은 느려서 version_all=True 일 때만 추가.
 AUTO_TCP_IDENTIFY_FLAGS = [
-    "-sS", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason",
+    "-sS", "-Pn", "-n", "-sV", "--open", "--reason",
     "-T4", "--max-retries", "2", "--script-timeout", "10s",
 ]
+# UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 적응형 백오프를 막아 open|filtered 오판).
 AUTO_UDP_IDENTIFY_FLAGS = [
-    "-sU", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason",
-    "-T4", "--max-retries", "1", "--max-scan-delay", "5ms", "--script-timeout", "10s",
+    "-sU", "-Pn", "-n", "-sV", "--open", "--reason",
+    "-T4", "--max-retries", "2", "--script-timeout", "10s",
 ]
 
 
@@ -136,14 +138,17 @@ def build_command_opts(nmap: str, option_keys: list[str], ports: str,
 
 def build_auto_command(nmap: str, stage: str, targets: list[str], out_basename: Path,
                        ports: str = "", tcp_ports: list[int] | None = None,
-                       nse: list[str] | None = None) -> list[str]:
+                       nse: list[str] | None = None, version_all: bool = False) -> list[str]:
     """자동 워크플로 단계 명령.
 
     tcp_discovery: 전체/지정 TCP에서 열린 포트 발견
     tcp_identify: 발견된 TCP 포트에 서비스/버전/NSE 단서 부착
     udp_identify: 주요/지정 UDP 포트 식별
+
+    version_all=True 면 식별 단계에 --version-all(intensity 9) 추가(정밀 재스캔용, 느림).
     """
     validate_targets(targets)
+    extra = ["--version-all"] if version_all else []
     if stage == "tcp_discovery":
         port_spec = auto_tcp_port_spec(ports)
         if not port_spec:
@@ -153,7 +158,7 @@ def build_auto_command(nmap: str, stage: str, targets: list[str], out_basename: 
         if not tcp_ports:
             raise ValueError("TCP 식별 단계에 사용할 열린 TCP 포트가 없습니다.")
         flags = [
-            *AUTO_TCP_IDENTIFY_FLAGS,
+            *AUTO_TCP_IDENTIFY_FLAGS, *extra,
             *_script_args(nse),
             "-p", "T:" + ",".join(str(p) for p in sorted(set(tcp_ports))),
         ]
@@ -161,7 +166,7 @@ def build_auto_command(nmap: str, stage: str, targets: list[str], out_basename: 
         port_spec = auto_udp_port_spec(ports)
         if not port_spec:
             raise ValueError("자동 스캔 UDP 단계에 사용할 UDP 포트가 없습니다.")
-        flags = [*AUTO_UDP_IDENTIFY_FLAGS, *_script_args(nse), "-p", port_spec]
+        flags = [*AUTO_UDP_IDENTIFY_FLAGS, *extra, *_script_args(nse), "-p", port_spec]
     else:
         raise ValueError(f"알 수 없는 자동 스캔 단계: {stage}")
     return [nmap, *STATS_FLAGS, *flags, "-oA", str(out_basename), *targets]

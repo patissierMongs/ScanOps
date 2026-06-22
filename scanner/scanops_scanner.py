@@ -23,7 +23,7 @@ from pathlib import Path
 
 VERSION = "0.1.0"
 STATS_EVERY_DEFAULT = "10s"
-UDP_DEFAULT_PORTS = "7,53,67,68,69,88,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
+UDP_DEFAULT_PORTS = "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 용도 식별형 NSE만(취약점/노이즈/부작용 스크립트 제외) — 빠르고 부작용 적게 '무엇/왜' 파악.
 # 제외: ssl-enum-ciphers·ntp-monlist·fingerprint-strings·dns-recursion·vnc-title
@@ -35,10 +35,11 @@ DEFAULT_NSE_SCRIPTS = (
     "rdp-ntlm-info,sip-methods,rpcinfo,banner,"
     "ftp-anon,ftp-syst,telnet-encryption,dns-nsid,vnc-info"
 )
-# UDP 식별용(3단계): UDP 기본 포트(53·123·137·161·500·5060 등)에 실제 매칭되는 스크립트만.
+# UDP 식별용(3단계): UDP 기본 포트(53·111·123·137·161·500·5060 등)에 실제 매칭되는 스크립트만.
+# rpcinfo 는 UDP 111(포트맵퍼)에서 RPC/NFS(2049) 프로그램 매핑 → 정체 파악에 유효.
 # 부작용 제외: dhcp-discover(리스 요청)·snmp-interfaces(장황·느림)·ntp-monlist(증폭).
 UDP_NSE_SCRIPTS = (
-    "snmp-info,snmp-sysdescr,nbstat,ike-version,dns-nsid,ntp-info,sip-methods"
+    "snmp-info,snmp-sysdescr,nbstat,ike-version,dns-nsid,ntp-info,sip-methods,rpcinfo"
 )
 # 발견 단계 호스트 디스커버리: ICMP 막은 서버도 흔한 서비스 포트로 잡고, 죽은 IP 는 건너뛴다
 # (-Pn 전수보다 듬성한 대역에서 빠르고 누락 적음). -sS 라 raw 소켓(관리자) 전제.
@@ -51,14 +52,15 @@ AUTO_TCP_DISCOVERY_FLAGS = [
 ]
 # identify 단계는 discovery 에서 살아난 호스트만 타깃(execute_auto 가 live_hosts 주입)이라
 # -Pn(전수 live 취급)이 안전. -n 제거 → 역DNS 켜서 호스트명 확보(용도 식별 근거).
+# 기본은 -sV(intensity 7); --version-all(전수 probe)은 느려서 --version-all 옵션으로만 추가.
 AUTO_TCP_IDENTIFY_FLAGS = [
-    "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
+    "-sS", "-Pn", "-sV", "--open", "--reason", "-T4",
     "--max-retries", "2", "--script", DEFAULT_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
 # UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 백오프를 막아 open|filtered 오판).
 # 역DNS 는 TCP identify 가 같은 호스트에서 이미 끝냄 → 중복 PTR 피하려 -n 유지.
 AUTO_UDP_IDENTIFY_FLAGS = [
-    "-sU", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason", "-T4",
+    "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
     "--max-retries", "2", "-p", f"U:{UDP_DEFAULT_PORTS}",
     "--script", UDP_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
@@ -354,6 +356,9 @@ def apply_auto_modifiers(flags: list[str], plan: dict) -> list[str]:
         flags = strip_flags(flags, {"--open"})
     if plan.get("open_only") and "--open" not in flags:
         flags.append("--open")
+    # 정밀 식별: -sV 단계에만 --version-all(intensity 9) 추가. discovery 엔 -sV 가 없어 무영향.
+    if plan.get("version_all") and "-sV" in flags and "--version-all" not in flags:
+        flags.append("--version-all")
     return flags
 
 
@@ -544,6 +549,7 @@ def create_plan(args: argparse.Namespace) -> dict:
         "tcp_only": args.tcp_only,
         "no_scripts": args.no_scripts,
         "nse_default": args.nse_default,
+        "version_all": args.version_all,
         "scripts": validate_scripts(args.scripts),
         "open_only": args.open_only,
         "include_closed": args.include_closed,
@@ -782,6 +788,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--nse-default", action="store_true", help="Run the built-in NSE script set.")
     p.add_argument("--scripts", default="", help="Comma-separated NSE script names. Overrides --nse-default script list.")
     p.add_argument("--no-scripts", action="store_true", help="Disable NSE scripts for profiles that include them.")
+    p.add_argument("--version-all", action="store_true", help="Add --version-all (intensity 9) to auto identify stages. Slower; for precision rescans. Default is -sV.")
     p.add_argument("--open-only", action="store_true", help="Add --open. Faster/smaller, but closed ports are omitted from heatmap XML.")
     p.add_argument("--include-closed", action="store_true", help="Remove --open so closed/filtered ports remain in XML.")
     p.add_argument("--stats-every", default=STATS_EVERY_DEFAULT, help="nmap --stats-every value.")
