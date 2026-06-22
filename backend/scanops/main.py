@@ -49,6 +49,7 @@ def _mount_routers() -> None:
     from .api import dashboard as dashboard_api
     from .api import events as events_api
     from .api import findings as findings_api
+    from .api import heatmap as heatmap_api
     from .api import notifications as notify_api
     from .api import reports as reports_api
     from .api import rules as rules_api
@@ -58,6 +59,7 @@ def _mount_routers() -> None:
     app.include_router(users_api.router, prefix="/api/users", tags=["users"])
     app.include_router(scans_api.router, prefix="/api/scans", tags=["scans"])
     app.include_router(findings_api.router, prefix="/api/findings", tags=["findings"])
+    app.include_router(heatmap_api.router, prefix="/api/heatmap", tags=["heatmap"])
     app.include_router(assets_api.router, prefix="/api/assets", tags=["assets"])
     app.include_router(notify_api.router, prefix="/api/notifications", tags=["notifications"])
     app.include_router(dashboard_api.router, prefix="/api/dashboard", tags=["dashboard"])

@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from . import scan_options
@@ -22,6 +23,20 @@ _OUT_FLAGS = {"-oX", "-oN", "-oG", "-oS", "-oA"}
 # 주기적 진행 보고 — nmap 이 stdout 에 "About X% done; ETC ..." 를 10초마다 출력.
 # --resume 은 원본 명령을 그대로 이어받으므로 이 플래그도 자동 승계된다(가시성 유지).
 STATS_FLAGS = ["--stats-every", "10s"]
+AUTO_TCP_DISCOVERY_FLAGS = [
+    "-sS", "-Pn", "-n", "-T4", "--open", "--reason",
+    "--min-hostgroup", "64", "--max-retries", "1",
+    "--defeat-rst-ratelimit", "--max-parallelism", "100",
+    "--max-scan-delay", "5ms",
+]
+AUTO_TCP_IDENTIFY_FLAGS = [
+    "-sS", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason",
+    "-T4", "--max-retries", "2", "--script-timeout", "10s",
+]
+AUTO_UDP_IDENTIFY_FLAGS = [
+    "-sU", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason",
+    "-T4", "--max-retries", "1", "--max-scan-delay", "5ms", "--script-timeout", "10s",
+]
 
 
 def find_nmap(explicit: str = "") -> str | None:
@@ -40,6 +55,49 @@ def validate_targets(targets: list[str]) -> list[str]:
     if bad:
         raise ValueError(f"허용되지 않는 타겟 형식: {bad}")
     return targets
+
+
+def _protocol_ports(port_spec: str, protocol: str) -> list[str]:
+    protocol = protocol.upper()
+    current = ""
+    ports: list[str] = []
+    for raw in (port_spec or "").replace(" ", "").split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        if ":" in item:
+            prefix, value = item.split(":", 1)
+            if prefix.upper() in {"T", "U"}:
+                current = prefix.upper()
+                item = value
+        if not item:
+            continue
+        if not current:
+            if protocol == "T":
+                ports.append(item)
+        elif current == protocol:
+            ports.append(item)
+    return ports
+
+
+def auto_tcp_port_spec(ports: str) -> str:
+    port_spec = scan_options.validate_ports(ports)
+    if not port_spec:
+        return "T:1-65535"
+    return ",".join(_protocol_ports(port_spec, "T"))
+
+
+def auto_udp_port_spec(ports: str) -> str:
+    port_spec = scan_options.validate_ports(ports)
+    if not port_spec:
+        return f"U:{scan_options.UDP_DEFAULT_PORTS}"
+    udp_ports = _protocol_ports(port_spec, "U")
+    return f"U:{','.join(udp_ports)}" if udp_ports else ""
+
+
+def _script_args(nse: list[str] | None) -> list[str]:
+    keys = scan_options.NSE_DEFAULT_KEYS if nse is None else nse
+    return scan_options.script_flag(keys)
 
 
 def xml_of(basename: Path) -> Path:
@@ -74,6 +132,58 @@ def build_command_opts(nmap: str, option_keys: list[str], ports: str,
     argv += script_flags
     argv += ["-oA", str(out_basename), *targets]
     return argv
+
+
+def build_auto_command(nmap: str, stage: str, targets: list[str], out_basename: Path,
+                       ports: str = "", tcp_ports: list[int] | None = None,
+                       nse: list[str] | None = None) -> list[str]:
+    """자동 워크플로 단계 명령.
+
+    tcp_discovery: 전체/지정 TCP에서 열린 포트 발견
+    tcp_identify: 발견된 TCP 포트에 서비스/버전/NSE 단서 부착
+    udp_identify: 주요/지정 UDP 포트 식별
+    """
+    validate_targets(targets)
+    if stage == "tcp_discovery":
+        port_spec = auto_tcp_port_spec(ports)
+        if not port_spec:
+            raise ValueError("자동 스캔 TCP 단계에 사용할 TCP 포트가 없습니다.")
+        flags = [*AUTO_TCP_DISCOVERY_FLAGS, "-p", port_spec]
+    elif stage == "tcp_identify":
+        if not tcp_ports:
+            raise ValueError("TCP 식별 단계에 사용할 열린 TCP 포트가 없습니다.")
+        flags = [
+            *AUTO_TCP_IDENTIFY_FLAGS,
+            *_script_args(nse),
+            "-p", "T:" + ",".join(str(p) for p in sorted(set(tcp_ports))),
+        ]
+    elif stage == "udp_identify":
+        port_spec = auto_udp_port_spec(ports)
+        if not port_spec:
+            raise ValueError("자동 스캔 UDP 단계에 사용할 UDP 포트가 없습니다.")
+        flags = [*AUTO_UDP_IDENTIFY_FLAGS, *_script_args(nse), "-p", port_spec]
+    else:
+        raise ValueError(f"알 수 없는 자동 스캔 단계: {stage}")
+    return [nmap, *STATS_FLAGS, *flags, "-oA", str(out_basename), *targets]
+
+
+def open_ports_from_xml(path: Path, proto: str = "tcp") -> list[int]:
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return []
+    found: set[int] = set()
+    for port in root.findall(".//port"):
+        if (port.get("protocol") or "").lower() != proto:
+            continue
+        state = port.find("state")
+        if state is None or (state.get("state") or "").lower() != "open":
+            continue
+        try:
+            found.add(int(port.get("portid") or ""))
+        except ValueError:
+            continue
+    return sorted(found)
 
 
 def run_opts(nmap: str, option_keys: list[str], ports: str, targets: list[str],

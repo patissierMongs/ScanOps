@@ -46,6 +46,7 @@ class PasswordReset(BaseModel):
 # ---- scan ----
 class ScanRunIn(BaseModel):
     name: str = ""
+    workflow: str = "manual"       # manual: 기존 단일 명령, auto: 발견→식별→UDP 자동 단계
     preset: str = "quick"          # 옵션 미지정 시 사용(하위호환)
     options: list[str] = []        # 스캔 옵션 키(화이트리스트) — 지정 시 우선
     ports: str = ""                # 포트 스펙(예: 22,80,443 또는 1-1024)

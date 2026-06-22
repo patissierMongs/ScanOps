@@ -80,6 +80,42 @@ def test_build_rejects_unknown_nse():
         r.build_command_opts("nmap", ["version"], "", ["10.0.0.1"], Path("/s/x"), nse=["evil-script"])
 
 
+def test_auto_workflow_builds_staged_commands():
+    base = Path("/s/scan_1.b0")
+    discovery = r.build_auto_command("nmap", "tcp_discovery", ["127.0.0.1"], Path(str(base) + ".tcp_discovery"))
+    identify = r.build_auto_command("nmap", "tcp_identify", ["127.0.0.1"], Path(str(base) + ".tcp_identify"), tcp_ports=[443, 22])
+    udp = r.build_auto_command("nmap", "udp_identify", ["127.0.0.1"], Path(str(base) + ".udp_identify"), ports="U:53")
+
+    assert discovery[discovery.index("-p") + 1] == "T:1-65535"
+    assert identify[identify.index("-p") + 1] == "T:22,443"
+    assert "--script" in identify and "http-title" in identify[identify.index("--script") + 1]
+    assert udp[udp.index("-p") + 1] == "U:53"
+
+
+def test_auto_workflow_can_disable_nse_scripts():
+    cmd = r.build_auto_command("nmap", "tcp_identify", ["127.0.0.1"], Path("/s/x"), tcp_ports=[443], nse=[])
+    assert "--script" not in cmd
+
+
+def test_auto_workflow_udp_only_does_not_invent_tcp_ports():
+    assert r.auto_tcp_port_spec("U:53") == ""
+    assert r.auto_udp_port_spec("U:53") == "U:53"
+
+
+def test_open_ports_from_xml_for_auto_discovery(tmp_path):
+    xml = tmp_path / "d.xml"
+    xml.write_text(
+        """<nmaprun><host><ports>
+        <port protocol="tcp" portid="22"><state state="open"/></port>
+        <port protocol="tcp" portid="80"><state state="closed"/></port>
+        <port protocol="udp" portid="53"><state state="open"/></port>
+        </ports></host></nmaprun>""",
+        encoding="utf-8",
+    )
+    assert r.open_ports_from_xml(xml, "tcp") == [22]
+    assert r.open_ports_from_xml(xml, "udp") == [53]
+
+
 def test_options_endpoint_exposes_nse(client=None):
     from scanops.scanning import scan_options as s
     assert len(s.NSE_SCRIPTS) >= 27

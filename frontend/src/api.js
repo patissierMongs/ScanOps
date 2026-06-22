@@ -34,3 +34,21 @@ export async function upload(path, file) {
   }
   return res.json();
 }
+
+export async function uploadMany(path, files) {
+  const fd = new FormData();
+  files.forEach((entry) => {
+    const file = entry.file || entry;
+    const name = entry.name || file.webkitRelativePath || file.name;
+    fd.append("files", file, name);
+  });
+  const headers = {};
+  const tok = getToken();
+  if (tok) headers.Authorization = "Bearer " + tok;
+  const res = await fetch("/api" + path, { method: "POST", body: fd, headers });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(e.detail || "업로드 실패");
+  }
+  return res.json();
+}

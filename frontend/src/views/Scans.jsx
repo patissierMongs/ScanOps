@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { api, upload } from "../api.js";
+import { api, uploadMany } from "../api.js";
 import { useToast } from "../ui/Toast.jsx";
 import ScanOptions from "../ui/ScanOptions.jsx";
 
@@ -32,7 +32,7 @@ export default function Scans({ user }) {
   const [progress, setProgress] = useState({});   // { [scanId]: { percent, etc, remaining, elapsed, hosts_up, last_line } }
   const [targets, setTargets] = useState("");
   const [name, setName] = useState("");
-  const [opt, setOpt] = useState({ options: [], ports: "", nse: [], command: "" });
+  const [opt, setOpt] = useState({ workflow: "auto", options: [], ports: "", nse: [], command: "" });
   const [batchSize, setBatchSize] = useState(256);
   const [staged, setStaged] = useState(false);     // 단계 분리 엔진 스캔(발견→포트→서비스)
   const [discovery, setDiscovery] = useState("sn");
@@ -101,36 +101,36 @@ export default function Scans({ user }) {
   const targetList = targets.split(/[\s,]+/).filter(Boolean);
 
   // 실행 전 예상 — 타겟/옵션/포트/배치크기가 바뀌면 디바운스로 /estimate 호출.
-  const estKey = JSON.stringify({ t: targetList, o: opt.options, p: opt.ports, b: batchSize });
+  const estKey = JSON.stringify({ t: targetList, w: opt.workflow, o: opt.options, p: opt.ports, b: batchSize });
   useEffect(() => {
     if (!canRun || !targetList.length) { setEst(null); return; }
     let alive = true;
     const id = setTimeout(() => {
-      api("/scans/estimate", { method: "POST", json: { targets: targetList, options: opt.options, ports: opt.ports, batch_size: batchSize } })
+      api("/scans/estimate", { method: "POST", json: { targets: targetList, workflow: opt.workflow, options: opt.options, ports: opt.ports, batch_size: batchSize } })
         .then((e) => { if (alive) setEst(e); })
         .catch(() => { if (alive) setEst(null); });
     }, 400);
     return () => { alive = false; clearTimeout(id); };
   }, [estKey]);
 
-  // 여러 .xml 또는 폴더째 가져오기 — 이름순(보통 시각순)으로 순차 인입해 닫힘 판정 순서를 보존.
+  // 여러 .xml 또는 폴더째 가져오기 — 자동 스캔 단계 파일은 서버에서 한 실행 결과로 묶어 인입한다.
   async function importFiles(fileList) {
     const xmls = [...fileList]
       .filter((f) => f.name.toLowerCase().endsWith(".xml"))
       .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
     if (!xmls.length) { toast("가져올 .xml 파일이 없습니다", { type: "err" }); return; }
     setBusy(true);
-    let ok = 0, fail = 0, newSum = 0, closedSum = 0;
-    for (const f of xmls) {
-      try {
-        const r = await upload("/scans/import", f);
-        ok += 1; newSum += r.counts.new || 0; closedSum += r.counts.closed || 0;
-      } catch { fail += 1; }
+    try {
+      const r = await uploadMany("/scans/import-bundle", xmls.map((f) => ({ file: f, name: f.webkitRelativePath || f.name })));
+      const c = r.counts || {};
+      toast(`가져옴 · 결과 ${r.imported}건 / 파일 ${r.file_count}개${r.failed ? ` (실패 ${r.failed})` : ""} · 신규 ${c.new || 0} / 닫힘 ${c.closed || 0}`,
+            r.failed ? { type: "err" } : undefined);
+      load();
+    } catch (e) {
+      toast(e.message, { type: "err" });
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
-    toast(`가져옴 · 파일 ${ok}/${xmls.length}${fail ? ` (실패 ${fail})` : ""} · 신규 ${newSum} / 닫힘 ${closedSum}`,
-          fail ? { type: "err" } : undefined);
-    load();
   }
 
   function onImport(e) {
@@ -142,8 +142,8 @@ export default function Scans({ user }) {
 
   // 직접 명령 모드 진입 시(또는 옵션 변경 시) 사용자가 손대기 전까진 조립된 명령을 따라간다.
   useEffect(() => {
-    if (rawMode && !rawEdited) setRawCmd(opt.command || "");
-  }, [rawMode, rawEdited, opt.command]);
+    if (rawMode && !rawEdited) setRawCmd(opt.workflow === "manual" ? (opt.command || "") : "");
+  }, [rawMode, rawEdited, opt.command, opt.workflow]);
 
   function runScan() {
     if (rawMode) {
@@ -158,8 +158,9 @@ export default function Scans({ user }) {
     if (!targetList.length) { toast("타겟을 입력하세요", { type: "err" }); return; }
     setBusy(true);
     const endpoint = staged ? "/scans/run-staged" : "/scans/run";
-    const body = { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, batch_size: batchSize };
-    if (staged) body.discovery = discovery;
+    const body = staged
+      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, batch_size: batchSize, discovery }
+      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, batch_size: batchSize };
     api(endpoint, { method: "POST", json: body })
       .then((s) => { toast(`${staged ? "단계 " : ""}스캔 시작됨 · #${s.id} (백그라운드 — 진행은 아래 표)`); setTargets(""); setName(""); load(); })
       .catch((e2) => toast(e2.message, { type: "err" }))
@@ -183,7 +184,7 @@ export default function Scans({ user }) {
       {canRun && (
         <div className="panel">
           <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-            <h3 style={{ margin: 0 }}>스캔 실행 (서버 nmap)</h3>
+            <h3 style={{ margin: 0 }}>스캔 실행</h3>
             <div className="row" style={{ gap: 14 }}>
               <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}>
                 <input type="checkbox" checked={staged} disabled={rawMode}
@@ -209,8 +210,8 @@ export default function Scans({ user }) {
             <div style={{ marginBottom: 12 }}>
               <div className="row" style={{ justifyContent: "space-between" }}>
                 <span className="cb-label">nmap 명령 — 직접 편집 (출력 플래그는 서버가 -oA 로 강제 교체)</span>
-                <button type="button" className="sm" onClick={() => { setRawCmd(opt.command || ""); setRawEdited(false); }}>
-                  옵션 빌더에서 채우기
+                <button type="button" className="sm" onClick={() => { setRawCmd(opt.workflow === "manual" ? (opt.command || "") : ""); setRawEdited(false); }}>
+                  단일 실행 명령으로 채우기
                 </button>
               </div>
               <textarea className="mono" rows={3} value={rawCmd}
@@ -218,8 +219,8 @@ export default function Scans({ user }) {
                         placeholder="nmap -sV -p 22,80,443 10.0.12.0/24"
                         style={{ width: "100%", resize: "vertical", fontSize: 12.5 }} />
               <div className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
-                단발 실행입니다 — 배치 청킹은 미지원(중지 후 [이어하기]는 전체 재실행). 셸 메타문자(; | &amp; $ ` 등)는 차단되고,
-                허용 대역(scope) 설정 시 IP/CIDR 타겟을 명시해야 하며 그 밖이면 거절됩니다.
+                직접 명령은 단발 실행입니다 — 배치 청킹/이어가기는 미지원(중지만 가능). 셸 메타문자(; | &amp; $ ` 등)는 차단되고,
+                허용 대역(scope)이 설정돼 있으면 그 밖의 IP 는 거절됩니다.
               </div>
             </div>
           )}
@@ -272,7 +273,7 @@ export default function Scans({ user }) {
               <input ref={folderRef} type="file" style={{ display: "none" }} disabled={busy} onChange={onImport} />
             </label>
             <span className="muted" style={{ fontSize: 12 }}>
-              스캔은 백그라운드로 실행됩니다 — 표에서 진행률이 갱신되고, 실행 중엔 [중지]·중단분은 [이어하기].
+              자동 스캔은 발견·식별·UDP 확인을 배치 안에서 순서대로 실행합니다. 실행 중엔 [중지], 중단분은 [이어하기]로 재개합니다.
             </span>
           </div>
         </div>
