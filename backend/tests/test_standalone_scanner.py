@@ -557,3 +557,28 @@ def test_auto_discovery_uses_ps_and_curated_nse(tmp_path):
     scripts = ident[ident.index("--script") + 1]
     assert "ssh-hostkey" in scripts and "ssl-cert" in scripts
     assert "ssl-enum-ciphers" not in scripts and "ntp-monlist" not in scripts
+
+
+def test_discovery_omits_open_so_udp_only_hosts_survive(tmp_path):
+    """발견에 --open 이 없어야 한다: 열린 TCP 0개인 up 호스트가 XML 에서 빠지면 UDP 식별 누락."""
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args(["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
+    plan = scanner.create_plan(args)
+    disc = scanner.build_command(plan, 0, "tcp_discovery")
+    assert "--open" not in disc
+    # 식별 단계엔 --open 유지(열린 포트만 깔끔히)
+    assert "--open" in scanner.build_command(plan, 0, "tcp_identify", [443])
+
+
+def test_live_hosts_ignores_mac_addresses(tmp_path):
+    """로컬 이더넷 XML 의 MAC 주소를 타깃으로 넘기지 않는다(ipv4/ipv6 만)."""
+    scanner = _load_scanner()
+    xml = tmp_path / "d.tcp_discovery.xml"
+    xml.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.9" addrtype="ipv4"/>'
+        '<address addr="00:11:22:33:44:55" addrtype="mac"/>'
+        '</host></nmaprun>',
+        encoding="utf-8",
+    )
+    assert scanner.live_hosts_from_xml(xml) == ["10.0.0.9"]
