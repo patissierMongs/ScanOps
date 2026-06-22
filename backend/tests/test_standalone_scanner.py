@@ -570,6 +570,48 @@ def test_discovery_omits_open_so_udp_only_hosts_survive(tmp_path):
     assert "--open" in scanner.build_command(plan, 0, "tcp_identify", [443])
 
 
+def test_discovery_uses_pe_ps_pa_probes(tmp_path):
+    """발견 probe 는 -PE + -PS + -PA 조합(SYN 침묵 호스트도 ICMP/ACK 로 포착)."""
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args(["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
+    disc = scanner.build_command(scanner.create_plan(args), 0, "tcp_discovery")
+    assert "-PE" in disc
+    assert any(t.startswith("-PS") for t in disc)
+    assert "-PA80,443,3389" in disc
+
+
+def _udp_targets_from_log(log_path):
+    """fake nmap 로그에서 udp_identify 단계의 (타깃) 토큰만 추출."""
+    for entry in _read_jsonl(log_path):
+        if entry["stage"] == "udp_identify":
+            args = entry["args"]
+            return args[args.index("-oA") + 2:]
+    return None
+
+
+def test_default_udp_targets_live_hosts_only(tmp_path):
+    """기본값: discovery 가 찾은 live host(여기선 127.0.0.1)만 UDP 식별 대상."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    log = tmp_path / "log.jsonl"
+    r = _run_scanner(["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "d",
+                      "10.0.0.5", "10.0.0.6"], env={"FAKE_NMAP_LOG": str(log)})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert _udp_targets_from_log(log) == ["127.0.0.1"]
+
+
+def test_udp_all_targets_uses_original_batch(tmp_path):
+    """--udp-all-targets: discovery live host 무시하고 원본 배치 전체를 UDP 대상으로."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    log = tmp_path / "log.jsonl"
+    r = _run_scanner(["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "u",
+                      "--udp-all-targets", "10.0.0.5", "10.0.0.6"], env={"FAKE_NMAP_LOG": str(log)})
+    assert r.returncode == 0, r.stderr + r.stdout
+    # 부분 누락 방지: live host(127.0.0.1)가 아니라 원본 타깃 둘 다가 UDP 대상이어야 한다.
+    assert _udp_targets_from_log(log) == ["10.0.0.5", "10.0.0.6"]
+
+
 def test_live_hosts_ignores_mac_addresses(tmp_path):
     """로컬 이더넷 XML 의 MAC 주소를 타깃으로 넘기지 않는다(ipv4/ipv6 만)."""
     scanner = _load_scanner()

@@ -23,13 +23,15 @@ _OUT_FLAGS = {"-oX", "-oN", "-oG", "-oS", "-oA"}
 # 주기적 진행 보고 — nmap 이 stdout 에 "About X% done; ETC ..." 를 10초마다 출력.
 # --resume 은 원본 명령을 그대로 이어받으므로 이 플래그도 자동 승계된다(가시성 유지).
 STATS_FLAGS = ["--stats-every", "10s"]
-# 발견: -PS(흔한 서버포트 SYN ping)로 살아있는 호스트만 추린다(-Pn 전수 아님). -Pn 이면 죽은 IP 도
-# status=up(user-set)로 박혀 이후 단계의 live-host 제한이 무력화됨 → 반드시 실제 호스트 발견 사용.
+# 발견: -PE(ICMP echo)+-PS(SYN)+-PA(ACK) 조합으로 살아있는 호스트만 추린다(-Pn 전수 아님).
+# -Pn 이면 죽은 IP 도 status=up(user-set)로 박혀 live-host 제한이 무력화됨 → 실제 호스트 발견 사용.
+# SYN엔 침묵해도 ICMP/ACK엔 답하는 호스트를 up으로 포착해 UDP 식별 누락을 줄인다.
 DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"
+DISCOVERY_PA = "-PA80,443,3389"
 # --open 제외: 열린 TCP 0개인 up 호스트(UDP 전용)를 nmap 이 XML 에서 빼버려 up_hosts 가 놓치고,
 # 그 호스트가 UDP 식별 대상에서 누락된다. 닫힌 포트는 <extraports> 로 요약돼 영향 없음.
 AUTO_TCP_DISCOVERY_FLAGS = [
-    "-sS", DISCOVERY_PS, "-n", "-T4", "--reason",
+    "-sS", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4", "--reason",
     "--min-hostgroup", "64", "--max-retries", "2",
     "--defeat-rst-ratelimit", "--max-parallelism", "100",
 ]

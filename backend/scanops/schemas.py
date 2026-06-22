@@ -54,6 +54,7 @@ class ScanRunIn(BaseModel):
     targets: list[str]
     batch_size: int = 256          # 청킹 배치당 호스트 수(중지/이어가기 단위)
     discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
+    udp_all_targets: bool = False  # auto: UDP 식별을 discovery live host 가 아닌 원본 타깃 전체로(-Pn)
 
 
 class RawCommandIn(BaseModel):

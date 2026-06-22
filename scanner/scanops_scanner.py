@@ -44,12 +44,15 @@ UDP_NSE_SCRIPTS = (
 )
 # 발견 단계 호스트 디스커버리: ICMP 막은 서버도 흔한 서비스 포트로 잡고, 죽은 IP 는 건너뛴다
 # (-Pn 전수보다 듬성한 대역에서 빠르고 누락 적음). -sS 라 raw 소켓(관리자) 전제.
+# probe 조합: -PE(ICMP echo) + -PS(SYN) + -PA(ACK). SYN엔 침묵해도 ICMP/ACK엔 답하는 호스트를
+# up으로 포착 → discovery 종속 UDP 식별의 누락을 줄인다(가산적, 비용≈0).
 DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"
+DISCOVERY_PA = "-PA80,443,3389"
 # --open 은 discovery 에 쓰지 않는다: 열린 TCP 가 0개인 up 호스트(UDP 전용: DNS/SNMP/NTP 등)를
 # nmap 이 XML 에서 통째로 빼버려 live_hosts 에서 누락 → 그 호스트가 UDP 식별을 못 받게 된다.
 # 닫힌 포트는 어차피 <extraports> 로 요약되어 XML 이 커지지 않고, 열린 포트 추출에도 영향 없다.
 AUTO_TCP_DISCOVERY_FLAGS = [
-    "-sS", DISCOVERY_PS, "-n", "-T4", "--reason",
+    "-sS", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4", "--reason",
     "--min-hostgroup", "64", "--max-retries", "2",
     "--defeat-rst-ratelimit", "--max-parallelism", "100",
     "-p", "T:1-65535",
@@ -552,6 +555,7 @@ def create_plan(args: argparse.Namespace) -> dict:
         "ports_override": ports_override,
         "all_ports": args.all_ports,
         "tcp_only": args.tcp_only,
+        "udp_all_targets": args.udp_all_targets,
         "no_scripts": args.no_scripts,
         "nse_default": args.nse_default,
         "scripts": validate_scripts(args.scripts),
@@ -722,6 +726,13 @@ def execute_auto(plan: dict, state_path: Path, zip_outputs: bool) -> int:
         elif not auto_udp_ports(plan):
             append_skipped_stage(plan, idx, "udp_identify", "사용자가 지정한 포트에 UDP 포트가 없습니다.")
             write_json(state_path, plan)
+        elif plan.get("udp_all_targets"):
+            # 완전 커버리지(opt-in): discovery 결과 무관하게 원본 배치 전체로 UDP 식별
+            # (TCP/ICMP/ACK에 다 침묵하지만 UDP만 여는 호스트·부분 누락까지 보장, 죽은 IP 비용 감수).
+            if not stage_succeeded(plan, idx, "udp_identify"):
+                rc = run_nmap_stage(plan, idx, state_path, "udp_identify")
+                if rc != 0:
+                    return fail_plan(plan, state_path, rc)
         elif auto_tcp_discovery_ports(plan):
             # discovery 를 돌렸으면 생존 호스트로만 UDP 식별(죽은 IP 재스캔 방지).
             if not live_hosts:
@@ -789,6 +800,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--scan-type", choices=["connect", "syn"], default="", help="Override TCP scan type.")
     p.add_argument("--udp", action="store_true", help="Add UDP scan (-sU). Keep ports narrow when using this.")
     p.add_argument("--tcp-only", action="store_true", help="Remove UDP scan and U: ports from the selected profile.")
+    p.add_argument("--udp-all-targets", action="store_true",
+                   help="Auto workflow: run UDP identify against the original batch targets (-Pn) instead of limiting to TCP-discovery live hosts. Catches UDP-only hosts that don't answer TCP discovery, at the cost of probing dead IPs.")
     p.add_argument("--nse-default", action="store_true", help="Run the built-in NSE script set.")
     p.add_argument("--scripts", default="", help="Comma-separated NSE script names. Overrides --nse-default script list.")
     p.add_argument("--no-scripts", action="store_true", help="Disable NSE scripts for profiles that include them.")
