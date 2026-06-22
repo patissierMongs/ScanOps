@@ -47,7 +47,7 @@ SCAN_OPTIONS = [
     {"key": "version_light", "label": "버전 탐지·가볍게 (--version-light)", "flags": ["--version-light"], "group": "탐지", "default": False,
      "desc": "-sV 를 빠른 프로브만으로. 정확도는 조금 낮지만 시간을 크게 줄인다."},
     {"key": "version_all", "label": "버전 탐지·전수 (--version-all)", "flags": ["--version-all"], "group": "탐지", "default": True,
-     "note": "느림", "desc": "모든 프로브를 시도해 최대한 정확하게. 그만큼 느리다. 용도 식별 정확도↑."},
+     "note": "느림", "desc": "모든 프로브를 시도해 최대한 정확하게(intensity 9). rarity 높은 서비스(redis 등)까지 식별. 그만큼 느리다."},
     {"key": "scripts", "label": "기본 NSE 스크립트 (-sC)", "flags": ["-sC"], "group": "탐지", "default": False,
      "desc": "안전한 기본 스크립트 묶음 실행(인증서·SMB·HTTP 헤더 등). ScanOps 의 NSE 추출(TLS_CN/SMB_OS 등)을 채운다."},
     {"key": "os", "label": "OS 탐지 (-O)", "flags": ["-O"], "group": "탐지", "default": False,
@@ -98,51 +98,54 @@ SCAN_OPTIONS = [
 
 # ── NSE 스크립트 화이트리스트 ──
 # 선택한 스크립트들은 서버가 `--script a,b,c` 한 줄로 조립한다. 임의 스크립트 주입은 막고
-# 이 목록의 이름만 허용. nmap_default=True 가 '정체 식별형' 기본 선택 21종(용도 파악에 직접 기여).
+# 이 목록의 이름만 허용. nmap_default=True 가 '정체 식별형' 기본 선택(용도 파악에 직접 기여).
+# proto: 식별 단계 적용 프로토콜(tcp/udp/both) — TCP identify 엔 tcp+both, UDP identify 엔 udp+both 만.
 # 취약점/노이즈/부작용 스크립트(ssl-enum-ciphers·ntp-monlist·ms-sql-info 등)는 기본 제외(펼쳐서 선택 가능).
 NSE_SCRIPTS = [
-    {"key": "http-headers", "group": "HTTP", "nmap_default": True, "desc": "HTTP 응답 헤더 수집"},
-    {"key": "http-server-header", "group": "HTTP", "nmap_default": True, "desc": "Server 헤더(웹서버 종류·버전)"},
-    {"key": "http-title", "group": "HTTP", "nmap_default": True, "desc": "페이지 제목"},
-    {"key": "ssl-cert", "group": "TLS/SSL", "nmap_default": True, "desc": "인증서 주체/발급자/유효기간(TLS_CN)"},
-    {"key": "ssl-enum-ciphers", "group": "TLS/SSL", "nmap_default": False, "desc": "지원 암호 스위트·등급(취약점 점검용, 느림)"},
-    {"key": "tls-alpn", "group": "TLS/SSL", "nmap_default": True, "desc": "ALPN 프로토콜 협상(h2 등)"},
-    {"key": "ssh-hostkey", "group": "SSH", "nmap_default": True, "desc": "SSH 호스트키 지문"},
-    {"key": "ssh-auth-methods", "group": "SSH", "nmap_default": False, "desc": "허용 인증 방식"},
-    {"key": "ssh2-enum-algos", "group": "SSH", "nmap_default": False, "desc": "지원 알고리즘 목록"},
-    {"key": "nbstat", "group": "SMB/NetBIOS", "nmap_default": True, "desc": "NetBIOS 이름·MAC"},
-    {"key": "smb-os-discovery", "group": "SMB/NetBIOS", "nmap_default": True, "desc": "SMB OS/컴퓨터명(SMB_OS)"},
-    {"key": "smb-protocols", "group": "SMB/NetBIOS", "nmap_default": True, "desc": "지원 SMB 버전(SMBv1 등)"},
-    {"key": "oracle-tns-version", "group": "DB", "nmap_default": True, "desc": "Oracle TNS 리스너 버전"},
-    {"key": "ms-sql-info", "group": "DB", "nmap_default": False, "desc": "MS-SQL 인스턴스 정보(1433/1434 외 부작용 주의)"},
-    {"key": "ldap-rootdse", "group": "DB", "nmap_default": False, "desc": "LDAP RootDSE(디렉터리 정보)"},
-    {"key": "rdp-ntlm-info", "group": "RDP", "nmap_default": True, "desc": "RDP NTLM 컴퓨터/도메인(NTLM_Computer)"},
-    {"key": "snmp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "desc": "SNMP 시스템 정보"},
-    {"key": "snmp-sysdescr", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "desc": "SNMP sysDescr"},
-    {"key": "ike-version", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "desc": "IKE(VPN) 버전"},
-    {"key": "sip-methods", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "desc": "SIP 지원 메서드"},
-    {"key": "ntp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "desc": "NTP 서버 정보"},
-    {"key": "ntp-monlist", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "desc": "NTP monlist(증폭 취약 점검용)"},
-    {"key": "rpcinfo", "group": "RPC", "nmap_default": True, "desc": "RPC 서비스 목록"},
-    {"key": "fingerprint-strings", "group": "기타", "nmap_default": False, "desc": "미식별 서비스 원시 응답"},
-    {"key": "banner", "group": "기타", "nmap_default": True, "desc": "서비스 배너 수집"},
-    {"key": "ftp-anon", "group": "FTP", "nmap_default": True, "desc": "익명 FTP 접속 허용 여부"},
-    {"key": "ftp-syst", "group": "FTP", "nmap_default": True, "desc": "FTP SYST/STAT 정보"},
-    {"key": "telnet-encryption", "group": "Telnet", "nmap_default": True, "desc": "Telnet 암호화 지원 여부"},
-    {"key": "dns-recursion", "group": "DNS", "nmap_default": False, "desc": "개방 재귀 DNS 여부"},
-    {"key": "dns-nsid", "group": "DNS", "nmap_default": True, "desc": "DNS 서버 식별(NSID)"},
-    {"key": "vnc-info", "group": "VNC", "nmap_default": True, "desc": "VNC 보안 타입"},
-    {"key": "vnc-title", "group": "VNC", "nmap_default": False, "desc": "VNC 데스크톱 제목"},
+    {"key": "http-headers", "group": "HTTP", "nmap_default": True, "proto": "tcp", "desc": "HTTP 응답 헤더 수집"},
+    {"key": "http-server-header", "group": "HTTP", "nmap_default": True, "proto": "tcp", "desc": "Server 헤더(웹서버 종류·버전)"},
+    {"key": "http-title", "group": "HTTP", "nmap_default": True, "proto": "tcp", "desc": "페이지 제목"},
+    {"key": "ssl-cert", "group": "TLS/SSL", "nmap_default": True, "proto": "tcp", "desc": "인증서 주체/발급자/유효기간(TLS_CN)"},
+    {"key": "ssl-enum-ciphers", "group": "TLS/SSL", "nmap_default": False, "proto": "tcp", "desc": "지원 암호 스위트·등급(취약점 점검용, 느림)"},
+    {"key": "tls-alpn", "group": "TLS/SSL", "nmap_default": True, "proto": "tcp", "desc": "ALPN 프로토콜 협상(h2 등)"},
+    {"key": "ssh-hostkey", "group": "SSH", "nmap_default": True, "proto": "tcp", "desc": "SSH 호스트키 지문"},
+    {"key": "ssh-auth-methods", "group": "SSH", "nmap_default": False, "proto": "tcp", "desc": "허용 인증 방식"},
+    {"key": "ssh2-enum-algos", "group": "SSH", "nmap_default": False, "proto": "tcp", "desc": "지원 알고리즘 목록"},
+    {"key": "nbstat", "group": "SMB/NetBIOS", "nmap_default": True, "proto": "udp", "desc": "NetBIOS 이름·MAC"},
+    {"key": "smb-os-discovery", "group": "SMB/NetBIOS", "nmap_default": True, "proto": "tcp", "desc": "SMB OS/컴퓨터명(SMB_OS)"},
+    {"key": "smb-protocols", "group": "SMB/NetBIOS", "nmap_default": True, "proto": "tcp", "desc": "지원 SMB 버전(SMBv1 등)"},
+    {"key": "oracle-tns-version", "group": "DB", "nmap_default": False, "proto": "tcp", "desc": "Oracle TNS 리스너 버전 ⚠ DB 장애 위험(티베로 등 호환DB 다운 사례) — 기본 제외"},
+    {"key": "ms-sql-info", "group": "DB", "nmap_default": False, "proto": "both", "desc": "MS-SQL 인스턴스 정보 ⚠ DB 장애/부작용 위험 — 기본 제외"},
+    {"key": "ldap-rootdse", "group": "DB", "nmap_default": False, "proto": "tcp", "desc": "LDAP RootDSE(디렉터리 정보)"},
+    {"key": "rdp-ntlm-info", "group": "RDP", "nmap_default": True, "proto": "tcp", "desc": "RDP NTLM 컴퓨터/도메인(NTLM_Computer)"},
+    {"key": "snmp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "udp", "desc": "SNMP 시스템 정보"},
+    {"key": "snmp-sysdescr", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "udp", "desc": "SNMP sysDescr"},
+    {"key": "ike-version", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "udp", "desc": "IKE(VPN) 버전"},
+    {"key": "sip-methods", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "both", "desc": "SIP 지원 메서드"},
+    {"key": "ntp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "udp", "desc": "NTP 서버 정보(monlist 아님, 양성 readvar)"},
+    {"key": "ntp-monlist", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "NTP monlist(증폭 취약 점검용)"},
+    {"key": "rpcinfo", "group": "RPC", "nmap_default": True, "proto": "both", "desc": "RPC 서비스 목록"},
+    {"key": "fingerprint-strings", "group": "기타", "nmap_default": True, "proto": "tcp", "desc": "미식별 서비스 원시 응답(-sV 가 식별 못 한 포트 조사)"},
+    {"key": "banner", "group": "기타", "nmap_default": True, "proto": "tcp", "desc": "서비스 배너 수집"},
+    {"key": "ftp-anon", "group": "FTP", "nmap_default": True, "proto": "tcp", "desc": "익명 FTP 접속 허용 여부"},
+    {"key": "ftp-syst", "group": "FTP", "nmap_default": True, "proto": "tcp", "desc": "FTP SYST/STAT 정보"},
+    {"key": "telnet-encryption", "group": "Telnet", "nmap_default": True, "proto": "tcp", "desc": "Telnet 암호화 지원 여부"},
+    {"key": "dns-recursion", "group": "DNS", "nmap_default": False, "proto": "both", "desc": "개방 재귀 DNS 여부"},
+    {"key": "dns-nsid", "group": "DNS", "nmap_default": True, "proto": "both", "desc": "DNS 서버 식별(NSID)"},
+    {"key": "vnc-info", "group": "VNC", "nmap_default": True, "proto": "tcp", "desc": "VNC 보안 타입"},
+    {"key": "vnc-title", "group": "VNC", "nmap_default": False, "proto": "tcp", "desc": "VNC 데스크톱 제목"},
 ]
 
-# 기본 선택되는 '정체 식별형' NSE 21종
+# 기본 선택되는 '정체 식별형' NSE
 NSE_DEFAULT_KEYS = [s["key"] for s in NSE_SCRIPTS if s["nmap_default"]]
 # 기본 UDP 포트 집합 + 기본 포트 스펙(전체 TCP + 주요 UDP) — '정밀 식별' 기본 프로파일이 쓴다.
-UDP_DEFAULT_PORTS = "7,53,67,68,69,88,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
+# 111(포트맵퍼) 포함 → rpcinfo 가 RPC/NFS(2049) 매핑에 유효.
+UDP_DEFAULT_PORTS = "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 DEFAULT_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 
 _BY_KEY = {o["key"]: o for o in SCAN_OPTIONS}
 _NSE_KEYS = {s["key"] for s in NSE_SCRIPTS}
+_NSE_PROTO = {s["key"]: s.get("proto", "both") for s in NSE_SCRIPTS}
 DEFAULT_KEYS = [o["key"] for o in SCAN_OPTIONS if o["default"]]
 
 # 포트 스펙: 숫자/범위/콤마 + T:/U: 프로토콜 접두만 허용
@@ -171,6 +174,12 @@ def validate_nse(keys: list[str]) -> list[str]:
     if bad:
         raise ValueError(f"알 수 없는 NSE 스크립트: {bad}")
     return keys
+
+
+def filter_nse_proto(keys: list[str], proto: str) -> list[str]:
+    """식별 단계 프로토콜에 맞는 NSE 만 남긴다 — proto 일치 또는 'both'.
+    TCP identify(proto='tcp')엔 UDP 전용(snmp-info 등) 제외, UDP identify(proto='udp')엔 TCP 전용 제외."""
+    return [k for k in keys if _NSE_PROTO.get(k, "both") in (proto, "both")]
 
 
 def script_flag(keys: list[str]) -> list[str]:

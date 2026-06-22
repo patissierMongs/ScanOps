@@ -70,10 +70,14 @@ def copy_app(app: Path) -> None:
 def install_site(app: Path) -> None:
     site = app / "runtime" / "site"
     site.mkdir(parents=True)
-    log("pip install --target runtime/site (offline, cp312 wheels)")
+    log("pip install --target runtime/site (offline, win_amd64 cp312 wheels)")
+    # 타깃 고정 설치: 빌드 호스트 OS/파이썬과 무관하게 Windows cp312 휠로 설치(리눅스에서 크로스빌드 가능).
+    # --only-binary=:all: 가 있어야 --platform/--abi/--python-version 가 허용된다(소스빌드 금지).
     subprocess.check_call([
         sys.executable, "-m", "pip", "install", "--no-index",
         "--find-links", str(WHEELHOUSE), "--target", str(site),
+        "--platform", "win_amd64", "--python-version", "3.12",
+        "--abi", "cp312", "--implementation", "cp", "--only-binary=:all:",
         "-r", str(ROOT / "backend" / "requirements.txt"),
     ])
     # 용량/잡음 줄이기: 사전설치본의 캐시 제거

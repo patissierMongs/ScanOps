@@ -23,19 +23,24 @@ _OUT_FLAGS = {"-oX", "-oN", "-oG", "-oS", "-oA"}
 # 주기적 진행 보고 — nmap 이 stdout 에 "About X% done; ETC ..." 를 10초마다 출력.
 # --resume 은 원본 명령을 그대로 이어받으므로 이 플래그도 자동 승계된다(가시성 유지).
 STATS_FLAGS = ["--stats-every", "10s"]
+# 발견: -PS(흔한 서버포트 SYN ping)로 살아있는 호스트만 추린다(-Pn 전수 아님). -Pn 이면 죽은 IP 도
+# status=up(user-set)로 박혀 이후 단계의 live-host 제한이 무력화됨 → 반드시 실제 호스트 발견 사용.
+DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"
 AUTO_TCP_DISCOVERY_FLAGS = [
-    "-sS", "-Pn", "-n", "-T4", "--open", "--reason",
-    "--min-hostgroup", "64", "--max-retries", "1",
+    "-sS", DISCOVERY_PS, "-n", "-T4", "--open", "--reason",
+    "--min-hostgroup", "64", "--max-retries", "2",
     "--defeat-rst-ratelimit", "--max-parallelism", "100",
-    "--max-scan-delay", "5ms",
 ]
+# 식별은 발견된 생존 호스트만 대상(scans.py 가 discovery_live 주입)이라 -Pn 안전, -n 제거 → 역DNS 로
+# 호스트명 확보(용도 식별 근거). --version-all(intensity 9)로 rarity 높은 서비스(redis 등)까지 식별.
 AUTO_TCP_IDENTIFY_FLAGS = [
-    "-sS", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason",
+    "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
     "-T4", "--max-retries", "2", "--script-timeout", "10s",
 ]
+# UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 적응형 백오프를 막아 open|filtered 오판).
 AUTO_UDP_IDENTIFY_FLAGS = [
     "-sU", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason",
-    "-T4", "--max-retries", "1", "--max-scan-delay", "5ms", "--script-timeout", "10s",
+    "-T4", "--max-retries", "2", "--script-timeout", "10s",
 ]
 
 
@@ -95,9 +100,9 @@ def auto_udp_port_spec(ports: str) -> str:
     return f"U:{','.join(udp_ports)}" if udp_ports else ""
 
 
-def _script_args(nse: list[str] | None) -> list[str]:
+def _script_args(nse: list[str] | None, proto: str) -> list[str]:
     keys = scan_options.NSE_DEFAULT_KEYS if nse is None else nse
-    return scan_options.script_flag(keys)
+    return scan_options.script_flag(scan_options.filter_nse_proto(keys, proto))
 
 
 def xml_of(basename: Path) -> Path:
@@ -140,7 +145,7 @@ def build_auto_command(nmap: str, stage: str, targets: list[str], out_basename: 
     """자동 워크플로 단계 명령.
 
     tcp_discovery: 전체/지정 TCP에서 열린 포트 발견
-    tcp_identify: 발견된 TCP 포트에 서비스/버전/NSE 단서 부착
+    tcp_identify: 발견된 TCP 포트에 서비스/버전/NSE 단서 부착(--version-all 기본)
     udp_identify: 주요/지정 UDP 포트 식별
     """
     validate_targets(targets)
@@ -154,14 +159,14 @@ def build_auto_command(nmap: str, stage: str, targets: list[str], out_basename: 
             raise ValueError("TCP 식별 단계에 사용할 열린 TCP 포트가 없습니다.")
         flags = [
             *AUTO_TCP_IDENTIFY_FLAGS,
-            *_script_args(nse),
+            *_script_args(nse, "tcp"),
             "-p", "T:" + ",".join(str(p) for p in sorted(set(tcp_ports))),
         ]
     elif stage == "udp_identify":
         port_spec = auto_udp_port_spec(ports)
         if not port_spec:
             raise ValueError("자동 스캔 UDP 단계에 사용할 UDP 포트가 없습니다.")
-        flags = [*AUTO_UDP_IDENTIFY_FLAGS, *_script_args(nse), "-p", port_spec]
+        flags = [*AUTO_UDP_IDENTIFY_FLAGS, *_script_args(nse, "udp"), "-p", port_spec]
     else:
         raise ValueError(f"알 수 없는 자동 스캔 단계: {stage}")
     return [nmap, *STATS_FLAGS, *flags, "-oA", str(out_basename), *targets]
