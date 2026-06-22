@@ -18,7 +18,10 @@ samples/.token
 frontend/node_modules/
 # frontend/dist 는 에어갭 배포용으로 커밋(빌드 산출물 동봉)
 
-# 패키징 wheelhouse 는 에어갭 배포용으로 포함
+# 패키징 wheelhouse 는 에어갭 배포용으로 포함(cp312 + 순수파이썬만 — 임베디드 3.12 와 일치)
+
+# 데모 스크린샷은 추적 안 함(레포 비대) — 필요하면 mockups/ 나 위키로
+samples/*.png
 
 # 데모/검증 스크립트의 런타임 산출물 — 스크립트로 재생성되므로 커밋 안 함
 # (스크립트 .py/.mjs/.sh 와 큐레이션된 샘플 XML·스크린샷은 그대로 추적)
