@@ -65,6 +65,14 @@ def copy_app(app: Path) -> None:
     for f in ("README.md", "DESIGN.md", "REBUILD.md", "HANDOFF.md"):
         if (ROOT / f).exists():
             shutil.copy2(ROOT / f, app / f)
+    # standalone 스캐너(에어갭 스캔 호스트용). CLI(scanops_scanner.py)는 stdlib 전용이라
+    # 번들 임베디드 파이썬으로도 실행 가능. GUI 는 tkinter 필요(임베디드엔 없음 → 별도 풀파이썬).
+    scanner_dst = app / "scanner"
+    scanner_dst.mkdir(parents=True, exist_ok=True)
+    for f in ("scanops_scanner.py", "scanops_scanner_gui.py", "run_gui.bat", "README.md"):
+        src = ROOT / "scanner" / f
+        if src.exists():
+            shutil.copy2(src, scanner_dst / f)
 
 
 def install_site(app: Path) -> None:
@@ -111,6 +119,13 @@ def write_launcher(app: Path) -> None:
         "echo Starting ScanOps -- open http://<this-server-ip>:8770/ in a browser.\r\n"
         "\"%~dp0runtime\\python\\python.exe\" -E -s -m uvicorn scanops.main:app --host 0.0.0.0 --port 8770\r\n"
         "pause\r\n",
+        encoding="ascii",
+    )
+    # standalone 스캐너를 번들 임베디드 파이썬으로 실행(nmap 은 호스트에 별도 설치 필요).
+    # 예: SCAN.bat --workflow auto 10.0.0.0/24
+    (app / "SCAN.bat").write_text(
+        "@echo off\r\n"
+        "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0scanner\\scanops_scanner.py\" %*\r\n",
         encoding="ascii",
     )
 
