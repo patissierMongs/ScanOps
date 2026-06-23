@@ -101,12 +101,15 @@ def place_python(app: Path, embed_zip: Path) -> None:
 
 
 def write_launcher(app: Path) -> None:
+    # -E -s: 시스템에 다른 Python 이 깔려 PYTHONHOME/PYTHONPATH 등 PYTHON* 환경변수가 설정돼 있어도
+    # 임베디드 런타임이 그걸 무시하도록 완전 격리(절대경로 호출 + ._pth 와 함께 폐쇄망 안전).
+    # SCANOPS_* 설정값은 PYTHON* 가 아니므로 그대로 읽힌다.
     (app / "START.bat").write_text(
         "@echo off\r\n"
         "title ScanOps\r\n"
         "cd /d \"%~dp0backend\"\r\n"
         "echo Starting ScanOps -- open http://<this-server-ip>:8770/ in a browser.\r\n"
-        "\"%~dp0runtime\\python\\python.exe\" -m uvicorn scanops.main:app --host 0.0.0.0 --port 8770\r\n"
+        "\"%~dp0runtime\\python\\python.exe\" -E -s -m uvicorn scanops.main:app --host 0.0.0.0 --port 8770\r\n"
         "pause\r\n",
         encoding="ascii",
     )
