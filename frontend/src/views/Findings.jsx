@@ -364,6 +364,14 @@ function RescanDrawer({ targets, onClose, onDone, toast }) {
 function renderCell(finding, key, displayModes) {
   const col = COLUMN_MAP[key];
   const val = cellValue(finding, key);
+  // 여러 줄 값(핑거프린트 등): 줄바꿈 보존 + 높이 제한 스크롤 박스로 깔끔하게.
+  if (col?.pre) return (
+    <pre className="mono" style={{
+      margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all",
+      maxHeight: 160, overflow: "auto", fontSize: 11, lineHeight: 1.4,
+      maxWidth: 460, background: "var(--line-soft, rgba(127,127,127,.08))", borderRadius: 6, padding: val ? "6px 8px" : 0,
+    }}>{val}</pre>
+  );
   if (!col?.badge) return <span className={col?.mono ? "mono" : undefined}>{val}</span>;
   const mode = displayModes[key] || "badge";
   if (mode === "text") return <span>{val}</span>;

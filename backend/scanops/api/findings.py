@@ -19,7 +19,7 @@ from ..schemas import (
     EventOut, FindingOut, FindingPatch, RescanIn, RescanOut, RescanRunIn, RescanRunOut,
 )
 from ..scanning import engine_runner, nmap_runner
-from ..scanning.nmap_parse import _extract_key_line
+from ..scanning.nmap_parse import _extract_key_line, pretty_fingerprint
 from ..spreadsheet import safe_cell
 from .deps import current_user, require_role
 
@@ -66,7 +66,7 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("version", "버전", lambda f: f.version),
     ("banner", "배너", lambda f: f.banner),
     ("cpe", "CPE", lambda f: f.cpe),
-    ("fingerprint", "핑거프린트", lambda f: f.fingerprint),
+    ("fingerprint", "핑거프린트", lambda f: pretty_fingerprint(f.fingerprint)),
     ("rtt", "RTT", lambda f: f.rtt),
     ("identification", "식별", lambda f: f.identification),
     ("category", "분류", lambda f: f.category),
