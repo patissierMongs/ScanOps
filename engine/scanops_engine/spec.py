@@ -78,6 +78,8 @@ class JobSpec:
     service: ServiceStage = field(default_factory=ServiceStage)
     # 타겟 재스캔: 발견·찾기 생략하고 지정 포트로 바로 서비스 probe. {ip: [ports]}
     targets_ports: dict | None = None
+    # 발견(IP:포트)별 개별 재스캔: 각 항목 1개 nmap 명령(그 ip·그 포트만). [{ip, port, proto}]
+    rescan_units: list | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobSpec":
@@ -90,6 +92,7 @@ class JobSpec:
             batch_size=int(d.get("batch_size", 256)),
             sudo=d.get("sudo", "auto"),
             targets_ports=d.get("targets_ports"),
+            rescan_units=d.get("rescan_units"),
         )
         for name, st in (d.get("stages") or {}).items():
             if name in _STAGE_CLASSES:
@@ -101,6 +104,7 @@ class JobSpec:
             "job_id": self.job_id, "targets": self.targets, "exclude": self.exclude,
             "out_dir": self.out_dir, "batch_size": self.batch_size, "sudo": self.sudo,
             "targets_ports": self.targets_ports,
+            "rescan_units": self.rescan_units,
             "stages": {
                 "discovery": asdict(self.discovery), "tcp": asdict(self.tcp),
                 "udp": asdict(self.udp), "service": asdict(self.service),
@@ -127,4 +131,11 @@ class JobSpec:
         for ip in (self.targets_ports or {}):
             if not _TARGET_RE.match(ip):
                 raise ValueError(f"허용되지 않는 재스캔 타겟: {ip!r}")
+        for u in (self.rescan_units or []):
+            if not _TARGET_RE.match(str(u.get("ip", ""))):
+                raise ValueError(f"허용되지 않는 재스캔 단위 IP: {u!r}")
+            if not (1 <= int(u.get("port", 0)) <= 65535):
+                raise ValueError(f"허용되지 않는 재스캔 단위 포트: {u!r}")
+            if u.get("proto", "tcp") not in ("tcp", "udp"):
+                raise ValueError(f"재스캔 단위 proto 는 tcp/udp: {u!r}")
         return self

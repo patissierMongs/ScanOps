@@ -30,30 +30,36 @@ def test_build_job_spec_maps_options_to_stages():
 def test_build_job_spec_defaults_and_rescan():
     spec = engine_runner.build_job_spec(
         1, [], [], options=[], ports="", nse=[], out_dir="/tmp/x", batch_size=256,
-        rescan_ports={"10.0.0.5": [6379, 22]})
+        rescan_units=[{"ip": "10.0.0.5", "port": 6379, "proto": "tcp"},
+                      {"ip": "10.0.0.5", "port": 22, "proto": "tcp"}])
     st = spec["stages"]
     assert st["tcp"]["ports"] == "1-65535"      # 기본 전포트
     assert st["tcp"]["timing"] == "-T4"          # 기본 T4
     assert st["udp"]["enabled"] is False
     assert "nse" not in st["service"]            # 비우면 엔진 기본 NSE 사용
-    assert spec["targets_ports"] == {"10.0.0.5": [6379, 22]}
+    assert len(spec["rescan_units"]) == 2 and spec["rescan_units"][0]["port"] == 6379
 
 
-def test_rescan_targets_groups_per_host():
-    ports, keys = engine_runner.rescan_targets([
-        ("10.0.0.5", 6379, "10.0.0.5|6379|tcp"),
-        ("10.0.0.5", 22, "10.0.0.5|22|tcp"),
-        ("10.0.0.6", 80, "10.0.0.6|80|tcp"),
+def test_rescan_targets_units_per_finding():
+    units, keys = engine_runner.rescan_targets([
+        ("10.0.0.5", 6379, "tcp", "10.0.0.5|6379|tcp"),
+        ("10.0.0.5", 22, "tcp", "10.0.0.5|22|tcp"),
+        ("10.0.0.6", 80, "udp", "10.0.0.6|80|udp"),
+        ("10.0.0.6", 80, "udp", "10.0.0.6|80|udp"),   # 중복 → 1건
     ])
-    assert ports == {"10.0.0.5": [22, 6379], "10.0.0.6": [80]}   # 호스트별, 교차곱 없음
-    assert keys == {"10.0.0.5|6379|tcp", "10.0.0.5|22|tcp", "10.0.0.6|80|tcp"}
+    assert units == [
+        {"ip": "10.0.0.5", "port": 6379, "proto": "tcp"},
+        {"ip": "10.0.0.5", "port": 22, "proto": "tcp"},
+        {"ip": "10.0.0.6", "port": 80, "proto": "udp"},
+    ]
+    assert keys == {"10.0.0.5|6379|tcp", "10.0.0.5|22|tcp", "10.0.0.6|80|udp"}
 
 
 def test_build_job_spec_rescan_enables_confirm():
     spec = engine_runner.build_job_spec(1, [], [], [], "", [], "/tmp/x", 256,
-                                        rescan_ports={"10.0.0.5": [22]})
+                                        rescan_units=[{"ip": "10.0.0.5", "port": 22, "proto": "tcp"}])
     assert spec["stages"]["service"]["confirm"] is True
-    assert spec["targets_ports"] == {"10.0.0.5": [22]}
+    assert spec["rescan_units"][0]["ip"] == "10.0.0.5"
 
 
 def test_describe():
@@ -61,7 +67,7 @@ def test_describe():
     d = engine_runner.describe(spec)
     assert "단계스캔" in d and "UDP" in d
     rspec = engine_runner.build_job_spec(1, [], [], [], "", [], "/tmp/x", 256,
-                                         rescan_ports={"10.0.0.5": [22]})
+                                         rescan_units=[{"ip": "10.0.0.5", "port": 22, "proto": "tcp"}])
     assert "재스캔" in engine_runner.describe(rspec)
 
 

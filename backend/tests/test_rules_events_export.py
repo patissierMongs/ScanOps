@@ -154,9 +154,14 @@ def test_rescan_command(client):
     assert r.status_code == 200, r.text
     out = r.json()
     assert out["command"].startswith("nmap ")
-    assert "-p " in out["command"]
     assert out["finding_count"] == 3
     assert len(out["ports"]) >= 1 and len(out["hosts"]) >= 1
+    # 발견(IP:포트)별 개별 명령 — 각 명령은 단일 포트·단일 호스트만
+    assert len(out["commands"]) >= 1
+    for c in out["commands"]:
+        assert c.startswith("nmap ") and " -p " in c
+        tail = c.split(" -p ", 1)[1].split()       # [port, host]
+        assert len(tail) == 2 and "," not in tail[0]   # 포트 1개, 호스트 1개(교차곱 아님)
 
 
 def test_rescan_command_empty(client):
@@ -189,7 +194,8 @@ def test_rescan_run_starts_engine_job(client, monkeypatch):
 
     spec = json.loads((get_settings().scans_dir / f"scan_{out['scan_id']}" / "spec.json")
                       .read_text(encoding="utf-8"))
-    assert spec["targets_ports"]                          # 호스트별 포트 직접 지정(발견·찾기 생략)
+    assert spec["rescan_units"]                           # 발견(IP:포트)별 개별 단위
+    assert all({"ip", "port", "proto"} <= set(u) for u in spec["rescan_units"])
     assert spec["stages"]["service"]["confirm"] is True   # 2-pass 정밀 확인
     assert spec["scanops"]["scope_keys"]                  # 닫힘 판정 한정 키
 

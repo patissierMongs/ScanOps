@@ -180,12 +180,22 @@ def rescan_command(
     rows = db.query(Finding).filter(Finding.id.in_(body.finding_ids)).all() if body.finding_ids else []
     hosts = sorted({f.host_ip for f in rows})
     ports = sorted({f.port for f in rows})
-    if not hosts or not ports:
-        return RescanOut(command="", hosts=hosts, ports=ports, finding_count=len(rows))
-    flags = body.preset_flags.strip() or "-sV -Pn"
-    port_str = ",".join(str(p) for p in ports)
-    command = f"nmap {flags} -p {port_str} {' '.join(hosts)}"
-    return RescanOut(command=command, hosts=hosts, ports=ports, finding_count=len(rows))
+    if not rows:
+        return RescanOut(command="", commands=[], hosts=hosts, ports=ports, finding_count=len(rows))
+    flags = body.preset_flags.strip() or "-sV -Pn -n"
+    # 발견(IP:포트:proto)별 개별 명령 — 각 항목 nmap 1개(그 ip·그 포트만). 중복 제거.
+    seen: set = set()
+    commands: list[str] = []
+    for f in sorted(rows, key=lambda r: (r.host_ip, r.port, r.proto or "tcp")):
+        proto = (f.proto or "tcp").lower()
+        u = (f.host_ip, f.port, proto)
+        if u in seen:
+            continue
+        seen.add(u)
+        udp = " -sU" if proto == "udp" else ""
+        commands.append(f"nmap {flags}{udp} -p {f.port} {f.host_ip}")
+    return RescanOut(command="\n".join(commands), commands=commands,
+                     hosts=hosts, ports=ports, finding_count=len(rows))
 
 
 def _start_engine_rescan(db: Session, user: User, rows: list[Finding], options: list[str]):
@@ -193,10 +203,10 @@ def _start_engine_rescan(db: Session, user: User, rows: list[Finding], options: 
     2-pass 확인, scope_keys 로 닫힘 판정 한정. scan_id 즉시 반환(진행은 /scans/{id}/stages)."""
     if not nmap_runner.find_nmap(_settings.nmap_path):
         raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
-    rescan_ports, scope_keys = engine_runner.rescan_targets(
-        [(f.host_ip, f.port, f.finding_key) for f in rows])
-    hosts = sorted(rescan_ports)
-    ports = sorted({p for ps in rescan_ports.values() for p in ps})
+    units, scope_keys = engine_runner.rescan_targets(
+        [(f.host_ip, f.port, f.proto, f.finding_key) for f in rows])
+    hosts = sorted({u["ip"] for u in units})
+    ports = sorted({u["port"] for u in units})
 
     scan = ScanRun(name=f"타겟 재스캔: {len(rows)}건", targets=" ".join(hosts),
                    status="running", created_by=user.id)
@@ -205,7 +215,7 @@ def _start_engine_rescan(db: Session, user: User, rows: list[Finding], options: 
     out_dir = _settings.scans_dir / f"scan_{scan.id}"
     out_dir.mkdir(parents=True, exist_ok=True)
     spec = engine_runner.build_job_spec(scan.id, [], [], options or [], "", [],
-                                        out_dir, 256, rescan_ports=rescan_ports)
+                                        out_dir, 256, rescan_units=units)
     spec["scanops"] = {"scope_keys": sorted(scope_keys)}   # 워커가 읽어 ingest 닫힘 판정에 사용
     (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
     scan.command = engine_runner.describe(spec)

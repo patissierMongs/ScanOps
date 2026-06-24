@@ -32,7 +32,7 @@ _TIMING = {"t0": "-T0", "t1": "-T1", "t2": "-T2", "t3": "-T3", "fast": "-T4", "t
 
 def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options: list[str],
                    ports: str, nse: list[str], out_dir: Path, batch_size: int,
-                   discovery: str = "sn", rescan_ports: dict | None = None) -> dict:
+                   discovery: str = "sn", rescan_units: list | None = None) -> dict:
     """ScanOps 옵션 키를 엔진 단계 설정으로 매핑. 스캔 기법/타이밍/버전강도/UDP/NSE 를 단계로 분배.
 
     one-liner 옵션(노핑·기법)은 엔진이 단계별로 알아서 처리하므로 그대로 옮기지 않는다.
@@ -62,28 +62,35 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
             "service": service,
         },
     }
-    if rescan_ports is not None:
-        spec["targets_ports"] = {ip: list(ps) for ip, ps in rescan_ports.items()}
+    if rescan_units is not None:
+        spec["rescan_units"] = [dict(u) for u in rescan_units]
         spec["stages"]["service"]["confirm"] = True   # 재스캔: 1차에 안 잡히면 retries↑ 2-pass 재확인
     return spec
 
 
-def rescan_targets(findings: list[tuple]) -> tuple[dict, set]:
-    """[(host_ip, port, finding_key)] → ({ip: [ports]}, scope_keys).
+def rescan_targets(findings: list[tuple]) -> tuple[list, set]:
+    """[(host_ip, port, proto, finding_key)] → ([{ip,port,proto}], scope_keys).
 
-    호스트별로 그 호스트의 포트만 모은다(기존 동기 재스캔의 host×port 교차곱 제거).
+    발견(IP:포트:proto)별 개별 단위 — 항목마다 nmap 1개(그 ip·그 포트만). 중복 제거.
     scope_keys 는 닫힘 판정을 선택 발견으로만 한정하는 데 쓴다(다른 포트 거짓 닫힘 방지).
     """
-    ports_by_ip: dict[str, set] = {}
+    units: list[dict] = []
+    seen: set = set()
     keys: set = set()
-    for ip, port, key in findings:
-        ports_by_ip.setdefault(ip, set()).add(int(port))
+    for ip, port, proto, key in findings:
+        proto = (proto or "tcp").lower()
+        u = (ip, int(port), proto)
+        if u not in seen:
+            seen.add(u)
+            units.append({"ip": ip, "port": int(port), "proto": proto})
         keys.add(key)
-    return {ip: sorted(ps) for ip, ps in ports_by_ip.items()}, keys
+    return units, keys
 
 
 def describe(spec: dict) -> str:
     """명령 표기용 사람이 읽는 요약."""
+    if spec.get("rescan_units"):
+        return f"타겟 재스캔(엔진) · {len(spec['rescan_units'])}건 개별(IP:포트별) · Stage3"
     if spec.get("targets_ports"):
         n = sum(len(v) for v in spec["targets_ports"].values())
         return f"타겟 재스캔(엔진) · {len(spec['targets_ports'])}호스트 / {n}포트 · Stage3"
