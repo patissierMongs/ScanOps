@@ -114,6 +114,40 @@ def test_export_xlsx(client):
     assert "spreadsheetml" in r.headers["content-type"]
 
 
+def test_export_fingerprint_and_owner_columns(client):
+    """수집은 되는데 노출 안 되던 값(핑거프린트·담당자)을 선택 컬럼으로 내보낼 수 있어야 한다."""
+    h = _auth(client)
+    client.post("/api/assets/bulk", headers=h, json=[{"ip": "127.0.0.1", "owner": "김운영"}])
+    _seed_findings(client, h)
+    r = client.get("/api/findings/export", headers=h,
+                   params={"cols": "host_ip,port,owner,fingerprint", "fmt": "csv"})
+    assert r.status_code == 200
+    text = r.content.decode("utf-8-sig")
+    header = text.splitlines()[0]
+    assert "담당자" in header and "핑거프린트" in header
+    # MinIO(포트 9000/9001)는 -sV 가 식별했어도 fingerprint-strings 원문에 Server 단서가 남는다
+    assert "MinIO" in text
+    assert "김운영" in text   # 자산대장 IP 매칭으로 채워진 담당자
+
+
+def test_finding_exposes_fingerprint_field(client):
+    """FindingOut 이 fingerprint(미식별 서비스 원시 응답)를 노출해 표/서랍에서 바로 보이게."""
+    h = _auth(client)
+    findings = _seed_findings(client, h)
+    fp = [f for f in findings if f.get("fingerprint")]
+    assert fp, "fingerprint-strings 가 있는 발견은 fingerprint 필드가 채워져야 한다"
+
+
+def test_purpose_surfaces_server_header(client):
+    """-sV 가 식별 못 해도 Server 헤더(uvicorn 류)를 용도근거로 끌어올린다."""
+    h = _auth(client)
+    _seed_findings(client, h)
+    r = client.get("/api/findings/export", headers=h,
+                   params={"cols": "host_ip,port,purpose", "fmt": "csv"})
+    assert r.status_code == 200
+    assert "server=" in r.content.decode("utf-8-sig")
+
+
 def test_export_unknown_column(client):
     h = _auth(client)
     _seed_findings(client, h)

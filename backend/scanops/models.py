@@ -135,6 +135,18 @@ class Finding(Base):
         back_populates="finding", cascade="all, delete-orphan", order_by="FindingEvent.created_at"
     )
 
+    @property
+    def fingerprint(self) -> str:
+        """-sV 가 식별 못 한 서비스의 원시 응답(fingerprint-strings NSE).
+
+        nmap 이 포트표로만 추측(예: 8770→apple-iphoto)하고 시그니처 매칭에 실패한 경우,
+        실제 응답(예: 'server: uvicorn')이 여기 남는다 — service 컬럼엔 안 드러나는 식별 단서.
+        """
+        for s in (self.nse_json or []):
+            if isinstance(s, dict) and (s.get("id") or "") == "fingerprint-strings":
+                return s.get("output") or ""
+        return ""
+
 
 class FindingEvent(Base):
     """이력 타임라인 + 감사 추적 (누가·언제·무엇을)."""

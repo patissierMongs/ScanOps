@@ -107,6 +107,7 @@ class FindingOut(BaseModel):
     version: str
     banner: str
     cpe: str
+    fingerprint: str = ""      # -sV 미식별 서비스 원시 응답(nse_json 의 fingerprint-strings)
     rtt: str
     identification: str
     category: str

@@ -19,6 +19,7 @@ export const ALL_COLUMNS = [
   { key: "version", label: "버전", get: (f) => f.version },
   { key: "banner", label: "배너", get: (f) => f.banner, mono: true },
   { key: "cpe", label: "CPE", get: (f) => f.cpe, mono: true },
+  { key: "fingerprint", label: "핑거프린트", get: (f) => f.fingerprint, mono: true },
   { key: "rtt", label: "RTT", get: (f) => f.rtt, mono: true },
   { key: "identification", label: "식별", get: (f) => f.identification },
   { key: "category", label: "분류", get: (f) => f.category },
@@ -29,6 +30,7 @@ export const ALL_COLUMNS = [
   { key: "status", label: "운영상태", get: (f) => f.status, badge: "status" },
   { key: "reopened", label: "재발", get: (f) => (f.reopened ? "재발" : "") },
   { key: "dept", label: "부서", get: (f) => f.dept },
+  { key: "owner", label: "담당자", get: (f) => f.owner },
   { key: "contact", label: "연락처", get: (f) => f.contact, mono: true },
   { key: "deadline", label: "마감", get: (f) => fmtDate(f.deadline), mono: true },
   { key: "first_seen", label: "등록 날짜", get: (f) => fmtDate(f.first_seen), mono: true },
@@ -49,7 +51,7 @@ export const cellValue = (finding, key) => {
 export const PRESETS = [
   { id: "p_report", name: "표준 보고서", cols: ["host_ip", "hostname", "port", "proto", "service", "version", "risk_level", "status", "dept", "first_seen", "last_seen"] },
   { id: "p_ports", name: "포트 인벤토리", cols: ["host_ip", "port", "proto", "state", "service"] },
-  { id: "p_finger", name: "서비스 핑거프린트", cols: ["host_ip", "port", "service", "product", "version", "banner", "cpe"] },
+  { id: "p_finger", name: "서비스 핑거프린트", cols: ["host_ip", "port", "service", "product", "version", "banner", "cpe", "fingerprint"] },
   { id: "p_risk", name: "위험·컴플라이언스", cols: ["host_ip", "port", "service", "risk_level", "category", "compliance", "status", "deadline"] },
   { id: "p_min", name: "최소 (CSV)", cols: ["host_ip", "port", "service"] },
 ];

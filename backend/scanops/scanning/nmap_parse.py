@@ -18,6 +18,10 @@ _REMARK_PATTERNS = [
     ("rdp-ntlm-info", "Target_Name", re.compile(r"Target_Name:\s*([^\n]+)")),
     ("nbstat", "host", re.compile(r"Computer name:\s*([^\n]+)")),
     ("http-title", "title", re.compile(r"\A\s*([^\n]+)")),
+    # http-server-header 출력은 Server 값 그 자체(예: "uvicorn")
+    ("http-server-header", "server", re.compile(r"\A\s*([^\r\n]+)")),
+    # -sV 가 식별 못 한 포트: fingerprint-strings 원시 응답에서 Server 헤더를 건진다(소문자 server: 포함).
+    ("fingerprint-strings", "server", re.compile(r"(?i)server:[ \t]*([^\r\n]+)")),
 ]
 
 
