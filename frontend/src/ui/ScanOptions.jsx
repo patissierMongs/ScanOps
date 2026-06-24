@@ -37,7 +37,11 @@ function commandText(parts) {
   return parts.filter(Boolean).join(" ");
 }
 
-export default function ScanOptions({ targets = [], portsAuto = "", onState }) {
+// 발견 단계 host-discovery probe — 백엔드 nmap_runner.DISCOVERY_PS/PA 와 동일하게 유지(미리보기 정확도).
+const DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080";
+const DISCOVERY_PA = "-PA80,443,3389";
+
+export default function ScanOptions({ targets = [], portsAuto = "", staged = false, onState }) {
   const [workflow, setWorkflow] = useState("auto");
   const [registry, setRegistry] = useState([]);
   const [sel, setSel] = useState(() => new Set());
@@ -74,28 +78,46 @@ export default function ScanOptions({ targets = [], portsAuto = "", onState }) {
     [nseReg, nseSel]
   );
 
-  const command = useMemo(() => {
-    const p = (ports || portsAuto).trim();
-    if (workflow === "auto") {
-      const { tcp, udp } = autoPortSpecs(p, udpPorts);
-      const scripts = selectedScripts.length ? selectedScripts.join(",") : "";
-      const lines = [];
-      if (tcp) {
-        lines.push(commandText(["nmap", "--stats-every", "10s", "-sS", "-Pn", "-n", "-T4", "--open", "--reason",
-          "--min-hostgroup", "64", "--max-retries", "1", "--defeat-rst-ratelimit", "--max-parallelism", "100",
-          "--max-scan-delay", "5ms", "-p", tcp, "-oA", "scan_<id>.tcp_discovery", ...targets]));
-        lines.push(commandText(["nmap", "--stats-every", "10s", "-sS", "-Pn", "-n", "-sV", "--version-all", "--open",
-          "--reason", "-T4", "--max-retries", "2", scripts && "--script", scripts, "--script-timeout", "10s",
-          "-p", "T:<발견된 TCP 포트>", "-oA", "scan_<id>.tcp_identify", ...targets]));
-      }
-      if (udp) {
-        lines.push(commandText(["nmap", "--stats-every", "10s", "-sU", "-Pn", "-n", "-sV", "--version-all", "--open",
-          "--reason", "-T4", "--max-retries", "1", "--max-scan-delay", "5ms", scripts && "--script", scripts,
-          "--script-timeout", "10s", "-p", udp, "-oA", "scan_<id>.udp_identify", ...targets]));
-      }
-      return lines.join("\n");
-    }
+  // 단계 분리(staged) 또는 자동 스캔이면 한 번에 안 돌고 단계별로 나눠 순차 실행된다.
+  const stepped = staged || workflow === "auto";
 
+  // 분산 실행되는 각 단계 명령 — 백엔드 nmap_runner.build_auto_command 의 플래그와 동기화.
+  const steps = useMemo(() => {
+    const p = (ports || portsAuto).trim();
+    const { tcp, udp } = autoPortSpecs(p, udpPorts);
+    const scripts = selectedScripts.length ? selectedScripts.join(",") : "";
+    const out = [];
+    if (tcp) {
+      out.push({
+        title: "TCP 발견",
+        desc: "전체/지정 TCP에서 지금 열려 있는 포트만 먼저 추려냅니다.",
+        cmd: commandText(["nmap", "--stats-every", "10s", "-sS", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4",
+          "--reason", "--min-hostgroup", "64", "--max-retries", "2", "--defeat-rst-ratelimit",
+          "--max-parallelism", "100", "-p", tcp, "-oA", "scan_<id>.tcp_discovery", ...targets]),
+      });
+      out.push({
+        title: "TCP 식별",
+        desc: "앞 단계에서 살아있던 호스트의 열린 TCP에만 서비스·제품·버전·NSE 단서를 확인합니다.",
+        cmd: commandText(["nmap", "--stats-every", "10s", "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
+          "-T4", "--max-retries", "2", scripts && "--script", scripts, "--script-timeout", "10s",
+          "-p", "T:<1단계에서 발견된 TCP 포트>", "-oA", "scan_<id>.tcp_identify", ...targets]),
+      });
+    }
+    if (udp) {
+      out.push({
+        title: "UDP 식별",
+        desc: "주요/지정 UDP에서 DNS·SNMP·NTP 같은 용도 단서를 확인합니다.",
+        cmd: commandText(["nmap", "--stats-every", "10s", "-sU", "-Pn", "-n", "-sV", "--version-all", "--open",
+          "--reason", "-T4", "--max-retries", "2", scripts && "--script", scripts, "--script-timeout", "10s",
+          "-p", udp, "-oA", "scan_<id>.udp_identify", ...targets]),
+      });
+    }
+    return out;
+  }, [ports, portsAuto, udpPorts, targets, selectedScripts]);
+
+  // 단일 실행(manual) 명령 — raw 모드 '채우기' 및 하위호환용.
+  const singleCommand = useMemo(() => {
+    const p = (ports || portsAuto).trim();
     const flags = registry.filter((o) => sel.has(o.key)).flatMap((o) => o.flags);
     const parts = ["nmap", ...flags];
     if (p) parts.push("-p", p);
@@ -103,7 +125,10 @@ export default function ScanOptions({ targets = [], portsAuto = "", onState }) {
     parts.push("-oA", "scan_<id>");
     if (targets.length) parts.push(...targets);
     return parts.join(" ");
-  }, [workflow, sel, ports, portsAuto, targets, registry, selectedScripts, udpPorts]);
+  }, [sel, ports, portsAuto, targets, registry, selectedScripts]);
+
+  // onState.command: manual 은 항상 단일 명령(raw 모드 '채우기'용), 그 외엔 분산 단계 명령.
+  const command = workflow === "manual" ? singleCommand : steps.map((s) => s.cmd).join("\n");
 
   useEffect(() => {
     onState && onState({
@@ -295,8 +320,26 @@ export default function ScanOptions({ targets = [], portsAuto = "", onState }) {
         </div>
       )}
 
-      <div className="cb-label" style={{ marginTop: 12 }}>실시간 명령</div>
-      <div className="pre scan-command">{command}</div>
+      <div className="cb-label" style={{ marginTop: 12 }}>실행될 명령어</div>
+      {stepped ? (
+        <>
+          <div className="scan-result-note" style={{ marginBottom: 8 }}>
+            아래 {steps.length}개 명령은 <b>한 번에 실행되지 않습니다.</b> {staged ? "단계 분리 엔진이 " : "자동 스캔이 "}
+            각 단계를 <b>나눠서(분산) 순차 실행</b>하며, 앞 단계의 결과가 다음 단계의 입력이 됩니다
+            (예: TCP 발견에서 열린 포트만 골라 식별 단계로 넘김). 각 단계는 별도 명령·별도 산출물(<span className="mono">-oA</span>)로 남습니다.
+          </div>
+          {steps.map((s, i) => (
+            <div key={i} style={{ marginTop: i ? 10 : 0 }}>
+              <div className="cb-label" style={{ fontSize: 12, marginBottom: 4 }}>
+                {i + 1}단계 · {s.title} <span className="muted" style={{ fontWeight: 400 }}>— {s.desc}</span>
+              </div>
+              <div className="pre scan-command">{s.cmd}</div>
+            </div>
+          ))}
+        </>
+      ) : (
+        <div className="pre scan-command">{command}</div>
+      )}
     </div>
   );
 }

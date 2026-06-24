@@ -150,11 +150,21 @@ export function resolveCell(cols, spec, i) {
   return cleanVal(val);
 }
 
-const CORE_FIELDS = ["asset_no", "dept", "owner", "contact", "hostname"];
+// 알려진 핵심 필드(백엔드 Asset 컬럼) — IP 외에는 가져오기 화면에서 자유롭게 넣고 뺄 수 있다.
+export const ASSET_KNOWN_FIELDS = [
+  { key: "asset_no", label: "자산번호" },
+  { key: "hostname", label: "호스트명" },
+  { key: "dept", label: "부서" },
+  { key: "owner", label: "담당자" },
+  { key: "contact", label: "연락처" },
+  { key: "note", label: "비고" },
+];
+const KNOWN_KEYS = new Set(ASSET_KNOWN_FIELDS.map((f) => f.key));
 
 // 매핑 + (선택) 커스텀 컬럼 → 백엔드 Asset 임포트용 레코드 배열(ip 필수).
-// mapping[field] = 컬럼번호 또는 {col,sep,part}. extraCols = 보존할 컬럼 index 배열.
-export function buildAssetRecords(cols, mapping, extraCols = []) {
+// mapping[field] = 컬럼번호 또는 {col,sep,part}. fields = 화면에 표시된 필드 정의([{key,label,custom}]).
+// custom 필드는 extra[label] 로 저장. extraCols = 매핑과 별개로 통째 보존할 컬럼 index 배열(extra[header]).
+export function buildAssetRecords(cols, mapping, extraCols = [], fields = ASSET_MAP_FIELDS) {
   const ipSpec = normalizeSpec(mapping.ip);
   if (!ipSpec || !cols[ipSpec.col]) return [];
   const n = cols[ipSpec.col].values.length;
@@ -163,8 +173,14 @@ export function buildAssetRecords(cols, mapping, extraCols = []) {
     const ip = resolveCell(cols, mapping.ip, i);
     if (!ip) continue;
     const rec = { ip, asset_no: "", dept: "", owner: "", contact: "", hostname: "", extra: {} };
-    for (const k of CORE_FIELDS) {
-      if (mapping[k] != null) rec[k] = resolveCell(cols, mapping[k], i);
+    for (const fld of fields) {
+      if (fld.key === "ip" || mapping[fld.key] == null) continue;
+      const v = resolveCell(cols, mapping[fld.key], i);
+      if (fld.custom) {
+        if (v) rec.extra[fld.label] = v;          // 사용자 정의 필드 → extra(JSON)
+      } else if (KNOWN_KEYS.has(fld.key)) {
+        rec[fld.key] = v;                          // 알려진 Asset 컬럼
+      }
     }
     for (const idx of extraCols) {
       const col = cols[idx];
@@ -177,6 +193,7 @@ export function buildAssetRecords(cols, mapping, extraCols = []) {
   return out;
 }
 
+// 가져오기 매핑 UI의 기본 표시 필드(IP 필수 + 자주 쓰는 선택 필드). 사용자가 행을 추가/제거한다.
 export const ASSET_MAP_FIELDS = [
   { key: "ip", label: "IP 주소", req: true },
   { key: "asset_no", label: "자산번호", req: false },
@@ -185,3 +202,6 @@ export const ASSET_MAP_FIELDS = [
   { key: "owner", label: "담당자", req: false },
   { key: "contact", label: "연락처", req: false },
 ];
+
+// 새 import 세션의 필드 목록 — 기본 정의를 깊은 복사(상태 변형 방지).
+export const defaultMapFields = () => ASSET_MAP_FIELDS.map((f) => ({ ...f }));

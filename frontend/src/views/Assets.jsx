@@ -3,7 +3,8 @@ import { api } from "../api.js";
 import { useToast } from "../ui/Toast.jsx";
 import {
   readWorkbook, unmergeFillWs, detectHeaderRow, assetColumnsFrom,
-  computeAutoMap, buildAssetRecords, normalizeSpec, normHeader, ASSET_MAP_FIELDS,
+  computeAutoMap, buildAssetRecords, normalizeSpec, normHeader,
+  ASSET_KNOWN_FIELDS, defaultMapFields,
 } from "../lib/assetImport.js";
 
 const MAP_PRESET_KEY = "scanops_asset_map_presets";
@@ -28,7 +29,7 @@ export default function Assets({ user }) {
     const { aoa, mergeCount } = unmergeFillWs(wb.Sheets[sheet]);
     const headerRow = detectHeaderRow(aoa);
     const cols = assetColumnsFrom(aoa, headerRow);
-    setImp({ wb, sheetNames, sheet, aoa, headerRow, mergeCount, cols, mapping: computeAutoMap(cols), extraCols: [] });
+    setImp({ wb, sheetNames, sheet, aoa, headerRow, mergeCount, cols, mapping: computeAutoMap(cols), extraCols: [], fields: defaultMapFields() });
     setPresetId("");
     const dataN = cols.length ? cols[0].values.length : 0;
     toast(`불러옴 · 헤더 ${headerRow + 1}행 · 데이터 ${dataN}행` + (mergeCount ? ` · 병합 ${mergeCount}개 해제` : ""));
@@ -76,6 +77,27 @@ export default function Assets({ user }) {
     setImp({ ...imp, extraCols: has ? imp.extraCols.filter((x) => x !== idx) : [...imp.extraCols, idx] });
   }
 
+  // ---- 매핑 필드 행 추가/제거 (IP 외 선택 필드는 자유롭게) ----
+  function addField(fld) {
+    if (imp.fields.some((f) => f.key === fld.key)) return;
+    setImp({ ...imp, fields: [...imp.fields, { ...fld }] });
+    setPresetId("");
+  }
+  function addCustomField() {
+    const name = (prompt("추가할 사용자 정의 필드 이름 (예: 종류, OS, 위치) — 커스텀(extra)으로 저장", "") || "").trim();
+    if (!name) return;
+    const key = "custom:" + name;
+    if (imp.fields.some((f) => f.key === key || f.label === name)) { toast("이미 있는 필드명입니다", { type: "err" }); return; }
+    setImp({ ...imp, fields: [...imp.fields, { key, label: name, custom: true }] });
+    setPresetId("");
+  }
+  function removeField(key) {
+    const m = { ...imp.mapping };
+    delete m[key];
+    setImp({ ...imp, fields: imp.fields.filter((f) => f.key !== key), mapping: m });
+    setPresetId("");
+  }
+
   // ---- 매핑 프리셋 (헤더명 기준 — 컬럼 순서가 바뀌어도 재적용) ----
   const colByHeader = (header) => {
     let c = imp.cols.find((x) => x.header === header);
@@ -86,12 +108,13 @@ export default function Assets({ user }) {
     const name = prompt("매핑 프리셋 이름 (반복 양식 재사용)", "월간 자산대장");
     if (!name || !name.trim()) return;
     const fields = {};
-    ASSET_MAP_FIELDS.forEach((f) => {
+    imp.fields.forEach((f) => {
       const ns = normalizeSpec(imp.mapping[f.key]);
       if (ns) fields[f.key] = { header: imp.cols[ns.col]?.header || "", sep: ns.sep, part: ns.part };
     });
+    const fieldDefs = imp.fields.map((f) => ({ key: f.key, label: f.label, req: !!f.req, custom: !!f.custom }));
     const extraHeaders = imp.extraCols.map((i) => imp.cols[i]?.header).filter(Boolean);
-    const next = [...mapPresets, { id: "mp_" + Date.now(), name: name.trim(), fields, extraHeaders }];
+    const next = [...mapPresets, { id: "mp_" + Date.now(), name: name.trim(), fields, fieldDefs, extraHeaders }];
     setMapPresets(next);
     localStorage.setItem(MAP_PRESET_KEY, JSON.stringify(next));
     setPresetId(next[next.length - 1].id);
@@ -108,8 +131,9 @@ export default function Assets({ user }) {
       if (idx == null) { miss++; return; }
       mapping[field] = (spec.sep || spec.part != null) ? { col: idx, sep: spec.sep || "", part: spec.part ?? null } : idx;
     });
+    const fields = (p.fieldDefs && p.fieldDefs.length) ? p.fieldDefs.map((f) => ({ ...f })) : defaultMapFields();
     const extraCols = (p.extraHeaders || []).map(colByHeader).filter((x) => x != null);
-    setImp({ ...imp, mapping, extraCols });
+    setImp({ ...imp, mapping, fields, extraCols });
     toast(miss ? `프리셋 적용 · ${miss}개 컬럼은 헤더 불일치로 누락` : "매핑 프리셋 적용");
   }
   function delMapPreset() {
@@ -120,7 +144,7 @@ export default function Assets({ user }) {
   }
 
   function doImport() {
-    const recs = buildAssetRecords(imp.cols, imp.mapping, imp.extraCols);
+    const recs = buildAssetRecords(imp.cols, imp.mapping, imp.extraCols, imp.fields);
     if (!recs.length) { toast("IP 컬럼을 매핑하세요", { type: "err" }); return; }
     api("/assets/bulk", { method: "POST", json: recs })
       .then((r) => { toast(`자산 가져옴 · 신규 ${r.added} / 갱신 ${r.updated} · 발견매칭 ${r.findings_matched}`); setImp(null); load(); })
@@ -135,9 +159,10 @@ export default function Assets({ user }) {
   };
 
   const usedCols = new Set();
-  if (imp) ASSET_MAP_FIELDS.forEach((f) => { const ns = normalizeSpec(imp.mapping[f.key]); if (ns) usedCols.add(ns.col); });
+  if (imp) imp.fields.forEach((f) => { const ns = normalizeSpec(imp.mapping[f.key]); if (ns) usedCols.add(ns.col); });
   const candidateExtra = imp ? imp.cols.filter((c) => !usedCols.has(c.index)) : [];
-  const records = imp ? buildAssetRecords(imp.cols, imp.mapping, imp.extraCols) : [];
+  const availableKnown = imp ? ASSET_KNOWN_FIELDS.filter((f) => !imp.fields.some((x) => x.key === f.key)) : [];
+  const records = imp ? buildAssetRecords(imp.cols, imp.mapping, imp.extraCols, imp.fields) : [];
   const preview = records[0] || null;
 
   // ---- 커밋 전 변경 미리보기(diff) — 현재 대장과 비교(신규/수정/동일/대장에만). 업서트 의미와 동일하게
@@ -210,16 +235,19 @@ export default function Assets({ user }) {
                 </div>
               </div>
 
-              <div className="cb-label">핵심 필드 매핑 — 한 컬럼을 구분자로 나눠 여러 필드에 배정 가능</div>
+              <div className="cb-label">필드 매핑 — IP만 필수, 나머지 선택 필드는 자유롭게 추가·제거. 한 컬럼을 구분자로 나눠 여러 필드에 배정 가능</div>
               <div className="map-grid">
-                {ASSET_MAP_FIELDS.map((fld) => {
+                {imp.fields.map((fld) => {
                   const ns = normalizeSpec(imp.mapping[fld.key]);
                   const col = ns ? ns.col : "";
                   const sep = ns ? ns.sep : "";
                   const np = partsOf(col, sep);
                   return (
                     <div key={fld.key} className="map-row">
-                      <span className="map-key">{fld.label}{fld.req && <b className="err"> *</b>}</span>
+                      <span className="map-key">
+                        {fld.label}{fld.req && <b className="err"> *</b>}
+                        {fld.custom && <span className="pill info" style={{ marginLeft: 4, fontSize: 10 }}>커스텀</span>}
+                      </span>
                       <select value={col} onChange={(e) => onCol(fld.key, e.target.value)}>
                         <option value="">—</option>
                         {imp.cols.map((c) => <option key={c.index} value={c.index}>{c.letter}: {c.header}</option>)}
@@ -235,9 +263,20 @@ export default function Assets({ user }) {
                           </select>
                         </>
                       )}
+                      {!fld.req && (
+                        <button type="button" className="sm" title="이 필드 제거"
+                                onClick={() => removeField(fld.key)} style={{ marginLeft: "auto" }}>제거</button>
+                      )}
                     </div>
                   );
                 })}
+              </div>
+              <div className="row" style={{ gap: 6, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <span className="muted" style={{ fontSize: 12 }}>필드 추가:</span>
+                {availableKnown.map((f) => (
+                  <button key={f.key} type="button" className="sm" onClick={() => addField(f)}>+ {f.label}</button>
+                ))}
+                <button type="button" className="sm" onClick={addCustomField}>+ 사용자 필드…</button>
               </div>
 
               {candidateExtra.length > 0 && (
@@ -262,12 +301,13 @@ export default function Assets({ user }) {
 
               {preview && (
                 <div className="pre" style={{ marginTop: 14 }}>
-                  {`ip       : ${preview.ip}
-dept     : ${preview.dept || "—"}
-owner    : ${preview.owner || "—"}
-contact  : ${preview.contact || "—"}
-asset_no : ${preview.asset_no || "—"}
-extra    : ${Object.keys(preview.extra).length ? JSON.stringify(preview.extra, null, 0) : "{}"}`}
+                  {[
+                    `ip       : ${preview.ip}`,
+                    ...imp.fields
+                      .filter((f) => f.key !== "ip" && !f.custom)
+                      .map((f) => `${f.key.padEnd(9)}: ${preview[f.key] || "—"}`),
+                    `extra    : ${Object.keys(preview.extra).length ? JSON.stringify(preview.extra) : "{}"}`,
+                  ].join("\n")}
                 </div>
               )}
               <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>

@@ -34,7 +34,7 @@ export default function Scans({ user }) {
   const [name, setName] = useState("");
   const [opt, setOpt] = useState({ workflow: "auto", options: [], ports: "", nse: [], command: "" });
   const [batchSize, setBatchSize] = useState(256);
-  const [staged, setStaged] = useState(false);     // 단계 분리 엔진 스캔(발견→포트→서비스)
+  const [staged, setStaged] = useState(true);      // 단계 분리 엔진 스캔(발견→포트→서비스) — 기본 ON
   const [discovery, setDiscovery] = useState("sn");
   const [stages, setStages] = useState({});        // { [scanId]: { stages, overall } } — 단계 타임라인
   const [rawMode, setRawMode] = useState(false);   // 직접 명령 입력 모드
@@ -186,10 +186,11 @@ export default function Scans({ user }) {
           <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
             <h3 style={{ margin: 0 }}>스캔 실행</h3>
             <div className="row" style={{ gap: 14 }}>
-              <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}>
+              <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}
+                     title="켜면 발견→TCP→UDP→서비스 단계를 한 번에 몰아 돌리지 않고, 단계로 나눠 분산 순차 실행합니다(앞 단계 결과를 다음 단계 입력으로). 아래 '실행될 명령어'에 단계별 명령이 표시됩니다.">
                 <input type="checkbox" checked={staged} disabled={rawMode}
                        onChange={(e) => setStaged(e.target.checked)} />
-                단계 분리 (발견→포트→서비스)
+                단계 분리 (발견→포트→서비스 · 분산 실행)
               </label>
               <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}>
                 <input type="checkbox" checked={rawMode}
@@ -227,7 +228,7 @@ export default function Scans({ user }) {
 
           {/* 옵션 빌더는 raw 모드에서도 마운트 유지(숨김만) — opt.command 가 최신이라 '채우기'가 정확하게 동작 */}
           <div style={{ display: rawMode ? "none" : "block" }}>
-            <ScanOptions targets={targetList} onState={setOpt} />
+            <ScanOptions targets={targetList} staged={staged} onState={setOpt} />
 
             <div style={{ marginTop: 12 }}>
               <div className="row" style={{ justifyContent: "space-between" }}>
