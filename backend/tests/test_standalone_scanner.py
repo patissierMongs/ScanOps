@@ -215,6 +215,10 @@ def test_auto_workflow_builds_discovery_identification_and_udp_commands(tmp_path
     assert "--script" in tcp_identify
     assert "http-title" in tcp_identify[tcp_identify.index("--script") + 1]
     assert udp_identify[udp_identify.index("-p") + 1].startswith("U:")
+    # 강도 9(--version-all)는 TCP 식별에만. UDP 는 기본 -sV(강도 7) — 수다/증폭 UDP nmap fatal 회피.
+    assert "--version-all" in tcp_identify
+    assert "--version-all" not in udp_identify
+    assert "-sV" in udp_identify
 
 
 def test_auto_workflow_reads_open_tcp_ports_from_discovery_xml(tmp_path):

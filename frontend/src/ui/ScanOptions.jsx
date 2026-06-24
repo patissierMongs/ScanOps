@@ -106,8 +106,8 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
     if (udp) {
       out.push({
         title: "UDP 식별",
-        desc: "주요/지정 UDP에서 DNS·SNMP·NTP 같은 용도 단서를 확인합니다.",
-        cmd: commandText(["nmap", "--stats-every", "10s", "-sU", "-Pn", "-n", "-sV", "--version-all", "--open",
+        desc: "주요/지정 UDP에서 DNS·SNMP·NTP 같은 용도 단서를 확인합니다(강도 7 -sV — UDP는 version-all 미적용).",
+        cmd: commandText(["nmap", "--stats-every", "10s", "-sU", "-Pn", "-n", "-sV", "--open",
           "--reason", "-T4", "--max-retries", "2", scripts && "--script", scripts, "--script-timeout", "10s",
           "-p", udp, "-oA", "scan_<id>.udp_identify", ...targets]),
       });

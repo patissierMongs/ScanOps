@@ -150,7 +150,9 @@ class Pipeline:
             args.append("-sS")
         if udp:
             args.append("-sU")
-        if sp.version_all:
+        # --version-all(강도 9)은 TCP 에만. UDP 동반 시 미적용 — 수다스러운/증폭형 UDP 서비스에서
+        # 거대·비정상 응답으로 nmap 이 fatal 종료될 위험이 크고 식별 이득은 미미하다.
+        if sp.version_all and not udp:
             args.append("--version-all")
         elif sp.version_light:
             args.append("--version-light")
