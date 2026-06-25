@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import { downloadFile } from "../lib/download.js";
 import { useToast } from "../ui/Toast.jsx";
@@ -252,11 +252,14 @@ function RescanDrawer({ targets, onClose, onDone, toast }) {
   const [phase, setPhase] = useState("idle");   // idle | running | done | failed
   const [scanId, setScanId] = useState(null);
   const [results, setResults] = useState(null);  // [{prev, cur}]
+  // 서랍이 떠 있는 동안만 폴링 — 재스캔 도중 닫으면(언마운트) 재귀 poll/setState 를 멈춘다.
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
   useEffect(() => {
     api("/findings/rescan-command", { method: "POST", json: { finding_ids: ids } })
-      .then((r) => setCommands(r.commands || []))
-      .catch(() => setCommands([]));
+      .then((r) => { if (alive.current) setCommands(r.commands || []); })
+      .catch(() => { if (alive.current) setCommands([]); });
   }, []);
 
   function copyAll() {
@@ -267,8 +270,10 @@ function RescanDrawer({ targets, onClose, onDone, toast }) {
   }
 
   function poll(id) {
+    if (!alive.current) return;
     api(`/scans/${id}`)
       .then((s) => {
+        if (!alive.current) return;
         if (s.status === "running" || s.status === "canceling") {
           setTimeout(() => poll(id), 2000);
           return;
@@ -277,12 +282,13 @@ function RescanDrawer({ targets, onClose, onDone, toast }) {
         Promise.all(targets.map((t) =>
           api(`/findings/${t.id}`).then((cur) => ({ prev: t, cur })).catch(() => ({ prev: t, cur: null }))
         )).then((rows) => {
+          if (!alive.current) return;
           setResults(rows);
           setPhase(s.status === "done" ? "done" : "failed");
           onDone && onDone();
         });
       })
-      .catch(() => setPhase("failed"));
+      .catch(() => { if (alive.current) setPhase("failed"); });
   }
 
   function start() {
@@ -366,7 +372,7 @@ function renderCell(finding, key, displayModes) {
   const val = cellValue(finding, key);
   // 여러 줄 값(핑거프린트 등): 줄바꿈 보존 + 높이 제한 스크롤 박스로 깔끔하게.
   if (col?.pre) return (
-    <pre className="mono" style={{
+    <pre className="mono" onClick={(e) => e.stopPropagation()} style={{
       margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all",
       maxHeight: 160, overflow: "auto", fontSize: 11, lineHeight: 1.4,
       maxWidth: 460, background: "var(--line-soft, rgba(127,127,127,.08))", borderRadius: 6, padding: val ? "6px 8px" : 0,

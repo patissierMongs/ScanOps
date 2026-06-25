@@ -169,6 +169,20 @@ def test_export_sanitizes_formula_injection(client):
     assert ",=cmd" not in text   # 생 수식이 셀 선두에 그대로 오면 안 됨
 
 
+def test_pretty_fingerprint_unit():
+    """probe 그룹 분리 + 들여쓰기 정리 + 동일 응답 중복 제거. 프론트 columns.js prettyFingerprint 와 동일 출력."""
+    from scanops.scanning.nmap_parse import pretty_fingerprint
+    raw = ("\n  GenericLines, SSLSessionReq: \n    HTTP/1.1 400 Bad Request\n    Connection: close"
+           "\n  GetRequest: \n    HTTP/1.0 200 OK\n    Server: uvicorn"
+           "\n  Help: \n    HTTP/1.1 400 Bad Request\n    Connection: close")  # GenericLines 와 동일 본문 → 합쳐짐
+    assert pretty_fingerprint(raw) == (
+        "[GenericLines, SSLSessionReq]\nHTTP/1.1 400 Bad Request\nConnection: close"
+        "\n\n[GetRequest]\nHTTP/1.0 200 OK\nServer: uvicorn"
+    )
+    assert pretty_fingerprint("") == ""
+    assert pretty_fingerprint(None) == ""
+
+
 def test_safe_cell_unit():
     from scanops.spreadsheet import safe_cell
     for danger in ("=1+1", "+1", "-1", "@SUM(A1)", "\tx", "\rx"):

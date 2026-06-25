@@ -144,7 +144,9 @@ class Finding(Base):
         """
         for s in (self.nse_json or []):
             if isinstance(s, dict) and (s.get("id") or "") == "fingerprint-strings":
-                return s.get("output") or ""
+                out = s.get("output") or ""
+                # 목록 응답 비대화 방지 — 미식별 서비스가 많으면 행마다 수 KB. 식별 단서엔 충분.
+                return out if len(out) <= 4000 else out[:4000] + "\n…(생략)"
         return ""
 
 
