@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from ..models import Category, RiskRule
 
 _SEED = Path(__file__).resolve().parent.parent / "seed" / "categories.json"
-_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "banned": 4}
 
 
 def seed_categories(db: Session) -> None:
@@ -37,10 +36,6 @@ def build_lookup(db: Session) -> dict[str, dict]:
     }
 
 
-def _max_risk(a: str, b: str) -> str:
-    return a if _RANK.get(a, 0) >= _RANK.get(b, 0) else b
-
-
 def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> dict:
     """finding 에 분류 필드를 채워 반환(같은 dict 수정)."""
     svc = (finding.get("service") or "").lower()
@@ -50,15 +45,16 @@ def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> d
     finding["risk_level"] = info.get("risk_level", "info")
     finding["compliance_json"] = list(info.get("compliance", []))
 
-    # 조직 위험규칙으로 등급 상향(최대치 채택).
-    # 금지 서비스(banned_service) 매칭은 최고 등급 '금지(banned)'로 승격.
-    # 기본포트 사용 금지(port_rule) = 서비스+포트 조합 일치 시 규칙 등급 적용(예: ssh/22).
+    # 조직 규칙은 taxonomy 기본값을 직접 덮어쓴다. risk_level=info 는 허용/정보 처리다.
+    # banned_service 는 기존 호환용 이름이며 항상 금지(banned)로 적용한다.
     for r in rules:
         if r.kind == "banned_service" and r.service and r.service.lower() == svc:
-            finding["risk_level"] = _max_risk(finding["risk_level"], "banned")
+            finding["risk_level"] = "banned"
+        elif r.kind == "service_rule" and r.service and r.service.lower() == svc:
+            finding["risk_level"] = r.risk_level
         elif (r.kind == "port_rule" and r.port == finding.get("port")
               and (not r.service or r.service.lower() == svc)):
-            finding["risk_level"] = _max_risk(finding["risk_level"], r.risk_level)
+            finding["risk_level"] = r.risk_level
         else:
             continue
         if r.note:
@@ -73,7 +69,7 @@ def reclassify_all(db: Session) -> int:
     """
     from ..models import Finding
     lookup = build_lookup(db)
-    rules = db.query(RiskRule).all()
+    rules = db.query(RiskRule).order_by(RiskRule.created_at, RiskRule.id).all()
     n = 0
     for f in db.query(Finding).all():
         d = {"service": f.service, "port": f.port}
@@ -90,7 +86,7 @@ def reclassify_all(db: Session) -> int:
 
 def enrich_all(db: Session, findings: list[dict]) -> list[dict]:
     lookup = build_lookup(db)
-    rules = db.query(RiskRule).all()
+    rules = db.query(RiskRule).order_by(RiskRule.created_at, RiskRule.id).all()
     for f in findings:
         classify(f, lookup, rules)
     return findings

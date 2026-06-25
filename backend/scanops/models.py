@@ -164,10 +164,10 @@ class FindingEvent(Base):
 
 
 class RiskRule(Base):
-    """taxonomy 위에 얹는 조직 커스텀 위험 규칙."""
+    """taxonomy 위에 얹는 조직 커스텀 규칙."""
     __tablename__ = "risk_rules"
     id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[str] = mapped_column(String(16))  # banned_service / port_rule
+    kind: Mapped[str] = mapped_column(String(16))  # service_rule / banned_service / port_rule
     service: Mapped[str] = mapped_column(String(64), default="")
     port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     risk_level: Mapped[str] = mapped_column(String(16), default="high")

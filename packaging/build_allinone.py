@@ -62,7 +62,7 @@ def copy_app(app: Path) -> None:
         sys.exit("frontend/dist not built. Run: cd frontend && npm run build")
     shutil.copytree(dist, app / "frontend" / "dist")
     # 문서
-    for f in ("README.md", "DESIGN.md", "REBUILD.md", "HANDOFF.md"):
+    for f in ("README.md", "DESIGN.md", "REBUILD.md", "HANDOFF.md", "THIRD_PARTY_NOTICES.md"):
         if (ROOT / f).exists():
             shutil.copy2(ROOT / f, app / f)
     # standalone 스캐너(에어갭 스캔 호스트용). CLI(scanops_scanner.py)는 stdlib 전용이라

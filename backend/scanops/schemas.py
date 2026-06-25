@@ -166,7 +166,7 @@ class EventFeed(BaseModel):
 
 # ---- risk rule ----
 class RuleIn(BaseModel):
-    kind: str  # banned_service / port_rule
+    kind: str  # service_rule / banned_service / port_rule
     service: str = ""
     port: int | None = None
     risk_level: str = "high"

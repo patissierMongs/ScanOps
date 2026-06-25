@@ -16,7 +16,7 @@ def _seed_findings(client, h):
     return client.get("/api/findings", headers=h).json()
 
 
-# ---- 위험규칙 ----
+# ---- 규칙 ----
 
 def test_rule_crud_and_match_count(client):
     h = _auth(client)
@@ -56,6 +56,38 @@ def test_banned_service_promotes_to_banned(client):
     client.delete(f"/api/rules/{r.json()['id']}", headers=h)
     f2 = client.get(f"/api/findings/{target['id']}", headers=h).json()
     assert f2["risk_level"] != "banned"
+
+
+def test_service_rule_can_allow_and_update(client):
+    h = _auth(client)
+    findings = _seed_findings(client, h)
+    target = next(f for f in findings if f["port"] == 22)
+    assert target["risk_level"] == "high"
+
+    r = client.post("/api/rules", headers=h, json={
+        "kind": "service_rule",
+        "service": target["service"],
+        "risk_level": "info",
+        "note": "업무용 허용",
+    })
+    assert r.status_code == 201, r.text
+
+    allowed = client.get(f"/api/findings/{target['id']}", headers=h).json()
+    assert allowed["risk_level"] == "info"
+
+    rule_id = r.json()["id"]
+    updated = client.put(f"/api/rules/{rule_id}", headers=h, json={
+        "kind": "port_rule",
+        "service": target["service"],
+        "port": target["port"],
+        "risk_level": "medium",
+        "note": "관리 포트",
+    })
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["risk_level"] == "medium"
+
+    changed = client.get(f"/api/findings/{target['id']}", headers=h).json()
+    assert changed["risk_level"] == "medium"
 
 
 def test_rule_validation_and_role(client):

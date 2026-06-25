@@ -54,6 +54,17 @@ def test_risk_rule_escalates():
         db.close()
 
 
+def test_service_rule_can_override_to_info():
+    db = _seeded_db()
+    try:
+        rule = RiskRule(kind="service_rule", service="ssh", risk_level="info", note="업무용 허용")
+        f = classify({"service": "ssh", "port": 22}, build_lookup(db), [rule])
+        assert f["risk_level"] == "info"
+        assert any(c["std"] == "조직규칙" for c in f["compliance_json"])
+    finally:
+        db.close()
+
+
 def test_import_populates_risk(client):
     make_user("op", "pw", role="auditor")
     h = {"Authorization": f"Bearer {token_for(client, 'op', 'pw')}"}

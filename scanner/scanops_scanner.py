@@ -130,6 +130,17 @@ def safe_name(name: str | None) -> str:
     return cleaned or f"scan_{timestamp()}"
 
 
+def target_label(targets: list[str]) -> str:
+    labels = [NAME_RE.sub("_", t.strip()).strip("._-") for t in targets if t.strip()]
+    labels = [label for label in labels if label]
+    if not labels:
+        return "target"
+    label = labels[0][:80]
+    if len(labels) > 1:
+        label = f"{label}_plus{len(labels) - 1}"
+    return label
+
+
 def find_nmap(explicit: str = "") -> str | None:
     if explicit and Path(explicit).is_file():
         return explicit
@@ -393,10 +404,11 @@ def build_auto_flags(plan: dict, stage_id: str, tcp_ports: list[int] | None = No
 def output_base(plan: dict, index: int, stage_id: str = "") -> Path:
     out_dir = Path(plan["output_dir"])
     name = plan["name"]
+    target = target_label(plan["batches"][index])
     suffix = f".{stage_id}" if stage_id else ""
     if len(plan["batches"]) == 1:
-        return out_dir / f"{name}{suffix}"
-    return out_dir / f"{name}.b{index:04d}{suffix}"
+        return out_dir / f"{name}.{target}{suffix}"
+    return out_dir / f"{name}.{target}.b{index:04d}{suffix}"
 
 
 def build_command(plan: dict, index: int, stage_id: str = "", tcp_ports: list[int] | None = None,

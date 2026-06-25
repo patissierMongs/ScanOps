@@ -210,6 +210,7 @@ def test_auto_workflow_builds_discovery_identification_and_udp_commands(tmp_path
     tcp_discovery = scanner.build_command(plan, 0, "tcp_discovery")
     tcp_identify = scanner.build_command(plan, 0, "tcp_identify", [22, 443])
     udp_identify = scanner.build_command(plan, 0, "udp_identify")
+    assert Path(tcp_discovery[tcp_discovery.index("-oA") + 1]).name == "auto.127.0.0.1.tcp_discovery"
     assert tcp_discovery[tcp_discovery.index("-p") + 1] == "T:1-65535"
     assert tcp_identify[tcp_identify.index("-p") + 1] == "T:22,443"
     assert "--script" in tcp_identify
@@ -295,19 +296,24 @@ def test_default_auto_workflow_end_to_end_creates_manifest_import_list_and_zip(t
     state = json.loads((output_dir / "auto.state.json").read_text(encoding="utf-8"))
     assert state["status"] == "done"
     assert [entry["stage"] for entry in _read_jsonl(log_path)] == ["tcp_discovery", "tcp_identify", "udp_identify"]
-    assert (output_dir / "auto.tcp_discovery.xml").exists()
-    assert (output_dir / "auto.tcp_identify.xml").exists()
-    assert (output_dir / "auto.udp_identify.xml").exists()
-    assert str(output_dir / "auto.tcp_discovery.xml") not in manifest["import_xml_files"]
-    assert str(output_dir / "auto.tcp_identify.xml") in manifest["import_xml_files"]
-    assert str(output_dir / "auto.udp_identify.xml") in manifest["import_xml_files"]
+    assert (output_dir / "auto.127.0.0.1.tcp_discovery.xml").exists()
+    assert (output_dir / "auto.127.0.0.1.tcp_identify.xml").exists()
+    assert (output_dir / "auto.127.0.0.1.udp_identify.xml").exists()
+    assert str(output_dir / "auto.127.0.0.1.tcp_discovery.xml") not in manifest["import_xml_files"]
+    assert str(output_dir / "auto.127.0.0.1.tcp_identify.xml") in manifest["import_xml_files"]
+    assert str(output_dir / "auto.127.0.0.1.udp_identify.xml") in manifest["import_xml_files"]
     identify_run = next(run for run in state["runs"] if run["stage_id"] == "tcp_identify")
     assert identify_run["command"][identify_run["command"].index("-p") + 1] == "T:22,443"
     zip_path = output_dir / "auto.scanops.zip"
     assert manifest["zip_path"] == str(zip_path)
     with zipfile.ZipFile(zip_path) as zf:
         names = set(zf.namelist())
-    assert {"auto.manifest.json", "auto.state.json", "auto.tcp_identify.xml", "auto.udp_identify.xml"} <= names
+    assert {
+        "auto.manifest.json",
+        "auto.state.json",
+        "auto.127.0.0.1.tcp_identify.xml",
+        "auto.127.0.0.1.udp_identify.xml",
+    } <= names
 
 
 def test_known_tcp_ports_end_to_end_skips_udp_and_scripts_when_requested(tmp_path):
@@ -336,7 +342,7 @@ def test_known_tcp_ports_end_to_end_skips_udp_and_scripts_when_requested(tmp_pat
     assert discovery["command"][discovery["command"].index("-p") + 1] == "22,443"
     assert "--script" not in identify["command"]
     assert udp["skipped"] is True
-    assert not (output_dir / "tcp_only.udp_identify.xml").exists()
+    assert not (output_dir / "tcp_only.127.0.0.1.udp_identify.xml").exists()
 
 
 def test_udp_only_port_end_to_end_does_not_run_full_tcp_scan(tmp_path):
@@ -369,7 +375,7 @@ def test_udp_only_port_end_to_end_does_not_run_full_tcp_scan(tmp_path):
     assert tcp_identify["skipped"] is True
     assert udp_identify["command"][udp_identify["command"].index("-p") + 1] == "U:53"
     manifest = json.loads((output_dir / "udp_only.manifest.json").read_text(encoding="utf-8"))
-    assert manifest["import_xml_files"] == [str(output_dir / "udp_only.udp_identify.xml")]
+    assert manifest["import_xml_files"] == [str(output_dir / "udp_only.127.0.0.1.udp_identify.xml")]
 
 
 def test_resume_after_failed_identification_reuses_successful_discovery(tmp_path):
@@ -438,11 +444,11 @@ def test_targets_file_batching_end_to_end_creates_numbered_outputs(tmp_path):
 
     assert result.returncode == 0, result.stderr + result.stdout
     manifest = json.loads((output_dir / "batch.manifest.json").read_text(encoding="utf-8"))
-    assert (output_dir / "batch.b0000.tcp_identify.xml").exists()
-    assert (output_dir / "batch.b0001.tcp_identify.xml").exists()
+    assert (output_dir / "batch.127.0.0.1.b0000.tcp_identify.xml").exists()
+    assert (output_dir / "batch.127.0.0.2.b0001.tcp_identify.xml").exists()
     assert manifest["import_xml_files"] == [
-        str(output_dir / "batch.b0000.tcp_identify.xml"),
-        str(output_dir / "batch.b0001.tcp_identify.xml"),
+        str(output_dir / "batch.127.0.0.1.b0000.tcp_identify.xml"),
+        str(output_dir / "batch.127.0.0.2.b0001.tcp_identify.xml"),
     ]
 
 

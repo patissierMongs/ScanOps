@@ -25,7 +25,8 @@ EXCLUDE_EXT = {".pyc", ".pyo", ".log", ".png", ".token"}
 # Top-level entries to include (everything else at root is skipped).
 INCLUDE_TOP = {
     "backend", "frontend", "packaging", "samples", "scripts",
-    "START.bat", "README.md", "DESIGN.md", "REBUILD.md", "HANDOFF.md", ".gitignore",
+    "START.bat", "README.md", "DESIGN.md", "REBUILD.md", "HANDOFF.md",
+    "THIRD_PARTY_NOTICES.md", ".gitignore",
 }
 # Inside frontend we keep src/dist/public + config, but never node_modules (in EXCLUDE_DIRS).
 
