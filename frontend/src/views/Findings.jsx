@@ -26,8 +26,7 @@ export default function Findings({ user }) {
   const [hideNormal, setHideNormal] = useState(true);
   const [selected, setSelected] = useState(() => new Set());
   const [confirmId, setConfirmId] = useState(null);
-  const [showRescan, setShowRescan] = useState(false);
-  const [rescanOpt, setRescanOpt] = useState({ options: [], ports: "" });
+  const [rescanDrawer, setRescanDrawer] = useState(null);
   const [rescanBusy, setRescanBusy] = useState(false);
   const [drawer, setDrawer] = useState(null);
   const toast = useToast();
@@ -92,23 +91,6 @@ export default function Findings({ user }) {
     setSelected((s) => (s.size === view.length ? new Set() : new Set(view.map((f) => f.id))));
   }
   const selFindings = findings.filter((f) => selected.has(f.id));
-  const selHosts = [...new Set(selFindings.map((f) => f.host_ip))].sort();
-  const portsAuto = [...new Set(selFindings.map((f) => f.port))].sort((a, b) => a - b).join(",");
-
-  function runRescan() {
-    const ids = [...selected];
-    if (!ids.length) { toast("발견을 선택하세요", { type: "err" }); return; }
-    setRescanBusy(true);
-    // 백그라운드 단계 엔진 재스캔(Stage3-only) — scan_id 즉시 반환, 진행은 스캔 페이지 단계 타임라인.
-    api("/findings/rescan", { method: "POST", json: { finding_ids: ids, options: rescanOpt.options, ports: rescanOpt.ports } })
-      .then((r) => {
-        toast(`타겟 재스캔 시작 · #${r.scan_id} (백그라운드 · ${r.hosts.length}호스트/${r.ports.length}포트 — 완료 후 새로고침)`);
-        setShowRescan(false);
-        setSelected(new Set());
-      })
-      .catch((e) => toast(e.message, { type: "err" }))
-      .finally(() => setRescanBusy(false));
-  }
 
   function runRescanDue() {
     setRescanBusy(true);
@@ -191,7 +173,7 @@ export default function Findings({ user }) {
           </label>
           {canEdit && (
             <button className="sm" disabled={selected.size === 0}
-                    onClick={() => setShowRescan((v) => !v)}>
+                    onClick={() => setRescanDrawer({ targets: selFindings })}>
               선택 재스캔 ({selected.size})
             </button>
           )}
@@ -202,20 +184,6 @@ export default function Findings({ user }) {
             </button>
           )}
         </div>
-
-        {canEdit && showRescan && selected.size > 0 && (
-          <div className="panel" style={{ background: "var(--surface-2)", marginBottom: 12 }}>
-            <h3>타겟 재스캔 — {selHosts.length}호스트 · 포트 {portsAuto || "(자동)"} · {selected.size}건</h3>
-            <ScanOptions targets={selHosts} portsAuto={portsAuto} onState={setRescanOpt} />
-            <div className="row" style={{ marginTop: 12 }}>
-              <button className="primary" disabled={rescanBusy} onClick={runRescan}>
-                {rescanBusy ? "시작 중…" : "재스캔 시작 (백그라운드 · 조치 검증)"}
-              </button>
-              <button onClick={() => setShowRescan(false)}>닫기</button>
-              <span className="muted" style={{ fontSize: 11.5 }}>발견·찾기 생략 → 선택 포트만 정밀 확인(2-pass) — 닫혔으면 자동 정상처리</span>
-            </div>
-          </div>
-        )}
 
         <div style={{ overflowX: "auto" }}>
           <table className="tbl">
@@ -263,13 +231,147 @@ export default function Findings({ user }) {
         <Drawer data={drawer} canEdit={canEdit} onClose={() => setDrawer(null)}
                 onSaved={() => { load(); setDrawer(null); }} toast={toast} />
       )}
+
+      {rescanDrawer && (
+        <RescanDrawer targets={rescanDrawer.targets}
+                      onClose={() => setRescanDrawer(null)}
+                      onDone={() => { load(); setSelected(new Set()); }}
+                      toast={toast} />
+      )}
     </div>
+  );
+}
+
+// 선택 발견을 IP:포트별 개별 명령으로 재스캔 — 우측 서랍에 명령(복사)·진행·타겟별 결과를 모은다.
+function RescanDrawer({ targets, onClose, onDone, toast }) {
+  const ids = targets.map((f) => f.id);
+  const hosts = [...new Set(targets.map((f) => f.host_ip))].sort();
+  const portsAuto = [...new Set(targets.map((f) => f.port))].sort((a, b) => a - b).join(",");
+  const [opt, setOpt] = useState({ options: [], ports: "" });
+  const [commands, setCommands] = useState([]);
+  const [phase, setPhase] = useState("idle");   // idle | running | done | failed
+  const [scanId, setScanId] = useState(null);
+  const [results, setResults] = useState(null);  // [{prev, cur}]
+
+  useEffect(() => {
+    api("/findings/rescan-command", { method: "POST", json: { finding_ids: ids } })
+      .then((r) => setCommands(r.commands || []))
+      .catch(() => setCommands([]));
+  }, []);
+
+  function copyAll() {
+    const text = commands.join("\n");
+    (navigator.clipboard?.writeText(text) || Promise.reject())
+      .then(() => toast(`명령 ${commands.length}개 복사됨`))
+      .catch(() => toast("복사 실패 — 직접 선택하세요", { type: "err" }));
+  }
+
+  function poll(id) {
+    api(`/scans/${id}`)
+      .then((s) => {
+        if (s.status === "running" || s.status === "canceling") {
+          setTimeout(() => poll(id), 2000);
+          return;
+        }
+        // 완료 → 각 타겟의 현재 상태 조회(닫힘이면 정상처리됨)
+        Promise.all(targets.map((t) =>
+          api(`/findings/${t.id}`).then((cur) => ({ prev: t, cur })).catch(() => ({ prev: t, cur: null }))
+        )).then((rows) => {
+          setResults(rows);
+          setPhase(s.status === "done" ? "done" : "failed");
+          onDone && onDone();
+        });
+      })
+      .catch(() => setPhase("failed"));
+  }
+
+  function start() {
+    setPhase("running");
+    api("/findings/rescan", { method: "POST", json: { finding_ids: ids, options: opt.options, ports: opt.ports } })
+      .then((r) => { setScanId(r.scan_id); poll(r.scan_id); })
+      .catch((e) => { toast(e.message, { type: "err" }); setPhase("failed"); });
+  }
+
+  return (
+    <>
+      <div className="scrim" onClick={onClose} />
+      <div className="drawer">
+        <h3>타겟 재스캔 — {targets.length}건 (IP:포트별 개별)</h3>
+        <div className="muted" style={{ marginBottom: 10 }}>{hosts.length}호스트 · 포트 {portsAuto || "(자동)"}</div>
+
+        {/* 개별 nmap 명령 — 망분리 시 스캔 호스트에 붙여 실행 후 XML 가져오기 */}
+        <div className="panel" style={{ boxShadow: "none", background: "var(--surface-2)", marginBottom: 12 }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <div className="cb-label" style={{ marginTop: 0 }}>개별 nmap 명령 ({commands.length}) — 그 IP·그 포트만</div>
+            <button className="sm" onClick={copyAll} disabled={!commands.length}>전체 복사</button>
+          </div>
+          <pre className="mono" style={{ fontSize: 11.5, whiteSpace: "pre-wrap", maxHeight: 150, overflow: "auto", margin: "6px 0 4px" }}>
+            {commands.join("\n") || "…"}
+          </pre>
+          <div className="muted" style={{ fontSize: 11 }}>망분리면 이 명령을 스캔 호스트에서 실행 → 결과 XML 가져오기.</div>
+        </div>
+
+        {/* 옵션 + 백그라운드 실행(콘솔이 대상망에 직접 닿을 때) */}
+        {phase !== "done" && (
+          <>
+            <ScanOptions targets={hosts} portsAuto={portsAuto} onState={setOpt} />
+            <div className="row" style={{ marginTop: 10 }}>
+              <button className="primary" disabled={phase === "running"} onClick={start}>
+                {phase === "running" ? "재스캔 중…" : "백그라운드 재스캔 시작 (조치 검증)"}
+              </button>
+              <span className="muted" style={{ fontSize: 11.5 }}>발견·찾기 생략 → 선택 포트만 2-pass 정밀 확인 — 닫혔으면 자동 정상처리</span>
+            </div>
+          </>
+        )}
+
+        {phase === "running" && !results && (
+          <div className="muted" style={{ marginTop: 12 }}>재스캔 진행 중… 완료되면 타겟별 결과가 여기에 표시됩니다.</div>
+        )}
+
+        {/* 타겟별 결과 */}
+        {results && (
+          <>
+            <h3 style={{ fontSize: 14, margin: "16px 0 8px" }}>결과{scanId ? ` · #${scanId}` : ""}</h3>
+            <table className="tbl">
+              <thead><tr><th>대상</th><th>이전</th><th>현재</th><th>서비스</th></tr></thead>
+              <tbody>
+                {results.map(({ prev, cur }, i) => {
+                  const closed = !cur || cur.state === "closed";
+                  return (
+                    <tr key={i}>
+                      <td className="mono">{prev.host_ip}:{prev.port}/{prev.proto}</td>
+                      <td className="muted">{prev.status}</td>
+                      <td>
+                        {closed
+                          ? <span className="pill low">닫힘 · 정상처리</span>
+                          : <span className="pill high">여전히 열림{cur.reopened ? " · 재발" : ""}</span>}
+                      </td>
+                      <td className="muted">{cur ? `${cur.service || ""} ${cur.version || ""}`.trim() || "—" : "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
+        )}
+
+        <button style={{ marginTop: 16 }} onClick={onClose}>닫기</button>
+      </div>
+    </>
   );
 }
 
 function renderCell(finding, key, displayModes) {
   const col = COLUMN_MAP[key];
   const val = cellValue(finding, key);
+  // 여러 줄 값(핑거프린트 등): 줄바꿈 보존 + 높이 제한 스크롤 박스로 깔끔하게.
+  if (col?.pre) return (
+    <pre className="mono" style={{
+      margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all",
+      maxHeight: 160, overflow: "auto", fontSize: 11, lineHeight: 1.4,
+      maxWidth: 460, background: "var(--line-soft, rgba(127,127,127,.08))", borderRadius: 6, padding: val ? "6px 8px" : 0,
+    }}>{val}</pre>
+  );
   if (!col?.badge) return <span className={col?.mono ? "mono" : undefined}>{val}</span>;
   const mode = displayModes[key] || "badge";
   if (mode === "text") return <span>{val}</span>;

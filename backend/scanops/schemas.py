@@ -107,6 +107,7 @@ class FindingOut(BaseModel):
     version: str
     banner: str
     cpe: str
+    fingerprint: str = ""      # -sV 미식별 서비스 원시 응답(nse_json 의 fingerprint-strings)
     rtt: str
     identification: str
     category: str
@@ -191,7 +192,8 @@ class RescanIn(BaseModel):
 
 
 class RescanOut(BaseModel):
-    command: str
+    command: str                      # commands 를 줄바꿈으로 합친 것(하위호환)
+    commands: list[str] = []          # 발견(IP:포트)별 개별 nmap 명령
     hosts: list[str]
     ports: list[int]
     finding_count: int

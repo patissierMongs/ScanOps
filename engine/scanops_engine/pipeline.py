@@ -45,26 +45,31 @@ class Pipeline:
     def run(self) -> dict:
         t0 = time.time()
         self.sink.emit("job_start", job_id=self.spec.job_id, targets=self.spec.targets,
-                       rescan=bool(self.spec.targets_ports))
-        if self.spec.targets_ports:
-            for ip, ports in self.spec.targets_ports.items():
-                self.open_map.setdefault(ip, {})["tcp"] = sorted({int(p) for p in ports})
-            self._save()
+                       rescan=bool(self.spec.targets_ports or self.spec.rescan_units))
+        if self.spec.rescan_units:
+            # 발견(IP:포트)별 개별 재스캔 — 항목마다 nmap 1개(그 ip·그 포트만).
+            if self.spec.service.enabled and not self.state.stopped():
+                self._rescan_units()
         else:
-            live = self._discovery()
-            if live and not self.state.stopped():
-                if self.spec.tcp.enabled and not self.state.done("tcp"):
-                    self._sweep("tcp", live)
-                    if not self.state.stopped():
-                        self.state.mark_done("tcp")
-                    self._save()
-                if self.spec.udp.enabled and not self.state.done("udp") and not self.state.stopped():
-                    self._sweep("udp", live)
-                    if not self.state.stopped():
-                        self.state.mark_done("udp")
-                    self._save()
-        if self.spec.service.enabled and not self.state.stopped():
-            self._service()
+            if self.spec.targets_ports:
+                for ip, ports in self.spec.targets_ports.items():
+                    self.open_map.setdefault(ip, {})["tcp"] = sorted({int(p) for p in ports})
+                self._save()
+            else:
+                live = self._discovery()
+                if live and not self.state.stopped():
+                    if self.spec.tcp.enabled and not self.state.done("tcp"):
+                        self._sweep("tcp", live)
+                        if not self.state.stopped():
+                            self.state.mark_done("tcp")
+                        self._save()
+                    if self.spec.udp.enabled and not self.state.done("udp") and not self.state.stopped():
+                        self._sweep("udp", live)
+                        if not self.state.stopped():
+                            self.state.mark_done("udp")
+                        self._save()
+            if self.spec.service.enabled and not self.state.stopped():
+                self._service()
         secs = round(time.time() - t0, 2)
         status = "stopped" if self.state.stopped() else "done"
         self.sink.emit("job_done", status=status, seconds=secs, counts=self.counts)
@@ -132,7 +137,7 @@ class Pipeline:
                        counts={"open_ports": total_open, "hosts": nhosts})
 
     # ── Stage 3: 서비스 probe (호스트별 열린 포트에만) ──
-    def _probe_host(self, ip, m, sp, confirm, retries=None):
+    def _probe_host(self, ip, m, sp, confirm, retries=None, tag=""):
         tcp, udp = m.get("tcp", []), m.get("udp", [])
         parts = []
         if tcp:
@@ -145,7 +150,9 @@ class Pipeline:
             args.append("-sS")
         if udp:
             args.append("-sU")
-        if sp.version_all:
+        # --version-all(강도 9)은 TCP 에만. UDP 동반 시 미적용 — 수다스러운/증폭형 UDP 서비스에서
+        # 거대·비정상 응답으로 nmap 이 fatal 종료될 위험이 크고 식별 이득은 미미하다.
+        if sp.version_all and not udp:
             args.append("--version-all")
         elif sp.version_light:
             args.append("--version-light")
@@ -153,7 +160,7 @@ class Pipeline:
         if sp.nse:
             args += ["--script", ",".join(sp.nse)]
         args.append(ip)
-        base = self.out / f"stage3-{ip.replace('.', '_')}{'-confirm' if confirm else ''}"
+        base = self.out / f"stage3-{ip.replace('.', '_')}{('-' + tag) if tag else ''}{'-confirm' if confirm else ''}"
         r = self._nmap("service", args, base)
         rows = nmaprun.services(Path(str(base) + ".xml")) if r["rc"] == 0 else []
         for row in rows:
@@ -181,6 +188,35 @@ class Pipeline:
                 secs += s2
                 nsvc += len(rows2)
             self.state.mark_service_done(ip)
+            self._save()
+        self.counts["services"] = nsvc
+        self.sink.emit("stage_done", stage="service", seconds=round(secs, 2), counts={"services": nsvc})
+
+    # ── 발견(IP:포트)별 개별 재스캔 — 항목마다 nmap 1개(그 ip·그 포트만) ──
+    def _rescan_units(self):
+        sp = self.spec.service
+        units = self.spec.rescan_units or []
+        self.sink.emit("stage_start", stage="service", hosts=len(units))
+        secs, nsvc = 0.0, 0
+        for u in units:
+            if self.state.stopped():
+                self.sink.emit("stage_done", stage="service", seconds=round(secs, 2), counts={"stopped": True})
+                return
+            ip, port, proto = str(u["ip"]), int(u["port"]), u.get("proto", "tcp")
+            key = f"{ip}|{port}|{proto}"
+            if self.state.service_done(key):
+                continue
+            m = {"udp": [port]} if proto == "udp" else {"tcp": [port]}
+            tag = f"{proto}{port}"
+            s1, rows = self._probe_host(ip, m, sp, confirm=False, tag=tag)
+            secs += s1
+            nsvc += len(rows)
+            # 2-pass 정밀 확인 — 1차에 안 잡히면 retries↑ 재확인(거짓 닫힘 방지)
+            if sp.confirm and not rows:
+                s2, rows2 = self._probe_host(ip, m, sp, confirm=True, retries=6, tag=tag)
+                secs += s2
+                nsvc += len(rows2)
+            self.state.mark_service_done(key)
             self._save()
         self.counts["services"] = nsvc
         self.sink.emit("stage_done", stage="service", seconds=round(secs, 2), counts={"services": nsvc})

@@ -18,6 +18,10 @@ _REMARK_PATTERNS = [
     ("rdp-ntlm-info", "Target_Name", re.compile(r"Target_Name:\s*([^\n]+)")),
     ("nbstat", "host", re.compile(r"Computer name:\s*([^\n]+)")),
     ("http-title", "title", re.compile(r"\A\s*([^\n]+)")),
+    # http-server-header 출력은 Server 값 그 자체(예: "uvicorn")
+    ("http-server-header", "server", re.compile(r"\A\s*([^\r\n]+)")),
+    # -sV 가 식별 못 한 포트: fingerprint-strings 원시 응답에서 Server 헤더를 건진다(소문자 server: 포함).
+    ("fingerprint-strings", "server", re.compile(r"(?i)server:[ \t]*([^\r\n]+)")),
 ]
 
 
@@ -35,6 +39,40 @@ def _identification(svc) -> str:
     if method == "table":
         return "추측"
     return "미확인"
+
+
+def pretty_fingerprint(raw: str) -> str:
+    """fingerprint-strings 원시 응답을 사람이 읽기 좋게 정리.
+
+    probe 그룹별로 들여쓰기를 정돈하고, 여러 probe 가 같은 응답을 낸 경우 합친다.
+    프론트 columns.js prettyFingerprint 와 동일 로직(표=내보내기 동일).
+    """
+    if not raw:
+        return ""
+    blocks: list[dict] = []
+    cur: dict | None = None
+    for ln in str(raw).replace("\r", "").split("\n"):
+        if not ln.strip():
+            continue
+        m = re.match(r"^\s{1,3}(\S.*?):\s*$", ln)   # probe 그룹 헤더
+        if m:
+            cur = {"probes": m.group(1), "body": []}
+            blocks.append(cur)
+        elif cur is not None:
+            cur["body"].append(ln.strip())
+        else:
+            cur = {"probes": "", "body": [ln.strip()]}
+            blocks.append(cur)
+    seen: set[str] = set()
+    out: list[str] = []
+    for b in blocks:
+        key = "\n".join(b["body"])
+        if key in seen:
+            continue
+        seen.add(key)
+        head = f"[{b['probes']}]\n" if b["probes"] else ""
+        out.append(head + "\n".join(b["body"]))
+    return "\n\n".join(out)
 
 
 def _extract_key_line(script_id: str, output: str) -> str:

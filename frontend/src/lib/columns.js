@@ -6,6 +6,30 @@ const fmtDate = (v) => (v ? String(v).slice(0, 10) : "");
 const joinCompliance = (list) =>
   (list || []).map((c) => `${c.std}:${c.ref}`).join("; ");
 
+// fingerprint-strings 원시 응답을 사람이 읽기 좋게: probe 그룹별로 들여쓰기 정리 + 동일 응답 합치기.
+// 백엔드 nmap_parse.pretty_fingerprint 와 동일 로직(표=내보내기 동일하게).
+export function prettyFingerprint(raw) {
+  if (!raw) return "";
+  const blocks = [];
+  let cur = null;
+  for (const ln of String(raw).replace(/\r/g, "").split("\n")) {
+    if (!ln.trim()) continue;
+    const m = ln.match(/^\s{1,3}(\S.*?):\s*$/);   // probe 그룹 헤더(들여쓰기 + 콜론 끝)
+    if (m) { cur = { probes: m[1], body: [] }; blocks.push(cur); }
+    else if (cur) cur.body.push(ln.trim());
+    else { cur = { probes: "", body: [ln.trim()] }; blocks.push(cur); }
+  }
+  const seen = new Set();
+  const out = [];
+  for (const b of blocks) {
+    const key = b.body.join("\n");
+    if (seen.has(key)) continue;                  // 동일 응답(여러 probe) 중복 제거
+    seen.add(key);
+    out.push((b.probes ? `[${b.probes}]\n` : "") + b.body.join("\n"));
+  }
+  return out.join("\n\n");
+}
+
 // key, label(=백엔드 헤더), get(finding)->표시문자열, display 기본형식
 export const ALL_COLUMNS = [
   { key: "finding_key", label: "발견키", get: (f) => f.finding_key, mono: true },
@@ -19,6 +43,7 @@ export const ALL_COLUMNS = [
   { key: "version", label: "버전", get: (f) => f.version },
   { key: "banner", label: "배너", get: (f) => f.banner, mono: true },
   { key: "cpe", label: "CPE", get: (f) => f.cpe, mono: true },
+  { key: "fingerprint", label: "핑거프린트", get: (f) => prettyFingerprint(f.fingerprint), mono: true, pre: true },
   { key: "rtt", label: "RTT", get: (f) => f.rtt, mono: true },
   { key: "identification", label: "식별", get: (f) => f.identification },
   { key: "category", label: "분류", get: (f) => f.category },
@@ -29,6 +54,7 @@ export const ALL_COLUMNS = [
   { key: "status", label: "운영상태", get: (f) => f.status, badge: "status" },
   { key: "reopened", label: "재발", get: (f) => (f.reopened ? "재발" : "") },
   { key: "dept", label: "부서", get: (f) => f.dept },
+  { key: "owner", label: "담당자", get: (f) => f.owner },
   { key: "contact", label: "연락처", get: (f) => f.contact, mono: true },
   { key: "deadline", label: "마감", get: (f) => fmtDate(f.deadline), mono: true },
   { key: "first_seen", label: "등록 날짜", get: (f) => fmtDate(f.first_seen), mono: true },
@@ -49,7 +75,7 @@ export const cellValue = (finding, key) => {
 export const PRESETS = [
   { id: "p_report", name: "표준 보고서", cols: ["host_ip", "hostname", "port", "proto", "service", "version", "risk_level", "status", "dept", "first_seen", "last_seen"] },
   { id: "p_ports", name: "포트 인벤토리", cols: ["host_ip", "port", "proto", "state", "service"] },
-  { id: "p_finger", name: "서비스 핑거프린트", cols: ["host_ip", "port", "service", "product", "version", "banner", "cpe"] },
+  { id: "p_finger", name: "서비스 핑거프린트", cols: ["host_ip", "port", "service", "product", "version", "banner", "cpe", "fingerprint"] },
   { id: "p_risk", name: "위험·컴플라이언스", cols: ["host_ip", "port", "service", "risk_level", "category", "compliance", "status", "deadline"] },
   { id: "p_min", name: "최소 (CSV)", cols: ["host_ip", "port", "service"] },
 ];

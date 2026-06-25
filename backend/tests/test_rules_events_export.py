@@ -114,6 +114,40 @@ def test_export_xlsx(client):
     assert "spreadsheetml" in r.headers["content-type"]
 
 
+def test_export_fingerprint_and_owner_columns(client):
+    """수집은 되는데 노출 안 되던 값(핑거프린트·담당자)을 선택 컬럼으로 내보낼 수 있어야 한다."""
+    h = _auth(client)
+    client.post("/api/assets/bulk", headers=h, json=[{"ip": "127.0.0.1", "owner": "김운영"}])
+    _seed_findings(client, h)
+    r = client.get("/api/findings/export", headers=h,
+                   params={"cols": "host_ip,port,owner,fingerprint", "fmt": "csv"})
+    assert r.status_code == 200
+    text = r.content.decode("utf-8-sig")
+    header = text.splitlines()[0]
+    assert "담당자" in header and "핑거프린트" in header
+    # MinIO(포트 9000/9001)는 -sV 가 식별했어도 fingerprint-strings 원문에 Server 단서가 남는다
+    assert "MinIO" in text
+    assert "김운영" in text   # 자산대장 IP 매칭으로 채워진 담당자
+
+
+def test_finding_exposes_fingerprint_field(client):
+    """FindingOut 이 fingerprint(미식별 서비스 원시 응답)를 노출해 표/서랍에서 바로 보이게."""
+    h = _auth(client)
+    findings = _seed_findings(client, h)
+    fp = [f for f in findings if f.get("fingerprint")]
+    assert fp, "fingerprint-strings 가 있는 발견은 fingerprint 필드가 채워져야 한다"
+
+
+def test_purpose_surfaces_server_header(client):
+    """-sV 가 식별 못 해도 Server 헤더(uvicorn 류)를 용도근거로 끌어올린다."""
+    h = _auth(client)
+    _seed_findings(client, h)
+    r = client.get("/api/findings/export", headers=h,
+                   params={"cols": "host_ip,port,purpose", "fmt": "csv"})
+    assert r.status_code == 200
+    assert "server=" in r.content.decode("utf-8-sig")
+
+
 def test_export_unknown_column(client):
     h = _auth(client)
     _seed_findings(client, h)
@@ -154,9 +188,14 @@ def test_rescan_command(client):
     assert r.status_code == 200, r.text
     out = r.json()
     assert out["command"].startswith("nmap ")
-    assert "-p " in out["command"]
     assert out["finding_count"] == 3
     assert len(out["ports"]) >= 1 and len(out["hosts"]) >= 1
+    # 발견(IP:포트)별 개별 명령 — 각 명령은 단일 포트·단일 호스트만
+    assert len(out["commands"]) >= 1
+    for c in out["commands"]:
+        assert c.startswith("nmap ") and " -p " in c
+        tail = c.split(" -p ", 1)[1].split()       # [port, host]
+        assert len(tail) == 2 and "," not in tail[0]   # 포트 1개, 호스트 1개(교차곱 아님)
 
 
 def test_rescan_command_empty(client):
@@ -189,7 +228,8 @@ def test_rescan_run_starts_engine_job(client, monkeypatch):
 
     spec = json.loads((get_settings().scans_dir / f"scan_{out['scan_id']}" / "spec.json")
                       .read_text(encoding="utf-8"))
-    assert spec["targets_ports"]                          # 호스트별 포트 직접 지정(발견·찾기 생략)
+    assert spec["rescan_units"]                           # 발견(IP:포트)별 개별 단위
+    assert all({"ip", "port", "proto"} <= set(u) for u in spec["rescan_units"])
     assert spec["stages"]["service"]["confirm"] is True   # 2-pass 정밀 확인
     assert spec["scanops"]["scope_keys"]                  # 닫힘 판정 한정 키
 
