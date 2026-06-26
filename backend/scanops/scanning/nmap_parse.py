@@ -103,6 +103,27 @@ def _remarks(detail: str, nse: list[dict]) -> str:
     return ", ".join(parts)
 
 
+# PTR(역DNS)이 없을 때 NSE 출력에서 컴퓨터명을 건진다(우선순위: RDP > SMB > NetBIOS).
+# 내부망은 PTR 이 없는 경우가 많아, 애플리케이션 계층 이름이 더 신뢰성 있다.
+_HOSTNAME_NSE = [
+    ("rdp-ntlm-info", re.compile(r"DNS_Computer_Name:\s*([^\r\n]+)")),
+    ("smb-os-discovery", re.compile(r"Computer name:\s*([^\r\n]+)")),
+    ("nbstat", re.compile(r"NetBIOS name:\s*([^,\r\n]+)")),
+]
+
+
+def _nse_hostname(scripts: list[dict]) -> str:
+    for sid_match, pat in _HOSTNAME_NSE:
+        for s in scripts:
+            if sid_match in (s.get("id") or "").lower():
+                m = pat.search(s.get("output") or "")
+                if m:
+                    name = m.group(1).strip().strip("\x00").strip()
+                    if name and name.lower() not in ("-", "unknown", "n/a"):
+                        return name
+    return ""
+
+
 def _detail(svc) -> str:
     if svc is None:
         return ""
@@ -171,6 +192,14 @@ def parse_xml(source) -> list[dict]:
         ports = host.find("ports")
         if ports is None:
             continue
+        # 호스트 레벨 NSE(<hostscript>) — nbstat/smb-os-discovery 등은 여기로 나온다.
+        host_scripts = [{"id": s.get("id") or "", "output": s.get("output") or ""}
+                        for s in host.findall("hostscript/script")]
+        # PTR(역DNS)이 없으면 NSE(RDP/SMB/NetBIOS) 컴퓨터명으로 폴백 — 포트+호스트 스크립트 전부에서.
+        if not hostname:
+            port_scripts = [{"id": s.get("id") or "", "output": s.get("output") or ""}
+                            for p in ports.findall("port") for s in p.findall("script")]
+            hostname = _nse_hostname(host_scripts + port_scripts)
         for port in ports.findall("port"):
             st = port.find("state")
             state = st.get("state") if st is not None else "open"
@@ -179,8 +208,9 @@ def parse_xml(source) -> list[dict]:
             if not state.startswith("open"):
                 continue
             svc = port.find("service")
+            # 포트 스크립트 + 호스트 레벨 스크립트(SMB OS·NetBIOS 단서가 비고/근거에 반영되도록).
             nse = [{"id": s.get("id") or "", "output": s.get("output") or ""}
-                   for s in port.findall("script")]
+                   for s in port.findall("script")] + host_scripts
             cpe = ";".join(c.text or "" for c in (svc.findall("cpe") if svc is not None else []))
             detail = _detail(svc)
             findings.append({

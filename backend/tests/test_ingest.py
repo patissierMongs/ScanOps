@@ -25,6 +25,37 @@ def test_parse_basic():
     assert any("CN=" in f["remarks"] for f in fs)
 
 
+def test_nse_hostname_fallback():
+    """PTR 없으면 NSE(RDP/SMB/NetBIOS) 컴퓨터명으로 hostname 폴백. PTR 있으면 PTR 우선."""
+    # PTR 없음 + rdp-ntlm-info(포트 스크립트) → DNS_Computer_Name
+    fs = parse_xml(
+        '<nmaprun><host><address addr="10.0.0.1" addrtype="ipv4"/>'
+        '<ports><port protocol="tcp" portid="3389"><state state="open"/>'
+        '<service name="ms-wbt-server" method="probed"/>'
+        '<script id="rdp-ntlm-info" output="DNS_Computer_Name: WIN-DC01"/>'
+        '</port></ports></host></nmaprun>')
+    assert fs[0]["hostname"] == "WIN-DC01"
+
+    # PTR 없음 + smb-os-discovery(hostscript) → Computer name, 그리고 hostscript 가 finding nse_json 에 포함
+    fs2 = parse_xml(
+        '<nmaprun><host><address addr="10.0.0.2" addrtype="ipv4"/>'
+        '<ports><port protocol="tcp" portid="445"><state state="open"/>'
+        '<service name="microsoft-ds" method="table"/></port></ports>'
+        '<hostscript><script id="smb-os-discovery" output="Computer name: FILESRV"/></hostscript>'
+        '</host></nmaprun>')
+    assert fs2[0]["hostname"] == "FILESRV"
+    assert any(s["id"] == "smb-os-discovery" for s in fs2[0]["nse_json"])
+
+    # PTR 있으면 우선(폴백 안 함)
+    fs3 = parse_xml(
+        '<nmaprun><host><address addr="10.0.0.3" addrtype="ipv4"/>'
+        '<hostnames><hostname name="real.ptr.local" type="PTR"/></hostnames>'
+        '<ports><port protocol="tcp" portid="3389"><state state="open"/>'
+        '<service name="ms-wbt-server" method="probed"/>'
+        '<script id="rdp-ntlm-info" output="DNS_Computer_Name: OTHERNAME"/></port></ports></host></nmaprun>')
+    assert fs3[0]["hostname"] == "real.ptr.local"
+
+
 def test_first_scan_all_new():
     init_db()
     db = SessionLocal()
