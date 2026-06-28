@@ -15,14 +15,18 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 STATS_EVERY_DEFAULT = "10s"
+# 호스트당 상한. nmap 은 이 시간을 넘긴 호스트를 포기하고 다음으로 넘어가며 0으로 정상 종료(부분 결과 유지).
+# 한 호스트가 스캔 전체를 무한정 멈추는 사고(QA-007)를 막는다. 비우면("") 미적용.
+HOST_TIMEOUT_DEFAULT = "15m"
 UDP_DEFAULT_PORTS = "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 용도 식별형 NSE만(취약점/노이즈/부작용 스크립트 제외) — 빠르고 부작용 적게 '무엇/왜' 파악.
@@ -84,8 +88,12 @@ PRESETS: dict[str, list[str]] = {
     "basic": ["-Pn", "-sV", "-T4"],
     "quick": ["-sT", "-T4", "--top-ports", "1000", "-sV", "--reason"],
     "light": ["-sT", "-T4", "--top-ports", "100", "--reason"],
+    # phase1 은 단일 nmap 실행으로 -sS+-sU 를 함께 돌린다. 한 번의 실행에선 --version-all 이
+    # TCP·UDP 양쪽 버전탐지에 모두 걸리는데, 강도 9 는 수다/증폭형 UDP(SNMP·SSDP·DNS 등)에서
+    # nmap 을 fatal 종료시킬 위험이 크다(자동 워크플로가 UDP 식별에서 --version-all 을 뺀 이유와 동일).
+    # 그래서 phase1 도 기본 -sV(강도 7)로 안전하게 간다. 강도 9 TCP 식별이 필요하면 자동 워크플로 사용.
     "phase1": [
-        "-sS", "-sU", "-Pn", "-n", "-sV", "--version-all", "--open", "--reason",
+        "-sS", "-sU", "-Pn", "-n", "-sV", "--open", "--reason",
         "-T4", "--max-retries", "2", "--min-hostgroup", "64",
         "--max-parallelism", "100", "--defeat-rst-ratelimit",
         "-p", PRECISION_PORTS,
@@ -95,6 +103,8 @@ PRESETS: dict[str, list[str]] = {
 
 TARGET_RE = re.compile(r"^[A-Za-z0-9_.:/\-]+$")
 PORTS_RE = re.compile(r"^[0-9TUtu:,\-\s]+$")
+# 포트 본문(프로토콜 접두사 제거 후): 단일 포트·범위·열린 범위(1-, -1024) 허용.
+PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
 SCRIPT_RE = re.compile(r"^[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*$")
 STATS_RE = re.compile(r"^\d+[smh]?$")
 NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -175,6 +185,65 @@ def validate_targets(targets: list[str]) -> None:
     bad = [t for t in targets if not TARGET_RE.match(t)]
     if bad:
         raise ValueError(f"허용되지 않는 target 형식: {bad}")
+    # IPv6 는 자동 워크플로 플래그(-6 없음)와 호환되지 않아 nmap 이 실패하고, 실패하면
+    # best-effort 라도 해당 대상은 결과가 0 → 혼란. 명시적으로 거절한다(QA-016).
+    ipv6 = [t for t in targets if ":" in t]
+    if ipv6:
+        raise ValueError(f"IPv6 대상은 아직 지원하지 않습니다: {ipv6}. IPv4 주소/대역으로 지정하세요.")
+
+
+def warn_ambiguous_ports(spec: str) -> None:
+    """T:/U: 접두사는 다음 접두사 전까지 sticky(nmap 규칙). 접두사 뒤의 '접두사 없는' 포트는
+    직전 프로토콜로 묶인다(예: T:80,U:53,443 → 443 은 UDP). 사용자 의도와 다를 수 있어 한 번 경고(QA-013)."""
+    if ":" not in spec:
+        return
+    current = ""
+    for seg in spec.replace(" ", "").split(","):
+        if ":" in seg:
+            current = seg.split(":", 1)[0].upper()
+        elif current:
+            print(
+                f"warning: 포트 '{seg}' 는 직전 '{current}:' 프로토콜로 처리됩니다(nmap 규칙). "
+                f"의도와 다르면 포트마다 T:/U: 접두사를 붙이세요.",
+                file=sys.stderr,
+            )
+            return
+
+
+def parse_scope(spec: str) -> list:
+    """콤마/공백 구분 CIDR·IP 목록 → 네트워크 객체. 잘못된 토큰은 건너뛴다."""
+    nets = []
+    for raw in (spec or "").replace(",", " ").split():
+        try:
+            nets.append(ipaddress.ip_network(raw.strip(), strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _in_scope(host: str, nets: list) -> bool:
+    try:
+        ip = ipaddress.ip_address(host)
+        return any(ip in n for n in nets)
+    except ValueError:
+        pass
+    try:
+        net = ipaddress.ip_network(host, strict=False)
+        return any(net.version == n.version and net.subnet_of(n) for n in nets)
+    except ValueError:
+        return False  # IP/CIDR 가 아니면(호스트명 등) scope 모드에선 검증 불가 → 불허
+
+
+def check_scope(hosts: list[str], spec: str) -> None:
+    """허용 대역(scope)이 설정돼 있으면 모든 host 가 그 안에 드는지 검증. 비면 무제한.
+    오타·잘못 붙여넣은 사외 대역을 스캔 시작 전에 막는다(QA-020, 백엔드 scope 와 동일 의미)."""
+    nets = parse_scope(spec)
+    if not nets:
+        return
+    bad = [h for h in hosts if not _in_scope(h, nets)]
+    if bad:
+        shown = ", ".join(bad[:5]) + (f" 외 {len(bad) - 5}건" if len(bad) > 5 else "")
+        raise ValueError(f"허용된 스캔 대역(scope) 밖의 대상입니다: {shown}")
 
 
 def validate_ports(ports: str) -> str:
@@ -183,7 +252,24 @@ def validate_ports(ports: str) -> str:
         return ""
     if not PORTS_RE.match(ports):
         raise ValueError("허용되지 않는 포트 형식입니다. 예: 22,80,443 또는 1-1024")
-    return ports.replace(" ", "")
+    ports = ports.replace(" ", "")
+    # 문자집합 통과 뒤에도 'T:'(빈 본문)·빈 항목(',,')·잘못된 본문 같은 쓰레기가 nmap -p 로
+    # 새지 않도록 항목 단위로 검증한다(QA-014).
+    for seg in ports.split(","):
+        if not seg:
+            raise ValueError("포트 목록에 빈 항목이 있습니다(콤마 위치 확인). 예: 22,80,443")
+        body = seg
+        if ":" in seg:
+            prefix, body = seg.split(":", 1)
+            if prefix.upper() not in ("T", "U"):
+                raise ValueError(f"알 수 없는 프로토콜 접두사: '{seg}' (T: 또는 U: 만 허용)")
+        if not body:
+            raise ValueError(f"프로토콜 접두사 뒤에 포트가 없습니다: '{seg}'")
+        if not PORT_BODY_RE.match(body):
+            raise ValueError(f"잘못된 포트/범위: '{seg}' (예: 80, 1-1024, 1-, -1024)")
+        if any(not (1 <= int(n) <= 65535) for n in re.findall(r"\d+", body)):
+            raise ValueError(f"포트는 1-65535 범위여야 합니다: '{seg}'")
+    return ports
 
 
 def validate_scripts(scripts: str) -> str:
@@ -202,6 +288,16 @@ def validate_stats_every(value: str) -> str:
     return value
 
 
+def validate_host_timeout(value: str) -> str:
+    """호스트당 상한. 빈 값/0 이면 미적용. 그 외는 nmap 시간 형식(15m 등)."""
+    value = (value if value is not None else "").strip()
+    if value in ("", "0"):
+        return ""
+    if not STATS_RE.match(value):
+        raise ValueError("--host-timeout 값은 15m, 30m 같은 nmap 시간 형식이어야 합니다(끄려면 0).")
+    return value
+
+
 def expand_targets(targets: list[str], cap: int) -> list[str]:
     hosts: list[str] = []
     for raw in targets:
@@ -211,20 +307,26 @@ def expand_targets(targets: list[str], cap: int) -> list[str]:
         if "/" in t:
             try:
                 net = ipaddress.ip_network(t, strict=False)
-            except ValueError:
-                hosts.append(t)
-            else:
-                hosts.extend(str(ip) for ip in net)
+            except ValueError as exc:
+                # 잘못된 CIDR 을 그대로 nmap 에 넘기면 거기서 깨진다 → 여기서 정직하게 거절(QA-019).
+                raise ValueError(f"잘못된 CIDR: {t}") from exc
+            # 전개 '전에' 크기를 확인한다. /8·IPv6 CIDR 을 통째로 materialize 하면 캡이 발동하기도 전에
+            # 메모리/시간이 폭발한다(QA-015).
+            if net.num_addresses > cap:
+                raise ValueError(f"대상 호스트가 너무 많습니다(>{cap}): {t}. --max-hosts 또는 범위를 조정하세요.")
+            hosts.extend(str(ip) for ip in net)
         elif match := RANGE_RE.match(t):
             base, lo, hi = match.group(1), int(match.group(2)), int(match.group(3))
-            if lo > hi or hi > 255:
+            octets = [int(o) for o in base.split(".")]
+            if any(o > 255 for o in octets) or lo > 255 or hi > 255 or lo > hi:
                 raise ValueError(f"잘못된 IP 범위: {t}")
             hosts.extend(f"{base}.{i}" for i in range(lo, hi + 1))
         else:
             hosts.append(t)
         if len(hosts) > cap:
             raise ValueError(f"대상 호스트가 너무 많습니다(>{cap}). --max-hosts 또는 범위를 조정하세요.")
-    return hosts
+    # 중복/겹침 대상 제거(순서 보존): 중복 스캔과 배치 출력 파일 충돌을 막는다(QA-018).
+    return list(dict.fromkeys(hosts))
 
 
 def make_batches(targets: list[str], batch_size: int) -> list[list[str]]:
@@ -297,6 +399,10 @@ def build_base_flags(args: argparse.Namespace) -> list[str]:
                 flags[idx + 1] = tcp_only_ports(flags[idx + 1])
     elif args.udp and "-sU" not in flags:
         flags.insert(1 if flags and flags[0] in SCAN_TYPE_FLAGS else 0, "-sU")
+
+    # TCP Connect(권한 불필요) 모드에선 -sU(raw 소켓, 관리자 권한 필요)를 쓸 수 없다 → 제거(QA-010).
+    if args.scan_type == "connect":
+        flags = strip_flags(flags, {"-sU"})
 
     ports = "T:1-65535" if args.all_ports else validate_ports(args.ports)
     if ports:
@@ -417,9 +523,13 @@ def build_command(plan: dict, index: int, stage_id: str = "", tcp_ports: list[in
     flags = build_auto_flags(plan, stage_id, tcp_ports) if stage_id else plan["base_flags"]
     # identify 단계는 discovery 생존 호스트(targets)로 좁힌다. 없으면 원본 배치 전체.
     scan_targets = targets if targets else plan["batches"][index]
+    host_timeout = plan.get("host_timeout", "")
+    # --host-timeout: 한 호스트가 무한정 멈추는 걸 막는다(nmap 이 해당 호스트만 포기, 0으로 정상 종료).
+    timeout_flags = ["--host-timeout", host_timeout] if host_timeout else []
     return [
         plan["nmap"],
         "--stats-every", plan["stats_every"],
+        *timeout_flags,
         *flags,
         "-oA", str(base),
         *scan_targets,
@@ -487,6 +597,28 @@ def live_hosts_from_xml(path: Path) -> list[str]:
     return hosts
 
 
+def xml_parse_ok(path: Path) -> bool:
+    """XML 이 존재하고 파싱 가능한지. discovery 결과가 손상(잘린 XML 등)됐는지 판단용."""
+    if not path.exists():
+        return False
+    try:
+        ET.parse(path)
+    except ET.ParseError:
+        return False
+    return True
+
+
+def xml_has_hosts(path: Path) -> bool:
+    """파싱 가능하고 host 항목이 하나라도 있는지. rc≠0 단계의 부분 XML 도 쓸만하면 manifest 에 포함하기 위함."""
+    if not path.exists():
+        return False
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        return False
+    return root.find(".//host") is not None
+
+
 def run_stage_name(stage_id: str) -> str:
     return dict(AUTO_STAGES).get(stage_id, stage_id)
 
@@ -543,11 +675,15 @@ def create_plan(args: argparse.Namespace) -> dict:
     # --max-hosts 캡은 배치 여부와 무관하게 항상 검증(초과 시 expand_targets 가 ValueError).
     # 비배치 모드는 원본 스펙(CIDR 등)을 그대로 nmap 에 넘기되, 캡 검사만 수행.
     expanded = expand_targets(raw_targets, args.max_hosts)
+    # scope 게이트: 설정 시 전개된 모든 호스트가 허용 대역 안인지 검증(밖이면 시작 전 거절).
+    check_scope(expanded, getattr(args, "scan_scope", "") or os.environ.get("SCANOPS_SCAN_SCOPE", ""))
     run_targets = expanded if args.batch_size > 0 else raw_targets
     batches = make_batches(run_targets, args.batch_size)
     out_dir = Path(args.output_dir).resolve()
     name = safe_name(args.name)
     ports_override = validate_ports(args.ports)
+    if ports_override:
+        warn_ambiguous_ports(ports_override)
     if args.workflow == "auto" and args.tcp_only and ports_override and not protocol_ports(ports_override, "T"):
         raise ValueError("TCP만 옵션을 사용할 때는 TCP 포트를 지정해야 합니다. 예: --ports 22,443")
     return {
@@ -564,6 +700,7 @@ def create_plan(args: argparse.Namespace) -> dict:
         "workflow": args.workflow,
         "profile": args.profile,
         "stats_every": validate_stats_every(args.stats_every),
+        "host_timeout": validate_host_timeout(getattr(args, "host_timeout", HOST_TIMEOUT_DEFAULT)),
         "base_flags": build_base_flags(args),
         "scan_type": args.scan_type,
         "ports_override": ports_override,
@@ -583,11 +720,21 @@ def create_plan(args: argparse.Namespace) -> dict:
     }
 
 
+REQUIRED_STATE_KEYS = ("workflow", "output_dir", "name", "manifest_path", "batches", "cursor", "runs")
+
+
 def load_plan(path: str, nmap_override: str = "", dry_run: bool = False) -> dict:
     p = Path(path)
     plan = json.loads(p.read_text(encoding="utf-8"))
-    if plan.get("tool") != "scanops_scanner":
+    if not isinstance(plan, dict) or plan.get("tool") != "scanops_scanner":
         raise ValueError("scanops_scanner state 파일이 아닙니다.")
+    # 손상/구버전 state 가 나중에 KeyError 트레이스백으로 터지지 않도록 필수 키를 미리 검증(QA-017).
+    missing = [k for k in REQUIRED_STATE_KEYS if k not in plan]
+    if missing:
+        raise ValueError(f"state 파일에 필수 항목이 없습니다(손상되었거나 호환되지 않음): {missing}")
+    if plan.get("status") == "running":
+        print("warning: 이 state 는 'running' 상태입니다(중단되었거나 다른 스캔이 진행 중일 수 있음). "
+              "동일 state 로 동시에 두 스캔을 돌리지 마세요.", file=sys.stderr)
     nmap = find_nmap(nmap_override) if nmap_override else find_nmap(plan.get("nmap", ""))
     if not nmap and dry_run:
         nmap = nmap_override or plan.get("nmap", "") or "nmap"
@@ -617,24 +764,31 @@ def print_plan(plan: dict) -> None:
             print(display_command(build_command(plan, idx)))
 
 
+def manifest_xml_files(run: dict) -> list[str]:
+    """이 run 에서 import 할 XML 목록. rc==0 은 그대로, rc≠0(부분 실패) 은 파싱되고 host 가 있는 XML 만 포함.
+    nmap 이 일부 호스트를 스캔하고도 비정상 종료(host down/NSE 오류 등)한 경우 그 부분 결과를 살린다(QA-005)."""
+    if run.get("skipped"):
+        return []
+    xmls = [p for p in run.get("files", []) if str(p).lower().endswith(".xml")]
+    if run.get("returncode") == 0:
+        return xmls
+    return [p for p in xmls if xml_has_hosts(Path(p))]
+
+
 def write_manifest(plan: dict, zip_path: str = "") -> None:
     manifest = dict(plan)
     manifest["state_path"] = plan.get("state_path", "")
     manifest["zip_path"] = zip_path
-    manifest["all_xml_files"] = [
+    runs = latest_runs(plan)
+    manifest["all_xml_files"] = list(dict.fromkeys(
+        p for run in runs for p in manifest_xml_files(run)
+    ))
+    manifest["import_xml_files"] = list(dict.fromkeys(
         p
-        for run in plan.get("runs", [])
-        if run.get("returncode") == 0 and not run.get("skipped")
-        for p in run.get("files", [])
-        if str(p).lower().endswith(".xml")
-    ]
-    manifest["import_xml_files"] = [
-        p
-        for run in plan.get("runs", [])
-        if run.get("returncode") == 0 and not run.get("skipped") and run.get("stage_id", "") != "tcp_discovery"
-        for p in run.get("files", [])
-        if str(p).lower().endswith(".xml")
-    ]
+        for run in runs
+        if run.get("stage_id", "") != "tcp_discovery"
+        for p in manifest_xml_files(run)
+    ))
     write_json(Path(plan["manifest_path"]), manifest)
 
 
@@ -651,17 +805,115 @@ def create_zip(plan: dict) -> str:
     return str(zip_path)
 
 
-def finish_plan(plan: dict, state_path: Path, zip_outputs: bool) -> None:
-    plan["status"] = "done"
+def run_batch(run: dict) -> int:
+    return run.get("batch_index", run.get("index"))
+
+
+def latest_runs(plan: dict) -> list[dict]:
+    """(batch, stage) 별 마지막 실행만 남긴다. --resume 으로 재시도해 성공한 단계가
+    예전 실패 기록에 가려지지 않도록(상태/요약/manifest 일관성)."""
+    by_key: dict[tuple, dict] = {}
+    for run in plan.get("runs", []):
+        by_key[(run_batch(run), run.get("stage_id", ""))] = run
+    return list(by_key.values())
+
+
+def failed_runs(plan: dict) -> list[dict]:
+    """비정상 종료(rc≠0)했고 건너뛰지 않은 단계들(각 단계의 최신 시도 기준). best-effort 실패 집계용."""
+    return [r for r in latest_runs(plan) if not r.get("skipped") and r.get("returncode") not in (0, None)]
+
+
+def importable_xml(plan: dict) -> list[str]:
+    """import 가능한 XML(파싱+host, discovery 제외). 부분 실패 단계의 XML 도 쓸만하면 포함."""
+    seen: dict[str, None] = {}
+    for run in latest_runs(plan):
+        if run.get("stage_id", "") == "tcp_discovery":
+            continue
+        for p in manifest_xml_files(run):
+            seen[p] = None
+    return list(seen)
+
+
+def scan_findings(plan: dict) -> dict:
+    """결과 요약 집계: 살아있는 호스트 수, 열린 TCP/UDP 포트 수, import XML 개수."""
+    live: set[str] = set()
+    tcp: set[int] = set()
+    udp: set[int] = set()
+    for run in latest_runs(plan):
+        if run.get("skipped"):
+            continue
+        for p in run.get("files", []):
+            if not str(p).lower().endswith(".xml"):
+                continue
+            path = Path(p)
+            stage = run.get("stage_id", "")
+            if stage == "tcp_discovery":
+                live.update(live_hosts_from_xml(path))
+            elif stage == "udp_identify":
+                udp.update(open_ports_from_xml(path, "udp"))
+            else:  # tcp_identify or single
+                tcp.update(open_ports_from_xml(path, "tcp"))
+                udp.update(open_ports_from_xml(path, "udp"))
+    return {
+        "live_hosts": len(live),
+        "open_tcp": len(tcp),
+        "open_udp": len(udp),
+        "importable": len(importable_xml(plan)),
+    }
+
+
+def finalize_plan(plan: dict, state_path: Path, zip_outputs: bool) -> int:
+    """단계별 best-effort 결과를 모아 플랜을 마감한다.
+    - done:    실패한 단계 없음(빈 결과여도 정직하게 done + 경고).
+    - partial: 일부 단계 실패했지만 import 가능한 결과가 남음 → 사용 가능. exit 0.
+    - failed:  실패가 있고 import 가능한 결과가 0 → 진짜 실패. exit 1.
+    이 구조가 'UDP 한 단계 실패가 전체 스캔을 죽이던' ISSUE-001/QA-002~006 을 해소한다."""
+    failed = failed_runs(plan)
+    importable = importable_xml(plan)
+    if importable:
+        status = "partial" if failed else "done"
+    else:
+        status = "failed" if failed else "done"
+    plan["status"] = status
     plan["finished_at"] = now_iso()
+    # --resume 이 실패한 단계를 다시 시도할 수 있도록 cursor 를 '아직 실패가 남은 가장 앞 배치'로 되돌린다.
+    # (성공한 단계는 stage_succeeded 가 막아 재실행되지 않으므로, 실패 단계만 재시도된다.)
+    failed_batches = [b for b in (run_batch(r) for r in failed) if b is not None]
+    if failed_batches:
+        plan["cursor"] = min(failed_batches)
     write_json(state_path, plan)
     zip_path = str(Path(plan["output_dir"]) / f"{plan['name']}.scanops.zip") if zip_outputs else ""
     write_manifest(plan, zip_path)
     if zip_outputs:
         create_zip(plan)
-    print(f"done: {plan['manifest_path']}")
+    print_scan_summary(plan, failed, status)
+    print(f"{status}: {plan['manifest_path']}")
     if zip_path:
         print(f"zip: {zip_path}")
+    if status != "done":
+        print("resume with: --resume " + str(state_path), file=sys.stderr)
+    return 0 if status in ("done", "partial") else 1
+
+
+def print_scan_summary(plan: dict, failed: list[dict], status: str) -> None:
+    f = scan_findings(plan)
+    print(
+        f"summary: live_hosts={f['live_hosts']} open_tcp={f['open_tcp']} "
+        f"open_udp={f['open_udp']} import_xml={f['importable']}"
+    )
+    for run in failed:
+        print(
+            f"warning: {run.get('stage_name') or run.get('stage_id') or 'scan'} "
+            f"실패(rc={run.get('returncode')}) — 부분 결과만 반영됩니다.",
+            file=sys.stderr,
+        )
+    if f["importable"] == 0 and not failed:
+        print(
+            "warning: 가져올 결과가 없습니다(열린 포트/살아있는 호스트 0). 대상·네트워크 도달성을 확인하세요.",
+            file=sys.stderr,
+        )
+    elif status == "failed":
+        print("error: 사용할 수 있는 스캔 결과가 없습니다(모든 단계 실패).", file=sys.stderr)
 
 
 def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", tcp_ports: list[int] | None = None,
@@ -689,53 +941,56 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     return rc
 
 
-def fail_plan(plan: dict, state_path: Path, rc: int) -> int:
-    plan["status"] = "failed"
-    plan["finished_at"] = now_iso()
-    write_json(state_path, plan)
-    write_manifest(plan)
-    return rc
-
-
 def execute_single(plan: dict, state_path: Path, zip_outputs: bool) -> int:
+    # best-effort: 한 배치가 실패해도 나머지 배치는 계속 진행. 마감에서 부분/실패를 판정한다.
+    # --resume 시 cursor 가 '실패한 가장 앞 배치'로 되감기므로, 이미 성공한 배치는 stage_succeeded 로
+    # 건너뛴다(성공 배치 재스캔/덮어쓰기 방지 — auto 워크플로와 동일한 증분 재개).
     for idx in range(int(plan["cursor"]), len(plan["batches"])):
-        rc = run_nmap_stage(plan, idx, state_path)
-        if rc != 0:
-            return fail_plan(plan, state_path, rc)
+        if not stage_succeeded(plan, idx, ""):
+            run_nmap_stage(plan, idx, state_path)
         plan["cursor"] = idx + 1
         write_json(state_path, plan)
-    finish_plan(plan, state_path, zip_outputs)
-    return 0
+    return finalize_plan(plan, state_path, zip_outputs)
 
 
 def execute_auto(plan: dict, state_path: Path, zip_outputs: bool) -> int:
+    # 핵심 설계: 각 단계는 best-effort. 한 단계(특히 UDP)의 rc≠0 이 전체 플랜을 죽이지 않는다.
+    # 실패한 단계는 plan["runs"] 에 rc 와 함께 기록되어 마감에서 partial/failed 로 정직하게 집계되고,
+    # --resume 시 stage_succeeded(rc==0) 가 False 이므로 자동으로 재시도된다.
     for idx in range(int(plan["cursor"]), len(plan["batches"])):
+        live_hosts: list[str] | None = None
         if auto_tcp_discovery_ports(plan):
             if not stage_succeeded(plan, idx, "tcp_discovery"):
-                rc = run_nmap_stage(plan, idx, state_path, "tcp_discovery")
-                if rc != 0:
-                    return fail_plan(plan, state_path, rc)
+                run_nmap_stage(plan, idx, state_path, "tcp_discovery")
 
             discovery_xml = Path(str(output_base(plan, idx, "tcp_discovery")) + ".xml")
-            tcp_ports = open_ports_from_xml(discovery_xml, "tcp")
-            # identify 는 발견된 살아있는 호스트만 타깃(죽은 IP 재스캔 방지). 비면 원본 배치로 폴백.
-            live_hosts = live_hosts_from_xml(discovery_xml) or None
-            if tcp_ports:
+            # 손상/누락 XML 을 '열린 포트 0' 과 구분(QA-008): 파싱 실패면 식별 대상을 알 수 없다.
+            parse_ok = xml_parse_ok(discovery_xml)
+            tcp_ports = open_ports_from_xml(discovery_xml, "tcp") if parse_ok else []
+            # identify 는 발견된 살아있는 호스트만 타깃(죽은 IP 재스캔 방지).
+            live_hosts = (live_hosts_from_xml(discovery_xml) if parse_ok else []) or None
+            if not parse_ok:
+                append_skipped_stage(plan, idx, "tcp_identify",
+                                     "tcp_discovery 결과 XML 이 없거나 손상되어 식별 대상을 알 수 없습니다.")
+                write_json(state_path, plan)
+            elif tcp_ports:
                 if not stage_succeeded(plan, idx, "tcp_identify"):
-                    rc = run_nmap_stage(plan, idx, state_path, "tcp_identify", tcp_ports, live_hosts)
-                    if rc != 0:
-                        return fail_plan(plan, state_path, rc)
+                    run_nmap_stage(plan, idx, state_path, "tcp_identify", tcp_ports, live_hosts)
             else:
                 append_skipped_stage(plan, idx, "tcp_identify", "tcp_discovery 에서 열린 TCP 포트를 찾지 못했습니다.")
                 write_json(state_path, plan)
         else:
             append_skipped_stage(plan, idx, "tcp_discovery", "사용자가 지정한 포트에 TCP 포트가 없습니다.")
             append_skipped_stage(plan, idx, "tcp_identify", "사용자가 지정한 포트에 TCP 포트가 없습니다.")
-            live_hosts = None
             write_json(state_path, plan)
 
         if plan.get("tcp_only"):
             append_skipped_stage(plan, idx, "udp_identify", "TCP만 옵션이 선택되었습니다.")
+            write_json(state_path, plan)
+        elif plan.get("scan_type") == "connect":
+            # TCP Connect(권한 불필요) 모드에선 -sU 를 쓸 수 없다(관리자 권한 필요) → UDP 단계는 깨끗이 건너뛴다(QA-010).
+            append_skipped_stage(plan, idx, "udp_identify",
+                                 "TCP Connect 모드(권한 불필요)에서는 UDP 스캔(-sU, 관리자 권한 필요)을 건너뜁니다.")
             write_json(state_path, plan)
         elif not auto_udp_ports(plan):
             append_skipped_stage(plan, idx, "udp_identify", "사용자가 지정한 포트에 UDP 포트가 없습니다.")
@@ -744,29 +999,41 @@ def execute_auto(plan: dict, state_path: Path, zip_outputs: bool) -> int:
             # 완전 커버리지(opt-in): discovery 결과 무관하게 원본 배치 전체로 UDP 식별
             # (TCP/ICMP/ACK에 다 침묵하지만 UDP만 여는 호스트·부분 누락까지 보장, 죽은 IP 비용 감수).
             if not stage_succeeded(plan, idx, "udp_identify"):
-                rc = run_nmap_stage(plan, idx, state_path, "udp_identify")
-                if rc != 0:
-                    return fail_plan(plan, state_path, rc)
+                run_nmap_stage(plan, idx, state_path, "udp_identify")
         elif auto_tcp_discovery_ports(plan):
             # discovery 를 돌렸으면 생존 호스트로만 UDP 식별(죽은 IP 재스캔 방지).
             if not live_hosts:
-                append_skipped_stage(plan, idx, "udp_identify", "tcp_discovery 에서 살아있는 호스트를 찾지 못했습니다.")
+                append_skipped_stage(plan, idx, "udp_identify",
+                                     "tcp_discovery 에서 살아있는 호스트를 찾지 못했습니다(숨은 UDP 전용 호스트는 --udp-all-targets 로 확인).")
                 write_json(state_path, plan)
             elif not stage_succeeded(plan, idx, "udp_identify"):
-                rc = run_nmap_stage(plan, idx, state_path, "udp_identify", targets=live_hosts)
-                if rc != 0:
-                    return fail_plan(plan, state_path, rc)
+                run_nmap_stage(plan, idx, state_path, "udp_identify", targets=live_hosts)
         elif not stage_succeeded(plan, idx, "udp_identify"):
             # discovery 를 안 돌렸으면 생존 정보가 없으므로 원본 배치 전체로 UDP 식별.
-            rc = run_nmap_stage(plan, idx, state_path, "udp_identify")
-            if rc != 0:
-                return fail_plan(plan, state_path, rc)
+            run_nmap_stage(plan, idx, state_path, "udp_identify")
 
         plan["cursor"] = idx + 1
         write_json(state_path, plan)
 
-    finish_plan(plan, state_path, zip_outputs)
-    return 0
+    return finalize_plan(plan, state_path, zip_outputs)
+
+
+def _raise_keyboard_interrupt(signum, frame):  # noqa: ANN001
+    raise KeyboardInterrupt()
+
+
+def install_stop_handlers() -> None:
+    """GUI/외부에서 보낸 정지 신호를 KeyboardInterrupt 로 바꿔 interrupted 정리(상태 저장+재개 힌트)가
+    실행되게 한다. Windows 의 CTRL_BREAK 는 SIGBREAK 로 오는데 파이썬은 기본적으로 이를
+    KeyboardInterrupt 로 바꾸지 않으므로 직접 핸들러를 단다(QA-009). 메인 스레드에서만 가능."""
+    for name in ("SIGBREAK", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _raise_keyboard_interrupt)
+        except (ValueError, OSError):
+            pass  # 비메인 스레드 등에서는 등록 불가 — 무시
 
 
 def execute(plan: dict, dry_run: bool = False, zip_outputs: bool = False) -> int:
@@ -777,6 +1044,7 @@ def execute(plan: dict, dry_run: bool = False, zip_outputs: bool = False) -> int
     out_dir = Path(plan["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     state_path = Path(plan["state_path"])
+    install_stop_handlers()
     plan["status"] = "running"
     write_json(state_path, plan)
 
@@ -822,6 +1090,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--open-only", action="store_true", help="Add --open. Faster/smaller, but closed ports are omitted from heatmap XML.")
     p.add_argument("--include-closed", action="store_true", help="Remove --open so closed/filtered ports remain in XML.")
     p.add_argument("--stats-every", default=STATS_EVERY_DEFAULT, help="nmap --stats-every value.")
+    p.add_argument("--host-timeout", default=HOST_TIMEOUT_DEFAULT,
+                   help="Per-host nmap --host-timeout so one host cannot hang the whole scan. 0 disables.")
+    p.add_argument("--scan-scope", default="",
+                   help="Allowed scan range(s): comma/space CIDR or IP. Targets outside are rejected before scanning. "
+                        "Falls back to the SCANOPS_SCAN_SCOPE env var. Empty means unrestricted.")
     p.add_argument("--batch-size", type=int, default=0, help="Expand targets and run batches of this size. 0 means one nmap run.")
     p.add_argument("--max-hosts", type=int, default=65536, help="Safety cap when expanding CIDR/ranges for batching.")
     p.add_argument("--resume", help="Resume from a previous *.state.json.")
@@ -841,6 +1114,10 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except (KeyError, TypeError) as exc:
+        # 손상/구버전 state 등으로 인한 예기치 못한 형태 → 트레이스백 대신 정직한 에러로(QA-017).
+        print(f"error: 손상되었거나 호환되지 않는 state/입력입니다: {exc!r}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

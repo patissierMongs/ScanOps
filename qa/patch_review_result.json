@@ -1,0 +1,513 @@
+{
+  "raised": 23,
+  "real_count": 22,
+  "mustfix_count": 6,
+  "mustfix": [
+    {
+      "title": "GUI fails to autofill resume path when scan is STOPPED (interrupted, rc=130) -- the exact scenario the graceful-stop feature exists for",
+      "location": "scanner/scanops_scanner_gui.py:425-432 _scan_markers vs scanner/scanops_scanner.py:1054 interrupted print",
+      "severity": "high",
+      "kind": "logic-bug",
+      "evidence": "GUI _scan_markers matches only `prefix = \"resume with: --resume \"` (lowercase) and sets self._resume_hint from it. finalize_plan (partial/failed) prints exactly that lowercase form at scanops_scanner.py:892. BUT the interrupt path prints a DIFFERENT string at scanops_scanner.py:1054: `\"\\ninterrupted. Resume with: --resume \" + str(state_path)` (capital 'Resume', prefixed with 'interrupted. '). Verified `'interrupted. Resume with: --resume PATH'.lstrip().startswith('resume with: --resume ')` is False. So _resume_hint stays \"\" on stop, and _drain_output's `if self._resume_hint and not self.resume_path.get().strip(): self.resume_path.set(self._resume_hint)` never fires.",
+      "impact": "When the user clicks Stop (CTRL_BREAK/SIGINT -> KeyboardInterrupt -> rc 130), the status label correctly says '중지됨 — [재개 실행]으로 이어할 수 있습니다' but the resume path field is left empty, so the user cannot actually click resume without manually locating the *.state.json. The headline GUI hardening feature (graceful stop + resume autofill) silently does not work on the stop path; it only works on partial/failed completion.",
+      "fix": "Make the GUI marker tolerant of both strings, e.g. lowercase the stripped line before matching, or match the substring 'Resume with: --resume '/'resume with: --resume ' case-insensitively; or unify the CLI to emit one canonical 'resume with: --resume <path>' line on the interrupt path too (scanops_scanner.py:1054).",
+      "confidence": "high",
+      "lens": "resume-cursor",
+      "verdict": {
+        "is_real": true,
+        "severity": "high",
+        "must_fix": true,
+        "rationale": "Verified end-to-end in current code. On Stop, run_nmap_stage (scanops_scanner.py:924 subprocess.call) and execute_single/execute_auto have NO KeyboardInterrupt handling, so the signal-raised KeyboardInterrupt (install_stop_handlers, line 1017) propagates to run_plan's handler at line 1050, which prints the interrupt form \"\\ninterrupted. Resume with: --resume <path>\" (line 1054) — NOT finalize_plan's lowercase \"resume with: --resume <path>\" (line 892). finalize_plan is never reached on stop. The GUI captures this line because _run_process uses stderr=subprocess.STDOUT (line 370), feeding it to _scan_markers (called from _drain_output line 432). But _scan_markers only matches stripped.startswith(\"resume with: --resume \") (lines 449-450). The interrupt line strips to \"interrupted. Resume with: --resume <path>\", which does NOT start with the lowercase prefix (verified: startswith -> False; case-insensitive substring -> True). So _resume_hint stays \"\" and the autofill at _drain_output lines 440-441 never fires. Meanwhile _final_status(130) returns \"중지됨 — [재개 실행]으로 이어할 수 있습니다\" (line 463), telling the user resume is ready while the resume_path field is empty. There is no other GUI code path that handles the interrupt/capital-Resume form. Net: the headline graceful-stop + resume-autofill feature silently does not autofill on its primary path (user clicks Stop). Tests pass because none assert _scan_markers against the CLI's actual interrupt-form output. Severity high and must_fix: the feature is advertised by the status label yet broken on the exact scenario it exists for; fix is trivial (case-insensitive substring match, or unify the CLI to emit one canonical line). Minor correction to the finding's line refs: GUI marker logic is at lines 447-451 (invoked via _drain_output line 432), not 425-432; substance is correct.",
+        "dedup_key": "gui-resume-autofill-missing-on-interrupt-rc130"
+      }
+    },
+    {
+      "title": "No test covers single-workflow multi-batch failure+resume or the GUI interrupted-string parsing -- the two real bugs above sit in green-test blind spots",
+      "location": "backend/tests/test_standalone_scanner.py (resume test at line 400 is auto-workflow only; batch tests at 455/716 have no failure+resume; no _scan_markers test)",
+      "severity": "medium",
+      "kind": "coverage-gap",
+      "evidence": "The updated resume test test_resume_after_failed_identification_reuses_successful_discovery uses the default auto workflow (no --workflow single) and a single target (no batching), so it exercises only the stage-guarded auto path. test_targets_file_batching... (455) and test_one_failed_batch_does_not_abort_others (716) batch but never resume. grep for 'workflow.*single' / '_scan_markers' / 'interrupted. Resume' in the test file returns no resume-with-single and no GUI-marker tests.",
+      "impact": "The suite (40 scanner tests green) gives false confidence that resume is incremental and that stop->autofill works. The single-workflow re-scan regression and the GUI interrupt-hint regression both pass CI undetected.",
+      "fix": "Add (1) a single-workflow, batch-size 1, 3+ target test where a middle batch fails then resume, asserting only the failed batch's target is re-invoked (assert on FAKE_NMAP_LOG targets); (2) a unit test feeding 'interrupted. Resume with: --resume X' through the GUI _scan_markers and asserting _resume_hint == 'X'.",
+      "confidence": "high",
+      "lens": "resume-cursor",
+      "verdict": {
+        "is_real": true,
+        "severity": "medium",
+        "must_fix": true,
+        "rationale": "Verified against the actual source. The coverage claims are all accurate, and the two underlying bugs they shield are real:\n\n1) Single-workflow resume re-scans already-succeeded later batches. execute_single (scanner/scanops_scanner.py:942-948) loops `for idx in range(cursor, len(batches))` and unconditionally calls run_nmap_stage with NO stage_succeeded guard. execute_auto (951-1013) guards every stage with stage_succeeded so only failed stages re-run. finalize_plan sets cursor=min(failed_batches) (881). So with --workflow single, batch-size 1, targets [t0,t1,t2] where batch 1 fails: cursor=1, resume runs idx 1 AND 2, needlessly re-scanning the already-succeeded batch 2. This directly contradicts the design comment at line 878 (\"성공한 단계는 stage_succeeded 가 막아 재실행되지 않는다\"), which only holds for auto. Efficiency/coverage regression, no data loss.\n\n2) GUI never autofills resume path on Stop/interrupt. The interrupt path prints \"\\ninterrupted. Resume with: --resume \"+path (scanner/scanops_scanner.py:1054), but GUI _scan_markers (scanner/scanops_scanner_gui.py:447-451) does line.lstrip() then matches prefix \"resume with: --resume \" (lowercase). The interrupt line after lstrip is \"interrupted. Resume with: --resume ...\" which does NOT start with that prefix (begins with \"interrupted.\" and uses capital \"Resume\"). So _resume_hint stays empty and the Stop->autofill feature (440-441) silently no-ops — defeating the headline GUI graceful-stop feature. The lowercase prefix only matches finalize output at line 892 (partial/failed), not the Stop/interrupt path the GUI Stop button actually triggers.\n\nCoverage gaps confirmed: resume test (test_standalone_scanner.py:401-452) uses default workflow=auto (1071) and single target 127.0.0.1 (no batching), so it can never hit execute_single. Batching tests (455, 716) never issue a second --resume run. The only single-workflow test (542) is a dry-run preset check. grep finds zero _scan_markers tests. So both defects pass the 40 green scanner tests undetected.\n\nmust_fix=true because acting on this finding surfaces a genuinely broken just-added feature (GUI Stop autofill) plus a resume-coverage regression; the green suite gives false confidence.",
+        "dedup_key": "coverage-gap-single-workflow-resume-and-gui-interrupt-marker"
+      }
+    },
+    {
+      "title": "Resume re-runs already-successful batches in single workflow, can lose good XML on transient re-failure",
+      "location": "scanner/scanops_scanner.py:942-948 execute_single (with finalize_plan cursor reset at :879-881)",
+      "severity": "high",
+      "kind": "regression",
+      "evidence": "execute_single loops `for idx in range(int(plan[\"cursor\"]), len(plan[\"batches\"])): run_nmap_stage(plan, idx, ...)` with NO per-batch success guard, unlike execute_auto which gates every stage behind stage_succeeded(). finalize_plan does `if failed_batches: plan[\"cursor\"] = min(failed_batches)`. So when batch 0 fails and batch 1 already succeeded, cursor rewinds to 0 and resume re-runs BOTH. Empirically confirmed: first run runs=[(b0,rc7),(b1,rc0)] status=partial cursor=0; resume re-runs b1, and when b1 transiently fails, runs become [(b0,7),(b1,0),(b0,0),(b1,7)] — latest_runs now keys (1,'') to the FAILED rc=7 run. The good first-run XML only survived my test because the fake nmap left the file on disk; a real nmap truncating/overwriting -oA output on failure would drop importable data for a batch that had already succeeded.",
+      "impact": "On --resume of a partial single-workflow batch scan, batches that already succeeded are needlessly rescanned (wasted scan time) and, if the forced rescan transiently fails, their previously-good results are demoted to a failed run and can be lost. Pre-patch behavior returned immediately on first failure (fail_plan), so successful batches were never re-run. This is a behavior regression introduced by best-effort + cursor-rewind without a single-workflow success guard.",
+      "fix": "Guard re-runs in execute_single the same way execute_auto does: skip a batch whose run already succeeded, e.g. `if not stage_succeeded(plan, idx, \"\"): run_nmap_stage(plan, idx, state_path)`. (stage_succeeded already treats stage_id \"\" correctly.) That makes the cursor rewind only retry genuinely-failed batches.",
+      "confidence": "high",
+      "lens": "status-manifest",
+      "verdict": {
+        "is_real": true,
+        "severity": "high",
+        "must_fix": true,
+        "rationale": "Verified against current scanner/scanops_scanner.py and reproduced empirically. execute_single (lines 944-946) loops `for idx in range(plan[\"cursor\"], len(plan[\"batches\"])): run_nmap_stage(...)` with NO per-batch success guard, while execute_auto (lines 958/972/...) gates every stage behind `if not stage_succeeded(...)`. finalize_plan (lines 879-881) rewinds `plan[\"cursor\"] = min(failed_batches)`. Reproduction: single workflow, batch-size 1, targets [10.0.0.5,10.0.0.6], batch0 fails. First run -> runs=[(0,'',7),(1,'',0)], status=partial, cursor rewound to 0 (not 2). On --resume, execute_single re-runs BOTH batches; runs become [(0,'',7),(1,'',0),(0,'',0),(1,'',7)]. latest_runs keys (1,'') to the LATEST (now rc=7) run, demoting the already-successful batch-1 result. With a real nmap that overwrites -oA output at run start (simulated via truncate-on-fail), 10.0.0.6 becomes un-importable and its on-disk XML is replaced by an empty <nmaprun/> -> silent loss of previously-good importable data. Without truncation (what the test fake nmap does, which is why all 40 tests stay green) the surviving file keeps it importable via xml_has_hosts, masking the bug — so the suite does not cover this. Pre-patch execute_single returned immediately on first failure via fail_plan (confirmed in qa/patch.diff lines 776-778), so successful batches were never re-run; this is a patch-introduced regression from removing the early return AND adding cursor rewind without the symmetric guard. The proposed one-line fix (`if not stage_succeeded(plan, idx, \"\"): run_nmap_stage(plan, idx, state_path)`) is correct: stage_succeeded compares run.get(\"stage_id\",\"\")==stage_id, so stage_id=\"\" matches single-workflow runs (verified at lines 624-629). Both the unconditional wasted rescan and the conditional data loss directly contradict the patch's stated best-effort/partial-preservation goal, so it should block merge.",
+        "dedup_key": "execute_single_resume_no_success_guard_reruns_successful_batches"
+      }
+    },
+    {
+      "title": "GUI resume-path autofill silently fails on STOP (interrupt), the patch's headline graceful-stop workflow",
+      "location": "scanner/scanops_scanner_gui.py:447-455 (_scan_markers) vs scanner/scanops_scanner.py:1054 (execute KeyboardInterrupt handler)",
+      "severity": "high",
+      "kind": "logic-bug",
+      "evidence": "GUI parser: prefix = \"resume with: --resume \"; if stripped.startswith(prefix): self._resume_hint = ... . CLI interrupt line: print(\"\\ninterrupted. Resume with: --resume \" + str(state_path), file=sys.stderr). The interrupt line begins with 'interrupted. Resume with' (capital R, and an 'interrupted. ' prefix), so stripped.startswith('resume with: --resume ') is False. Reproduced: interrupt-path resume_hint stays '' while finalize-path ('resume with: --resume <path>', lowercase) parses correctly.",
+      "impact": "When the user clicks STOP, the CLI exits 130 and _final_status(130) tells the user '[재개 실행]으로 이어할 수 있습니다', but self._resume_hint is never set, so resume_path is NOT autofilled. The user is told to resume but the resume field is empty — exactly the case (graceful STOP -> resume) this patch was built to support. The finalize partial/failed path works, masking the bug in casual testing.",
+      "fix": "Make the CLI emit a single canonical resume marker, or make the GUI matcher robust: match case-insensitively and use a substring search, e.g. m = re.search(r'(?i)resume with: --resume\\s+(.+)', line); if m: self._resume_hint = m.group(1).strip(). Alternatively change scanops_scanner.py:1054 to print the same lowercase 'resume with: --resume ' prefix at line start (drop the leading 'interrupted. ').",
+      "confidence": "high",
+      "lens": "signals-gui",
+      "verdict": {
+        "is_real": true,
+        "severity": "high",
+        "must_fix": true,
+        "rationale": "Confirmed against current code. The CLI interrupt handler (scanops_scanner.py:1054) prints `\"\\ninterrupted. Resume with: --resume \" + state_path` to stderr, while the finalize partial/failed path (scanops_scanner.py:892) prints lowercase `\"resume with: --resume \" + state_path`. The GUI matcher (scanops_scanner_gui.py:447-451) only matches a line that, after lstrip(), startswith the exact lowercase `\"resume with: --resume \"`. The interrupt line begins with `\"interrupted. Resume with...\"` (capital R, leading `interrupted. `), so the startswith check is False and _resume_hint stays \"\".\n\nVerified the STOP path actually reaches the interrupt handler: GUI _stop (lines 399-402) sends CTRL_BREAK/SIGINT to the process group; install_stop_handlers (scanops_scanner.py:1017) raises KeyboardInterrupt; the stage loops execute_single/execute_auto (lines 942-1012) have NO try/except, and run_nmap_stage uses plain subprocess.call — so KeyboardInterrupt propagates to execute()'s handler at line 1050 -> prints the capital-R marker -> returns 130. The GUI merges stderr into stdout (line 370 stderr=subprocess.STDOUT), so the line IS captured but not matched.\n\nResult: on graceful STOP, _drain_output gets rc=130, _final_status(130) tells the user '[재개 실행]으로 이어할 수 있습니다', but the autofill at lines 440-441 is skipped because _resume_hint is empty. The resume field is left blank on the exact graceful-STOP->resume workflow this patch was built to deliver. The finalize partial/failed path works (lowercase marker matches), which masks the bug in non-interrupt testing — consistent with the green suite, since no test exercises the GUI marker parser against the live interrupt-path string.\n\nCaveat (does not negate): autofill also requires the resume field to be empty; on a fresh forward scan it is, so the common case is hit. must_fix=high because STOP is the primary user trigger for the headline feature and it silently fails. The proposed fixes (case-insensitive substring regex in _scan_markers, or unifying the CLI to emit one canonical lowercase marker) are both correct; unifying the marker is the cleaner option.",
+        "dedup_key": "gui-resume-autofill-interrupt-marker-mismatch"
+      }
+    },
+    {
+      "title": "No GUI test covers _scan_markers / resume autofill, so the STOP-path marker mismatch is fully uncovered",
+      "location": "backend/tests/test_standalone_scanner.py:845 (test_interrupt_writes_interrupted_state_and_resume_hint)",
+      "severity": "medium",
+      "kind": "coverage-gap",
+      "evidence": "The interrupt test asserts only `'--resume' in capsys.readouterr().err` — it checks the CLI prints something containing --resume, never that the GUI's _scan_markers can extract the path. grep for _scan_markers/_resume_hint in the test file returns no hits; there are zero tests instantiating the GUI parser.",
+      "impact": "The case/prefix mismatch between the CLI interrupt line and the GUI parser passes CI green. Any divergence in the resume-hint wording between CLI and GUI goes undetected.",
+      "fix": "Add a unit test that feeds both CLI resume lines ('resume with: --resume X' and 'interrupted. Resume with: --resume X') through ScannerGui._scan_markers (or a extracted pure helper) and asserts _resume_hint == X for both.",
+      "confidence": "high",
+      "lens": "signals-gui",
+      "verdict": {
+        "is_real": true,
+        "severity": "medium",
+        "must_fix": true,
+        "rationale": "VERIFIED REAL, and the coverage gap hides an actual functional regression in newly-added GUI behavior.\n\nTwo distinct CLI resume-hint strings exist:\n- scanner/scanops_scanner.py:892 (finalize_plan, partial/failed): print(\"resume with: --resume \" + state_path)\n- scanner/scanops_scanner.py:1054 (execute KeyboardInterrupt handler, the GUI STOP path): print(\"\\ninterrupted. Resume with: --resume \" + state_path)\n\nThe GUI parser scanner/scanops_scanner_gui.py:447-451 (_scan_markers) matches ONLY prefix=\"resume with: --resume \" via stripped.startswith(prefix) after line.lstrip(). The interrupt line, after lstrip(), is \"interrupted. Resume with: --resume <path>\" — it does NOT start with \"resume with: --resume \" (different leading word AND capital R). So on the interrupt/STOP path, _resume_hint is never set, and the autofill at lines 440-441 never fires. This directly contradicts the docstring at gui line 439 (\"실패/부분/중단 시 재개 경로를 자동 채워\" = auto-fill resume path on failed/partial/INTERRUPTED). The partial/failed path matches and works; only the STOP path is broken — exactly the path the patch's new graceful _stop (CTRL_BREAK/SIGINT) drives.\n\nCoverage-gap claim confirmed exactly: (1) grep shows _scan_markers/_resume_hint appear only in the GUI source and patch.diff, never in backend/tests/test_standalone_scanner.py; the only GUI reference in tests is py_compile.compile(GUI_SCRIPT) at line 572 (syntax smoke only). (2) The interrupt test at backend/tests/test_standalone_scanner.py:845-867 asserts only '--resume' in capsys.readouterr().err — a substring both CLI strings satisfy — so it stays green despite the parser mismatch and never feeds the line through the GUI parser. No test instantiates the GUI parser.\n\nmust_fix=true: this is not merely a missing test; the green suite conceals a real, user-visible correctness regression in behavior introduced by this patch (GUI resume-autofill silently fails on the documented interrupt case). Minimal fix: relax the GUI prefix to match both ('--resume ' as the anchor, or case-insensitive '...resume with: --resume'), and add a unit test feeding both CLI lines through _scan_markers asserting _resume_hint equals the path for both.",
+        "dedup_key": "gui-scan-markers-interrupt-resume-hint-prefix-mismatch"
+      }
+    },
+    {
+      "title": "GUI fails to autofill resume path after Stop (interrupt rc=130) due to marker-string mismatch",
+      "location": "scanner/scanops_scanner_gui.py:447-451 (_scan_markers) vs scanner/scanops_scanner.py:1054 (execute KeyboardInterrupt)",
+      "severity": "high",
+      "kind": "regression",
+      "evidence": "CLI interrupt emits: print(\"\\ninterrupted. Resume with: --resume \" + str(state_path)) (capital R, 'interrupted.' prefix). GUI parses: prefix = \"resume with: --resume \"; if stripped.startswith(prefix): self._resume_hint = ... — startswith fails because the interrupt line after lstrip is 'interrupted. Resume with: --resume <path>'. Simulation confirmed: finalize line -> resume_hint=<path>; interrupt line -> resume_hint='' .",
+      "impact": "When the user clicks Stop (the primary graceful-stop path the whole GUI _stop/CTRL_BREAK rework exists for), proc exits 130, _final_status(130) tells the user '중지됨 — [재개 실행]으로 이어할 수 있습니다', but self.resume_path is never populated (line 440 guard sees empty _resume_hint). User is told to resume but the resume field stays blank. The other (finalize partial/failed) path uses lowercase 'resume with:' and DOES match, masking the bug. No test covers GUI marker parsing, so suite stays green.",
+      "fix": "Make the GUI prefix match case-insensitively and tolerate the 'interrupted.' prefix, or normalize the CLI to emit one canonical hint. Simplest: in _scan_markers use `low = stripped.lower(); marker='resume with: --resume '; i=low.find(marker); if i>=0: self._resume_hint = stripped[i+len(marker):].strip()`. Or change scanner.py:1054 to also print the lowercase 'resume with: --resume ' line.",
+      "confidence": "high",
+      "lens": "validation-coverage",
+      "verdict": {
+        "is_real": true,
+        "severity": "high",
+        "must_fix": true,
+        "rationale": "Verified against current code. The CLI emits two different resume-hint strings: finalize_plan (scanner/scanops_scanner.py:892) prints lowercase \"resume with: --resume <path>\", while the KeyboardInterrupt/Stop path (scanner/scanops_scanner.py:1054) prints \"\\ninterrupted. Resume with: --resume <path>\" (capital R, \"interrupted.\" prefix). The GUI's _scan_markers (scanner/scanops_scanner_gui.py:448-451) does stripped=line.lstrip() then stripped.startswith(\"resume with: --resume \"). For the interrupt line, lstrip() only removes the leading \"\\n\", leaving \"interrupted. Resume with: --resume <path>\", which does NOT startswith the lowercase prefix, so _resume_hint stays \"\". stderr is merged into the line stream (stderr=subprocess.STDOUT, line 370), so both hints DO reach the parser — confirming the lowercase finalize hint matches and masks the bug. On Stop: _stop() (line 391-409) sends CTRL_BREAK_EVENT/SIGINT -> CLI raises KeyboardInterrupt -> execute() returns 130. The done handler shows _final_status(130) = \"중지됨 — [재개 실행]으로 이어할 수 있습니다\" (line 462-463), but the autofill guard at line 440 (if self._resume_hint and not ...) sees empty _resume_hint, so resume_path is never populated. The user is told to resume but the resume field stays blank. This is a genuine regression on exactly the graceful-stop path the GUI _stop/CTRL_BREAK rework was built for, and no test covers GUI marker parsing so the suite stays green. must_fix because it defeats the primary intended workflow of this patch and the fix is trivial (case-insensitive substring match in the GUI, or normalize the CLI to one canonical lowercase hint). Note for severity calibration: it degrades a convenience autofill (user can still copy the printed path or pass --resume manually) and does not corrupt scan data or weaken coverage, but it directly breaks the feature the patch set out to deliver.",
+        "dedup_key": "gui-resume-autofill-marker-mismatch-interrupt-130"
+      }
+    }
+  ],
+  "real": [
+    {
+      "title": "execute_single resume re-scans every already-succeeded batch after the earliest failure (resume is not incremental for single workflow)",
+      "location": "scanner/scanops_scanner.py:942-948 execute_single; cursor set at finalize_plan:879-881",
+      "severity": "high",
+      "kind": "logic-bug",
+      "evidence": "execute_single loops `for idx in range(int(plan[\"cursor\"]), len(plan[\"batches\"])): run_nmap_stage(plan, idx, state_path)` with NO stage_succeeded/stage_recorded guard. finalize_plan sets `plan[\"cursor\"] = min(failed_batches)`. So on resume, every batch index >= the earliest failed batch is unconditionally re-run, including batches that already succeeded. Live repro (workflow=single, batch-size 1, 5 targets, only batch index 1 fails first run -> cursor=1): on --resume the scanner re-invoked nmap for targets A.A.A.2, A.A.A.3, A.A.A.4, A.A.A.5 (4 invocations) when only A.A.A.2 needed retry. execute_auto avoids this by guarding each stage with `if not stage_succeeded(...)`; execute_single has no equivalent.",
+      "impact": "For the single workflow, --resume after a mid-list batch failure re-scans all subsequent already-completed batches on every resume attempt. Wasted scan time/network load proportional to remaining batches, and each resume re-hits hosts that were already done -- defeating the purpose of resume. Final state still converges (latest_runs keeps newest), so it is wasteful rather than incorrect, but it is a clear resume regression vs the auto path.",
+      "fix": "Guard the single-workflow batch in execute_single the same way auto does, e.g. skip when the batch already has a successful run: `if stage_succeeded(plan, idx, \"\"): plan[\"cursor\"] = idx + 1; continue` before run_nmap_stage (stage_id is \"\" for single runs, and stage_succeeded already keys on stage_id==\"\").",
+      "confidence": "high",
+      "lens": "resume-cursor",
+      "verdict": {
+        "is_real": true,
+        "severity": "medium",
+        "must_fix": false,
+        "rationale": "VERIFIED against current scanner/scanops_scanner.py. The core mechanism is real:\n\n1. execute_single (lines 944-947) loops `for idx in range(int(plan[\"cursor\"]), len(plan[\"batches\"])): run_nmap_stage(plan, idx, state_path)` with NO stage_succeeded/stage_recorded guard — every batch from cursor onward is unconditionally re-invoked.\n2. finalize_plan (lines 879-881) sets `plan[\"cursor\"] = min(failed_batches)` where failed_batches comes from failed_runs(). So cursor rewinds to the earliest still-failed batch.\n3. Therefore, for workflow=single with batch-size 1 and a mid-list batch failure (e.g. batch 1 of 5 fails), on --resume the loop runs `range(1,5)` and re-invokes nmap for batches 1,2,3,4 even though 2,3,4 already succeeded. The repro in the finding is accurate.\n4. execute_auto DOES guard every run_nmap_stage with `if not stage_succeeded(...)` (lines 958, 972, 996, 1004, 1006), so the auto path correctly retries only failed stages. execute_single is the regression relative to auto.\n5. Test coverage gap confirmed: the only resume test (backend/tests/test_standalone_scanner.py:401 test_resume_after_failed_identification_reuses_successful_discovery) exercises the AUTO workflow with a SINGLE target/batch (127.0.0.1). It asserts the auto stage_succeeded guard skips already-done stages, but never covers multi-batch single-workflow partial-then-resume. So green tests do not catch this.\n6. The proposed fix is sound: single runs are recorded with stage_id=\"\" (run_nmap_stage default), and stage_succeeded keys on stage_id==\"\" exactly, so `stage_succeeded(plan, idx, \"\")` would correctly detect a prior successful single batch.\n\nSEVERITY DOWNGRADED from the finding's \"high\" to medium, and must_fix=false, because final output is NOT wrong: latest_runs() (lines 810-816) keeps the newest run per (batch, stage_id), so re-scanning a succeeded batch just overwrites with another success and the status/summary/manifest still converge correctly. The defect is wasted scan time and re-hitting already-completed hosts on every resume attempt — a real performance/coverage-effort regression and a clear inconsistency with the auto path, but not a correctness bug that produces wrong results or blocks merge. It is a genuine introduced defect worth fixing, just not merge-blocking.",
+        "dedup_key": "execute_single-resume-rescans-succeeded-batches"
+      }
+    },
+    {
+      "title": "GUI fails to autofill resume path when scan is STOPPED (interrupted, rc=130) -- the exact scenario the graceful-stop feature exists for",
+      "location": "scanner/scanops_scanner_gui.py:425-432 _scan_markers vs scanner/scanops_scanner.py:1054 interrupted print",
+      "severity": "high",
+      "kind": "logic-bug",
+      "evidence": "GUI _scan_markers matches only `prefix = \"resume with: --resume \"` (lowercase) and sets self._resume_hint from it. finalize_plan (partial/failed) prints exactly that lowercase form at scanops_scanner.py:892. BUT the interrupt path prints a DIFFERENT string at scanops_scanner.py:1054: `\"\\ninterrupted. Resume with: --resume \" + str(state_path)` (capital 'Resume', prefixed with 'interrupted. '). Verified `'interrupted. Resume with: --resume PATH'.lstrip().startswith('resume with: --resume ')` is False. So _resume_hint stays \"\" on stop, and _drain_output's `if self._resume_hint and not self.resume_path.get().strip(): self.resume_path.set(self._resume_hint)` never fires.",
+      "impact": "When the user clicks Stop (CTRL_BREAK/SIGINT -> KeyboardInterrupt -> rc 130), the status label correctly says '중지됨 — [재개 실행]으로 이어할 수 있습니다' but the resume path field is left empty, so the user cannot actually click resume without manually locating the *.state.json. The headline GUI hardening feature (graceful stop + resume autofill) silently does not work on the stop path; it only works on partial/failed completion.",
+      "fix": "Make the GUI marker tolerant of both strings, e.g. lowercase the stripped line before matching, or match the substring 'Resume with: --resume '/'resume with: --resume ' case-insensitively; or unify the CLI to emit one canonical 'resume with: --resume <path>' line on the interrupt path too (scanops_scanner.py:1054).",
+      "confidence": "high",
+      "lens": "resume-cursor",
+      "verdict": {
+        "is_real": true,
+        "severity": "high",
+        "must_fix": true,
+        "rationale": "Verified end-to-end in current code. On Stop, run_nmap_stage (scanops_scanner.py:924 subprocess.call) and execute_single/execute_auto have NO KeyboardInterrupt handling, so the signal-raised KeyboardInterrupt (install_stop_handlers, line 1017) propagates to run_plan's handler at line 1050, which prints the interrupt form \"\\ninterrupted. Resume with: --resume <path>\" (line 1054) — NOT finalize_plan's lowercase \"resume with: --resume <path>\" (line 892). finalize_plan is never reached on stop. The GUI captures this line because _run_process uses stderr=subprocess.STDOUT (line 370), feeding it to _scan_markers (called from _drain_output line 432). But _scan_markers only matches stripped.startswith(\"resume with: --resume \") (lines 449-450). The interrupt line strips to \"interrupted. Resume with: --resume <path>\", which does NOT start with the lowercase prefix (verified: startswith -> False; case-insensitive substring -> True). So _resume_hint stays \"\" and the autofill at _drain_output lines 440-441 never fires. Meanwhile _final_status(130) returns \"중지됨 — [재개 실행]으로 이어할 수 있습니다\" (line 463), telling the user resume is ready while the resume_path field is empty. There is no other GUI code path that handles the interrupt/capital-Resume form. Net: the headline graceful-stop + resume-autofill feature silently does not autofill on its primary path (user clicks Stop). Tests pass because none assert _scan_markers against the CLI's actual interrupt-form output. Severity high and must_fix: the feature is advertised by the status label yet broken on the exact scenario it exists for; fix is trivial (case-insensitive substring match, or unify the CLI to emit one canonical line). Minor correction to the finding's line refs: GUI marker logic is at lines 447-451 (invoked via _drain_output line 432), not 425-432; substance is correct.",
+        "dedup_key": "gui-resume-autofill-missing-on-interrupt-rc130"
+      }
+    },
+    {
+      "title": "plan[\"runs\"] grows unboundedly across repeated resumes of a genuinely-failing stage (state file + zip bloat)",
+      "location": "scanner/scanops_scanner.py:937 run_nmap_stage (plan[\"runs\"].append) + create_zip:796-798",
+      "severity": "low",
+      "kind": "edge-case",
+      "evidence": "run_nmap_stage always appends a new run dict; nothing prunes superseded attempts. latest_runs() dedups for status/summary/manifest, but the raw runs list persists every attempt. Live repro (udp stage that always fails, 3 resumes): #udp_identify entries in state grew 2 -> 3 -> 4. create_zip builds `wanted` by iterating plan[\"runs\"] (all attempts), and write_json serializes the full list each time.",
+      "impact": "For a stage that never succeeds (e.g. UDP perpetually returns rc!=0 on a host), each --resume permanently adds another run record. Over many resumes the state.json and the per-run file set in the zip grow without bound. Not a correctness bug (latest_runs masks old entries) but a slow resource/state leak and noisier diagnostics.",
+      "fix": "Either replace the prior (batch, stage) attempt in run_nmap_stage instead of appending (mirror latest_runs keying), or cap/garbage-collect superseded run records when writing state.",
+      "confidence": "high",
+      "lens": "resume-cursor",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Verified against current scanner/scanops_scanner.py. run_nmap_stage (line 937) unconditionally does plan[\"runs\"].append(run) with no keying/replacement; load_plan (line 726) reloads the full runs list with no pruning; and a perpetually-failing stage IS re-run on every --resume because stage_succeeded (line 624) only returns True on a rc==0 record, which such a stage never produces. So each resume of a never-succeeding stage permanently appends another run record, and write_json (line 938/660) serializes the entire growing runs array into state.json each time -- a genuine slow state-file growth. The finding correctly self-classifies this as NOT a correctness bug: status/summary/manifest/findings all go through latest_runs (lines 780, 821, 827, 840) which dedups by (batch, stage), and stage_succeeded/stage_recorded only test existence, so duplicate failed records never change exit code, status, coverage, or reported results. One overstatement in the finding: it claims \"the per-run file set in the zip grow without bound\" -- this is wrong. create_zip (line 796) builds `wanted` as a set, and repeated attempts of the same (batch, stage) share the identical output_base and therefore identical file paths, so zip membership does NOT grow; only state.json's runs array grows. Net: a real but minor resource/diagnostic-noise leak requiring a pathological many-resume-of-an-always-failing-stage scenario; small per-record JSON, no functional impact. Low severity, not merge-blocking, matching the finding's own assessment.",
+        "dedup_key": "runs-list-unbounded-growth-on-repeated-resume"
+      }
+    },
+    {
+      "title": "run_batch can return None and crash min(failed_batches) for legacy/hand-edited state lacking both batch_index and index",
+      "location": "scanner/scanops_scanner.py:806-807 run_batch; consumed at finalize_plan:879-881 and latest_runs:813-816",
+      "severity": "low",
+      "kind": "edge-case",
+      "evidence": "`def run_batch(run): return run.get(\"batch_index\", run.get(\"index\"))`. If a run dict has neither key (e.g. a 0.1.0 state.json missing the new batch_index, or a corrupted/hand-edited state), run_batch returns None. latest_runs keys on (None, stage) and finalize computes `min(failed_batches)` over a list that may contain None, raising TypeError on Py3 if any failed run lacks both keys. REQUIRED_STATE_KEYS validation in load_plan does not check per-run keys.",
+      "impact": "Resuming an older/corrupted state whose runs lack batch_index could raise TypeError. main() catches TypeError (lines 1112-1115) and returns rc 2 with an honest message, so no raw traceback -- but a resumable scan is rejected rather than continued. Low likelihood since all runs written by current code set both keys; only legacy/edited states are affected.",
+      "fix": "Default run_batch to a concrete int: `return run.get(\"batch_index\", run.get(\"index\", 0))`, or filter None out of failed_batches before min().",
+      "confidence": "medium",
+      "lens": "resume-cursor",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Code-level claim is accurate: run_batch (scanner/scanops_scanner.py:806-807) returns None when a run dict lacks BOTH \"batch_index\" and \"index\"; finalize_plan:879-881 builds failed_batches via run_batch and calls min(...), which raises TypeError if the list mixes None and int; load_plan's REQUIRED_STATE_KEYS (line 721) does not validate per-run keys. Verified the two only run-creation sites (run_nmap_stage:925-927 and append_skipped_stage:644-646) BOTH always set \"index\" and \"batch_index\", so no version of this scanner ever wrote a key-less run. The legacy 0.1.0 case the finding cites is in fact fully handled by the get(\"index\") fallback (that fallback exists precisely for old states that have \"index\" but not \"batch_index\") — so it does NOT trigger None. The ONLY trigger is a hand-edited/corrupted state where a run lost both keys, an artificial scenario, not a real resume path. Outcome is graceful: main() catches TypeError (1112-1115) and returns rc 2 with an honest \"corrupted/incompatible state\" message — no traceback, no data loss, no silent weakening of scan coverage. Not a regression introduced by the patch: the pre-existing stage_succeeded/stage_recorded helpers (lines 626, 634) already use the identical run.get(\"batch_index\", run.get(\"index\")) pattern with the same None possibility. Real but extremely low-likelihood, degrades safely, and does not block merge; finding itself rates it low/medium-confidence and concedes the graceful rc-2 behavior. A trivial hardening (default to 0 or filter None before min) is reasonable but optional.",
+        "dedup_key": "run_batch-none-min-failed-batches-typeerror"
+      }
+    },
+    {
+      "title": "No test covers single-workflow multi-batch failure+resume or the GUI interrupted-string parsing -- the two real bugs above sit in green-test blind spots",
+      "location": "backend/tests/test_standalone_scanner.py (resume test at line 400 is auto-workflow only; batch tests at 455/716 have no failure+resume; no _scan_markers test)",
+      "severity": "medium",
+      "kind": "coverage-gap",
+      "evidence": "The updated resume test test_resume_after_failed_identification_reuses_successful_discovery uses the default auto workflow (no --workflow single) and a single target (no batching), so it exercises only the stage-guarded auto path. test_targets_file_batching... (455) and test_one_failed_batch_does_not_abort_others (716) batch but never resume. grep for 'workflow.*single' / '_scan_markers' / 'interrupted. Resume' in the test file returns no resume-with-single and no GUI-marker tests.",
+      "impact": "The suite (40 scanner tests green) gives false confidence that resume is incremental and that stop->autofill works. The single-workflow re-scan regression and the GUI interrupt-hint regression both pass CI undetected.",
+      "fix": "Add (1) a single-workflow, batch-size 1, 3+ target test where a middle batch fails then resume, asserting only the failed batch's target is re-invoked (assert on FAKE_NMAP_LOG targets); (2) a unit test feeding 'interrupted. Resume with: --resume X' through the GUI _scan_markers and asserting _resume_hint == 'X'.",
+      "confidence": "high",
+      "lens": "resume-cursor",
+      "verdict": {
+        "is_real": true,
+        "severity": "medium",
+        "must_fix": true,
+        "rationale": "Verified against the actual source. The coverage claims are all accurate, and the two underlying bugs they shield are real:\n\n1) Single-workflow resume re-scans already-succeeded later batches. execute_single (scanner/scanops_scanner.py:942-948) loops `for idx in range(cursor, len(batches))` and unconditionally calls run_nmap_stage with NO stage_succeeded guard. execute_auto (951-1013) guards every stage with stage_succeeded so only failed stages re-run. finalize_plan sets cursor=min(failed_batches) (881). So with --workflow single, batch-size 1, targets [t0,t1,t2] where batch 1 fails: cursor=1, resume runs idx 1 AND 2, needlessly re-scanning the already-succeeded batch 2. This directly contradicts the design comment at line 878 (\"성공한 단계는 stage_succeeded 가 막아 재실행되지 않는다\"), which only holds for auto. Efficiency/coverage regression, no data loss.\n\n2) GUI never autofills resume path on Stop/interrupt. The interrupt path prints \"\\ninterrupted. Resume with: --resume \"+path (scanner/scanops_scanner.py:1054), but GUI _scan_markers (scanner/scanops_scanner_gui.py:447-451) does line.lstrip() then matches prefix \"resume with: --resume \" (lowercase). The interrupt line after lstrip is \"interrupted. Resume with: --resume ...\" which does NOT start with that prefix (begins with \"interrupted.\" and uses capital \"Resume\"). So _resume_hint stays empty and the Stop->autofill feature (440-441) silently no-ops — defeating the headline GUI graceful-stop feature. The lowercase prefix only matches finalize output at line 892 (partial/failed), not the Stop/interrupt path the GUI Stop button actually triggers.\n\nCoverage gaps confirmed: resume test (test_standalone_scanner.py:401-452) uses default workflow=auto (1071) and single target 127.0.0.1 (no batching), so it can never hit execute_single. Batching tests (455, 716) never issue a second --resume run. The only single-workflow test (542) is a dry-run preset check. grep finds zero _scan_markers tests. So both defects pass the 40 green scanner tests undetected.\n\nmust_fix=true because acting on this finding surfaces a genuinely broken just-added feature (GUI Stop autofill) plus a resume-coverage regression; the green suite gives false confidence.",
+        "dedup_key": "coverage-gap-single-workflow-resume-and-gui-interrupt-marker"
+      }
+    },
+    {
+      "title": "Resume re-runs already-successful batches in single workflow, can lose good XML on transient re-failure",
+      "location": "scanner/scanops_scanner.py:942-948 execute_single (with finalize_plan cursor reset at :879-881)",
+      "severity": "high",
+      "kind": "regression",
+      "evidence": "execute_single loops `for idx in range(int(plan[\"cursor\"]), len(plan[\"batches\"])): run_nmap_stage(plan, idx, ...)` with NO per-batch success guard, unlike execute_auto which gates every stage behind stage_succeeded(). finalize_plan does `if failed_batches: plan[\"cursor\"] = min(failed_batches)`. So when batch 0 fails and batch 1 already succeeded, cursor rewinds to 0 and resume re-runs BOTH. Empirically confirmed: first run runs=[(b0,rc7),(b1,rc0)] status=partial cursor=0; resume re-runs b1, and when b1 transiently fails, runs become [(b0,7),(b1,0),(b0,0),(b1,7)] — latest_runs now keys (1,'') to the FAILED rc=7 run. The good first-run XML only survived my test because the fake nmap left the file on disk; a real nmap truncating/overwriting -oA output on failure would drop importable data for a batch that had already succeeded.",
+      "impact": "On --resume of a partial single-workflow batch scan, batches that already succeeded are needlessly rescanned (wasted scan time) and, if the forced rescan transiently fails, their previously-good results are demoted to a failed run and can be lost. Pre-patch behavior returned immediately on first failure (fail_plan), so successful batches were never re-run. This is a behavior regression introduced by best-effort + cursor-rewind without a single-workflow success guard.",
+      "fix": "Guard re-runs in execute_single the same way execute_auto does: skip a batch whose run already succeeded, e.g. `if not stage_succeeded(plan, idx, \"\"): run_nmap_stage(plan, idx, state_path)`. (stage_succeeded already treats stage_id \"\" correctly.) That makes the cursor rewind only retry genuinely-failed batches.",
+      "confidence": "high",
+      "lens": "status-manifest",
+      "verdict": {
+        "is_real": true,
+        "severity": "high",
+        "must_fix": true,
+        "rationale": "Verified against current scanner/scanops_scanner.py and reproduced empirically. execute_single (lines 944-946) loops `for idx in range(plan[\"cursor\"], len(plan[\"batches\"])): run_nmap_stage(...)` with NO per-batch success guard, while execute_auto (lines 958/972/...) gates every stage behind `if not stage_succeeded(...)`. finalize_plan (lines 879-881) rewinds `plan[\"cursor\"] = min(failed_batches)`. Reproduction: single workflow, batch-size 1, targets [10.0.0.5,10.0.0.6], batch0 fails. First run -> runs=[(0,'',7),(1,'',0)], status=partial, cursor rewound to 0 (not 2). On --resume, execute_single re-runs BOTH batches; runs become [(0,'',7),(1,'',0),(0,'',0),(1,'',7)]. latest_runs keys (1,'') to the LATEST (now rc=7) run, demoting the already-successful batch-1 result. With a real nmap that overwrites -oA output at run start (simulated via truncate-on-fail), 10.0.0.6 becomes un-importable and its on-disk XML is replaced by an empty <nmaprun/> -> silent loss of previously-good importable data. Without truncation (what the test fake nmap does, which is why all 40 tests stay green) the surviving file keeps it importable via xml_has_hosts, masking the bug — so the suite does not cover this. Pre-patch execute_single returned immediately on first failure via fail_plan (confirmed in qa/patch.diff lines 776-778), so successful batches were never re-run; this is a patch-introduced regression from removing the early return AND adding cursor rewind without the symmetric guard. The proposed one-line fix (`if not stage_succeeded(plan, idx, \"\"): run_nmap_stage(plan, idx, state_path)`) is correct: stage_succeeded compares run.get(\"stage_id\",\"\")==stage_id, so stage_id=\"\" matches single-workflow runs (verified at lines 624-629). Both the unconditional wasted rescan and the conditional data loss directly contradict the patch's stated best-effort/partial-preservation goal, so it should block merge.",
+        "dedup_key": "execute_single_resume_no_success_guard_reruns_successful_batches"
+      }
+    },
+    {
+      "title": "install_stop_handlers permanently overrides SIGTERM/SIGBREAK process-wide and never restores them",
+      "location": "scanner/scanops_scanner.py:1020-1031 install_stop_handlers, called from execute() at :1042",
+      "severity": "medium",
+      "kind": "logic-bug",
+      "evidence": "install_stop_handlers does `signal.signal(sig, _raise_keyboard_interrupt)` for SIGBREAK/SIGTERM with no save/restore. execute() calls it unconditionally on every non-dry-run invocation. The module is imported directly by the test suite (importlib.util in _load_scanner), and the new test test_interrupt_writes_interrupted_state_and_resume_hint must manually `saved = {s: _sig.getsignal(...)}` ... `finally: _sig.signal(getattr(_sig,s), h)` around scanner.execute(plan) — i.e. the test itself has to undo the handler clobber, proving the side effect.",
+      "impact": "Any host process (test runner, GUI-in-process, or future embedding) that imports the module and calls execute() permanently loses its own SIGTERM handling, replaced by a handler that raises KeyboardInterrupt. For the standalone CLI this is benign, but it is a latent global-state footgun that only worked in tests because the test restores by hand; another test that calls execute() without restoring would leak the handler.",
+      "fix": "Either restore the previous handlers after execute() finishes (save with signal.getsignal before, restore in a finally), or only install handlers when running as __main__ (e.g. pass a flag from main()). At minimum, restore in execute()'s finally so library callers are not mutated.",
+      "confidence": "high",
+      "lens": "status-manifest",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Code-level claim is fully accurate. install_stop_handlers() (scanner/scanops_scanner.py:1020-1031) calls signal.signal(sig, _raise_keyboard_interrupt) for SIGBREAK/SIGTERM with no save/restore; execute() (:1042) calls it unconditionally on every non-dry-run run, and the try/except KeyboardInterrupt at :1046-1055 has no finally to restore prior handlers. The two new tests (:850 and :874) manually getsignal()+restore in a finally, which directly proves the leaked global side effect — exactly as the finding states.\n\nHowever, must_fix=false and severity should be low, not medium, because the actual blast radius is empty in this codebase: (1) the CLI __main__ path is the only production execution path and is *deliberately* designed to convert these signals to KeyboardInterrupt then exit (the finding itself concedes this is benign); (2) the GUI does NOT call execute() in-process — it spawns the scanner as a subprocess (scanner/scanops_scanner_gui.py:382 subprocess.Popen) and stops it via CTRL_BREAK_EVENT/taskkill, so the 'GUI-in-process' victim in the impact claim does not exist; (3) no backend/production code imports the scanner module (the only backend hit is sqlite cursor.execute in db.py, unrelated); the sole in-process caller is the test suite, which already restores handlers itself. SIGINT is untouched (default is already KeyboardInterrupt). So this is a genuine latent global-state-hygiene footgun for hypothetical *future* embedding, not a correctness regression, exit-code/status bug, or coverage weakening in any current path. It does not block merge. The suggested fix (save handlers and restore in execute()'s finally, or only install when running as __main__) is correct and cheap and would be a reasonable cleanup.",
+        "dedup_key": "install_stop_handlers-no-restore-global-signal-mutation"
+      }
+    },
+    {
+      "title": "A failed tcp_discovery (rc!=0) that wrote a partial XML is silently trusted, weakening coverage while reporting partial+exit0",
+      "location": "scanner/scanops_scanner.py:957-976 execute_auto (xml_parse_ok gate) and :771-773 manifest_xml_files",
+      "severity": "medium",
+      "kind": "edge-case",
+      "evidence": "After run_nmap_stage(tcp_discovery) the code only checks `parse_ok = xml_parse_ok(discovery_xml)` (parseable?), not the returncode. If discovery exits rc!=0 but left a parseable XML, tcp_ports and live_hosts are extracted from it and identify/udp proceed normally. Confirmed end-to-end: fake discovery writing a valid 1-host/1-port XML then exit 7 yields status=partial, exit 0, import_xml=[tcp_identify.xml, udp_identify.xml], runs=[(tcp_discovery,7),(tcp_identify,0),(udp_identify,0)].",
+      "impact": "When discovery aborts partway (host-timeout, NSE/scan error, --host-timeout firing on many hosts), it may have enumerated only some ports of some hosts. identify/UDP then run against that incomplete host/port set, but the scan is reported as 'partial, usable' (exit 0). Coverage is silently reduced; the user sees a green-ish partial and may not rescan. The cursor does rewind to retry discovery, but the partial identify/udp results from the truncated set are already published in the manifest as importable.",
+      "fix": "When discovery returncode != 0, treat the derived port/host set as untrusted: either skip identify/udp for that batch with a clear 'discovery incomplete — rerun' skip_reason, or at least flag in the summary that identification ran on a partial discovery so the partial status is not mistaken for full coverage.",
+      "confidence": "medium",
+      "lens": "status-manifest",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "The mechanical claims are accurate against the code: in execute_auto (scanner/scanops_scanner.py:957-976), discovery results are used based only on parse_ok = xml_parse_ok(discovery_xml) (line 963), never on the discovery returncode. So a discovery that exits rc!=0 but leaves a parseable XML still drives tcp_identify (line 971-973) and UDP identify against live_hosts (998-1005). finalize_plan then sees discovery in failed_runs, importable_xml non-empty → status=\"partial\", returns 0 (lines 869-893). manifest_xml_files (765-773) does include rc!=0 parseable XML for identify/udp. All confirmed.\n\nHowever \"silently trusted\" is overstated and the severity is too high. The patch does NOT report this as a clean success: status is \"partial\" (not \"done\"), print_scan_summary emits a stderr \"warning: ... 실패(rc=...) — 부분 결과만 반영됩니다.\" for the failed discovery (lines 902-907), and finalize prints \"resume with: --resume ...\" to stderr (line 892) while rewinding the cursor to the failed discovery batch (lines 879-881). The finding's own impact text concedes the cursor rewinds. So the user is signaled three ways, not silently misled.\n\nMore fundamentally, this is a deliberate, documented design tradeoff, not an introduced defect: the salvage-parseable-partial-XML behavior is the explicit QA-005/QA-008 goal (manifest_xml_files docstring line 766-767, xml_parse_ok docstring 599) — distinguish \"corrupt/missing XML\" (skip identify, line 967-970) from \"0 open ports\" while still using usable partial results. The fix the finding proposes (skip identify/udp on discovery rc!=0) directly contradicts that intended salvage behavior and would discard usable data. \n\nThere IS a genuinely subtle real gap the finding only grazes: because the partial-set tcp_identify run exits rc==0, on --resume stage_succeeded(tcp_identify) is True, so even after discovery re-runs and succeeds with a fuller port set, identify will NOT re-run — the resume rewind retries discovery but cannot widen identification. That is the one concretely-defensible weakness, and it's worth a note, but it is an edge case (requires discovery to exit nonzero yet produce a valid host XML), is partially surfaced (partial status + warning + resume hint), tests don't cover it, and it does not block merge. Net: real low-severity edge case, severity \"medium\" and the \"silently\" framing are not justified; not a must-fix.",
+        "dedup_key": "discovery-rc-nonzero-partial-xml-trusted-for-identify-udp"
+      }
+    },
+    {
+      "title": "GUI labels a clean empty 'done' scan as '부분 완료'(partial complete) because the empty-result warning bumps warn_count",
+      "location": "scanner/scanops_scanner_gui.py:447-464 _scan_markers/_final_status; CLI emits the warning at scanner.py:908-912",
+      "severity": "low",
+      "kind": "logic-bug",
+      "evidence": "For a successful but empty scan the CLI prints status 'done' (exit 0) plus `warning: 가져올 결과가 없습니다(...)`. _scan_markers does `if stripped.startswith(\"warning:\"): self._warn_count += 1`. _final_status: `if rc == 0: if self._partial or self._warn_count: return f\"부분 완료 — 경고 {self._warn_count}건...\"`. So warn_count=1 makes the GUI report '부분 완료' even though the CLI status is 'done'.",
+      "impact": "A genuinely complete scan that simply found nothing is shown to the user as a partial/incomplete result, which may prompt unnecessary re-runs or mask the real 'done, nothing found' meaning. Status semantics diverge between CLI and GUI.",
+      "fix": "Drive the GUI final status off the CLI's authoritative status line (it already prints `done:`/`partial:`/`failed:`), e.g. capture a status marker rather than inferring partial from warn_count; or only treat a `partial:` marker (not warning count) as partial.",
+      "confidence": "high",
+      "lens": "status-manifest",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Verified in current code. A successful-but-empty scan in the CLI sets status='done' with exit 0 (scanops_scanner.py:869-874,893) AND emits 'warning: 가져올 결과가 없습니다(...)' for exactly that case (scanops_scanner.py:908-912). The GUI's _scan_markers increments _warn_count on any line starting with 'warning:' (scanops_scanner_gui.py:452-453), and _final_status returns '부분 완료 — 경고 N건' whenever rc==0 and (_partial or _warn_count) is true (gui.py:457-461). Since _partial is only set by a real 'partial:' marker (gui.py:454-455) and is False here, the warn_count=1 alone flips a clean 'done' scan to display as '부분 완료'. This is a genuine CLI/GUI status-semantics divergence introduced by the patch. It is display-only: exit code (0) and scan outputs are correct, the user is merely shown 'partial complete' instead of 'complete' for a scan that legitimately found nothing — which can prompt unnecessary re-runs. Fix is straightforward (drive final status from the authoritative 'done:'/'partial:' status line, which the GUI already partially parses, instead of inferring partial from warn_count). Not a merge blocker because there is no correctness/data-loss impact, only a misleading label.",
+        "dedup_key": "gui-empty-done-scan-labeled-partial-via-warn-count"
+      }
+    },
+    {
+      "title": "Persistently-failing-but-partial discovery creates an unbreakable resume loop that never reaches 'done'",
+      "location": "scanner/scanops_scanner.py:863-893 finalize_plan + :957-959 execute_auto discovery retry",
+      "severity": "low",
+      "kind": "edge-case",
+      "evidence": "finalize_plan resets `plan[\"cursor\"] = min(failed_batches)` whenever any latest run has rc not in (0,None). A tcp_discovery that always exits rc!=0 (but writes usable partial XML) is always in failed_runs, so cursor is always rewound and stage_succeeded(tcp_discovery) is always False, so every --resume re-runs discovery. identify/udp succeeded (rc=0) so they are skipped, but status stays 'partial'/'failed' forever and 'resume with: --resume ...' is printed every time.",
+      "impact": "A user following the resume hint can loop indefinitely re-running only the discovery stage with no path to 'done' and no signal that retrying is futile. Not data-corrupting, but a confusing operational dead-end and wasted scans.",
+      "fix": "Cap discovery retries or, after a resume that produced no new successful stage, stop printing the resume hint / mark the stage as permanently failed; or treat a discovery that yielded usable downstream results as non-retriable so the plan can settle to a stable terminal status.",
+      "confidence": "medium",
+      "lens": "status-manifest",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Verified real against current scanner/scanops_scanner.py. Proof of the loop: (1) failed_runs() uses latest_runs() and flags any run whose returncode is not in (0, None) and is not skipped (L819-821); (2) finalize_plan() rewinds plan[\"cursor\"] = min(failed_batches) whenever any latest run is failed (L879-881), prints \"resume with: --resume\" for any non-\"done\" status (L891-892), and importable_xml() EXCLUDES tcp_discovery XML (L824-832), so if a non-discovery stage produced usable XML, status is \"partial\" not \"failed\"; (3) on --resume, execute_auto starts at the rewound cursor and gates discovery on stage_succeeded(idx,\"tcp_discovery\") (L958), which scans ALL runs for a rc==0 non-skipped record (L624-629). A tcp_discovery that always exits rc!=0 but writes parseable XML with hosts/open ports (exactly the QA-005 case manifest_xml_files/xml_has_hosts was built to salvage, L765-773, 609-617) is therefore never \"succeeded\", so discovery re-runs on every resume; tcp_identify/udp_identify keep their earlier rc==0 record so stage_succeeded is True and they are skipped; the new discovery rc!=0 is again in failed_runs, cursor is rewound again, status stays \"partial\" forever, and the resume hint reprints every time. There is no resume-attempt cap (the only retries in the file are nmap's --max-retries probe retries, L60/70/78/97). The passing resume test (test_standalone_scanner.py:401-452) does NOT cover this: it fails tcp_identify (not discovery), so on resume identify returns rc==0, failed_runs empties, cursor is not rewound, and status settles to \"done\" (L451) — masking the discovery-fails-forever path.\n\nNot must-fix / does not block merge: (a) no data corruption or coverage loss — partial results are produced, importable, and exit code is correctly 0 for \"partial\"; (b) the precondition (discovery persistently exits rc!=0 yet writes usable host XML) is uncommon; (c) it is not an automatic infinite loop — it only recurs if the user keeps manually following the hint, and each resume is idempotent (only the discovery stage re-runs, identify/udp are skipped). The defect is a genuine operational dead-end / wasted-scan UX wart (no signal that retrying is futile, plan never settles to \"done\"), consistent with the reported \"low\" severity. Worth fixing per the suggestion (mark a discovery that yielded usable downstream results non-retriable, or suppress the resume hint when a resume makes no new stage succeed), but it is not a correctness regression that should gate this hardening patch.",
+        "dedup_key": "finalize_plan-persistent-partial-discovery-unbreakable-resume-loop"
+      }
+    },
+    {
+      "title": "GUI resume-path autofill silently fails on STOP (interrupt), the patch's headline graceful-stop workflow",
+      "location": "scanner/scanops_scanner_gui.py:447-455 (_scan_markers) vs scanner/scanops_scanner.py:1054 (execute KeyboardInterrupt handler)",
+      "severity": "high",
+      "kind": "logic-bug",
+      "evidence": "GUI parser: prefix = \"resume with: --resume \"; if stripped.startswith(prefix): self._resume_hint = ... . CLI interrupt line: print(\"\\ninterrupted. Resume with: --resume \" + str(state_path), file=sys.stderr). The interrupt line begins with 'interrupted. Resume with' (capital R, and an 'interrupted. ' prefix), so stripped.startswith('resume with: --resume ') is False. Reproduced: interrupt-path resume_hint stays '' while finalize-path ('resume with: --resume <path>', lowercase) parses correctly.",
+      "impact": "When the user clicks STOP, the CLI exits 130 and _final_status(130) tells the user '[재개 실행]으로 이어할 수 있습니다', but self._resume_hint is never set, so resume_path is NOT autofilled. The user is told to resume but the resume field is empty — exactly the case (graceful STOP -> resume) this patch was built to support. The finalize partial/failed path works, masking the bug in casual testing.",
+      "fix": "Make the CLI emit a single canonical resume marker, or make the GUI matcher robust: match case-insensitively and use a substring search, e.g. m = re.search(r'(?i)resume with: --resume\\s+(.+)', line); if m: self._resume_hint = m.group(1).strip(). Alternatively change scanops_scanner.py:1054 to print the same lowercase 'resume with: --resume ' prefix at line start (drop the leading 'interrupted. ').",
+      "confidence": "high",
+      "lens": "signals-gui",
+      "verdict": {
+        "is_real": true,
+        "severity": "high",
+        "must_fix": true,
+        "rationale": "Confirmed against current code. The CLI interrupt handler (scanops_scanner.py:1054) prints `\"\\ninterrupted. Resume with: --resume \" + state_path` to stderr, while the finalize partial/failed path (scanops_scanner.py:892) prints lowercase `\"resume with: --resume \" + state_path`. The GUI matcher (scanops_scanner_gui.py:447-451) only matches a line that, after lstrip(), startswith the exact lowercase `\"resume with: --resume \"`. The interrupt line begins with `\"interrupted. Resume with...\"` (capital R, leading `interrupted. `), so the startswith check is False and _resume_hint stays \"\".\n\nVerified the STOP path actually reaches the interrupt handler: GUI _stop (lines 399-402) sends CTRL_BREAK/SIGINT to the process group; install_stop_handlers (scanops_scanner.py:1017) raises KeyboardInterrupt; the stage loops execute_single/execute_auto (lines 942-1012) have NO try/except, and run_nmap_stage uses plain subprocess.call — so KeyboardInterrupt propagates to execute()'s handler at line 1050 -> prints the capital-R marker -> returns 130. The GUI merges stderr into stdout (line 370 stderr=subprocess.STDOUT), so the line IS captured but not matched.\n\nResult: on graceful STOP, _drain_output gets rc=130, _final_status(130) tells the user '[재개 실행]으로 이어할 수 있습니다', but the autofill at lines 440-441 is skipped because _resume_hint is empty. The resume field is left blank on the exact graceful-STOP->resume workflow this patch was built to deliver. The finalize partial/failed path works (lowercase marker matches), which masks the bug in non-interrupt testing — consistent with the green suite, since no test exercises the GUI marker parser against the live interrupt-path string.\n\nCaveat (does not negate): autofill also requires the resume field to be empty; on a fresh forward scan it is, so the common case is hit. must_fix=high because STOP is the primary user trigger for the headline feature and it silently fails. The proposed fixes (case-insensitive substring regex in _scan_markers, or unifying the CLI to emit one canonical lowercase marker) are both correct; unifying the marker is the cleaner option.",
+        "dedup_key": "gui-resume-autofill-interrupt-marker-mismatch"
+      }
+    },
+    {
+      "title": "No GUI test covers _scan_markers / resume autofill, so the STOP-path marker mismatch is fully uncovered",
+      "location": "backend/tests/test_standalone_scanner.py:845 (test_interrupt_writes_interrupted_state_and_resume_hint)",
+      "severity": "medium",
+      "kind": "coverage-gap",
+      "evidence": "The interrupt test asserts only `'--resume' in capsys.readouterr().err` — it checks the CLI prints something containing --resume, never that the GUI's _scan_markers can extract the path. grep for _scan_markers/_resume_hint in the test file returns no hits; there are zero tests instantiating the GUI parser.",
+      "impact": "The case/prefix mismatch between the CLI interrupt line and the GUI parser passes CI green. Any divergence in the resume-hint wording between CLI and GUI goes undetected.",
+      "fix": "Add a unit test that feeds both CLI resume lines ('resume with: --resume X' and 'interrupted. Resume with: --resume X') through ScannerGui._scan_markers (or a extracted pure helper) and asserts _resume_hint == X for both.",
+      "confidence": "high",
+      "lens": "signals-gui",
+      "verdict": {
+        "is_real": true,
+        "severity": "medium",
+        "must_fix": true,
+        "rationale": "VERIFIED REAL, and the coverage gap hides an actual functional regression in newly-added GUI behavior.\n\nTwo distinct CLI resume-hint strings exist:\n- scanner/scanops_scanner.py:892 (finalize_plan, partial/failed): print(\"resume with: --resume \" + state_path)\n- scanner/scanops_scanner.py:1054 (execute KeyboardInterrupt handler, the GUI STOP path): print(\"\\ninterrupted. Resume with: --resume \" + state_path)\n\nThe GUI parser scanner/scanops_scanner_gui.py:447-451 (_scan_markers) matches ONLY prefix=\"resume with: --resume \" via stripped.startswith(prefix) after line.lstrip(). The interrupt line, after lstrip(), is \"interrupted. Resume with: --resume <path>\" — it does NOT start with \"resume with: --resume \" (different leading word AND capital R). So on the interrupt/STOP path, _resume_hint is never set, and the autofill at lines 440-441 never fires. This directly contradicts the docstring at gui line 439 (\"실패/부분/중단 시 재개 경로를 자동 채워\" = auto-fill resume path on failed/partial/INTERRUPTED). The partial/failed path matches and works; only the STOP path is broken — exactly the path the patch's new graceful _stop (CTRL_BREAK/SIGINT) drives.\n\nCoverage-gap claim confirmed exactly: (1) grep shows _scan_markers/_resume_hint appear only in the GUI source and patch.diff, never in backend/tests/test_standalone_scanner.py; the only GUI reference in tests is py_compile.compile(GUI_SCRIPT) at line 572 (syntax smoke only). (2) The interrupt test at backend/tests/test_standalone_scanner.py:845-867 asserts only '--resume' in capsys.readouterr().err — a substring both CLI strings satisfy — so it stays green despite the parser mismatch and never feeds the line through the GUI parser. No test instantiates the GUI parser.\n\nmust_fix=true: this is not merely a missing test; the green suite conceals a real, user-visible correctness regression in behavior introduced by this patch (GUI resume-autofill silently fails on the documented interrupt case). Minimal fix: relax the GUI prefix to match both ('--resume ' as the anchor, or case-insensitive '...resume with: --resume'), and add a unit test feeding both CLI lines through _scan_markers asserting _resume_hint equals the path for both.",
+        "dedup_key": "gui-scan-markers-interrupt-resume-hint-prefix-mismatch"
+      }
+    },
+    {
+      "title": "nmap hyphenated-octet + CIDR target syntax (e.g. 10.0.0-5.0/24) now rejected pre-scan",
+      "location": "scanner/scanops_scanner.py:305-310 (expand_targets, '/' branch)",
+      "severity": "medium",
+      "kind": "regression",
+      "evidence": "New code: `if \"/\" in t: try: net = ipaddress.ip_network(t, strict=False) except ValueError as exc: raise ValueError(f\"잘못된 CIDR: {t}\")`. Previously the except branch did `hosts.append(t)` (passed the spec straight to nmap). Reproduced: expand_targets(['10.0.0-5.0/24']) -> 'REJECTED: 잘못된 CIDR'. nmap accepts this hybrid octet-range+CIDR syntax. expand_targets is called in create_plan even for non-batch mode (cap check), so the target is rejected in both batch and non-batch modes.",
+      "impact": "A previously-working, documented-style nmap target spec (octet ranges combined with /mask) now fails before the scan starts. Coverage/usability regression for power users; the tool advertises 'IP/CIDR/range' targets.",
+      "fix": "Only hard-reject when the slash form is clearly a malformed dotted-quad CIDR; otherwise fall back to passing the literal token through to nmap (as before) — or special-case the '/' branch to detect nmap octet-range syntax and append the raw token instead of raising.",
+      "confidence": "high",
+      "lens": "signals-gui",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "VERIFIED REAL but downgraded to low/non-blocking. The patch (qa/patch.diff, expand_targets '/' branch, scanner/scanops_scanner.py:305-310) changed the CIDR-parse-failure path from `hosts.append(t)` (pass literal token to nmap) to `raise ValueError(\\\"잘못된 CIDR: {t}\\\")`. TARGET_RE (^[A-Za-z0-9_.:/\\\\-]+$) and the IPv6 check both pass `10.0.0-5.0/24`, so it reaches expand_targets; ipaddress.ip_network() raises -> now rejected (reproduced: ValueError). create_plan calls expand_targets unconditionally (line 675), so rejection occurs in BOTH batch and non-batch modes (confirmed). And the syntax IS valid nmap: the installed nmap 7.99 expands `10.0.0-5.0/24` to 1536 hosts via `nmap -sL` (verified empirically). No test covers this hybrid form (test_range_octet_validation only checks plain hyphen ranges + pure CIDR), matching the 'what tests don't cover' brief. WHY NOT MUST_FIX: (1) scope is narrow — only targets combining a hyphenated octet range AND a /mask break; the dominant forms (plain CIDR /24, simple last-octet ranges 1-254) all still work. (2) The change is a deliberate hardening trade-off (QA-019: catch malformed-CIDR typos before nmap) and fails LOUDLY with an honest upfront error, not a silent coverage loss or wrong results. (3) Easy user workaround (rephrase target). Real usability regression for power users, worth a follow-up fix (special-case nmap octet-range-in-slash tokens to pass through), but not merge-blocking.",
+        "dedup_key": "expand_targets-rejects-hyphenated-octet-cidr-syntax"
+      }
+    },
+    {
+      "title": "GUI window-close while scanning can orphan the nmap process (force-kill timer never fires)",
+      "location": "scanner/scanops_scanner_gui.py:494-499 (_close) -> 408-409 (_stop schedules root.after(6000,...))",
+      "severity": "low",
+      "kind": "edge-case",
+      "evidence": "_close(): `if self.proc is not None: self._stop()` then immediately `self.root.destroy()`. _stop() sends the graceful signal and schedules `self.root.after(6000, lambda: self._force_kill(proc))`. After root.destroy() the Tk mainloop ends and the scheduled after-callback never runs; the reader thread is daemon and dies with the process.",
+      "impact": "If the child CLI/nmap does not exit promptly on the graceful signal (e.g. nmap ignores CTRL_BREAK mid-probe), the 6s force-kill fallback is lost when the user closes the window, leaving an orphaned nmap process running.",
+      "fix": "In _close(), when proc is running, perform a synchronous bounded wait + force-kill before root.destroy() (e.g. send signal, proc.wait(timeout=...), then taskkill/killpg on timeout), rather than relying on root.after which dies with the mainloop.",
+      "confidence": "medium",
+      "lens": "signals-gui",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Verified against scanner/scanops_scanner_gui.py. _close() (lines 494-499) calls self._stop() then immediately self.root.destroy(). _stop() (lines 391-409) only sends the graceful signal (CTRL_BREAK_EVENT on Windows / killpg SIGINT on POSIX) and schedules the force-kill via self.root.after(6000, lambda: self._force_kill(proc)) — it does NOT wait. Once root.destroy() runs, main()'s root.mainloop() (line 509) returns and the process exits; the pending Tk after() timer is discarded by the destroyed interpreter and never fires. The reader thread is daemon=True (line 362) so it dies with the process. Crucially, the child is launched with CREATE_NEW_PROCESS_GROUP on Windows / start_new_session=True on POSIX (lines 377-380), so it is NOT in the GUI's process group/session and is NOT cleaned up when the GUI process exits. Therefore, if the child CLI/nmap does not honor the graceful signal promptly (nmap mid-probe commonly ignores CTRL_BREAK), the 6s taskkill/SIGKILL fallback that this patch added explicitly to prevent zombies (comment 좀비 방지, line 408) is lost on window-close, leaving an orphaned nmap process. The finding is accurate and is a real gap in the patch's own design. However it is correctly low severity: it requires the specific combination of an in-progress scan + window-close + the child ignoring the graceful signal in that window; it leaks a transient process rather than corrupting data; and the primary Stop-button path (where the mainloop stays alive to run the after() callback) works correctly. Not a merge blocker — the patch is still a net improvement over having no force-kill at all. Suggested fix is sound: in _close(), do a bounded synchronous wait + force-kill (send signal, proc.wait(timeout=...), then taskkill/killpg on timeout) before root.destroy() instead of relying on root.after().",
+        "dedup_key": "gui_close_orphan_nmap_force_kill_timer_lost"
+      }
+    },
+    {
+      "title": "--host-timeout default (15m) now injected into single/phase1 scans, can silently drop slow hosts",
+      "location": "scanner/scanops_scanner.py:526 (build_command timeout_flags) + 701/1088 (HOST_TIMEOUT_DEFAULT='15m' default)",
+      "severity": "low",
+      "kind": "edge-case",
+      "evidence": "build_command always prepends `--host-timeout 15m` when plan['host_timeout'] is set, and HOST_TIMEOUT_DEFAULT='15m' is the argparse default applied to every workflow including single-run full-port (T:1-65535) scans. Previously no --host-timeout was added.",
+      "impact": "On a slow link, a legitimate host whose full-port scan exceeds 15m is abandoned by nmap (host dropped, partial result), silently weakening coverage for single-run precision scans. Mitigated by --host-timeout 0, but the default changed.",
+      "fix": "Acceptable if intentional, but consider documenting prominently or scoping the default to the auto workflow (where per-host hang risk is the stated motivation) rather than single full-port scans; or surface the per-host timeout in the GUI.",
+      "confidence": "medium",
+      "lens": "signals-gui",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Verified factually accurate against current code. build_command (scanner/scanops_scanner.py:524-526) unconditionally prepends `--host-timeout <host_timeout>` to EVERY command regardless of stage_id, so single-run scans (stage_id=\"\", using plan[\"base_flags\"]) and phase1 full-port precision scans both receive it. HOST_TIMEOUT_DEFAULT=\"15m\" (line 29) is the argparse default (line 1088) applied in create_plan via validate_host_timeout (line 701). qa/patch.diff confirms this is entirely new code (all + lines, 329/450/511-517/570/906) — previously no --host-timeout was emitted, so this is a genuine behavior change introduced by the patch. The coverage concern is technically valid: nmap's --host-timeout abandons a host that exceeds the limit and returns partial results, so a legitimate full-port (T:1-65535,U:...) scan on a slow link could be silently truncated at 15m. I also confirmed the finding's secondary claim: scanner/scanops_scanner_gui.py has ZERO references to host_timeout, so a GUI-launched scan is locked to the 15m default with no UI override.\n\nHowever this is NOT must-fix: (1) it is the explicit, documented intent of the hardening patch (CLI help: \"Per-host nmap --host-timeout so one host cannot hang the whole scan. 0 disables.\"); (2) it is user-overridable via --host-timeout 0, which validate_host_timeout maps to \"\" -> no flag (verified line 292-293 + test QA-007 line 185); (3) it is covered by a regression test (test_host_timeout_in_all_auto_commands). The code does exactly what it intends — this is a deliberate coverage-vs-hang-safety trade-off, not a logic bug or unintended regression. Real and worth noting (the GUI lacking any override is the sharpest point), but low severity and should not block merge.",
+        "dedup_key": "host-timeout-15m-default-injected-into-single-and-phase1-scans"
+      }
+    },
+    {
+      "title": "validate_ports accepts out-of-range ports (0, 65536-99999)",
+      "location": "scanner/scanops_scanner.py:107 (PORT_BODY_RE) + 249-270 (validate_ports)",
+      "severity": "low",
+      "kind": "coverage-gap",
+      "evidence": "PORT_BODY_RE = ^(\\d{1,5}-\\d{1,5}|\\d{1,5}-|-\\d{1,5}|\\d{1,5})$ — \\d{1,5} permits 0 and 65536..99999. Reproduced: validate_ports('0')='0', validate_ports('99999')='99999', validate_ports('T:65536')='T:65536' all pass.",
+      "impact": "The new 'tightening' (QA-014) still lets invalid port numbers through to nmap, which then errors out at runtime ('Ports must be between 0 and 65535'). The validation gives a false sense of completeness. Not a regression (old PORTS_RE also allowed these) but the patch's stated goal was to stop garbage reaching nmap -p.",
+      "fix": "After the body regex, parse numeric endpoints and assert 1 <= port <= 65535 (and low <= high) per segment.",
+      "confidence": "high",
+      "lens": "signals-gui",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Confirmed against current scanner/scanops_scanner.py. PORT_BODY_RE (line 107) is `^(\\d{1,5}-\\d{1,5}|\\d{1,5}-|-\\d{1,5}|\\d{1,5})$`; `\\d{1,5}` admits 0 and 65536-99999, and validate_ports (lines 249-270) does no numeric endpoint/range check after the regex. Reproduced: validate_ports('0')='0', validate_ports('99999')='99999', validate_ports('T:65536')='T:65536', validate_ports('U:0-100') all pass. (Also unchecked: low<=high ordering, e.g. a reversed range body would pass the body regex too.) NOT a regression: pre-patch code was `return ports.replace(' ','')` guarded only by PORTS_RE char-class, which already accepted these; the QA-014 tightening added empty-segment/bad-prefix/empty-body checks but not numeric range checks. The QA-014 test (test_malformed_ports_rejected_valid_passes) covers '22,U:', '22,,80', 'T:', '80,bad', 'U:,53' but no out-of-range numerics, so the gap is genuinely untested. Impact is low and not must-fix: an out-of-range value flows to `nmap -p` (build_command), where nmap fatals at runtime ('Ports must be between 0 and 65535'). The scan hard-fails loudly rather than silently running with wrong coverage, and it requires the user to type an explicitly invalid port. So this weakens the patch's stated 'stop garbage reaching nmap -p' goal but introduces no silent correctness/coverage regression — a quality/UX nit, not a merge blocker.",
+        "dedup_key": "validate_ports-port-range-not-enforced"
+      }
+    },
+    {
+      "title": "GUI fails to autofill resume path after Stop (interrupt rc=130) due to marker-string mismatch",
+      "location": "scanner/scanops_scanner_gui.py:447-451 (_scan_markers) vs scanner/scanops_scanner.py:1054 (execute KeyboardInterrupt)",
+      "severity": "high",
+      "kind": "regression",
+      "evidence": "CLI interrupt emits: print(\"\\ninterrupted. Resume with: --resume \" + str(state_path)) (capital R, 'interrupted.' prefix). GUI parses: prefix = \"resume with: --resume \"; if stripped.startswith(prefix): self._resume_hint = ... — startswith fails because the interrupt line after lstrip is 'interrupted. Resume with: --resume <path>'. Simulation confirmed: finalize line -> resume_hint=<path>; interrupt line -> resume_hint='' .",
+      "impact": "When the user clicks Stop (the primary graceful-stop path the whole GUI _stop/CTRL_BREAK rework exists for), proc exits 130, _final_status(130) tells the user '중지됨 — [재개 실행]으로 이어할 수 있습니다', but self.resume_path is never populated (line 440 guard sees empty _resume_hint). User is told to resume but the resume field stays blank. The other (finalize partial/failed) path uses lowercase 'resume with:' and DOES match, masking the bug. No test covers GUI marker parsing, so suite stays green.",
+      "fix": "Make the GUI prefix match case-insensitively and tolerate the 'interrupted.' prefix, or normalize the CLI to emit one canonical hint. Simplest: in _scan_markers use `low = stripped.lower(); marker='resume with: --resume '; i=low.find(marker); if i>=0: self._resume_hint = stripped[i+len(marker):].strip()`. Or change scanner.py:1054 to also print the lowercase 'resume with: --resume ' line.",
+      "confidence": "high",
+      "lens": "validation-coverage",
+      "verdict": {
+        "is_real": true,
+        "severity": "high",
+        "must_fix": true,
+        "rationale": "Verified against current code. The CLI emits two different resume-hint strings: finalize_plan (scanner/scanops_scanner.py:892) prints lowercase \"resume with: --resume <path>\", while the KeyboardInterrupt/Stop path (scanner/scanops_scanner.py:1054) prints \"\\ninterrupted. Resume with: --resume <path>\" (capital R, \"interrupted.\" prefix). The GUI's _scan_markers (scanner/scanops_scanner_gui.py:448-451) does stripped=line.lstrip() then stripped.startswith(\"resume with: --resume \"). For the interrupt line, lstrip() only removes the leading \"\\n\", leaving \"interrupted. Resume with: --resume <path>\", which does NOT startswith the lowercase prefix, so _resume_hint stays \"\". stderr is merged into the line stream (stderr=subprocess.STDOUT, line 370), so both hints DO reach the parser — confirming the lowercase finalize hint matches and masks the bug. On Stop: _stop() (line 391-409) sends CTRL_BREAK_EVENT/SIGINT -> CLI raises KeyboardInterrupt -> execute() returns 130. The done handler shows _final_status(130) = \"중지됨 — [재개 실행]으로 이어할 수 있습니다\" (line 462-463), but the autofill guard at line 440 (if self._resume_hint and not ...) sees empty _resume_hint, so resume_path is never populated. The user is told to resume but the resume field stays blank. This is a genuine regression on exactly the graceful-stop path the GUI _stop/CTRL_BREAK rework was built for, and no test covers GUI marker parsing so the suite stays green. must_fix because it defeats the primary intended workflow of this patch and the fix is trivial (case-insensitive substring match in the GUI, or normalize the CLI to one canonical lowercase hint). Note for severity calibration: it degrades a convenience autofill (user can still copy the printed path or pass --resume manually) and does not corrupt scan data or weaken coverage, but it directly breaks the feature the patch set out to deliver.",
+        "dedup_key": "gui-resume-autofill-marker-mismatch-interrupt-130"
+      }
+    },
+    {
+      "title": "--host-timeout default 15m is now injected into every command (single/preset too), silently truncating slow/filtered-host scans",
+      "location": "scanner/scanops_scanner.py:524-534 (build_command) + :1088 (--host-timeout default=HOST_TIMEOUT_DEFAULT='15m')",
+      "severity": "medium",
+      "kind": "regression",
+      "evidence": "build_command unconditionally adds timeout_flags = ['--host-timeout', host_timeout] when plan['host_timeout'] truthy; create_plan sets host_timeout=validate_host_timeout(getattr(args,'host_timeout','15m')) for ALL workflows. Probe confirmed: single phase1 --all-ports -> host-timeout 15m; quick -> host-timeout 15m. Previously no --host-timeout existed at all.",
+      "impact": "A full 65535-port SYN scan (or phase1 --all-ports, or connect/-sT which is much slower) against a heavily filtered host / tarpit routinely exceeds 15 minutes. nmap now ABANDONS that host at 15m and exits 0 with partial results, so open ports are silently dropped from XML with no failure signal. This is exactly the kind of 'silently weakens scan coverage' change the lens warns about. Fake-nmap tests return instantly so timing is never exercised.",
+      "fix": "Either scope the default to the auto workflow only (where per-host hang risk motivated QA-007) and leave single/preset uncapped, or raise the default substantially for --all-ports/full-range scans, or at minimum emit a warning when a host hits the timeout (parse 'Host timeout' from nmap or surface it). Document that 15m can truncate large scans and that 0 disables.",
+      "confidence": "high",
+      "lens": "validation-coverage",
+      "verdict": {
+        "is_real": true,
+        "severity": "medium",
+        "must_fix": false,
+        "rationale": "Verified against current scanner/scanops_scanner.py. The factual chain is correct: build_command (lines 524-526) unconditionally injects `--host-timeout <value>` whenever plan[\"host_timeout\"] is truthy, for ALL stages/workflows; create_plan (line 701) sets host_timeout = validate_host_timeout(getattr(args,\"host_timeout\",HOST_TIMEOUT_DEFAULT)) for single/preset too, not just auto; and the argparse default (line 1088) is HOST_TIMEOUT_DEFAULT=\"15m\" (line 29). The patch.diff confirms `--host-timeout` is brand-new (all + lines) — previously no per-host cap existed at all. So every command — single profile, --all-ports, connect/-sT, and each auto phase — now carries `--host-timeout 15m`.\n\nThe impact claim is also valid: nmap on a host-timeout gives up on that host but exits 0 (host timeout is non-fatal), so finalize_plan/failed_runs (lines 819-821, 863-893) treat the stage as successful (rc=0, not failed), and any open ports that hadn't been confirmed before 15m are silently absent from the XML with no failure signal and no warning. print_scan_summary surfaces only rc!=0 stages, so a truncated-but-rc0 host is never flagged. This is a genuine behavior change that can weaken coverage on the specific pathological case named (slow full-range scan of a tarpit/heavily-filtered host). The test (test_host_timeout_in_all_auto_commands) only asserts the flag is PRESENT with an instant fake nmap, so timing/truncation is never exercised — the green suite does not cover this.\n\nWhy NOT must_fix: this is a deliberate, documented hardening tradeoff (QA-007 comment at line 525: prevent one host from hanging the whole scan), and it is fully user-controllable — `--host-timeout 0` disables it and the help text (line 1089) says \"0 disables.\" 15m is generous for responsive hosts; the cap only bites on pathological slow hosts where the scan would otherwise hang far longer. It is a real, worth-noting coverage caveat (and the lack of any \"host timed out\" surfacing is the most legitimate gap), but it is a tunable design decision with an explicit off-switch, not a logic bug or regression from faulty code — it should not block merge. Reasonable hardening: scope the default to the auto workflow, raise it for --all-ports/full-range, or surface \"Host timeout\" from nmap output as a warning.",
+        "dedup_key": "host-timeout-default-15m-injected-all-workflows-silent-coverage-truncation"
+      }
+    },
+    {
+      "title": "check_scope rejects ALL hostname targets whenever a scope (CLI or SCANOPS_SCAN_SCOPE env) is set",
+      "location": "scanner/scanops_scanner.py:224-234 (_in_scope) + :677 (create_plan reads scan_scope or env)",
+      "severity": "medium",
+      "kind": "edge-case",
+      "evidence": "_in_scope returns False for anything that is not an IP/CIDR: 'except ValueError: return False  # IP/CIDR 가 아니면(호스트명 등) scope 모드에선 검증 불가 → 불허'. create_plan calls check_scope(expanded, args.scan_scope or os.environ.get('SCANOPS_SCAN_SCOPE','')). Probe: check_scope(['example.com'],'10.0.0.0/8') and check_scope(['localhost'],'127.0.0.0/8') both raise.",
+      "impact": "Previously hostnames always scanned. If SCANOPS_SCAN_SCOPE is exported globally/org-wide (the feature explicitly falls back to env), every hostname/FQDN target is now rejected before scanning even when it legitimately resolves inside the allowed range — a coverage regression that only manifests in deployments that set the env var. No test sets the env var with a hostname target.",
+      "fix": "When scope is set and a target is a hostname, either resolve it (socket.gethostbyname) and check the resolved IP against the scope, or warn-and-allow instead of hard-reject, or document loudly that enabling scope disables hostname targets. At minimum the error message should explain that hostnames are unverifiable under scope, not just say 'out of scope'.",
+      "confidence": "high",
+      "lens": "validation-coverage",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Behavioral claims VERIFIED against current code. _in_scope (scanner/scanops_scanner.py:224-234) returns False for any non-IP/non-CIDR string; check_scope (:237-246) then raises ValueError, aborting with returncode 2. Direct probes confirm: check_scope(['example.com'],'10.0.0.0/8') and check_scope(['localhost'],'127.0.0.0/8') both reject, while empty scope allows and in-range IPs pass. create_plan (:677) reads args.scan_scope OR os.environ.get('SCANOPS_SCAN_SCOPE',''), and --scan-scope (:1090-1092) documents the env fallback — both real. There is NO hostname resolution anywhere in the scanner. The test test_scan_scope_gate_cli_and_env uses only IP targets, so the green suite genuinely does not cover a hostname-under-scope case.\n\nHowever the finding OVERSTATES severity/impact on two points. (1) Not a regression: the ENTIRE scope feature (parse_scope, _in_scope, check_scope, --scan-scope, env fallback, and the check_scope call) is net-new in this patch — every line is a '+' in qa/patch.diff. With the default (empty scope, no env var) check_scope returns early and hostname scanning is unaffected; the behavior only manifests when a user OPTS IN to scope. The 'previously hostnames always scanned' phrasing implies a silent weakening of existing scans, which is false — old behavior (no scope) is unchanged. (2) Failing closed is a defensible/arguably correct posture for an allow-list scope gate whose stated purpose is blocking out-of-scope targets; a hostname cannot be statically verified against a CIDR without DNS resolution (which adds TOCTOU/spoofing risk). So this is a real design sharp-edge + a misleading error message ('out of scope' vs 'hostnames unverifiable under scope'), worth a doc/message fix, but it is opt-in, does not affect default behavior, is not a correctness bug, and does not block merge. Severity lowered to low; must_fix=false.",
+        "dedup_key": "check_scope-rejects-hostname-targets-when-scope-set"
+      }
+    },
+    {
+      "title": "Resume of a permanently-failing stage never converges and grows runs[] unbounded on every resume",
+      "location": "scanner/scanops_scanner.py:863-893 (finalize_plan cursor reset) + :937 (run_nmap_stage appends a new run each time)",
+      "severity": "low",
+      "kind": "edge-case",
+      "evidence": "finalize_plan sets cursor=min(failed_batches) so the failed batch is always revisited; execute_auto re-runs the stage (stage_succeeded stays False) and run_nmap_stage does plan['runs'].append(run) with no dedup. Probe with a UDP stage that always exits 7: after RUN1 status=partial cursor=0; RESUME2/3/4 each re-ran udp_identify and nruns grew 4->5->6, status stayed partial, cursor stayed 0.",
+      "impact": "A genuinely-down/blocked service makes --resume non-idempotent: each resume re-runs the doomed stage, appends another failed run record, and the on-disk state.json grows monotonically while never reaching 'done'. latest_runs() hides the duplicates for reporting but the file bloats and there is no terminal state / max-retry, so an automation loop calling --resume will churn forever at exit 0.",
+      "fix": "Cap retries per (batch,stage) (e.g. store an attempt count and stop retrying after N), or prune superseded run records to keep only latest_runs() in plan['runs'] on each write, and/or distinguish a 'gave up' terminal status so callers can stop looping.",
+      "confidence": "high",
+      "lens": "validation-coverage",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Verified against current scanner/scanops_scanner.py. All mechanics in the finding are provable: (1) finalize_plan resets cursor=min(failed_batches) (L879-881), so a permanently-failing stage's batch is always re-targeted by --resume; (2) stage_succeeded requires returncode==0 (L627), so a stage that always exits non-zero never blocks re-execution (re-run at L996/L1004-1005/L1006-1008); (3) run_nmap_stage does plan[\"runs\"].append(run) unconditionally (L937) and write_json serializes the whole list (L938) with no dedup/pruning, so runs[] and state.json grow monotonically on every resume; (4) latest_runs() dedups (batch,stage) for reporting/manifest/summary only (L810-816) — it is never written back, so the on-disk duplicates persist; (5) partial returns exit 0 (L893), so status stays partial forever with exit 0. Grep confirms there is NO attempt counter, retry cap, or terminal \"gave up\" state anywhere. The passing resume test (test_standalone_scanner.py:401-452) only exercises the CONVERGENT path (fail once → succeed on resume → done); the non-convergent (perpetually-failing) path is untested, which is exactly why tests stay green. So the finding is a genuine, newly-introduced behavior of this patch: --resume is non-idempotent against a genuinely-down/blocked service and the state file bloats without bound, and an external automation loop gating on exit code would churn indefinitely. However it is correctly rated low and is NOT merge-blocking: each individual invocation still terminates (no in-process infinite loop), still emits correct partial results, correct summary/manifest (via latest_runs), and exits 0 with usable data — there is no scan-coverage regression, crash, or data loss. The impact requires an external loop repeatedly resuming a permanently-failing target, a real but narrow operational scenario; it is a robustness/idempotency edge case, not a correctness regression of the scan itself.",
+        "dedup_key": "resume-nonidempotent-permanently-failing-stage-runs-unbounded-growth"
+      }
+    },
+    {
+      "title": "validate_ports still accepts out-of-range ports (0, >65535, T:0-0)",
+      "location": "scanner/scanops_scanner.py:107 (PORT_BODY_RE) + :249-270 (validate_ports)",
+      "severity": "low",
+      "kind": "edge-case",
+      "evidence": "PORT_BODY_RE = r'^(\\d{1,5}-\\d{1,5}|\\d{1,5}-|-\\d{1,5}|\\d{1,5})$' matches any 1-5 digit number. Probe: validate_ports('99999')='99999', validate_ports('0')='0', validate_ports('T:0-0')='T:0-0' all pass.",
+      "impact": "The patch advertises 'tightening' to stop garbage reaching nmap -p, but numeric range 0/>65535 still passes through. nmap will fatally reject '99999' ('Ports must be between 0 and 65535 inclusive'), so an invalid port aborts the whole scan with a raw nmap error instead of the friendly pre-validation the patch intends. Not a regression (old code did zero body validation) — an incomplete fix.",
+      "fix": "After PORT_BODY_RE match, parse the numeric bounds and reject any value >65535 (and optionally bound the lower edge). e.g. for each numeric token in body assert 0 <= int(tok) <= 65535.",
+      "confidence": "high",
+      "lens": "validation-coverage",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Verified against current scanner/scanops_scanner.py. PORT_BODY_RE (line 107) = r\"^(\\d{1,5}-\\d{1,5}|\\d{1,5}-|-\\d{1,5}|\\d{1,5})$\" only constrains digit COUNT (1-5 digits), not numeric magnitude, so validate_ports (lines 249-270) accepts out-of-range ports. Confirmed by running the actual function: validate_ports('99999')='99999', '0'='0', '65536'='65536', 'T:0-0'='T:0-0', 'T:99999'='T:99999', '-1'='-1' all PASS; only 6+ digit values like '100000' get rejected (by digit count, not range). The QA-014 comment (lines 256-257) explicitly advertises that the new per-segment validation stops 'garbage' from leaking into nmap -p, but it catches only empty segments and bad protocol prefixes — not numeric values >65535 or 0. nmap fatally aborts on such ports ('Ports specified must be between 0 and 65535 inclusive'), so the whole scan dies with a raw nmap error instead of the friendly pre-validation the patch intends. This is an INCOMPLETE FIX in the just-written hardening block, not a regression (the finding correctly concedes old code did zero body validation, and probes confirm pre-existing-style behavior). Correctly scoped as low/edge-case: requires operator to type an invalid port, fails relatively gracefully (nmap error, not silent corruption or weakened coverage), and does not weaken any normal-path scan. The test suite passes because no regression test exercises out-of-range numeric bodies. Not must-fix: it does not block merge — the patch still materially tightens validation; bounding 1<=int(tok)<=65535 per numeric token would complete it.",
+        "dedup_key": "validate_ports-accepts-out-of-range-numeric-ports"
+      }
+    },
+    {
+      "title": "IPv6 reject mislabels any colon-containing target (e.g. host:8080) as IPv6",
+      "location": "scanner/scanops_scanner.py:190-192 (validate_targets)",
+      "severity": "low",
+      "kind": "edge-case",
+      "evidence": "ipv6 = [t for t in targets if ':' in t]; if ipv6: raise ValueError('IPv6 대상은 아직 지원하지 않습니다: ...'). TARGET_RE permits ':'. Probe: validate_targets(['host:8080']) raises the IPv6 error.",
+      "impact": "A user pasting host:port (a common copy/paste mistake) gets a confusing 'IPv6 not supported' message rather than 'targets must not include a port'. Minor UX only — nmap doesn't accept host:port anyway, so no legitimate input is lost.",
+      "fix": "Tighten the IPv6 detection to actual IPv6 (try ipaddress.ip_address(t).version==6 / presence of '::' or >=2 colons) and give a distinct message for host:port forms.",
+      "confidence": "medium",
+      "lens": "validation-coverage",
+      "verdict": {
+        "is_real": true,
+        "severity": "low",
+        "must_fix": false,
+        "rationale": "Verified against scanner/scanops_scanner.py:184-192. validate_targets first checks TARGET_RE (line 104: `^[A-Za-z0-9_.:/\\-]+$`), which permits ':'. It then does `ipv6 = [t for t in targets if ':' in t]` and raises \"IPv6 대상은 아직 지원하지 않습니다\" for ANY target containing a colon. I empirically confirmed: validate_targets(['host:8080']) raises the IPv6 error, not a port-related one. So any host:port paste is mislabeled as IPv6. However, impact is cosmetic only: such input is invalid for the auto workflow either way (nmap target syntax has no host:port form), so no legitimate target is silently dropped, no scan coverage is weakened, and there is no correctness/regression risk. The misleading message is a minor UX wart. The proposed fix (use ipaddress/'::' or >=2 colons to detect true IPv6, distinct message for host:port) is reasonable but not merge-blocking. Tests pass because none feed a host:port target. Real defect, low severity, not a must-fix.",
+        "dedup_key": "validate_targets-colon-misclassified-as-ipv6"
+      }
+    }
+  ]
+}

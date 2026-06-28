@@ -102,12 +102,31 @@ def main() -> int:
         return 2
     base = Path(args[args.index("-oA") + 1])
     stage = stage_from_base(base)
+    targets = args[args.index("-oA") + 2:]
     log = os.environ.get("FAKE_NMAP_LOG")
     if log:
         with open(log, "a", encoding="utf-8") as fp:
             fp.write(json.dumps({"stage": stage, "args": args}, ensure_ascii=False) + "\n")
+    fail_code = int(os.environ.get("FAKE_NMAP_FAIL_CODE", "7"))
+    # partial: 유효한 XML 을 쓴 뒤 비정상 종료(QA-005: 부분 결과 살리기 검증용)
+    if os.environ.get("FAKE_NMAP_PARTIAL_STAGE") == stage:
+        write_xml(base, stage)
+        return fail_code
+    # corrupt: 망가진 XML 을 쓰고 rc=0 (QA-008: 손상 XML 을 '열린 포트 0' 과 구분하는지 검증용)
+    if os.environ.get("FAKE_NMAP_CORRUPT_STAGE") == stage:
+        base.parent.mkdir(parents=True, exist_ok=True)
+        Path(str(base) + ".xml").write_text("<nmaprun><host><broken", encoding="utf-8")
+        return 0
+    # empty: host 없는 유효 XML, rc=0 (QA-012: 빈 결과를 정직하게 알리는지 검증용)
+    if os.environ.get("FAKE_NMAP_EMPTY_STAGE") == stage:
+        base.parent.mkdir(parents=True, exist_ok=True)
+        Path(str(base) + ".xml").write_text('<?xml version="1.0"?><nmaprun scanner="fake"></nmaprun>', encoding="utf-8")
+        return 0
     if os.environ.get("FAKE_NMAP_FAIL_STAGE") == stage:
-        return int(os.environ.get("FAKE_NMAP_FAIL_CODE", "7"))
+        return fail_code
+    fail_target = os.environ.get("FAKE_NMAP_FAIL_TARGET")
+    if fail_target and fail_target in targets:
+        return fail_code
     write_xml(base, stage)
     return 0
 
@@ -164,7 +183,8 @@ def test_phase1_profile_matches_precision_single_run_preset():
 
     assert flags[:4] == ["-sS", "-sU", "-Pn", "-n"]
     assert "-sV" in flags
-    assert "--version-all" in flags
+    # phase1 은 -sU 와 한 번에 돌기에 --version-all(강도 9)을 빼서 수다/증폭 UDP 의 nmap fatal 을 피한다(QA-011).
+    assert "--version-all" not in flags
     assert "--open" in flags
     assert flags[flags.index("-p") + 1].startswith("T:1-65535,U:")
     assert "--script" in flags
@@ -379,6 +399,8 @@ def test_udp_only_port_end_to_end_does_not_run_full_tcp_scan(tmp_path):
 
 
 def test_resume_after_failed_identification_reuses_successful_discovery(tmp_path):
+    """best-effort 의미: tcp_identify 가 실패해도 udp_identify 는 계속 진행되어 부분 결과가 남는다.
+    실패한 단계는 partial 로 기록되고 exit 0(쓸만한 import XML 존재). --resume 시 실패 단계만 재시도된다."""
     fake_nmap = _fake_nmap(tmp_path)
     output_dir = tmp_path / "out"
     log_path = tmp_path / "fake_nmap.jsonl"
@@ -395,9 +417,16 @@ def test_resume_after_failed_identification_reuses_successful_discovery(tmp_path
         ],
         env={"FAKE_NMAP_LOG": str(log_path), "FAKE_NMAP_FAIL_STAGE": "tcp_identify"},
     )
-    assert first.returncode == 7, first.stderr + first.stdout
+    # tcp_identify 실패는 더 이상 전체 스캔을 죽이지 않는다: udp 까지 돌고 partial 로 마감(exit 0).
+    assert first.returncode == 0, first.stderr + first.stdout
     failed_state = json.loads((output_dir / "resume.state.json").read_text(encoding="utf-8"))
-    assert failed_state["status"] == "failed"
+    assert failed_state["status"] == "partial"
+    # 첫 실행: discovery → (실패)identify → udp 까지 best-effort 로 진행
+    assert [entry["stage"] for entry in _read_jsonl(log_path)] == [
+        "tcp_discovery",
+        "tcp_identify",
+        "udp_identify",
+    ]
 
     second = _run_scanner(
         [
@@ -411,11 +440,12 @@ def test_resume_after_failed_identification_reuses_successful_discovery(tmp_path
     )
 
     assert second.returncode == 0, second.stderr + second.stdout
+    # resume 은 실패한 tcp_identify 만 재시도(discovery/udp 는 이미 성공 → 건너뜀).
     assert [entry["stage"] for entry in _read_jsonl(log_path)] == [
         "tcp_discovery",
         "tcp_identify",
-        "tcp_identify",
         "udp_identify",
+        "tcp_identify",
     ]
     resumed_state = json.loads((output_dir / "resume.state.json").read_text(encoding="utf-8"))
     assert resumed_state["status"] == "done"
@@ -634,3 +664,262 @@ def test_live_hosts_ignores_mac_addresses(tmp_path):
         encoding="utf-8",
     )
     assert scanner.live_hosts_from_xml(xml) == ["10.0.0.9"]
+
+
+# --- 하드닝 회귀 테스트: 실패 격리 / 안정성 / 검증 ----------------------------------
+
+def test_udp_failure_is_partial_not_fatal(tmp_path):
+    """ISSUE-001/QA-002: UDP 식별 실패해도 TCP 결과로 partial 마감 + exit 0 + 재개 힌트."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    r = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "p", "127.0.0.1"],
+        env={"FAKE_NMAP_FAIL_STAGE": "udp_identify"},
+    )
+    assert r.returncode == 0, r.stderr + r.stdout
+    state = json.loads((out / "p.state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "partial"
+    manifest = json.loads((out / "p.manifest.json").read_text(encoding="utf-8"))
+    assert str(out / "p.127.0.0.1.tcp_identify.xml") in manifest["import_xml_files"]
+    assert "--resume" in r.stderr
+
+
+def test_partial_xml_from_failed_stage_is_importable(tmp_path):
+    """QA-005: rc≠0 이라도 host 가 든 부분 XML 은 import 목록에 포함."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    r = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "pp", "127.0.0.1"],
+        env={"FAKE_NMAP_PARTIAL_STAGE": "udp_identify"},
+    )
+    assert r.returncode == 0, r.stderr + r.stdout
+    state = json.loads((out / "pp.state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "partial"
+    manifest = json.loads((out / "pp.manifest.json").read_text(encoding="utf-8"))
+    assert str(out / "pp.127.0.0.1.udp_identify.xml") in manifest["import_xml_files"]
+
+
+def test_corrupt_discovery_xml_not_reported_as_clean_empty(tmp_path):
+    """QA-008: 손상 discovery XML 은 '열린 포트 0' 이 아니라 '손상' 으로 구분되어 식별을 건너뛴다."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "c", "127.0.0.1"],
+        env={"FAKE_NMAP_CORRUPT_STAGE": "tcp_discovery"},
+    )
+    state = json.loads((out / "c.state.json").read_text(encoding="utf-8"))
+    ident = next(rn for rn in state["runs"] if rn["stage_id"] == "tcp_identify")
+    assert ident.get("skipped") is True
+    assert "손상" in ident.get("skip_reason", "")
+
+
+def test_one_failed_batch_does_not_abort_others(tmp_path):
+    """QA-003: 멀티배치에서 한 타깃의 단계 실패가 나머지 배치를 막지 않는다."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    r = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "b",
+         "--batch-size", "1", "--tcp-only", "10.0.0.5", "10.0.0.6"],
+        env={"FAKE_NMAP_FAIL_TARGET": "10.0.0.5"},
+    )
+    manifest = json.loads((out / "b.manifest.json").read_text(encoding="utf-8"))
+    assert any("10.0.0.6" in p for p in manifest["import_xml_files"])
+    state = json.loads((out / "b.state.json").read_text(encoding="utf-8"))
+    assert state["status"] in ("partial", "done")
+
+
+def test_empty_scan_reports_done_with_warning(tmp_path):
+    """QA-012: 살아있는 호스트가 없으면 조용한 성공이 아니라 경고를 남긴다."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    r = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "e", "127.0.0.1"],
+        env={"FAKE_NMAP_EMPTY_STAGE": "tcp_discovery"},
+    )
+    assert r.returncode == 0, r.stderr + r.stdout
+    state = json.loads((out / "e.state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "done"
+    assert "가져올 결과가 없습니다" in r.stderr
+
+
+def test_host_timeout_in_all_auto_commands(tmp_path):
+    """QA-007: 모든 자동 단계 명령에 --host-timeout 주입(끄기는 --host-timeout 0)."""
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args(["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
+    plan = scanner.create_plan(args)
+    for cmd in (
+        scanner.build_command(plan, 0, "tcp_discovery"),
+        scanner.build_command(plan, 0, "tcp_identify", [22]),
+        scanner.build_command(plan, 0, "udp_identify"),
+    ):
+        assert "--host-timeout" in cmd and cmd[cmd.index("--host-timeout") + 1] == "15m"
+    off = scanner.parser().parse_args(
+        ["--dry-run", "--nmap", "nmap", "--host-timeout", "0", "--output-dir", str(tmp_path), "127.0.0.1"])
+    assert "--host-timeout" not in scanner.build_command(scanner.create_plan(off), 0, "tcp_discovery")
+
+
+def test_ipv6_target_rejected(tmp_path):
+    """QA-016: -6 를 못 붙이는 자동 워크플로에서 IPv6 대상은 시작 전에 거절."""
+    r = _run_scanner(["--nmap", "nmap", "--dry-run", "--output-dir", str(tmp_path), "fe80::1"])
+    assert r.returncode == 2
+    assert "IPv6" in r.stderr
+
+
+def test_malformed_ports_rejected_valid_passes():
+    """QA-014: 잘못된 포트 스펙 거절, 정상/열린범위는 통과."""
+    import pytest
+    scanner = _load_scanner()
+    for bad in ("22,U:", "22,,80", "T:", "80,bad", "U:,53"):
+        with pytest.raises(ValueError):
+            scanner.validate_ports(bad)
+    assert scanner.validate_ports("T:1-1024,U:53") == "T:1-1024,U:53"
+    assert scanner.validate_ports("1-,-1024,443") == "1-,-1024,443"
+
+
+def test_scan_scope_gate_cli_and_env(tmp_path):
+    """QA-020: scope 밖 대상은 거절, 안쪽/CLI·ENV 양쪽 동작."""
+    fake_nmap = _fake_nmap(tmp_path)
+    bad = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(tmp_path / "o"), "--scan-scope", "10.0.0.0/8", "192.168.1.5"])
+    assert bad.returncode == 2 and ("대역" in bad.stderr or "scope" in bad.stderr)
+    ok = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(tmp_path / "o2"), "--name", "s", "--tcp-only", "10.1.2.3"],
+        env={"SCANOPS_SCAN_SCOPE": "10.0.0.0/8"})
+    assert ok.returncode == 0, ok.stderr + ok.stdout
+
+
+def test_connect_scan_strips_udp_everywhere(tmp_path):
+    """QA-010: connect(권한 불필요)는 단일 프로필에서 -sU 제거, 자동에서 UDP 단계 건너뜀."""
+    scanner = _load_scanner()
+    flags = scanner.build_base_flags(_args(profile="phase1", scan_type="connect"))
+    assert "-sU" not in flags
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    r = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "cn", "--scan-type", "connect", "127.0.0.1"])
+    assert r.returncode == 0, r.stderr + r.stdout
+    state = json.loads((out / "cn.state.json").read_text(encoding="utf-8"))
+    udp = next(rn for rn in state["runs"] if rn["stage_id"] == "udp_identify")
+    assert udp.get("skipped") is True
+
+
+def test_large_cidr_rejected_before_materialization(tmp_path):
+    """QA-015: 큰 CIDR 은 전개 전에 캡으로 즉시 거절(메모리/시간 폭발 방지)."""
+    import pytest
+    import time as _t
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args(["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "10.0.0.0/8"])
+    start = _t.perf_counter()
+    with pytest.raises(ValueError):
+        scanner.create_plan(args)
+    assert _t.perf_counter() - start < 2.0
+
+
+def test_duplicate_targets_deduped():
+    """QA-018: 중복/겹침 대상은 순서 보존하며 한 번만."""
+    scanner = _load_scanner()
+    hosts = scanner.expand_targets(["10.0.0.1", "10.0.0.1", "10.0.0.0/30", "10.0.0.1"], cap=100)
+    assert hosts == ["10.0.0.1", "10.0.0.0", "10.0.0.2", "10.0.0.3"]
+
+
+def test_range_octet_validation():
+    """QA-019: base 옥텟>255·끝>255 거절, 정상 범위는 전개."""
+    import pytest
+    scanner = _load_scanner()
+    for bad in ("10.0.999.1-5", "10.0.0.1-300"):
+        with pytest.raises(ValueError):
+            scanner.expand_targets([bad], cap=100)
+    assert scanner.expand_targets(["10.0.0.1-3"], cap=100) == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+
+
+def test_resume_malformed_state_clean_error(tmp_path):
+    """QA-017: 손상/구버전 state 는 트레이스백이 아니라 정직한 에러(rc=2)."""
+    bad = tmp_path / "bad.state.json"
+    bad.write_text(json.dumps({"tool": "scanops_scanner"}), encoding="utf-8")
+    r = _run_scanner(["--resume", str(bad), "--nmap", "nmap", "--dry-run"])
+    assert r.returncode == 2
+    assert "Traceback" not in r.stderr
+    assert "필수 항목" in r.stderr
+
+
+def test_interrupt_writes_interrupted_state_and_resume_hint(tmp_path, monkeypatch, capsys):
+    """QA-009: 정지 신호(→KeyboardInterrupt)는 status=interrupted 로 저장하고 재개 힌트를 남긴다(rc=130).
+    GUI 의 CTRL_BREAK/SIGINT 정지가 도달하는 바로 그 정리 경로를 검증."""
+    import signal as _sig
+    scanner = _load_scanner()
+    saved = {s: _sig.getsignal(getattr(_sig, s)) for s in ("SIGTERM", "SIGBREAK") if hasattr(_sig, s)}
+
+    def boom(*_a, **_k):
+        raise KeyboardInterrupt()
+
+    try:
+        args = scanner.parser().parse_args(
+            ["--nmap", "nmap", "--output-dir", str(tmp_path), "--name", "i", "127.0.0.1"])
+        plan = scanner.create_plan(args)
+        monkeypatch.setattr(scanner.subprocess, "call", boom)
+        rc = scanner.execute(plan)
+        assert rc == 130
+        state = json.loads((tmp_path / "i.state.json").read_text(encoding="utf-8"))
+        assert state["status"] == "interrupted"
+        assert "--resume" in capsys.readouterr().err
+    finally:
+        for s, h in saved.items():
+            _sig.signal(getattr(_sig, s), h)
+
+
+def test_single_workflow_resume_only_reruns_failed_batch(tmp_path):
+    """QA-003 보강: --workflow single, 멀티배치에서 한 배치만 실패 → resume 은 그 배치만 재시도(성공 배치 재스캔 X)."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    log = tmp_path / "log.jsonl"
+    first = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "sb", "--workflow", "single",
+         "--profile", "basic", "--batch-size", "1", "10.0.0.5", "10.0.0.6", "10.0.0.7"],
+        env={"FAKE_NMAP_LOG": str(log), "FAKE_NMAP_FAIL_TARGET": "10.0.0.6"},
+    )
+    assert first.returncode == 0, first.stderr + first.stdout  # 부분 성공(다른 배치 import 가능)
+    state = json.loads((out / "sb.state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "partial"
+    # cursor 는 실패한 배치(10.0.0.6 = index 1)로 되감겨야 한다.
+    assert state["cursor"] == 1
+    first_targets = [e["args"][e["args"].index("-oA") + 2] for e in _read_jsonl(log)]
+    assert first_targets == ["10.0.0.5", "10.0.0.6", "10.0.0.7"]
+
+    second = _run_scanner(
+        ["--resume", str(out / "sb.state.json"), "--nmap", str(fake_nmap)],
+        env={"FAKE_NMAP_LOG": str(log)},  # 실패 타깃 해제 → 이번엔 성공
+    )
+    assert second.returncode == 0, second.stderr + second.stdout
+    resumed = json.loads((out / "sb.state.json").read_text(encoding="utf-8"))
+    assert resumed["status"] == "done"
+    # resume 은 실패했던 10.0.0.6 만 다시 부른다(이미 성공한 .5/.7 은 재스캔 안 함).
+    all_targets = [e["args"][e["args"].index("-oA") + 2] for e in _read_jsonl(log)]
+    assert all_targets == ["10.0.0.5", "10.0.0.6", "10.0.0.7", "10.0.0.6"]
+
+
+def test_gui_parse_marker_handles_both_resume_line_forms():
+    """QA-009 보강: GUI 표식 파서가 finalize 형/중단(interrupted) 형 재개 힌트를 모두 잡는다."""
+    spec = importlib.util.spec_from_file_location("scanops_gui", GUI_SCRIPT)
+    gui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gui)
+    pm = gui.parse_marker
+    assert pm("resume with: --resume C:/x/y.state.json")["resume"] == "C:/x/y.state.json"
+    # 중단 경로의 실제 출력: 대문자 Resume + 'interrupted.' 접두사
+    assert pm("interrupted. Resume with: --resume C:/x/y.state.json")["resume"] == "C:/x/y.state.json"
+    assert pm("warning: 뭔가 실패")["warning"] is True
+    assert pm("partial: C:/x/y.manifest.json")["partial"] is True
+    assert pm("그냥 로그 한 줄")["resume"] is None
+
+
+def test_install_stop_handlers_registers_without_error():
+    """QA-009: 정지 신호 핸들러 등록이 메인 스레드에서 예외 없이 동작."""
+    import signal as _sig
+    scanner = _load_scanner()
+    saved = {s: _sig.getsignal(getattr(_sig, s)) for s in ("SIGTERM", "SIGBREAK") if hasattr(_sig, s)}
+    try:
+        scanner.install_stop_handlers()
+        if hasattr(_sig, "SIGTERM"):
+            assert _sig.getsignal(_sig.SIGTERM) is scanner._raise_keyboard_interrupt
+    finally:
+        for s, h in saved.items():
+            _sig.signal(getattr(_sig, s), h)
