@@ -16,6 +16,21 @@ from tkinter import scrolledtext, ttk
 SCRIPT = Path(__file__).with_name("scanops_scanner.py")
 DEFAULT_OUTPUT = "scanops_scans"
 
+
+def parse_marker(line: str) -> dict:
+    """CLI 출력 한 줄에서 표식 추출(순수 함수, Tk 불필요 → 단위 테스트 가능).
+    재개 힌트는 finalize 의 'resume with: --resume PATH' 와 중단의
+    'interrupted. Resume with: --resume PATH' 두 형태 모두 대소문자/접두사 무관 부분일치로 잡는다."""
+    stripped = line.strip()
+    low = stripped.lower()
+    marker = "resume with: --resume "
+    idx = low.find(marker)
+    return {
+        "resume": stripped[idx + len(marker):].strip() if idx >= 0 else None,
+        "warning": low.startswith("warning:"),
+        "partial": low.startswith("partial:"),
+    }
+
 RUN_MODE_LABELS = {
     "auto": "자동 스캔 - 열린 포트와 용도 파악",
     "single_basic": "단일 실행 - 빠른 서비스 확인",
@@ -72,6 +87,7 @@ class ScannerGui:
         self.scan_type_label = StringVar(value="프로필 기본")
         self.tcp_only = BooleanVar(value=False)
         self.udp = BooleanVar(value=False)
+        self.udp_all_targets = BooleanVar(value=False)
         self.nse_default = BooleanVar(value=False)
         self.no_scripts = BooleanVar(value=False)
         self.open_only = BooleanVar(value=False)
@@ -82,6 +98,10 @@ class ScannerGui:
         self.status = StringVar(value="준비됨")
         self.show_advanced = BooleanVar(value=False)
         self.show_nse = BooleanVar(value=False)
+        # 실행 중 CLI 출력에서 추출하는 표식: 재개 state 경로 / 경고 수 / partial 여부.
+        self._resume_hint = ""
+        self._warn_count = 0
+        self._partial = False
 
         self._build_ui()
         self.root.after(120, self._drain_output)
@@ -153,6 +173,7 @@ class ScannerGui:
         checks.grid(row=2, column=0, columnspan=4, sticky="ew", padx=10, pady=(2, 8))
         ttk.Checkbutton(checks, text="TCP만", variable=self.tcp_only).pack(side="left", padx=(0, 14))
         ttk.Checkbutton(checks, text="단일 실행에 UDP 추가", variable=self.udp).pack(side="left", padx=(0, 14))
+        ttk.Checkbutton(checks, text="숨은 UDP 전용 호스트도 확인", variable=self.udp_all_targets).pack(side="left", padx=(0, 14))
         ttk.Checkbutton(checks, text="열린 포트만", variable=self.open_only).pack(side="left", padx=(0, 14))
         ttk.Checkbutton(checks, text="닫힌 포트 포함", variable=self.include_closed).pack(side="left", padx=(0, 14))
         ttk.Checkbutton(checks, text="zip 생성", variable=self.zip_outputs).pack(side="left")
@@ -314,6 +335,8 @@ class ScannerGui:
             cmd.append("--tcp-only")
         if self.udp.get():
             cmd.append("--udp")
+        if self.udp_all_targets.get() and mode == "auto":
+            cmd.append("--udp-all-targets")
         if self.nse_default.get():
             cmd.append("--nse-default")
         if self.no_scripts.get():
@@ -346,6 +369,9 @@ class ScannerGui:
             messagebox.showerror("입력 확인", str(exc))
             return
         self._append_log("\n$ " + self._display_command(cmd) + "\n")
+        self._resume_hint = ""
+        self._warn_count = 0
+        self._partial = False
         self._set_running(True)
         self.status.set("명령 확인 중" if dry_run else "스캔 실행 중")
         threading.Thread(target=self._run_process, args=(cmd,), daemon=True).start()
@@ -380,30 +406,78 @@ class ScannerGui:
     def _stop(self) -> None:
         if self.proc is None:
             return
-        self._append_log("\n중지 요청...\n")
+        self._append_log("\n중지 요청(정상 종료 시도)...\n")
+        proc = self.proc
+        # 먼저 정상 종료 신호를 보내 CLI 의 interrupted 정리(상태 저장 + 재개 힌트)가 돌게 한다.
+        # Windows: CTRL_BREAK_EVENT(프로세스 그룹), POSIX: 그룹에 SIGINT. CLI 가 KeyboardInterrupt 로 처리.
         try:
             if os.name == "nt":
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
             else:
-                os.killpg(self.proc.pid, signal.SIGTERM)
+                os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        except (OSError, ValueError):
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        # 정상 종료가 지연되면 강제 종료로 폴백(좀비 방지).
+        self.root.after(6000, lambda: self._force_kill(proc))
+
+    def _force_kill(self, proc: subprocess.Popen) -> None:
+        if self.proc is not proc or proc.poll() is not None:
+            return  # 이미 종료됨
+        self._append_log("정상 종료 지연 — 강제 종료합니다.\n")
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except OSError:
-            self.proc.terminate()
+            try:
+                proc.terminate()
+            except OSError:
+                pass
 
     def _drain_output(self) -> None:
         try:
             while True:
                 kind, payload = self.output_queue.get_nowait()
                 if kind == "line":
-                    self._append_log(str(payload))
+                    line = str(payload)
+                    self._scan_markers(line)
+                    self._append_log(line)
                 elif kind == "done":
                     rc = int(payload)
                     self.proc = None
                     self._set_running(False)
-                    self.status.set("완료" if rc == 0 else f"종료 코드 {rc}")
+                    self.status.set(self._final_status(rc))
+                    # 실패/부분/중단 시 재개 경로를 자동 채워 사용자가 바로 [재개 실행] 할 수 있게.
+                    if self._resume_hint and not self.resume_path.get().strip():
+                        self.resume_path.set(self._resume_hint)
                     self._append_log(f"\nexit code: {rc}\n")
         except queue.Empty:
             pass
         self.root.after(120, self._drain_output)
+
+    def _scan_markers(self, line: str) -> None:
+        m = parse_marker(line)
+        if m["resume"]:
+            self._resume_hint = m["resume"]
+        if m["warning"]:
+            self._warn_count += 1
+        if m["partial"]:
+            self._partial = True
+
+    def _final_status(self, rc: int) -> str:
+        if rc == 0:
+            if self._partial:
+                return f"부분 완료 — 경고 {self._warn_count}건(로그 확인)"
+            if self._warn_count:
+                return f"완료(경고 {self._warn_count}건 — 로그 확인)"
+            return "완료"
+        if rc == 130:
+            return "중지됨 — [재개 실행]으로 이어할 수 있습니다"
+        return f"실패(종료 코드 {rc}) — [재개 실행] 가능"
 
     def _set_running(self, running: bool) -> None:
         state = "disabled" if running else "normal"
@@ -436,8 +510,17 @@ class ScannerGui:
     def _close(self) -> None:
         if self.proc is not None and not messagebox.askyesno("종료", "스캔이 실행 중입니다. 중지하고 닫을까요?"):
             return
-        if self.proc is not None:
+        proc = self.proc
+        if proc is not None:
+            # 정상 종료 신호를 보낸 뒤, 창을 닫기 전에 잠깐 기다렸다가 안 죽으면 강제 종료한다.
+            # (창을 바로 destroy 하면 _stop 의 after(force_kill) 타이머가 사라져 nmap 이 고아가 될 수 있음.)
             self._stop()
+            try:
+                proc.wait(timeout=6)
+            except subprocess.TimeoutExpired:
+                self._force_kill(proc)
+            except OSError:
+                pass
         self.root.destroy()
 
 
