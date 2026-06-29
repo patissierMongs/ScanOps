@@ -54,3 +54,26 @@ Source: live baseline run in headless container (40 pass / 2 fail) + standalone 
 | QA-028 | R2 | medium | FIX | GUI couples pure CLI-output logic (parse_marker) to a top-level tkinter import → untestable headless |
 | QA-029 | R2 | low | FIX | Interrupt/resume test is non-hermetic (needs real nmap), suite pass/fail varies by machine |
 | QA-030 | R2 | medium | FIX | Single-workflow summary always reports live_hosts=0 even with hosts up + open ports |
+
+## Round 3 (loop: 5-dimension multi-agent analysis + adversarial verify)
+
+Source: scanner-qa-discovery workflow (5 analyzers × adversarial troubleshooter). 19 candidates → 16 confirmed new/real (3 rejected: --host-timeout 0 backstop [covered by QA-007 + documented opt-out], single-workflow host-timeout test [code correct], resume-of-done idempotency test [code correct]).
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-031 | R3 | high | FIX | open_only injects --open into auto tcp_discovery, breaking UDP-only-host survival invariant |
+| QA-032 | R3 | medium | FIX | GUI _final_status promises resume for rc=2 validation errors where no state.json exists |
+| QA-033 | R3 | medium | FIX | Resume-path autofill never refreshes → second failed scan resumes the FIRST scan's state |
+| QA-034 | R3 | low | FIX | Resume button never disabled while a scan is running (_set_running omits it) |
+| QA-035 | R3 | medium | FIX | validate_ports accepts reversed port ranges (443-22) → fatal nmap error / empty failed scan |
+| QA-036 | R3 | medium | FIX | --all-ports + a TCP-only --ports silently disables the UDP identify stage |
+| QA-037 | R3 | low | FIX | tcp_only_ports truncates spec at first 'U:', dropping later T: ports (latent, preset-masked) |
+| QA-038 | R3 | high | FIX | discovery-only-success mislabeled 'failed' (exit 1) despite live hosts + open ports |
+| QA-039 | R3 | medium | FIX | summary open_tcp/open_udp count distinct port numbers, under-reporting multi-host exposure |
+| QA-040 | R3 | medium | FIX | scan_findings never counts discovery open TCP → open_tcp=0 when identify skipped/fails |
+| QA-041 | R3 | high | FIX | resume trusts recorded files w/o existence check → manifest advertises vanished XML as done |
+| QA-042 | R3 | medium | FIX | interrupt during finalize overwrites completed done/partial status with 'interrupted' |
+| QA-043 | R3 | medium | FIX | write_json non-atomic + execute() only catches KeyboardInterrupt → status='running' stranded |
+| QA-044 | R3 | high | FIX(test) | finalize_plan 'failed'/exit-1 path (all stages fail) is completely untested |
+| QA-045 | R3 | low | FILE-ONLY | --udp single-profile -sU insertion has no test (no code defect; low-value coverage) |
+| QA-046 | R3 | medium | FIX(test) | --open-only add / --open-only vs --include-closed precedence untested |
