@@ -10,8 +10,18 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox
-from tkinter import scrolledtext, ttk
+
+# tkinter 를 최상단에서 강제로 import 하면 headless/ Tk 없는 파이썬에서 모듈 자체가 import 불가가 되어
+# 순수 함수(parse_marker, GUI↔CLI 표식 계약)와 상수까지 단위 테스트할 수 없다(QA-028).
+# GUI 를 '실행' 하려면 당연히 tkinter 가 필요하지만, 'import' 하는 데는 필요 없게 가드한다.
+try:
+    from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox
+    from tkinter import scrolledtext, ttk
+    _TK_IMPORT_ERROR: Exception | None = None
+except ImportError as _exc:  # noqa: F841 — headless 환경: 순수 로직만 import 가능하게 유지
+    BooleanVar = StringVar = Tk = filedialog = messagebox = None  # type: ignore[assignment]
+    scrolledtext = ttk = None  # type: ignore[assignment]
+    _TK_IMPORT_ERROR = _exc
 
 SCRIPT = Path(__file__).with_name("scanops_scanner.py")
 DEFAULT_OUTPUT = "scanops_scans"
@@ -525,6 +535,11 @@ class ScannerGui:
 
 
 def main() -> None:
+    if _TK_IMPORT_ERROR is not None:
+        raise SystemExit(
+            "이 GUI 는 tkinter 가 필요합니다. tkinter 를 설치/활성화한 파이썬으로 실행하세요.\n"
+            f"(tkinter import 실패: {_TK_IMPORT_ERROR})"
+        )
     root = Tk()
     try:
         root.option_add("*Font", ("Malgun Gothic", 10))

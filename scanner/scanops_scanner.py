@@ -597,6 +597,35 @@ def live_hosts_from_xml(path: Path) -> list[str]:
     return hosts
 
 
+def hosts_with_open_ports_from_xml(path: Path) -> list[str]:
+    """열린 포트가 1개 이상인 호스트 주소만 추출(status 무관). 열린 포트가 있으면 그 호스트는 확실히
+    살아있다 → discovery 가 없는 단일 워크플로나 UDP 전용 호스트의 live 집계 보정용(QA-030).
+    -Pn 이 죽은 호스트를 up 으로 표시해도 '열린 포트' 조건이라 과집계되지 않는다."""
+    if not path.exists():
+        return []
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        return []
+    hosts: list[str] = []
+    seen: set[str] = set()
+    for host in root.findall(".//host"):
+        has_open = any(
+            (state := port.find("state")) is not None and (state.get("state") or "").lower() == "open"
+            for port in host.findall(".//port")
+        )
+        if not has_open:
+            continue
+        for addr in host.findall("address"):
+            if (addr.get("addrtype") or "").lower() == "mac":
+                continue
+            ip = addr.get("addr") or ""
+            if ip and ip not in seen and TARGET_RE.match(ip):
+                seen.add(ip)
+                hosts.append(ip)
+    return hosts
+
+
 def xml_parse_ok(path: Path) -> bool:
     """XML 이 존재하고 파싱 가능한지. discovery 결과가 손상(잘린 XML 등)됐는지 판단용."""
     if not path.exists():
@@ -851,9 +880,13 @@ def scan_findings(plan: dict) -> dict:
                 live.update(live_hosts_from_xml(path))
             elif stage == "udp_identify":
                 udp.update(open_ports_from_xml(path, "udp"))
+                # discovery 가 없거나 UDP 전용으로 살아난 호스트도 live 로 집계(QA-030).
+                live.update(hosts_with_open_ports_from_xml(path))
             else:  # tcp_identify or single
                 tcp.update(open_ports_from_xml(path, "tcp"))
                 udp.update(open_ports_from_xml(path, "udp"))
+                # 단일 워크플로(discovery 없음)는 여기서만 호스트를 보므로 열린 포트 호스트를 live 로 센다(QA-030).
+                live.update(hosts_with_open_ports_from_xml(path))
     return {
         "live_hosts": len(live),
         "open_tcp": len(tcp),

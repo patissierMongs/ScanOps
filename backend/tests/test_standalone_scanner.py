@@ -855,6 +855,9 @@ def test_interrupt_writes_interrupted_state_and_resume_hint(tmp_path, monkeypatc
     try:
         args = scanner.parser().parse_args(
             ["--nmap", "nmap", "--output-dir", str(tmp_path), "--name", "i", "127.0.0.1"])
+        # hermetic: 실제 nmap 설치 여부와 무관하게 create_plan 이 성공하도록 find_nmap 을 스텁한다(QA-029).
+        # 어차피 subprocess.call 을 boom 으로 막아 nmap 을 실행하지 않으므로 경로 검증 외엔 영향 없음.
+        monkeypatch.setattr(scanner, "find_nmap", lambda *a, **k: "nmap")
         plan = scanner.create_plan(args)
         monkeypatch.setattr(scanner.subprocess, "call", boom)
         rc = scanner.execute(plan)
@@ -909,6 +912,38 @@ def test_gui_parse_marker_handles_both_resume_line_forms():
     assert pm("warning: 뭔가 실패")["warning"] is True
     assert pm("partial: C:/x/y.manifest.json")["partial"] is True
     assert pm("그냥 로그 한 줄")["resume"] is None
+
+
+def test_single_workflow_summary_counts_live_host_with_open_port(tmp_path):
+    """QA-030: 단일 워크플로(discovery 없음)도 열린 포트가 있으면 live_hosts 를 0 이 아니라 실제로 센다.
+    닫힌 포트만 있는 호스트는 live 로 세지 않아 -Pn 과집계도 막는다."""
+    scanner = _load_scanner()
+    xml = tmp_path / "s.x.xml"
+    xml.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.1.2.3" addrtype="ipv4"/>'
+        '<ports><port protocol="tcp" portid="443"><state state="open"/></port></ports>'
+        '</host></nmaprun>',
+        encoding="utf-8",
+    )
+    plan = {
+        "runs": [{"index": 0, "batch_index": 0, "stage_id": "", "returncode": 0, "files": [str(xml)]}],
+        "manifest_path": str(tmp_path / "m.json"),
+        "state_path": str(tmp_path / "s.json"),
+    }
+    findings = scanner.scan_findings(plan)
+    assert findings["live_hosts"] == 1 and findings["open_tcp"] == 1
+    assert scanner.hosts_with_open_ports_from_xml(xml) == ["10.1.2.3"]
+
+    closed = tmp_path / "c.xml"
+    closed.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.1.2.4" addrtype="ipv4"/>'
+        '<ports><port protocol="tcp" portid="80"><state state="closed"/></port></ports>'
+        '</host></nmaprun>',
+        encoding="utf-8",
+    )
+    assert scanner.hosts_with_open_ports_from_xml(closed) == []
 
 
 def test_install_stop_handlers_registers_without_error():

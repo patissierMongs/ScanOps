@@ -44,3 +44,13 @@ Full evidence: qa/analysis_result.json. ISSUE-001 (the originally reported UDP e
 - **H** port-spec validation: protocol_ports + validate_ports tightening (QA-013, QA-014)
 - **I** input/robustness: CIDR cap pre-check, IPv6 reject, dedup, range octets, malformed-state guard, scope allowlist, running-state guard (QA-015..020, QA-023)
 - **Z** deferred (cosmetic/low value, recorded only): QA-024, QA-025, QA-026, QA-028
+
+## Round 2 (loop: standalone re-analysis, fake-nmap harness)
+
+Source: live baseline run in headless container (40 pass / 2 fail) + standalone re-analysis. New issues not covered by QA-002..027.
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-028 | R2 | medium | FIX | GUI couples pure CLI-output logic (parse_marker) to a top-level tkinter import → untestable headless |
+| QA-029 | R2 | low | FIX | Interrupt/resume test is non-hermetic (needs real nmap), suite pass/fail varies by machine |
+| QA-030 | R2 | medium | FIX | Single-workflow summary always reports live_hosts=0 even with hosts up + open ports |
