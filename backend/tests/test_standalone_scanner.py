@@ -122,7 +122,12 @@ def main() -> int:
         base.parent.mkdir(parents=True, exist_ok=True)
         Path(str(base) + ".xml").write_text('<?xml version="1.0"?><nmaprun scanner="fake"></nmaprun>', encoding="utf-8")
         return 0
-    if os.environ.get("FAKE_NMAP_FAIL_STAGE") == stage:
+    # FAIL_ALL: 모든 단계가 XML 없이 비정상 종료(QA-044: 진짜 failed/exit1 경로 검증용)
+    if os.environ.get("FAKE_NMAP_FAIL_ALL"):
+        return fail_code
+    # FAIL_STAGE 는 콤마 구분 다중 단계 지원(QA-038: discovery 만 성공/identify 전부 실패 시나리오)
+    fail_stage = os.environ.get("FAKE_NMAP_FAIL_STAGE", "")
+    if stage in [s for s in fail_stage.split(",") if s]:
         return fail_code
     fail_target = os.environ.get("FAKE_NMAP_FAIL_TARGET")
     if fail_target and fail_target in targets:
@@ -270,6 +275,13 @@ def test_auto_workflow_reads_open_tcp_ports_from_discovery_xml(tmp_path):
 def test_manifest_recommends_identification_xml_not_discovery_xml(tmp_path):
     scanner = _load_scanner()
     manifest = tmp_path / "scan.manifest.json"
+    # QA-041 이후 manifest 는 실제 존재하는 XML 만 광고하므로 파일을 만들어 둔다.
+    for stage in ("tcp_discovery", "tcp_identify", "udp_identify"):
+        (tmp_path / f"scan.{stage}.xml").write_text(
+            '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+            '<address addr="127.0.0.1" addrtype="ipv4"/></host></nmaprun>',
+            encoding="utf-8",
+        )
     plan = {
         "manifest_path": str(manifest),
         "state_path": str(tmp_path / "scan.state.json"),
@@ -958,3 +970,225 @@ def test_install_stop_handlers_registers_without_error():
     finally:
         for s, h in saved.items():
             _sig.signal(getattr(_sig, s), h)
+
+
+# --- Round 3 회귀/커버리지 테스트 (QA-031..046) -------------------------------------
+
+def test_reversed_port_range_rejected():
+    """QA-035: 거꾸로 된 포트 범위(시작>끝)는 거절, 정상/열린범위는 통과."""
+    import pytest
+    scanner = _load_scanner()
+    for bad in ("443-22", "T:1000-1", "100-50,22", "U:200-100"):
+        with pytest.raises(ValueError):
+            scanner.validate_ports(bad)
+    assert scanner.validate_ports("22-443") == "22-443"
+    assert scanner.validate_ports("1-,-1024,80") == "1-,-1024,80"
+
+
+def test_all_ports_keeps_default_udp_stage(tmp_path):
+    """QA-036: --all-ports 는 TCP만 담긴 --ports 가 있어도 UDP 기본 포트셋을 유지(UDP 단계 안 사라짐)."""
+    scanner = _load_scanner()
+    assert scanner.auto_udp_ports({"all_ports": True, "ports_override": "22,80"}).startswith("U:")
+    assert scanner.auto_udp_ports({"all_ports": True, "ports_override": "T:443"}).startswith("U:")
+    args = scanner.parser().parse_args(
+        ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "--all-ports", "--ports", "22,80", "127.0.0.1"])
+    plan = scanner.create_plan(args)
+    assert scanner.auto_udp_ports(plan).startswith("U:")
+
+
+def test_tcp_only_ports_preserves_tcp_after_udp_segment():
+    """QA-037: U: 뒤에 오는 T: 포트도 보존(첫 U:에서 절단하지 않음)."""
+    scanner = _load_scanner()
+    assert scanner.tcp_only_ports("U:53,T:80,443") == "T:80,443"
+    assert scanner.tcp_only_ports("T:80,U:53,T:443") == "T:80,T:443"
+    assert scanner.tcp_only_ports("T:1-65535,U:53") == "T:1-65535"
+
+
+def test_open_only_does_not_add_open_to_discovery(tmp_path):
+    """QA-031: --open-only 라도 discovery 엔 --open 이 붙지 않는다(UDP 전용 호스트 생존). identify 엔 붙는다."""
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args(
+        ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "--open-only", "127.0.0.1"])
+    plan = scanner.create_plan(args)
+    assert "--open" not in scanner.build_command(plan, 0, "tcp_discovery")
+    assert "--open" in scanner.build_command(plan, 0, "tcp_identify", [443])
+
+
+def test_open_only_and_include_closed_precedence():
+    """QA-046: open_only 는 --open 추가, include_closed 는 제거, 둘 다면 open_only 가 이긴다. auto 도 동일(discovery 제외)."""
+    scanner = _load_scanner()
+    assert "--open" in scanner.build_base_flags(_args(open_only=True))
+    assert "--open" not in scanner.build_base_flags(_args(profile="phase1", include_closed=True))
+    assert "--open" in scanner.build_base_flags(_args(open_only=True, include_closed=True))
+    assert "--open" in scanner.apply_auto_modifiers(["-sV"], {"open_only": True}, "tcp_identify")
+    assert "--open" not in scanner.apply_auto_modifiers(["-sV"], {"open_only": True}, "tcp_discovery")
+
+
+def test_udp_single_profile_inserts_su():
+    """QA-045: --udp 는 단일 프로필에 -sU 를 (scan-type 뒤에) 삽입한다."""
+    scanner = _load_scanner()
+    assert "-sU" in scanner.build_base_flags(_args(udp=True))
+    assert scanner.build_base_flags(_args(profile="quick", udp=True))[:2] == ["-sT", "-sU"]
+    assert "-sU" not in scanner.build_base_flags(_args(udp=True, tcp_only=True))
+
+
+def test_summary_counts_host_port_pairs_not_distinct_ports(tmp_path):
+    """QA-039: 같은 포트번호라도 호스트가 다르면 따로 센다(노출 규모 정확)."""
+    scanner = _load_scanner()
+    xml = tmp_path / "two.tcp_identify.xml"
+    xml.write_text(
+        '<?xml version="1.0"?><nmaprun>'
+        '<host><status state="up"/><address addr="10.0.0.1" addrtype="ipv4"/>'
+        '<ports><port protocol="tcp" portid="22"><state state="open"/></port>'
+        '<port protocol="tcp" portid="443"><state state="open"/></port></ports></host>'
+        '<host><status state="up"/><address addr="10.0.0.2" addrtype="ipv4"/>'
+        '<ports><port protocol="tcp" portid="443"><state state="open"/></port></ports></host>'
+        '</nmaprun>',
+        encoding="utf-8",
+    )
+    plan = {"runs": [{"index": 0, "batch_index": 0, "stage_id": "tcp_identify", "returncode": 0, "files": [str(xml)]}],
+            "manifest_path": str(tmp_path / "m.json"), "state_path": str(tmp_path / "s.json")}
+    findings = scanner.scan_findings(plan)
+    assert findings["open_tcp"] == 3
+    assert findings["live_hosts"] == 2
+    assert scanner.open_host_ports_from_xml(xml, "tcp") == [("10.0.0.1", 22), ("10.0.0.1", 443), ("10.0.0.2", 443)]
+
+
+def test_scan_findings_counts_discovery_open_tcp_as_floor(tmp_path):
+    """QA-040: identify 가 없어도 discovery 가 찾은 열린 TCP 가 open_tcp 에 반영된다."""
+    scanner = _load_scanner()
+    xml = tmp_path / "d.tcp_discovery.xml"
+    xml.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.9" addrtype="ipv4"/>'
+        '<ports><port protocol="tcp" portid="22"><state state="open"/></port></ports></host></nmaprun>',
+        encoding="utf-8",
+    )
+    plan = {"runs": [{"index": 0, "batch_index": 0, "stage_id": "tcp_discovery", "returncode": 0, "files": [str(xml)]}],
+            "manifest_path": str(tmp_path / "m.json"), "state_path": str(tmp_path / "s.json")}
+    findings = scanner.scan_findings(plan)
+    assert findings["open_tcp"] == 1 and findings["live_hosts"] == 1
+
+
+def test_discovery_only_success_is_partial_not_failed(tmp_path):
+    """QA-038: discovery 만 성공(identify 전부 실패)해도 live host+open port 가 있으면 partial(exit 0),
+    discovery XML 을 import fallback 으로 추천한다('모든 단계 실패' 아님)."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    r = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "do", "127.0.0.1"],
+        env={"FAKE_NMAP_FAIL_STAGE": "tcp_identify,udp_identify"},
+    )
+    assert r.returncode == 0, r.stderr + r.stdout
+    state = json.loads((out / "do.state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "partial"
+    assert "모든 단계 실패" not in r.stderr
+    manifest = json.loads((out / "do.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["import_xml_files"] == [str(out / "do.127.0.0.1.tcp_discovery.xml")]
+    assert "open_tcp=2" in r.stdout and "live_hosts=1" in r.stdout
+
+
+def test_all_stages_failed_reports_failed_exit1(tmp_path):
+    """QA-044: 모든 단계가 실패하고 import 가능한 결과가 없으면 status=failed, exit 1, '모든 단계 실패' 안내."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    r = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "fa", "127.0.0.1"],
+        env={"FAKE_NMAP_FAIL_ALL": "1"},
+    )
+    assert r.returncode == 1, r.stderr + r.stdout
+    state = json.loads((out / "fa.state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert "모든 단계 실패" in r.stderr
+    manifest = json.loads((out / "fa.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["import_xml_files"] == []
+
+
+def test_manifest_excludes_vanished_rc0_xml(tmp_path):
+    """QA-041: 성공(rc=0) 기록이라도 XML 이 사라지면 import 목록에서 빠진다."""
+    scanner = _load_scanner()
+    present = tmp_path / "p.tcp_identify.xml"
+    present.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/></host></nmaprun>',
+        encoding="utf-8",
+    )
+    run_present = {"stage_id": "tcp_identify", "returncode": 0, "files": [str(present)]}
+    run_missing = {"stage_id": "udp_identify", "returncode": 0, "files": [str(tmp_path / "gone.udp_identify.xml")]}
+    assert scanner.manifest_xml_files(run_present) == [str(present)]
+    assert scanner.manifest_xml_files(run_missing) == []
+
+
+def test_resume_drops_vanished_xml_from_import_list(tmp_path):
+    """QA-041: 성공(rc=0) 단계의 XML 이 사라지면, resume 후 manifest 가 그것을 importable 로 광고하지 않는다.
+    (완료 플랜은 cursor 가 끝이라 재스캔하지 않지만, 사라진 XML 을 'done' 으로 추천해서는 안 된다.)"""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    first = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "rv", "127.0.0.1"],
+    )
+    assert first.returncode == 0, first.stderr + first.stdout
+    gone = out / "rv.127.0.0.1.tcp_identify.xml"
+    gone.unlink()
+    second = _run_scanner(
+        ["--resume", str(out / "rv.state.json"), "--nmap", str(fake_nmap)],
+    )
+    assert second.returncode == 0, second.stderr + second.stdout
+    manifest = json.loads((out / "rv.manifest.json").read_text(encoding="utf-8"))
+    assert str(gone) not in manifest["import_xml_files"]
+    assert str(gone) not in manifest["all_xml_files"]
+
+
+def test_late_interrupt_during_finalize_keeps_terminal_status(tmp_path, monkeypatch):
+    """QA-042: finalize(zip 생성 등) 중 인터럽트가 완료 상태를 'interrupted' 로 덮어쓰지 않는다."""
+    scanner = _load_scanner()
+    fake = _fake_nmap(tmp_path)
+    args = scanner.parser().parse_args(
+        ["--nmap", str(fake), "--output-dir", str(tmp_path / "o"), "--name", "li", "--zip", "127.0.0.1"])
+    plan = scanner.create_plan(args)
+
+    def boom(*_a, **_k):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(scanner, "create_zip", boom)
+    rc = scanner.execute(plan, zip_outputs=True)
+    assert rc == 0
+    state = json.loads((tmp_path / "o" / "li.state.json").read_text(encoding="utf-8"))
+    assert state["status"] in ("done", "partial")
+
+
+def test_write_json_failure_downgrades_running_status(tmp_path, monkeypatch):
+    """QA-043: 루프 도중 write_json 실패(디스크풀 등)는 status 를 'running' 으로 방치하지 않고 내려준다(exit 1)."""
+    scanner = _load_scanner()
+    fake = _fake_nmap(tmp_path)
+    args = scanner.parser().parse_args(
+        ["--nmap", str(fake), "--output-dir", str(tmp_path / "o"), "--name", "io", "--tcp-only", "127.0.0.1"])
+    plan = scanner.create_plan(args)
+    real = scanner.write_json
+    state_flag = {"fired": False}
+
+    def flaky(path, data):
+        if data.get("runs") and not state_flag["fired"]:
+            state_flag["fired"] = True
+            raise OSError("disk full")
+        return real(path, data)
+
+    monkeypatch.setattr(scanner, "write_json", flaky)
+    rc = scanner.execute(plan)
+    assert rc == 1
+    state = json.loads((tmp_path / "o" / "io.state.json").read_text(encoding="utf-8"))
+    assert state["status"] != "running"
+
+
+def test_final_status_text_no_false_resume_promise():
+    """QA-032: rc=2(입력오류, 재개 힌트 없음)는 '재개 가능' 을 안내하지 않는다(순수 함수, headless)."""
+    spec = importlib.util.spec_from_file_location("scanops_gui_fs", GUI_SCRIPT)
+    gui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gui)
+    fst = gui.final_status_text
+    assert "재개 불가" in fst(2, False, 0, False)
+    assert fst(130, False, 0, False).startswith("중지됨")
+    assert "재개 실행" in fst(1, False, 0, True)
+    assert "재개할 상태가 없습니다" in fst(1, False, 0, False)
+    assert fst(0, True, 2, False).startswith("부분 완료")
+    assert fst(0, False, 0, False) == "완료"

@@ -267,8 +267,13 @@ def validate_ports(ports: str) -> str:
             raise ValueError(f"프로토콜 접두사 뒤에 포트가 없습니다: '{seg}'")
         if not PORT_BODY_RE.match(body):
             raise ValueError(f"잘못된 포트/범위: '{seg}' (예: 80, 1-1024, 1-, -1024)")
-        if any(not (1 <= int(n) <= 65535) for n in re.findall(r"\d+", body)):
+        nums = re.findall(r"\d+", body)
+        if any(not (1 <= int(n) <= 65535) for n in nums):
             raise ValueError(f"포트는 1-65535 범위여야 합니다: '{seg}'")
+        # 거꾸로 된 범위(시작>끝)는 nmap 이 fatal 로 거절 → 빈 실패 스캔이 된다. IP 범위(expand_targets)와
+        # 동일하게 여기서 정직하게 막는다(QA-035). 열린 범위('1-','-1024')는 끝점이 하나라 무관.
+        if "-" in body and len(nums) == 2 and int(nums[0]) > int(nums[1]):
+            raise ValueError(f"포트 범위가 거꾸로입니다(시작>끝): '{seg}'. 예: 22-443")
     return ports
 
 
@@ -375,15 +380,27 @@ def set_scan_type(flags: list[str], scan_type: str) -> list[str]:
 
 
 def tcp_only_ports(port_spec: str) -> str:
-    u_idx = port_spec.upper().find("U:")
-    if u_idx >= 0:
-        port_spec = port_spec[:u_idx].rstrip(",")
-    parts = []
-    for part in port_spec.split(","):
-        item = part.strip()
-        if not item or item.upper().startswith("U:"):
+    # nmap sticky 규칙(T:/U: 는 다음 접두사 전까지 유효)을 존중해 TCP 부분만 남긴다. 접두사 없는 포트는
+    # 직전 프로토콜에 귀속된다. 이전 구현은 첫 'U:' 에서 spec 을 통째로 잘라 그 뒤 T: 포트를 잃었고
+    # (예: 'U:53,T:80,443' → '' ), 단순 항목 필터는 U: 뒤 sticky 포트(예: 'U:7,53' 의 53)를 TCP 로
+    # 오인했다 — 둘 다 틀렸다(QA-037). T: 접두사는 보존한다(build_base_flags 가 그대로 -p 에 넣는다).
+    current = ""
+    parts: list[str] = []
+    for raw in port_spec.split(","):
+        item = raw.strip()
+        if not item:
             continue
-        parts.append(item)
+        if ":" in item:
+            prefix, value = item.split(":", 1)
+            up = prefix.upper()
+            if up in ("T", "U"):
+                current = up
+                if up == "T" and value:
+                    parts.append(f"T:{value}")
+                continue
+        # 접두사 없는 포트: 직전 프로토콜(없으면 TCP)에 귀속
+        if current in ("", "T"):
+            parts.append(item)
     return ",".join(parts)
 
 
@@ -464,6 +481,11 @@ def auto_tcp_discovery_ports(plan: dict) -> str:
 
 
 def auto_udp_ports(plan: dict) -> str:
+    # --all-ports 는 '전부 스캔' 의도 → auto_tcp_discovery_ports 가 override 를 무시하고 전체를 잡는 것과
+    # 대칭으로, UDP 도 기본 UDP 포트셋을 쓴다. (이전엔 all_ports 를 무시해, TCP만 담긴 --ports 가 남아 있으면
+    # UDP 단계가 통째로 건너뛰어졌다 — QA-036.) tcp_only 는 execute_auto 가 더 앞에서 처리.
+    if plan.get("all_ports"):
+        return f"U:{UDP_DEFAULT_PORTS}"
     override = plan.get("ports_override", "")
     if override:
         ports = protocol_ports(override, "U")
@@ -471,7 +493,7 @@ def auto_udp_ports(plan: dict) -> str:
     return f"U:{UDP_DEFAULT_PORTS}"
 
 
-def apply_auto_modifiers(flags: list[str], plan: dict) -> list[str]:
+def apply_auto_modifiers(flags: list[str], plan: dict, stage_id: str = "") -> list[str]:
     flags = set_scan_type(list(flags), plan.get("scan_type", ""))
     scripts = plan.get("scripts", "")
     if plan.get("no_scripts"):
@@ -481,7 +503,10 @@ def apply_auto_modifiers(flags: list[str], plan: dict) -> list[str]:
         flags = replace_value_flag(flags, "--script", scripts)
     if plan.get("include_closed"):
         flags = strip_flags(flags, {"--open"})
-    if plan.get("open_only") and "--open" not in flags:
+    # discovery 단계엔 --open 을 절대 추가하지 않는다: 열린 TCP 0개인 up 호스트(UDP 전용)가 XML 에서
+    # 통째로 빠져 live_hosts 에서 누락되고 UDP 식별을 못 받는다(상단 불변식, QA-031).
+    # open_only 는 identify 단계(이미 --open 보유)에만 의미가 있으므로 discovery 는 제외한다.
+    if plan.get("open_only") and "--open" not in flags and stage_id != "tcp_discovery":
         flags.append("--open")
     return flags
 
@@ -504,7 +529,7 @@ def build_auto_flags(plan: dict, stage_id: str, tcp_ports: list[int] | None = No
         flags = replace_value_flag(AUTO_UDP_IDENTIFY_FLAGS, "-p", udp_ports)
     else:
         raise ValueError(f"unknown auto stage: {stage_id}")
-    return apply_auto_modifiers(flags, plan)
+    return apply_auto_modifiers(flags, plan, stage_id)
 
 
 def output_base(plan: dict, index: int, stage_id: str = "") -> Path:
@@ -569,6 +594,43 @@ def open_ports_from_xml(path: Path, protocol: str = "tcp") -> list[int]:
         except ValueError:
             continue
     return sorted(ports)
+
+
+def open_host_ports_from_xml(path: Path, protocol: str = "tcp") -> list[tuple[str, int]]:
+    """열린 (호스트, 포트) 쌍 목록. 서로 다른 호스트의 같은 포트번호를 구분해 노출 규모를 정확히 센다(QA-039).
+    포트번호만 세면 50개 호스트가 443 을 열어도 1 로 집계돼 공격면을 크게 과소보고한다."""
+    if not path.exists():
+        return []
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        return []
+    protocol = protocol.lower()
+    pairs: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for host in root.findall(".//host"):
+        ip = ""
+        for addr in host.findall("address"):
+            if (addr.get("addrtype") or "").lower() == "mac":
+                continue
+            if addr.get("addr"):
+                ip = addr.get("addr") or ""
+                break
+        for port in host.findall(".//port"):
+            if (port.get("protocol") or "").lower() != protocol:
+                continue
+            state = port.find("state")
+            if state is None or (state.get("state") or "").lower() != "open":
+                continue
+            try:
+                pid = int(port.get("portid") or "")
+            except ValueError:
+                continue
+            key = (ip, pid)
+            if key not in seen:
+                seen.add(key)
+                pairs.append(key)
+    return pairs
 
 
 def live_hosts_from_xml(path: Path) -> list[str]:
@@ -656,6 +718,10 @@ def stage_succeeded(plan: dict, batch_index: int, stage_id: str) -> bool:
     for run in plan.get("runs", []):
         run_batch = run.get("batch_index", run.get("index"))
         if run_batch == batch_index and run.get("stage_id", "") == stage_id and run.get("returncode") == 0 and not run.get("skipped"):
+            # 성공으로 기록됐어도 출력 파일이 전부 사라졌으면 재스캔되도록 성공으로 보지 않는다(QA-041).
+            files = run.get("files", [])
+            if files and not any(Path(f).exists() for f in files):
+                continue
             return True
     return False
 
@@ -689,7 +755,11 @@ def append_skipped_stage(plan: dict, batch_index: int, stage_id: str, reason: st
 
 
 def write_json(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 원자적 쓰기: 임시파일에 쓴 뒤 os.replace 로 교체한다. 중간에 실패해도 기존 state 파일이
+    # 손상되거나 절반만 쓰인 채 남지 않는다(QA-043).
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def create_plan(args: argparse.Namespace) -> dict:
@@ -800,7 +870,8 @@ def manifest_xml_files(run: dict) -> list[str]:
         return []
     xmls = [p for p in run.get("files", []) if str(p).lower().endswith(".xml")]
     if run.get("returncode") == 0:
-        return xmls
+        # 기록 당시 존재했어도 이후 삭제/유실됐을 수 있으므로 실제 존재하는 것만 광고한다(QA-041).
+        return [p for p in xmls if Path(p).exists()]
     return [p for p in xmls if xml_has_hosts(Path(p))]
 
 
@@ -812,12 +883,8 @@ def write_manifest(plan: dict, zip_path: str = "") -> None:
     manifest["all_xml_files"] = list(dict.fromkeys(
         p for run in runs for p in manifest_xml_files(run)
     ))
-    manifest["import_xml_files"] = list(dict.fromkeys(
-        p
-        for run in runs
-        if run.get("stage_id", "") != "tcp_discovery"
-        for p in manifest_xml_files(run)
-    ))
+    # identify 산출물이 하나도 없으면 성공한 discovery XML 을 구제 fallback 으로 추천한다(QA-038).
+    manifest["import_xml_files"] = importable_xml(plan, include_discovery_fallback=True)
     write_json(Path(plan["manifest_path"]), manifest)
 
 
@@ -852,22 +919,34 @@ def failed_runs(plan: dict) -> list[dict]:
     return [r for r in latest_runs(plan) if not r.get("skipped") and r.get("returncode") not in (0, None)]
 
 
-def importable_xml(plan: dict) -> list[str]:
-    """import 가능한 XML(파싱+host, discovery 제외). 부분 실패 단계의 XML 도 쓸만하면 포함."""
+def importable_xml(plan: dict, include_discovery_fallback: bool = False) -> list[str]:
+    """import 가능한 XML(파싱+host, discovery 제외). 부분 실패 단계의 XML 도 쓸만하면 포함.
+    include_discovery_fallback=True 면, identify 산출물이 하나도 없을 때 성공한 discovery XML 을 구제
+    fallback 으로 포함한다(QA-038: discovery 만 성공한 스캔이 'failed' 로 버려지지 않게)."""
     seen: dict[str, None] = {}
     for run in latest_runs(plan):
         if run.get("stage_id", "") == "tcp_discovery":
             continue
         for p in manifest_xml_files(run):
             seen[p] = None
+    if seen or not include_discovery_fallback:
+        return list(seen)
+    # fallback 은 host 가 실제로 든 성공 discovery XML 만 구제한다. host 0 인 빈 discovery(살아있는 호스트
+    # 없음)까지 살리면 '빈 스캔'이 import 가능한 것처럼 잘못 보고된다(QA-038 ↔ QA-012 경계).
+    for run in latest_runs(plan):
+        if run.get("stage_id", "") != "tcp_discovery":
+            continue
+        for p in manifest_xml_files(run):
+            if xml_has_hosts(Path(p)):
+                seen[p] = None
     return list(seen)
 
 
 def scan_findings(plan: dict) -> dict:
-    """결과 요약 집계: 살아있는 호스트 수, 열린 TCP/UDP 포트 수, import XML 개수."""
+    """결과 요약 집계: 살아있는 호스트 수, 열린 TCP/UDP (호스트,포트) 수, import XML 개수."""
     live: set[str] = set()
-    tcp: set[int] = set()
-    udp: set[int] = set()
+    tcp: set[tuple[str, int]] = set()
+    udp: set[tuple[str, int]] = set()
     for run in latest_runs(plan):
         if run.get("skipped"):
             continue
@@ -878,20 +957,23 @@ def scan_findings(plan: dict) -> dict:
             stage = run.get("stage_id", "")
             if stage == "tcp_discovery":
                 live.update(live_hosts_from_xml(path))
+                # discovery 가 찾은 열린 TCP 를 floor 로 집계: identify 가 건너뛰거나 실패해도 open_tcp 가
+                # 0 으로 떨어지지 않는다(QA-040). set 이라 identify 재관측분과 중복되지 않는다.
+                tcp.update(open_host_ports_from_xml(path, "tcp"))
             elif stage == "udp_identify":
-                udp.update(open_ports_from_xml(path, "udp"))
+                udp.update(open_host_ports_from_xml(path, "udp"))
                 # discovery 가 없거나 UDP 전용으로 살아난 호스트도 live 로 집계(QA-030).
                 live.update(hosts_with_open_ports_from_xml(path))
             else:  # tcp_identify or single
-                tcp.update(open_ports_from_xml(path, "tcp"))
-                udp.update(open_ports_from_xml(path, "udp"))
+                tcp.update(open_host_ports_from_xml(path, "tcp"))
+                udp.update(open_host_ports_from_xml(path, "udp"))
                 # 단일 워크플로(discovery 없음)는 여기서만 호스트를 보므로 열린 포트 호스트를 live 로 센다(QA-030).
                 live.update(hosts_with_open_ports_from_xml(path))
     return {
         "live_hosts": len(live),
         "open_tcp": len(tcp),
         "open_udp": len(udp),
-        "importable": len(importable_xml(plan)),
+        "importable": len(importable_xml(plan, include_discovery_fallback=True)),
     }
 
 
@@ -902,7 +984,9 @@ def finalize_plan(plan: dict, state_path: Path, zip_outputs: bool) -> int:
     - failed:  실패가 있고 import 가능한 결과가 0 → 진짜 실패. exit 1.
     이 구조가 'UDP 한 단계 실패가 전체 스캔을 죽이던' ISSUE-001/QA-002~006 을 해소한다."""
     failed = failed_runs(plan)
-    importable = importable_xml(plan)
+    # discovery 만 성공한 경우(identify 산출물 0)에도 성공한 discovery XML 을 구제 fallback 으로 인정한다.
+    # 살아있는 호스트와 열린 포트를 찾고도 'failed'(exit 1, "모든 단계 실패")로 버려지던 문제를 막는다(QA-038).
+    importable = importable_xml(plan, include_discovery_fallback=True)
     if importable:
         status = "partial" if failed else "done"
     else:
@@ -1086,11 +1170,30 @@ def execute(plan: dict, dry_run: bool = False, zip_outputs: bool = False) -> int
             return execute_auto(plan, state_path, zip_outputs)
         return execute_single(plan, state_path, zip_outputs)
     except KeyboardInterrupt:
+        # finalize 가 이미 최종 상태(done/partial/failed)를 디스크에 기록한 뒤의 늦은 인터럽트(예: zip 생성 중)는
+        # 그 최종 상태를 덮어쓰지 않는다(QA-042). 완료된 스캔이 'interrupted' 로 둔갑하는 것을 막는다.
+        if plan.get("status") in ("done", "partial", "failed"):
+            return 0 if plan["status"] in ("done", "partial") else 1
         plan["status"] = "interrupted"
         plan["finished_at"] = now_iso()
-        write_json(state_path, plan)
+        try:
+            write_json(state_path, plan)
+        except OSError:
+            pass
         print("\ninterrupted. Resume with: --resume " + str(state_path), file=sys.stderr)
         return 130
+    except OSError as exc:
+        # 루프 도중 상태 저장 실패(디스크풀/읽기전용 등)로 finalize 에 도달 못 하면 status 가 'running' 으로
+        # 영구히 남는다(QA-043). 가능하면 interrupted 로 낮추고 재개 힌트를 남긴다.
+        if plan.get("status") not in ("done", "partial", "failed"):
+            plan["status"] = "interrupted"
+            plan["finished_at"] = now_iso()
+            try:
+                write_json(state_path, plan)
+            except OSError:
+                pass
+        print(f"\nerror: 입출력 오류로 스캔이 중단되었습니다: {exc}\nresume with: --resume {state_path}", file=sys.stderr)
+        return 1
 
 
 def parser() -> argparse.ArgumentParser:

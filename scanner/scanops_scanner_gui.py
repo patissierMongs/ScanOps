@@ -41,6 +41,26 @@ def parse_marker(line: str) -> dict:
         "partial": low.startswith("partial:"),
     }
 
+
+def final_status_text(rc: int, partial: bool, warn_count: int, has_resume: bool) -> str:
+    """종료 코드 → 사용자 상태 문자열(순수 함수, Tk 불필요 → 단위 테스트 가능).
+    재개는 실제로 재개할 state 가 있을 때(=재개 힌트를 받았거나 중지 rc=130)만 권한다. rc=2(입력/설정
+    오류)는 execute 이전에 거절돼 state 가 없으므로 '재개 가능'을 안내하지 않는다(QA-032)."""
+    if rc == 0:
+        if partial:
+            return f"부분 완료 — 경고 {warn_count}건(로그 확인)"
+        if warn_count:
+            return f"완료(경고 {warn_count}건 — 로그 확인)"
+        return "완료"
+    if rc == 130:
+        return "중지됨 — [재개 실행]으로 이어할 수 있습니다"
+    if has_resume:
+        return f"실패(종료 코드 {rc}) — [재개 실행] 가능"
+    if rc == 2:
+        return f"입력/설정 오류(종료 코드 {rc}) — 입력을 고치고 다시 실행하세요(재개 불가)"
+    return f"실패(종료 코드 {rc}) — 재개할 상태가 없습니다(로그 확인)"
+
+
 RUN_MODE_LABELS = {
     "auto": "자동 스캔 - 열린 포트와 용도 파악",
     "single_basic": "단일 실행 - 빠른 서비스 확인",
@@ -204,7 +224,8 @@ class ScannerGui:
         resume.columnconfigure(0, weight=1)
         ttk.Entry(resume, textvariable=self.resume_path).grid(row=0, column=0, sticky="ew", padx=(10, 6), pady=8)
         ttk.Button(resume, text="state.json 선택", command=self._browse_resume).grid(row=0, column=1, padx=6, pady=8)
-        ttk.Button(resume, text="재개 실행", command=lambda: self._start(dry_run=False, resume=True)).grid(row=0, column=2, padx=(6, 10), pady=8)
+        self.resume_btn = ttk.Button(resume, text="재개 실행", command=lambda: self._start(dry_run=False, resume=True))
+        self.resume_btn.grid(row=0, column=2, padx=(6, 10), pady=8)
 
         log_frame = ttk.LabelFrame(outer, text="명령/실행 로그")
         log_frame.grid(row=7, column=0, sticky="nsew")
@@ -382,6 +403,9 @@ class ScannerGui:
         self._resume_hint = ""
         self._warn_count = 0
         self._partial = False
+        # 새 스캔(재개 아님)을 실제로 시작하면 이전 스캔의 재개 경로를 비워, 잘못된 state 재개를 막는다(QA-033).
+        if not resume and not dry_run:
+            self.resume_path.set("")
         self._set_running(True)
         self.status.set("명령 확인 중" if dry_run else "스캔 실행 중")
         threading.Thread(target=self._run_process, args=(cmd,), daemon=True).start()
@@ -461,8 +485,9 @@ class ScannerGui:
                     self.proc = None
                     self._set_running(False)
                     self.status.set(self._final_status(rc))
-                    # 실패/부분/중단 시 재개 경로를 자동 채워 사용자가 바로 [재개 실행] 할 수 있게.
-                    if self._resume_hint and not self.resume_path.get().strip():
+                    # 실패/부분/중단 시 재개 경로를 자동 채운다. 항상 '최신' 힌트로 덮어써서, 이전 실패
+                    # 스캔의 state 경로가 남아 다음에 엉뚱한 스캔을 재개하는 일을 막는다(QA-033).
+                    if self._resume_hint:
                         self.resume_path.set(self._resume_hint)
                     self._append_log(f"\nexit code: {rc}\n")
         except queue.Empty:
@@ -479,20 +504,14 @@ class ScannerGui:
             self._partial = True
 
     def _final_status(self, rc: int) -> str:
-        if rc == 0:
-            if self._partial:
-                return f"부분 완료 — 경고 {self._warn_count}건(로그 확인)"
-            if self._warn_count:
-                return f"완료(경고 {self._warn_count}건 — 로그 확인)"
-            return "완료"
-        if rc == 130:
-            return "중지됨 — [재개 실행]으로 이어할 수 있습니다"
-        return f"실패(종료 코드 {rc}) — [재개 실행] 가능"
+        return final_status_text(rc, self._partial, self._warn_count, bool(self._resume_hint))
 
     def _set_running(self, running: bool) -> None:
         state = "disabled" if running else "normal"
         self.preview_btn.configure(state=state)
         self.start_btn.configure(state=state)
+        # 재개 버튼도 실행 중엔 비활성화(다른 액션 버튼과 일관, QA-034). _start 의 실행 중 가드는 백스톱.
+        self.resume_btn.configure(state=state)
         self.stop_btn.configure(state="normal" if running else "disabled")
 
     def _append_log(self, text: str) -> None:
