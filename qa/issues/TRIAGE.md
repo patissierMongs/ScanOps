@@ -118,3 +118,11 @@ Source: scanner-qa-convergence-r7 workflow (high bar). 1 candidate → 1 confirm
 | ID | grp | sev | disp | title |
 |----|-----|-----|------|-------|
 | QA-059 | R7 | low | FIX | dry-run preview shows a UDP stage (invalid -sT -sU) for --scan-type connect that execute actually skips |
+
+## Round 8 (loop: final convergence) — CONVERGED ✅
+
+Source: scanner-qa-convergence-r8 workflow (maximal bar). 0 candidates raised across all dimensions → 0 confirmed. The loop's termination condition (no more problems found) is met.
+
+Convergence yield by round: **16 → 7 → 4 → 2 → 1 → 0**. Rounds 5–7 findings were predominantly follow-ons to earlier fixes (each fix adversarially stress-tested by the next round), now all closed.
+
+**Final state:** QA-002..059 filed (58 issues) and resolved (QA-024/025/026 deferred cosmetic; QA-045/055 file-only — no code defect). Standalone scanner test suite **70 passing** (from a 40-pass/2-fail baseline). All commits CI-green. The standalone nmap scanner (CLI + GUI) is hardened across failure-isolation, hang-guarding, result-reliability, resume/state integrity, port/target validation, and GUI stop/resume UX.
