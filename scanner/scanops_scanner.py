@@ -727,6 +727,14 @@ def xml_has_hosts(path: Path) -> bool:
     return root.find(".//host") is not None
 
 
+def xml_has_usable_host(path: Path) -> bool:
+    """import 가치가 있는 host 가 있는지: status=up 호스트가 있거나 열린 포트를 가진 호스트가 있는지.
+    단순 <host> 엘리먼트 존재(xml_has_hosts)보다 엄격하다 — MAC-only/유령 호스트나 status=down + 전부
+    필터/닫힘인 '빈' 식별 XML 이 importable 로 잘못 잡혀 discovery 구제 fallback 을 막는 것을 방지(QA-056).
+    QA-050 의 집계 헬퍼와 동일한 '쓸만한 host' 기준을 쓴다."""
+    return bool(live_hosts_from_xml(path) or hosts_with_open_ports_from_xml(path))
+
+
 def run_stage_name(stage_id: str) -> str:
     return dict(AUTO_STAGES).get(stage_id, stage_id)
 
@@ -947,9 +955,10 @@ def importable_xml(plan: dict, include_discovery_fallback: bool = False) -> list
         if run.get("stage_id", "") == "tcp_discovery":
             continue
         for p in manifest_xml_files(run):
-            # host 가 실제로 든 식별 XML 만 importable 로 센다. rc=0 이지만 host 없는 빈 식별 XML 이
-            # seen 을 차지하면 discovery 구제 fallback 이 막혀, 실데이터가 든 discovery XML 이 누락된다(QA-049).
-            if xml_has_hosts(Path(p)):
+            # '쓸만한 host'(status=up 또는 열린 포트)가 든 식별 XML 만 importable 로 센다. host 없는 빈 XML
+            # (QA-049)이나 MAC-only/유령·down-전부필터 host(QA-056)가 seen 을 차지하면 discovery 구제
+            # fallback 이 막혀 실데이터가 든 discovery XML 이 누락된다.
+            if xml_has_usable_host(Path(p)):
                 seen[p] = None
     if seen or not include_discovery_fallback:
         return list(seen)
@@ -959,7 +968,7 @@ def importable_xml(plan: dict, include_discovery_fallback: bool = False) -> list
         if run.get("stage_id", "") != "tcp_discovery":
             continue
         for p in manifest_xml_files(run):
-            if xml_has_hosts(Path(p)):
+            if xml_has_usable_host(Path(p)):
                 seen[p] = None
     return list(seen)
 

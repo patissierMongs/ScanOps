@@ -91,3 +91,14 @@ Source: scanner-qa-convergence workflow (5 analyzers × adversarial verify) over
 | QA-051 | R4 | medium | FIX | xml-only deletion defeats QA-041 resume re-run (siblings satisfy the vanish check) |
 | QA-052 | R4 | medium | FIX(test) | no-live-hosts UDP skip + --udp-all-targets rescue untested |
 | QA-053 | R4 | low | FIX | expand_targets caps on pre-dedup count, rejecting deduplicable-within-cap input |
+
+## Round 5 (loop: convergence audit of the round-4-patched code)
+
+Source: scanner-qa-convergence-r5 workflow. 4 candidates → 4 confirmed. Two are follow-ons to round-4 fixes (QA-054←QA-047, QA-056←QA-049); diminishing severity (high 1, medium 1, low 2).
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-054 | R5 | medium | FIX | QA-047 fix POSIX-only; Windows force-kill rc=1 still mislabels a stop as failure |
+| QA-055 | R5 | low | FILE-ONLY | rc<0 stop message promises state.json after a force-killed dry-run (near-unreachable race) |
+| QA-056 | R5 | high | FIX | xml_has_hosts too weak: content-less identify host suppresses discovery fallback (re-opens QA-049) |
+| QA-057 | R5 | low | FIX(test) | auto-workflow UDP skip for a TCP-only --ports override is untested |

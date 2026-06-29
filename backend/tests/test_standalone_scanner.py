@@ -1316,3 +1316,73 @@ def test_expand_targets_caps_on_deduped_count():
         ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
     assert scanner.expand_targets(["10.0.0.0/30", "10.0.0.0/30"], cap=4) == \
         ["10.0.0.0", "10.0.0.1", "10.0.0.2", "10.0.0.3"]
+
+
+# --- Round 5 회귀/커버리지 테스트 (QA-054/056/057) ----------------------------------
+
+def test_final_status_text_windows_user_stop_rc1_is_stop():
+    """QA-054: Windows force-kill 은 rc=1(음수 아님)이지만 사용자 중지(user_stopped)면 '중지'로 표시.
+    사용자 중지가 아닌 실제 rc=1 실패는 여전히 '실패'."""
+    spec = importlib.util.spec_from_file_location("scanops_gui_ustop", GUI_SCRIPT)
+    gui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gui)
+    stopped = gui.final_status_text(1, False, 0, False, user_stopped=True)
+    assert stopped.startswith("중지됨") and "실패" not in stopped and "재개" in stopped
+    assert gui.final_status_text(1, False, 0, False).startswith("실패")
+    # 음수 rc(POSIX force-kill)도 여전히 '중지'
+    assert gui.final_status_text(-9, False, 0, False).startswith("중지됨")
+
+
+def test_contentless_identify_host_does_not_block_discovery_salvage(tmp_path):
+    """QA-056: rc=0 식별 XML 의 host 가 MAC-only/down-전부필터라 import 가치가 없으면 discovery 구제 fallback 작동."""
+    scanner = _load_scanner()
+    disc = tmp_path / "z.tcp_discovery.xml"
+    disc.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/>'
+        '<ports><port protocol="tcp" portid="22"><state state="open"/></port>'
+        '<port protocol="tcp" portid="443"><state state="open"/></port></ports></host></nmaprun>',
+        encoding="utf-8",
+    )
+    ident = tmp_path / "z.tcp_identify.xml"
+    ident.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="down"/>'
+        '<address addr="00:11:22:33:44:55" addrtype="mac"/>'
+        '<ports><port protocol="tcp" portid="22"><state state="filtered"/></port></ports></host></nmaprun>',
+        encoding="utf-8",
+    )
+    plan = {
+        "runs": [
+            {"index": 0, "batch_index": 0, "stage_id": "tcp_discovery", "returncode": 0, "files": [str(disc)]},
+            {"index": 0, "batch_index": 0, "stage_id": "tcp_identify", "returncode": 0, "files": [str(ident)]},
+        ],
+        "manifest_path": str(tmp_path / "m.json"), "state_path": str(tmp_path / "s.json"),
+    }
+    assert not scanner.xml_has_usable_host(ident)
+    assert scanner.xml_has_usable_host(disc)
+    assert scanner.importable_xml(plan, include_discovery_fallback=True) == [str(disc)]
+    # status=up 이지만 열린 포트 없는 호스트는 여전히 importable(상태 데이터 보존)
+    up_noports = tmp_path / "u.tcp_identify.xml"
+    up_noports.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.2" addrtype="ipv4"/><ports></ports></host></nmaprun>',
+        encoding="utf-8",
+    )
+    assert scanner.xml_has_usable_host(up_noports)
+
+
+def test_auto_tcp_only_ports_override_skips_udp_stage(tmp_path):
+    """QA-057: auto 워크플로에서 --tcp-only 플래그 없이 TCP만 담긴 --ports 를 주면 UDP 단계가 '포트 없음'으로 건너뛴다."""
+    scanner = _load_scanner()
+    assert scanner.auto_udp_ports({"ports_override": "22,443"}) == ""
+    assert scanner.auto_udp_ports({"ports_override": "T:80"}) == ""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    r = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "to", "--ports", "22,443", "127.0.0.1"])
+    assert r.returncode == 0, r.stderr + r.stdout
+    state = json.loads((out / "to.state.json").read_text(encoding="utf-8"))
+    udp = next(rn for rn in state["runs"] if rn["stage_id"] == "udp_identify")
+    assert udp.get("skipped") is True and "UDP 포트가 없습니다" in udp.get("skip_reason", "")
+    disc = next(rn for rn in state["runs"] if rn["stage_id"] == "tcp_discovery")
+    assert disc.get("skipped") is not True

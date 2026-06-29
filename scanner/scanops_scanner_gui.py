@@ -42,7 +42,7 @@ def parse_marker(line: str) -> dict:
     }
 
 
-def final_status_text(rc: int, partial: bool, warn_count: int, has_resume: bool) -> str:
+def final_status_text(rc: int, partial: bool, warn_count: int, has_resume: bool, user_stopped: bool = False) -> str:
     """종료 코드 → 사용자 상태 문자열(순수 함수, Tk 불필요 → 단위 테스트 가능).
     재개는 실제로 재개할 state 가 있을 때(=재개 힌트를 받았거나 중지 rc=130)만 권한다. rc=2(입력/설정
     오류)는 execute 이전에 거절돼 state 가 없으므로 '재개 가능'을 안내하지 않는다(QA-032)."""
@@ -54,10 +54,12 @@ def final_status_text(rc: int, partial: bool, warn_count: int, has_resume: bool)
         return "완료"
     if rc == 130:
         return "중지됨 — [재개 실행]으로 이어할 수 있습니다"
-    if rc < 0:
-        # 시그널 종료(force-kill SIGKILL 등): 실패가 아니라 '중지'다. CLI 가 재개 힌트를 못 남겼어도
-        # state.json 이 디스크에 남아 재개 가능하므로 'state.json 선택' 버튼으로 안내한다(QA-047).
-        return f"중지됨(신호 {-rc}) — 'state.json 선택' 후 [재개 실행] 할 수 있습니다"
+    if rc < 0 or user_stopped:
+        # 시그널 종료(POSIX force-kill SIGKILL → rc<0) 또는 사용자가 중지를 요청한 경우(Windows taskkill 은
+        # rc=1 같은 양수라 음수로 식별 불가 → user_stopped 로 구분, QA-054). 실패가 아니라 '중지'다. CLI 가
+        # 재개 힌트를 못 남겼어도 state.json 이 디스크에 남아 재개 가능하므로 'state.json 선택'으로 안내(QA-047).
+        sig = f"(신호 {-rc}) " if rc < 0 else ""
+        return f"중지됨{sig}— 'state.json 선택' 후 [재개 실행] 할 수 있습니다"
     if has_resume:
         return f"실패(종료 코드 {rc}) — [재개 실행] 가능"
     if rc == 2:
@@ -136,6 +138,7 @@ class ScannerGui:
         self._resume_hint = ""
         self._warn_count = 0
         self._partial = False
+        self._user_stopped = False  # 사용자가 [중지]를 눌렀는지 — 종료 표시를 '실패' 대신 '중지'로(QA-054)
 
         self._build_ui()
         self.root.after(120, self._drain_output)
@@ -407,6 +410,7 @@ class ScannerGui:
         self._resume_hint = ""
         self._warn_count = 0
         self._partial = False
+        self._user_stopped = False
         # 새 스캔(재개 아님)을 실제로 시작하면 이전 스캔의 재개 경로를 비워, 잘못된 state 재개를 막는다(QA-033).
         if not resume and not dry_run:
             self.resume_path.set("")
@@ -444,6 +448,7 @@ class ScannerGui:
     def _stop(self) -> None:
         if self.proc is None:
             return
+        self._user_stopped = True  # 종료 코드가 무엇이든(Windows taskkill rc=1 포함) '중지'로 표시(QA-054)
         self._append_log("\n중지 요청(정상 종료 시도)...\n")
         proc = self.proc
         # 먼저 정상 종료 신호를 보내 CLI 의 interrupted 정리(상태 저장 + 재개 힌트)가 돌게 한다.
@@ -508,7 +513,7 @@ class ScannerGui:
             self._partial = True
 
     def _final_status(self, rc: int) -> str:
-        return final_status_text(rc, self._partial, self._warn_count, bool(self._resume_hint))
+        return final_status_text(rc, self._partial, self._warn_count, bool(self._resume_hint), self._user_stopped)
 
     def _set_running(self, running: bool) -> None:
         state = "disabled" if running else "normal"
