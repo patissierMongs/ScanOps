@@ -10,8 +10,18 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox
-from tkinter import scrolledtext, ttk
+
+# tkinter 를 최상단에서 강제로 import 하면 headless/ Tk 없는 파이썬에서 모듈 자체가 import 불가가 되어
+# 순수 함수(parse_marker, GUI↔CLI 표식 계약)와 상수까지 단위 테스트할 수 없다(QA-028).
+# GUI 를 '실행' 하려면 당연히 tkinter 가 필요하지만, 'import' 하는 데는 필요 없게 가드한다.
+try:
+    from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox
+    from tkinter import scrolledtext, ttk
+    _TK_IMPORT_ERROR: Exception | None = None
+except ImportError as _exc:  # noqa: F841 — headless 환경: 순수 로직만 import 가능하게 유지
+    BooleanVar = StringVar = Tk = filedialog = messagebox = None  # type: ignore[assignment]
+    scrolledtext = ttk = None  # type: ignore[assignment]
+    _TK_IMPORT_ERROR = _exc
 
 SCRIPT = Path(__file__).with_name("scanops_scanner.py")
 DEFAULT_OUTPUT = "scanops_scans"
@@ -30,6 +40,34 @@ def parse_marker(line: str) -> dict:
         "warning": low.startswith("warning:"),
         "partial": low.startswith("partial:"),
     }
+
+
+def final_status_text(rc: int, partial: bool, warn_count: int, has_resume: bool, user_stopped: bool = False) -> str:
+    """종료 코드 → 사용자 상태 문자열(순수 함수, Tk 불필요 → 단위 테스트 가능).
+    재개는 실제로 재개할 state 가 있을 때(=재개 힌트를 받았거나 중지 rc=130)만 권한다. rc=2(입력/설정
+    오류)는 execute 이전에 거절돼 state 가 없으므로 '재개 가능'을 안내하지 않는다(QA-032)."""
+    if rc == 0:
+        if partial:
+            return f"부분 완료 — 경고 {warn_count}건(로그 확인)"
+        if warn_count:
+            return f"완료(경고 {warn_count}건 — 로그 확인)"
+        return "완료"
+    if rc == 130:
+        return "중지됨 — [재개 실행]으로 이어할 수 있습니다"
+    if rc == 2:
+        # 입력/설정 오류는 execute 이전 거절이라 재개할 state 가 없다 → user_stopped 가 켜져 있어도(QA-058)
+        # '중지/재개'로 둔갑하지 않도록 가장 먼저 처리한다(QA-032 의 false-resume 제거를 유지).
+        return f"입력/설정 오류(종료 코드 {rc}) — 입력을 고치고 다시 실행하세요(재개 불가)"
+    if rc < 0 or user_stopped:
+        # 시그널 종료(POSIX force-kill SIGKILL → rc<0) 또는 사용자가 중지를 요청한 경우(Windows taskkill 은
+        # rc=1 같은 양수라 음수로 식별 불가 → user_stopped 로 구분, QA-054). 실패가 아니라 '중지'다. CLI 가
+        # 재개 힌트를 못 남겼어도 state.json 이 디스크에 남아 재개 가능하므로 'state.json 선택'으로 안내(QA-047).
+        sig = f"(신호 {-rc}) " if rc < 0 else ""
+        return f"중지됨{sig}— 'state.json 선택' 후 [재개 실행] 할 수 있습니다"
+    if has_resume:
+        return f"실패(종료 코드 {rc}) — [재개 실행] 가능"
+    return f"실패(종료 코드 {rc}) — 재개할 상태가 없습니다(로그 확인)"
+
 
 RUN_MODE_LABELS = {
     "auto": "자동 스캔 - 열린 포트와 용도 파악",
@@ -102,6 +140,7 @@ class ScannerGui:
         self._resume_hint = ""
         self._warn_count = 0
         self._partial = False
+        self._user_stopped = False  # 사용자가 [중지]를 눌렀는지 — 종료 표시를 '실패' 대신 '중지'로(QA-054)
 
         self._build_ui()
         self.root.after(120, self._drain_output)
@@ -194,7 +233,8 @@ class ScannerGui:
         resume.columnconfigure(0, weight=1)
         ttk.Entry(resume, textvariable=self.resume_path).grid(row=0, column=0, sticky="ew", padx=(10, 6), pady=8)
         ttk.Button(resume, text="state.json 선택", command=self._browse_resume).grid(row=0, column=1, padx=6, pady=8)
-        ttk.Button(resume, text="재개 실행", command=lambda: self._start(dry_run=False, resume=True)).grid(row=0, column=2, padx=(6, 10), pady=8)
+        self.resume_btn = ttk.Button(resume, text="재개 실행", command=lambda: self._start(dry_run=False, resume=True))
+        self.resume_btn.grid(row=0, column=2, padx=(6, 10), pady=8)
 
         log_frame = ttk.LabelFrame(outer, text="명령/실행 로그")
         log_frame.grid(row=7, column=0, sticky="nsew")
@@ -372,6 +412,10 @@ class ScannerGui:
         self._resume_hint = ""
         self._warn_count = 0
         self._partial = False
+        self._user_stopped = False
+        # 새 스캔(재개 아님)을 실제로 시작하면 이전 스캔의 재개 경로를 비워, 잘못된 state 재개를 막는다(QA-033).
+        if not resume and not dry_run:
+            self.resume_path.set("")
         self._set_running(True)
         self.status.set("명령 확인 중" if dry_run else "스캔 실행 중")
         threading.Thread(target=self._run_process, args=(cmd,), daemon=True).start()
@@ -404,8 +448,11 @@ class ScannerGui:
             self.output_queue.put(("done", 1))
 
     def _stop(self) -> None:
-        if self.proc is None:
+        # 이미 종료된(아직 drain 안 된) 프로세스에는 중지 처리를 하지 않는다: 그러지 않으면 ~120ms drain 창에서
+        # 막 실패(rc=1)/검증오류(rc=2)로 끝난 스캔에 _user_stopped 가 걸려 '실패'가 '중지'로 둔갑한다(QA-058).
+        if self.proc is None or self.proc.poll() is not None:
             return
+        self._user_stopped = True  # 종료 코드가 무엇이든(Windows taskkill rc=1 포함) '중지'로 표시(QA-054)
         self._append_log("\n중지 요청(정상 종료 시도)...\n")
         proc = self.proc
         # 먼저 정상 종료 신호를 보내 CLI 의 interrupted 정리(상태 저장 + 재개 힌트)가 돌게 한다.
@@ -451,8 +498,9 @@ class ScannerGui:
                     self.proc = None
                     self._set_running(False)
                     self.status.set(self._final_status(rc))
-                    # 실패/부분/중단 시 재개 경로를 자동 채워 사용자가 바로 [재개 실행] 할 수 있게.
-                    if self._resume_hint and not self.resume_path.get().strip():
+                    # 실패/부분/중단 시 재개 경로를 자동 채운다. 항상 '최신' 힌트로 덮어써서, 이전 실패
+                    # 스캔의 state 경로가 남아 다음에 엉뚱한 스캔을 재개하는 일을 막는다(QA-033).
+                    if self._resume_hint:
                         self.resume_path.set(self._resume_hint)
                     self._append_log(f"\nexit code: {rc}\n")
         except queue.Empty:
@@ -469,20 +517,14 @@ class ScannerGui:
             self._partial = True
 
     def _final_status(self, rc: int) -> str:
-        if rc == 0:
-            if self._partial:
-                return f"부분 완료 — 경고 {self._warn_count}건(로그 확인)"
-            if self._warn_count:
-                return f"완료(경고 {self._warn_count}건 — 로그 확인)"
-            return "완료"
-        if rc == 130:
-            return "중지됨 — [재개 실행]으로 이어할 수 있습니다"
-        return f"실패(종료 코드 {rc}) — [재개 실행] 가능"
+        return final_status_text(rc, self._partial, self._warn_count, bool(self._resume_hint), self._user_stopped)
 
     def _set_running(self, running: bool) -> None:
         state = "disabled" if running else "normal"
         self.preview_btn.configure(state=state)
         self.start_btn.configure(state=state)
+        # 재개 버튼도 실행 중엔 비활성화(다른 액션 버튼과 일관, QA-034). _start 의 실행 중 가드는 백스톱.
+        self.resume_btn.configure(state=state)
         self.stop_btn.configure(state="normal" if running else "disabled")
 
     def _append_log(self, text: str) -> None:
@@ -525,6 +567,11 @@ class ScannerGui:
 
 
 def main() -> None:
+    if _TK_IMPORT_ERROR is not None:
+        raise SystemExit(
+            "이 GUI 는 tkinter 가 필요합니다. tkinter 를 설치/활성화한 파이썬으로 실행하세요.\n"
+            f"(tkinter import 실패: {_TK_IMPORT_ERROR})"
+        )
     root = Tk()
     try:
         root.option_add("*Font", ("Malgun Gothic", 10))

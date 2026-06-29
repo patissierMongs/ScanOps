@@ -44,3 +44,85 @@ Full evidence: qa/analysis_result.json. ISSUE-001 (the originally reported UDP e
 - **H** port-spec validation: protocol_ports + validate_ports tightening (QA-013, QA-014)
 - **I** input/robustness: CIDR cap pre-check, IPv6 reject, dedup, range octets, malformed-state guard, scope allowlist, running-state guard (QA-015..020, QA-023)
 - **Z** deferred (cosmetic/low value, recorded only): QA-024, QA-025, QA-026, QA-028
+
+## Round 2 (loop: standalone re-analysis, fake-nmap harness)
+
+Source: live baseline run in headless container (40 pass / 2 fail) + standalone re-analysis. New issues not covered by QA-002..027.
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-028 | R2 | medium | FIX | GUI couples pure CLI-output logic (parse_marker) to a top-level tkinter import → untestable headless |
+| QA-029 | R2 | low | FIX | Interrupt/resume test is non-hermetic (needs real nmap), suite pass/fail varies by machine |
+| QA-030 | R2 | medium | FIX | Single-workflow summary always reports live_hosts=0 even with hosts up + open ports |
+
+## Round 3 (loop: 5-dimension multi-agent analysis + adversarial verify)
+
+Source: scanner-qa-discovery workflow (5 analyzers × adversarial troubleshooter). 19 candidates → 16 confirmed new/real (3 rejected: --host-timeout 0 backstop [covered by QA-007 + documented opt-out], single-workflow host-timeout test [code correct], resume-of-done idempotency test [code correct]).
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-031 | R3 | high | FIX | open_only injects --open into auto tcp_discovery, breaking UDP-only-host survival invariant |
+| QA-032 | R3 | medium | FIX | GUI _final_status promises resume for rc=2 validation errors where no state.json exists |
+| QA-033 | R3 | medium | FIX | Resume-path autofill never refreshes → second failed scan resumes the FIRST scan's state |
+| QA-034 | R3 | low | FIX | Resume button never disabled while a scan is running (_set_running omits it) |
+| QA-035 | R3 | medium | FIX | validate_ports accepts reversed port ranges (443-22) → fatal nmap error / empty failed scan |
+| QA-036 | R3 | medium | FIX | --all-ports + a TCP-only --ports silently disables the UDP identify stage |
+| QA-037 | R3 | low | FIX | tcp_only_ports truncates spec at first 'U:', dropping later T: ports (latent, preset-masked) |
+| QA-038 | R3 | high | FIX | discovery-only-success mislabeled 'failed' (exit 1) despite live hosts + open ports |
+| QA-039 | R3 | medium | FIX | summary open_tcp/open_udp count distinct port numbers, under-reporting multi-host exposure |
+| QA-040 | R3 | medium | FIX | scan_findings never counts discovery open TCP → open_tcp=0 when identify skipped/fails |
+| QA-041 | R3 | high | FIX | resume trusts recorded files w/o existence check → manifest advertises vanished XML as done |
+| QA-042 | R3 | medium | FIX | interrupt during finalize overwrites completed done/partial status with 'interrupted' |
+| QA-043 | R3 | medium | FIX | write_json non-atomic + execute() only catches KeyboardInterrupt → status='running' stranded |
+| QA-044 | R3 | high | FIX(test) | finalize_plan 'failed'/exit-1 path (all stages fail) is completely untested |
+| QA-045 | R3 | low | FILE-ONLY | --udp single-profile -sU insertion has no test (no code defect; low-value coverage) |
+| QA-046 | R3 | medium | FIX(test) | --open-only add / --open-only vs --include-closed precedence untested |
+
+## Round 4 (loop: convergence audit of the patched code)
+
+Source: scanner-qa-convergence workflow (5 analyzers × adversarial verify) over the round-2/3-patched code. 7 candidates → 7 confirmed (0 rejected). Four are interactions/regressions surfaced by the round-3 fixes (QA-047/049/050/051); three are deeper pre-existing (QA-048/052/053).
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-047 | R4 | medium | FIX | Force-kill negative rc shown as "실패 — 재개할 상태 없음" (stop mislabeled, resume denied) |
+| QA-048 | R4 | medium | FIX | single-workflow --tcp-only/connect leave U: ports in --ports override → nmap fatal |
+| QA-049 | R4 | high | FIX | rc=0 host-less identify XML suppresses discovery fallback → manifest advertises empty XML |
+| QA-050 | R4 | low | FIX | open_host_ports_from_xml counts ("",port) for MAC-only host → open_tcp>0 while live=0 |
+| QA-051 | R4 | medium | FIX | xml-only deletion defeats QA-041 resume re-run (siblings satisfy the vanish check) |
+| QA-052 | R4 | medium | FIX(test) | no-live-hosts UDP skip + --udp-all-targets rescue untested |
+| QA-053 | R4 | low | FIX | expand_targets caps on pre-dedup count, rejecting deduplicable-within-cap input |
+
+## Round 5 (loop: convergence audit of the round-4-patched code)
+
+Source: scanner-qa-convergence-r5 workflow. 4 candidates → 4 confirmed. Two are follow-ons to round-4 fixes (QA-054←QA-047, QA-056←QA-049); diminishing severity (high 1, medium 1, low 2).
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-054 | R5 | medium | FIX | QA-047 fix POSIX-only; Windows force-kill rc=1 still mislabels a stop as failure |
+| QA-055 | R5 | low | FILE-ONLY | rc<0 stop message promises state.json after a force-killed dry-run (near-unreachable race) |
+| QA-056 | R5 | high | FIX | xml_has_hosts too weak: content-less identify host suppresses discovery fallback (re-opens QA-049) |
+| QA-057 | R5 | low | FIX(test) | auto-workflow UDP skip for a TCP-only --ports override is untested |
+
+## Round 6 (loop: convergence audit of the round-5-patched code)
+
+Source: scanner-qa-convergence-r6 workflow. 2 candidates → 2 confirmed, but both are the SAME root cause (the round-5 QA-054 _user_stopped flag) seen from two dimensions. Yield 16 → 7 → 4 → 2: converging.
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-058 | R6 | low | FIX | _stop sets _user_stopped on an already-exited proc (120ms race), mislabeling a failure/rc=2 as a stop |
+
+## Round 7 (loop: final-bar convergence audit)
+
+Source: scanner-qa-convergence-r7 workflow (high bar). 1 candidate → 1 confirmed (low). Yield 16 → 7 → 4 → 2 → 1: at the tail.
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-059 | R7 | low | FIX | dry-run preview shows a UDP stage (invalid -sT -sU) for --scan-type connect that execute actually skips |
+
+## Round 8 (loop: final convergence) — CONVERGED ✅
+
+Source: scanner-qa-convergence-r8 workflow (maximal bar). 0 candidates raised across all dimensions → 0 confirmed. The loop's termination condition (no more problems found) is met.
+
+Convergence yield by round: **16 → 7 → 4 → 2 → 1 → 0**. Rounds 5–7 findings were predominantly follow-ons to earlier fixes (each fix adversarially stress-tested by the next round), now all closed.
+
+**Final state:** QA-002..059 filed (58 issues) and resolved (QA-024/025/026 deferred cosmetic; QA-045/055 file-only — no code defect). Standalone scanner test suite **70 passing** (from a 40-pass/2-fail baseline). All commits CI-green. The standalone nmap scanner (CLI + GUI) is hardened across failure-isolation, hang-guarding, result-reliability, resume/state integrity, port/target validation, and GUI stop/resume UX.
