@@ -1153,6 +1153,24 @@ def install_stop_handlers() -> None:
             pass  # 비메인 스레드 등에서는 등록 불가 — 무시
 
 
+def rewind_cursor_for_vanished_outputs(plan: dict) -> None:
+    """resume 시, 성공(rc=0)으로 기록됐지만 출력 파일이 전부 사라진 단계가 있으면 그 단계가 속한 가장 앞
+    배치로 cursor 를 되감아 재스캔되게 한다(QA-041). 완료(done) 플랜은 cursor 가 끝이라 그냥 두면 아무
+    단계도 재실행되지 않는다. stage_succeeded 가 사라진 단계를 성공으로 보지 않으므로, 되감긴 배치에서 그
+    단계만 다시 돌고 산출물이 멀쩡한 단계는 그대로 건너뛴다(fresh 플랜은 runs 가 없어 무영향)."""
+    missing_batches: list[int] = []
+    for run in plan.get("runs", []):
+        if run.get("skipped") or run.get("returncode") != 0:
+            continue
+        files = run.get("files", [])
+        if files and not any(Path(f).exists() for f in files):
+            b = run.get("batch_index", run.get("index"))
+            if b is not None:
+                missing_batches.append(int(b))
+    if missing_batches:
+        plan["cursor"] = min(int(plan.get("cursor", 0)), min(missing_batches))
+
+
 def execute(plan: dict, dry_run: bool = False, zip_outputs: bool = False) -> int:
     if dry_run:
         print_plan(plan)
@@ -1162,6 +1180,8 @@ def execute(plan: dict, dry_run: bool = False, zip_outputs: bool = False) -> int
     out_dir.mkdir(parents=True, exist_ok=True)
     state_path = Path(plan["state_path"])
     install_stop_handlers()
+    # resume: 성공 기록이지만 산출물이 사라진 단계가 있으면 그 배치로 cursor 를 되감아 재스캔되게 한다(QA-041).
+    rewind_cursor_for_vanished_outputs(plan)
     plan["status"] = "running"
     write_json(state_path, plan)
 

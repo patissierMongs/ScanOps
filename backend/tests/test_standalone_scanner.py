@@ -1119,24 +1119,33 @@ def test_manifest_excludes_vanished_rc0_xml(tmp_path):
     assert scanner.manifest_xml_files(run_missing) == []
 
 
-def test_resume_drops_vanished_xml_from_import_list(tmp_path):
-    """QA-041: 성공(rc=0) 단계의 XML 이 사라지면, resume 후 manifest 가 그것을 importable 로 광고하지 않는다.
-    (완료 플랜은 cursor 가 끝이라 재스캔하지 않지만, 사라진 XML 을 'done' 으로 추천해서는 안 된다.)"""
+def test_resume_reruns_stage_whose_output_vanished(tmp_path):
+    """QA-041: 성공(rc=0) 단계의 출력이 전부 사라지면 resume 이 cursor 를 되감아 그 단계만 다시 돌리고
+    XML 을 재생성한다(멀쩡한 단계는 건너뜀). 사라진 XML 을 'done' 으로 광고하지 않는다."""
     fake_nmap = _fake_nmap(tmp_path)
     out = tmp_path / "out"
+    log = tmp_path / "log.jsonl"
     first = _run_scanner(
         ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "rv", "127.0.0.1"],
+        env={"FAKE_NMAP_LOG": str(log)},
     )
     assert first.returncode == 0, first.stderr + first.stdout
     gone = out / "rv.127.0.0.1.tcp_identify.xml"
-    gone.unlink()
+    for suf in (".xml", ".nmap", ".gnmap"):
+        p = out / ("rv.127.0.0.1.tcp_identify" + suf)
+        if p.exists():
+            p.unlink()
     second = _run_scanner(
         ["--resume", str(out / "rv.state.json"), "--nmap", str(fake_nmap)],
+        env={"FAKE_NMAP_LOG": str(log)},
     )
     assert second.returncode == 0, second.stderr + second.stdout
+    stages = [e["stage"] for e in _read_jsonl(log)]
+    assert stages.count("tcp_identify") == 2   # 사라진 단계만 재실행
+    assert stages.count("tcp_discovery") == 1  # 멀쩡한 단계는 재실행 안 함
+    assert gone.exists()                        # 재생성됨
     manifest = json.loads((out / "rv.manifest.json").read_text(encoding="utf-8"))
-    assert str(gone) not in manifest["import_xml_files"]
-    assert str(gone) not in manifest["all_xml_files"]
+    assert str(gone) in manifest["import_xml_files"]
 
 
 def test_late_interrupt_during_finalize_keeps_terminal_status(tmp_path, monkeypatch):
