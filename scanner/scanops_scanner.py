@@ -304,7 +304,9 @@ def validate_host_timeout(value: str) -> str:
 
 
 def expand_targets(targets: list[str], cap: int) -> list[str]:
-    hosts: list[str] = []
+    # dict 로 누적해 '전개 도중'에도 중복/겹침을 제거한다(QA-018). 캡은 dedup 된 누적 개수로 검사하므로
+    # 중복 대상이 캡을 헛되이 넘기지 않고(QA-053), 동시에 누적 폭발도 막는다(QA-015 유지).
+    hosts: dict[str, None] = {}
     for raw in targets:
         t = raw.strip()
         if not t:
@@ -315,23 +317,24 @@ def expand_targets(targets: list[str], cap: int) -> list[str]:
             except ValueError as exc:
                 # 잘못된 CIDR 을 그대로 nmap 에 넘기면 거기서 깨진다 → 여기서 정직하게 거절(QA-019).
                 raise ValueError(f"잘못된 CIDR: {t}") from exc
-            # 전개 '전에' 크기를 확인한다. /8·IPv6 CIDR 을 통째로 materialize 하면 캡이 발동하기도 전에
-            # 메모리/시간이 폭발한다(QA-015).
+            # 전개 '전에' 단일 CIDR 크기를 확인한다. /8·IPv6 CIDR 을 통째로 materialize 하면 캡이 발동하기도
+            # 전에 메모리/시간이 폭발한다(QA-015). 이 pre-check 는 절대 제거하지 말 것.
             if net.num_addresses > cap:
                 raise ValueError(f"대상 호스트가 너무 많습니다(>{cap}): {t}. --max-hosts 또는 범위를 조정하세요.")
-            hosts.extend(str(ip) for ip in net)
+            for ip in net:
+                hosts[str(ip)] = None
         elif match := RANGE_RE.match(t):
             base, lo, hi = match.group(1), int(match.group(2)), int(match.group(3))
             octets = [int(o) for o in base.split(".")]
             if any(o > 255 for o in octets) or lo > 255 or hi > 255 or lo > hi:
                 raise ValueError(f"잘못된 IP 범위: {t}")
-            hosts.extend(f"{base}.{i}" for i in range(lo, hi + 1))
+            for i in range(lo, hi + 1):
+                hosts[f"{base}.{i}"] = None
         else:
-            hosts.append(t)
+            hosts[t] = None
         if len(hosts) > cap:
             raise ValueError(f"대상 호스트가 너무 많습니다(>{cap}). --max-hosts 또는 범위를 조정하세요.")
-    # 중복/겹침 대상 제거(순서 보존): 중복 스캔과 배치 출력 파일 충돌을 막는다(QA-018).
-    return list(dict.fromkeys(hosts))
+    return list(hosts)
 
 
 def make_batches(targets: list[str], batch_size: int) -> list[list[str]]:
@@ -425,6 +428,16 @@ def build_base_flags(args: argparse.Namespace) -> list[str]:
     if ports:
         flags = strip_value_flags(flags, VALUE_FLAGS)
         flags.extend(["-p", ports])
+
+    # TCP 전용(tcp_only)·connect(권한 불필요, UDP 불가) 모드에선 '최종' -p 의 U: 포트도 제거한다.
+    # 위 tcp_only 분기는 프리셋 -p 만 처리하므로, 사용자 --ports override 의 U: 포트가 그대로 새어
+    # -sU 없이 nmap 에 전달되면 nmap 이 fatal 종료한다(QA-048). 제거 후 TCP 포트가 없으면 정직하게 거절.
+    if (getattr(args, "tcp_only", False) or args.scan_type == "connect") and "-p" in flags:
+        idx = flags.index("-p")
+        stripped = tcp_only_ports(flags[idx + 1])
+        if not stripped:
+            raise ValueError("TCP 전용(또는 connect) 모드인데 지정한 포트에 TCP 포트가 없습니다. 예: --ports 22,443")
+        flags[idx + 1] = stripped
 
     scripts = validate_scripts(args.scripts)
     if getattr(args, "no_scripts", False):
@@ -616,6 +629,10 @@ def open_host_ports_from_xml(path: Path, protocol: str = "tcp") -> list[tuple[st
             if addr.get("addr"):
                 ip = addr.get("addr") or ""
                 break
+        if not ip:
+            # 사용 가능한(비-MAC) 주소가 없으면 건너뛴다 — live_hosts_from_xml / hosts_with_open_ports_from_xml
+            # 의 가드와 일관되게 ('', port) 유령 쌍이 open_tcp 를 부풀려 live=0 인데 open>0 이 되는 모순 방지(QA-050).
+            continue
         for port in host.findall(".//port"):
             if (port.get("protocol") or "").lower() != protocol:
                 continue
@@ -718,9 +735,11 @@ def stage_succeeded(plan: dict, batch_index: int, stage_id: str) -> bool:
     for run in plan.get("runs", []):
         run_batch = run.get("batch_index", run.get("index"))
         if run_batch == batch_index and run.get("stage_id", "") == stage_id and run.get("returncode") == 0 and not run.get("skipped"):
-            # 성공으로 기록됐어도 출력 파일이 전부 사라졌으면 재스캔되도록 성공으로 보지 않는다(QA-041).
-            files = run.get("files", [])
-            if files and not any(Path(f).exists() for f in files):
+            # 성공으로 기록됐어도 '.xml 산출물'이 사라졌으면 재스캔되도록 성공으로 보지 않는다(QA-041).
+            # manifest 가 광고하는 것은 .xml 이므로, .nmap/.gnmap 형제가 남아있어도 .xml 이 없으면 vanished 로
+            # 본다 — 그렇지 않으면 .xml 만 지워졌을 때 재실행이 안 돼 importable 결과가 영구 손실된다(QA-051).
+            xmls = [f for f in run.get("files", []) if str(f).lower().endswith(".xml")]
+            if xmls and not any(Path(f).exists() for f in xmls):
                 continue
             return True
     return False
@@ -928,7 +947,10 @@ def importable_xml(plan: dict, include_discovery_fallback: bool = False) -> list
         if run.get("stage_id", "") == "tcp_discovery":
             continue
         for p in manifest_xml_files(run):
-            seen[p] = None
+            # host 가 실제로 든 식별 XML 만 importable 로 센다. rc=0 이지만 host 없는 빈 식별 XML 이
+            # seen 을 차지하면 discovery 구제 fallback 이 막혀, 실데이터가 든 discovery XML 이 누락된다(QA-049).
+            if xml_has_hosts(Path(p)):
+                seen[p] = None
     if seen or not include_discovery_fallback:
         return list(seen)
     # fallback 은 host 가 실제로 든 성공 discovery XML 만 구제한다. host 0 인 빈 discovery(살아있는 호스트
@@ -1162,8 +1184,9 @@ def rewind_cursor_for_vanished_outputs(plan: dict) -> None:
     for run in plan.get("runs", []):
         if run.get("skipped") or run.get("returncode") != 0:
             continue
-        files = run.get("files", [])
-        if files and not any(Path(f).exists() for f in files):
+        # manifest 가 광고하는 .xml 기준으로 vanished 판정(.nmap/.gnmap 형제만 남아도 .xml 이 없으면 재실행, QA-051).
+        xmls = [f for f in run.get("files", []) if str(f).lower().endswith(".xml")]
+        if xmls and not any(Path(f).exists() for f in xmls):
             b = run.get("batch_index", run.get("index"))
             if b is not None:
                 missing_batches.append(int(b))

@@ -82,10 +82,12 @@ def write_xml(base: Path, stage: str) -> None:
         ports = """
         <port protocol="tcp" portid="80"><state state="open"/><service name="http" product="nginx"/></port>
         """
+    # DOWN_DISCOVERY: discovery 가 열린 TCP 는 찾았지만 status=down(살아있는 호스트 0) 인 시나리오 재현(QA-052)
+    status = "down" if (os.environ.get("FAKE_NMAP_DOWN_DISCOVERY") and stage == "tcp_discovery") else "up"
     xml = f"""<?xml version="1.0"?>
 <nmaprun scanner="fake">
   <host>
-    <status state="up"/>
+    <status state="{status}"/>
     <address addr="127.0.0.1" addrtype="ipv4"/>
     <ports>{ports}</ports>
   </host>
@@ -1201,3 +1203,116 @@ def test_final_status_text_no_false_resume_promise():
     assert "재개할 상태가 없습니다" in fst(1, False, 0, False)
     assert fst(0, True, 2, False).startswith("부분 완료")
     assert fst(0, False, 0, False) == "완료"
+
+
+# --- Round 4 회귀/커버리지 테스트 (QA-047..053) -------------------------------------
+
+def test_final_status_text_negative_rc_is_stop_not_failure():
+    """QA-047: force-kill 음수 rc(-9 등)는 '실패'가 아니라 '중지'로 표시하고 state 재개를 안내한다."""
+    spec = importlib.util.spec_from_file_location("scanops_gui_neg", GUI_SCRIPT)
+    gui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gui)
+    msg = gui.final_status_text(-9, False, 0, False)
+    assert msg.startswith("중지됨") and "재개" in msg
+    assert "실패" not in msg
+
+
+def test_single_tcp_only_strips_udp_ports_from_override():
+    """QA-048: 단일 워크플로 --tcp-only/connect 는 사용자 --ports 의 U: 포트도 제거하고, TCP 포트가 없으면 거절."""
+    import pytest
+    scanner = _load_scanner()
+    f = scanner.build_base_flags(_args(profile="basic", tcp_only=True, ports="T:80,U:53"))
+    assert f[f.index("-p") + 1] == "T:80"
+    f2 = scanner.build_base_flags(_args(profile="basic", scan_type="connect", ports="U:53,T:443"))
+    assert f2[f2.index("-p") + 1] == "T:443"
+    with pytest.raises(ValueError):
+        scanner.build_base_flags(_args(profile="basic", tcp_only=True, ports="U:53"))
+
+
+def test_hostless_identify_xml_does_not_block_discovery_salvage(tmp_path):
+    """QA-049: rc=0 이지만 host 없는 식별 XML 이 discovery 구제 fallback 을 막지 않는다(실데이터=discovery XML 보존)."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    r = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "hl", "--tcp-only", "127.0.0.1"],
+        env={"FAKE_NMAP_EMPTY_STAGE": "tcp_identify"},
+    )
+    assert r.returncode == 0, r.stderr + r.stdout
+    manifest = json.loads((out / "hl.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["import_xml_files"] == [str(out / "hl.127.0.0.1.tcp_discovery.xml")]
+    assert str(out / "hl.127.0.0.1.tcp_identify.xml") not in manifest["import_xml_files"]
+
+
+def test_open_host_ports_skips_mac_only_host(tmp_path):
+    """QA-050: 비-MAC 주소가 없는 호스트는 (host,port) 집계에서 제외(live=0 인데 open>0 인 모순 방지)."""
+    scanner = _load_scanner()
+    xml = tmp_path / "mac.xml"
+    xml.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="00:11:22:33:44:55" addrtype="mac"/>'
+        '<ports><port protocol="tcp" portid="22"><state state="open"/></port></ports></host></nmaprun>',
+        encoding="utf-8",
+    )
+    assert scanner.open_host_ports_from_xml(xml, "tcp") == []
+    plan = {"runs": [{"index": 0, "batch_index": 0, "stage_id": "tcp_identify", "returncode": 0, "files": [str(xml)]}],
+            "manifest_path": str(tmp_path / "m.json"), "state_path": str(tmp_path / "s.json")}
+    findings = scanner.scan_findings(plan)
+    assert findings["open_tcp"] == 0 and findings["live_hosts"] == 0
+
+
+def test_resume_reruns_when_only_xml_vanished(tmp_path):
+    """QA-051: .nmap/.gnmap 형제가 남아도 .xml 만 사라지면 resume 이 그 단계를 재실행하고 .xml 을 재생성한다."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    log = tmp_path / "log.jsonl"
+    first = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "xo", "127.0.0.1"],
+        env={"FAKE_NMAP_LOG": str(log)},
+    )
+    assert first.returncode == 0, first.stderr + first.stdout
+    gone = out / "xo.127.0.0.1.tcp_identify.xml"
+    gone.unlink()  # .xml 만 삭제, .nmap/.gnmap 유지
+    assert (out / "xo.127.0.0.1.tcp_identify.nmap").exists()
+    second = _run_scanner(
+        ["--resume", str(out / "xo.state.json"), "--nmap", str(fake_nmap)],
+        env={"FAKE_NMAP_LOG": str(log)},
+    )
+    assert second.returncode == 0, second.stderr + second.stdout
+    stages = [e["stage"] for e in _read_jsonl(log)]
+    assert stages.count("tcp_identify") == 2
+    assert gone.exists()
+    manifest = json.loads((out / "xo.manifest.json").read_text(encoding="utf-8"))
+    assert str(gone) in manifest["import_xml_files"]
+
+
+def test_udp_skipped_when_no_live_hosts_and_rescued_by_udp_all_targets(tmp_path):
+    """QA-052: discovery 가 살아있는 호스트를 못 찾으면(status=down) 기본은 UDP 건너뜀(--udp-all-targets 힌트),
+    --udp-all-targets 면 원본 배치로 UDP 실행."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    r = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "nd", "10.0.0.5"],
+        env={"FAKE_NMAP_DOWN_DISCOVERY": "1"},
+    )
+    assert r.returncode == 0, r.stderr + r.stdout
+    state = json.loads((out / "nd.state.json").read_text(encoding="utf-8"))
+    udp = next(rn for rn in state["runs"] if rn["stage_id"] == "udp_identify")
+    assert udp.get("skipped") is True and "--udp-all-targets" in udp.get("skip_reason", "")
+
+    out2 = tmp_path / "out2"
+    log = tmp_path / "log.jsonl"
+    r2 = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(out2), "--name", "nu", "--udp-all-targets", "10.0.0.5"],
+        env={"FAKE_NMAP_DOWN_DISCOVERY": "1", "FAKE_NMAP_LOG": str(log)},
+    )
+    assert r2.returncode == 0, r2.stderr + r2.stdout
+    assert _udp_targets_from_log(log) == ["10.0.0.5"]
+
+
+def test_expand_targets_caps_on_deduped_count():
+    """QA-053: 중복/겹침 대상은 dedup 후 개수로 캡을 검사한다(중복이 캡을 헛되이 넘기지 않음)."""
+    scanner = _load_scanner()
+    assert scanner.expand_targets(["10.0.0.1", "10.0.0.1", "10.0.0.2", "10.0.0.3"], cap=3) == \
+        ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    assert scanner.expand_targets(["10.0.0.0/30", "10.0.0.0/30"], cap=4) == \
+        ["10.0.0.0", "10.0.0.1", "10.0.0.2", "10.0.0.3"]

@@ -54,6 +54,10 @@ def final_status_text(rc: int, partial: bool, warn_count: int, has_resume: bool)
         return "완료"
     if rc == 130:
         return "중지됨 — [재개 실행]으로 이어할 수 있습니다"
+    if rc < 0:
+        # 시그널 종료(force-kill SIGKILL 등): 실패가 아니라 '중지'다. CLI 가 재개 힌트를 못 남겼어도
+        # state.json 이 디스크에 남아 재개 가능하므로 'state.json 선택' 버튼으로 안내한다(QA-047).
+        return f"중지됨(신호 {-rc}) — 'state.json 선택' 후 [재개 실행] 할 수 있습니다"
     if has_resume:
         return f"실패(종료 코드 {rc}) — [재개 실행] 가능"
     if rc == 2:

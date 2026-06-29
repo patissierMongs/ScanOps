@@ -77,3 +77,17 @@ Source: scanner-qa-discovery workflow (5 analyzers × adversarial troubleshooter
 | QA-044 | R3 | high | FIX(test) | finalize_plan 'failed'/exit-1 path (all stages fail) is completely untested |
 | QA-045 | R3 | low | FILE-ONLY | --udp single-profile -sU insertion has no test (no code defect; low-value coverage) |
 | QA-046 | R3 | medium | FIX(test) | --open-only add / --open-only vs --include-closed precedence untested |
+
+## Round 4 (loop: convergence audit of the patched code)
+
+Source: scanner-qa-convergence workflow (5 analyzers × adversarial verify) over the round-2/3-patched code. 7 candidates → 7 confirmed (0 rejected). Four are interactions/regressions surfaced by the round-3 fixes (QA-047/049/050/051); three are deeper pre-existing (QA-048/052/053).
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-047 | R4 | medium | FIX | Force-kill negative rc shown as "실패 — 재개할 상태 없음" (stop mislabeled, resume denied) |
+| QA-048 | R4 | medium | FIX | single-workflow --tcp-only/connect leave U: ports in --ports override → nmap fatal |
+| QA-049 | R4 | high | FIX | rc=0 host-less identify XML suppresses discovery fallback → manifest advertises empty XML |
+| QA-050 | R4 | low | FIX | open_host_ports_from_xml counts ("",port) for MAC-only host → open_tcp>0 while live=0 |
+| QA-051 | R4 | medium | FIX | xml-only deletion defeats QA-041 resume re-run (siblings satisfy the vanish check) |
+| QA-052 | R4 | medium | FIX(test) | no-live-hosts UDP skip + --udp-all-targets rescue untested |
+| QA-053 | R4 | low | FIX | expand_targets caps on pre-dedup count, rejecting deduplicable-within-cap input |
