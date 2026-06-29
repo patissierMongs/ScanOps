@@ -54,6 +54,10 @@ def final_status_text(rc: int, partial: bool, warn_count: int, has_resume: bool,
         return "완료"
     if rc == 130:
         return "중지됨 — [재개 실행]으로 이어할 수 있습니다"
+    if rc == 2:
+        # 입력/설정 오류는 execute 이전 거절이라 재개할 state 가 없다 → user_stopped 가 켜져 있어도(QA-058)
+        # '중지/재개'로 둔갑하지 않도록 가장 먼저 처리한다(QA-032 의 false-resume 제거를 유지).
+        return f"입력/설정 오류(종료 코드 {rc}) — 입력을 고치고 다시 실행하세요(재개 불가)"
     if rc < 0 or user_stopped:
         # 시그널 종료(POSIX force-kill SIGKILL → rc<0) 또는 사용자가 중지를 요청한 경우(Windows taskkill 은
         # rc=1 같은 양수라 음수로 식별 불가 → user_stopped 로 구분, QA-054). 실패가 아니라 '중지'다. CLI 가
@@ -62,8 +66,6 @@ def final_status_text(rc: int, partial: bool, warn_count: int, has_resume: bool,
         return f"중지됨{sig}— 'state.json 선택' 후 [재개 실행] 할 수 있습니다"
     if has_resume:
         return f"실패(종료 코드 {rc}) — [재개 실행] 가능"
-    if rc == 2:
-        return f"입력/설정 오류(종료 코드 {rc}) — 입력을 고치고 다시 실행하세요(재개 불가)"
     return f"실패(종료 코드 {rc}) — 재개할 상태가 없습니다(로그 확인)"
 
 
@@ -446,7 +448,9 @@ class ScannerGui:
             self.output_queue.put(("done", 1))
 
     def _stop(self) -> None:
-        if self.proc is None:
+        # 이미 종료된(아직 drain 안 된) 프로세스에는 중지 처리를 하지 않는다: 그러지 않으면 ~120ms drain 창에서
+        # 막 실패(rc=1)/검증오류(rc=2)로 끝난 스캔에 _user_stopped 가 걸려 '실패'가 '중지'로 둔갑한다(QA-058).
+        if self.proc is None or self.proc.poll() is not None:
             return
         self._user_stopped = True  # 종료 코드가 무엇이든(Windows taskkill rc=1 포함) '중지'로 표시(QA-054)
         self._append_log("\n중지 요청(정상 종료 시도)...\n")

@@ -102,3 +102,11 @@ Source: scanner-qa-convergence-r5 workflow. 4 candidates → 4 confirmed. Two ar
 | QA-055 | R5 | low | FILE-ONLY | rc<0 stop message promises state.json after a force-killed dry-run (near-unreachable race) |
 | QA-056 | R5 | high | FIX | xml_has_hosts too weak: content-less identify host suppresses discovery fallback (re-opens QA-049) |
 | QA-057 | R5 | low | FIX(test) | auto-workflow UDP skip for a TCP-only --ports override is untested |
+
+## Round 6 (loop: convergence audit of the round-5-patched code)
+
+Source: scanner-qa-convergence-r6 workflow. 2 candidates → 2 confirmed, but both are the SAME root cause (the round-5 QA-054 _user_stopped flag) seen from two dimensions. Yield 16 → 7 → 4 → 2: converging.
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-058 | R6 | low | FIX | _stop sets _user_stopped on an already-exited proc (120ms race), mislabeling a failure/rc=2 as a stop |

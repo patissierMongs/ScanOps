@@ -1386,3 +1386,17 @@ def test_auto_tcp_only_ports_override_skips_udp_stage(tmp_path):
     assert udp.get("skipped") is True and "UDP 포트가 없습니다" in udp.get("skip_reason", "")
     disc = next(rn for rn in state["runs"] if rn["stage_id"] == "tcp_discovery")
     assert disc.get("skipped") is not True
+
+
+# --- Round 6 회귀 테스트 (QA-058) ---------------------------------------------------
+
+def test_final_status_text_rc2_not_relabeled_by_user_stopped():
+    """QA-058: rc=2(입력/설정 오류, execute 이전 거절)는 user_stopped 가 켜져 있어도 '중지/재개'로 둔갑하지 않는다.
+    진짜 사용자 중지(rc=1 등)는 여전히 '중지', user_stopped 아닌 rc=1 실패는 '실패'."""
+    spec = importlib.util.spec_from_file_location("scanops_gui_r2", GUI_SCRIPT)
+    gui = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gui)
+    msg2 = gui.final_status_text(2, False, 0, False, user_stopped=True)
+    assert "재개 불가" in msg2 and "중지" not in msg2
+    assert gui.final_status_text(1, False, 0, False, user_stopped=True).startswith("중지됨")
+    assert gui.final_status_text(1, False, 0, False).startswith("실패")
