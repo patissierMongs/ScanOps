@@ -883,9 +883,14 @@ def print_plan(plan: dict) -> None:
                 print(display_command(build_command(plan, idx, "tcp_identify", [0])).replace("T:0", "T:<open TCP ports from previous step>"))
             else:
                 print(f"# {idx + 1}/{len(plan['batches'])} TCP 포트가 지정되지 않아 TCP 단계는 건너뜁니다.")
-            if not plan.get("tcp_only") and auto_udp_ports(plan):
+            # 미리보기는 실제 실행과 일치해야 한다: connect(권한 불필요) 모드는 execute_auto 가 UDP 단계를
+            # 건너뛰므로(QA-010) 미리보기에도 띄우지 않는다. 안 그러면 절대 안 도는 -sT+-sU(무효 조합)를
+            # 광고하게 된다(QA-059).
+            if not plan.get("tcp_only") and plan.get("scan_type") != "connect" and auto_udp_ports(plan):
                 print(f"# {idx + 1}/{len(plan['batches'])} {run_stage_name('udp_identify')}")
                 print(display_command(build_command(plan, idx, "udp_identify")))
+            elif plan.get("scan_type") == "connect" and not plan.get("tcp_only"):
+                print(f"# {idx + 1}/{len(plan['batches'])} UDP 단계는 connect(권한 불필요) 모드에서 건너뜁니다.")
         else:
             print(display_command(build_command(plan, idx)))
 

@@ -1400,3 +1400,22 @@ def test_final_status_text_rc2_not_relabeled_by_user_stopped():
     assert "재개 불가" in msg2 and "중지" not in msg2
     assert gui.final_status_text(1, False, 0, False, user_stopped=True).startswith("중지됨")
     assert gui.final_status_text(1, False, 0, False).startswith("실패")
+
+
+# --- Round 7 회귀 테스트 (QA-059) ---------------------------------------------------
+
+def test_connect_dry_run_preview_omits_udp_stage(tmp_path):
+    """QA-059: --scan-type connect 의 dry-run 미리보기는 실제로 건너뛰는 UDP 단계(-sU)를 보여주지 않고 안내만 한다."""
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT), "--dry-run", "--nmap", "nmap", "--workflow", "auto",
+            "--scan-type", "connect", "--output-dir", str(tmp_path), "--name", "c", "10.0.0.5",
+        ],
+        text=True, encoding="utf-8", capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "주요 UDP 서비스 식별" not in result.stdout
+    assert "-sU" not in result.stdout
+    assert "connect" in result.stdout  # UDP 건너뜀 안내가 표시된다
+    # TCP 단계는 여전히 미리보기에 있다
+    assert "TCP 전체 포트 발견" in result.stdout

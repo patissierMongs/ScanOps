@@ -110,3 +110,11 @@ Source: scanner-qa-convergence-r6 workflow. 2 candidates → 2 confirmed, but bo
 | ID | grp | sev | disp | title |
 |----|-----|-----|------|-------|
 | QA-058 | R6 | low | FIX | _stop sets _user_stopped on an already-exited proc (120ms race), mislabeling a failure/rc=2 as a stop |
+
+## Round 7 (loop: final-bar convergence audit)
+
+Source: scanner-qa-convergence-r7 workflow (high bar). 1 candidate → 1 confirmed (low). Yield 16 → 7 → 4 → 2 → 1: at the tail.
+
+| ID | grp | sev | disp | title |
+|----|-----|-----|------|-------|
+| QA-059 | R7 | low | FIX | dry-run preview shows a UDP stage (invalid -sT -sU) for --scan-type connect that execute actually skips |
