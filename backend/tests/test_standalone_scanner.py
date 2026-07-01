@@ -731,7 +731,7 @@ def test_one_failed_batch_does_not_abort_others(tmp_path):
     """QA-003: 멀티배치에서 한 타깃의 단계 실패가 나머지 배치를 막지 않는다."""
     fake_nmap = _fake_nmap(tmp_path)
     out = tmp_path / "out"
-    r = _run_scanner(
+    _run_scanner(
         ["--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "b",
          "--batch-size", "1", "--tcp-only", "10.0.0.5", "10.0.0.6"],
         env={"FAKE_NMAP_FAIL_TARGET": "10.0.0.5"},
@@ -819,8 +819,9 @@ def test_connect_scan_strips_udp_everywhere(tmp_path):
 
 def test_large_cidr_rejected_before_materialization(tmp_path):
     """QA-015: 큰 CIDR 은 전개 전에 캡으로 즉시 거절(메모리/시간 폭발 방지)."""
-    import pytest
     import time as _t
+
+    import pytest
     scanner = _load_scanner()
     args = scanner.parser().parse_args(["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "10.0.0.0/8"])
     start = _t.perf_counter()

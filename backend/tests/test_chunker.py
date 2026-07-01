@@ -1,7 +1,7 @@
 """청킹 — 타겟 확장 / 배치 분할 / 사이드카 상태."""
-from pathlib import Path
 
 import pytest
+
 from scanops.scanning import chunker as ch
 
 

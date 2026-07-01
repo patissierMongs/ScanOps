@@ -245,6 +245,7 @@ def test_rescan_run_starts_engine_job(client, monkeypatch):
     엔진 워커(spawn)는 막아 실제 nmap 이 안 돌게 한다 — 검증 대상은 job 구성.
     """
     import json
+
     import scanops.api.scans as scans_mod
     from scanops.config import get_settings
     monkeypatch.setattr(scans_mod, "_engine_worker", lambda scan_id: None)

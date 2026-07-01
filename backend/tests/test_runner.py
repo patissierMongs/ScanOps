@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import pytest
+
 from scanops.scanning import nmap_runner as r
 
 
@@ -74,8 +75,9 @@ def test_build_with_nse_scripts():
 
 
 def test_build_rejects_unknown_nse():
-    import pytest
     from pathlib import Path
+
+    import pytest
     with pytest.raises(ValueError):
         r.build_command_opts("nmap", ["version"], "", ["10.0.0.1"], Path("/s/x"), nse=["evil-script"])
 

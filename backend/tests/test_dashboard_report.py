@@ -2,6 +2,7 @@
 import io
 
 import openpyxl
+
 from tests.conftest import make_user, token_for
 
 XML = "tests/fixtures/sample_scan.xml"

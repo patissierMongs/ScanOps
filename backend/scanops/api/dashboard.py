@@ -1,7 +1,7 @@
 """대시보드 라우터 — 운영 요약 지표."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func
@@ -17,7 +17,7 @@ router = APIRouter()
 @router.get("")
 def dashboard(_: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     open_q = db.query(Finding).filter(Finding.state == "open")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     by_risk = dict(
         db.query(Finding.risk_level, func.count())

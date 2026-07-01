@@ -2,3 +2,6 @@
 -r requirements.txt
 pytest==8.3.4
 httpx==0.28.1
+# 린트/타입 게이트(CI) — 운영 배포와 무관.
+ruff==0.15.8
+mypy==1.19.1
