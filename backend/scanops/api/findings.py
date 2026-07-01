@@ -5,7 +5,7 @@ import csv
 import io
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
@@ -15,11 +15,17 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import get_db
 from ..models import FINDING_STATUSES, RISK_LABELS_KO, Finding, FindingEvent, ScanRun, User
-from ..schemas import (
-    EventOut, FindingOut, FindingPatch, RescanIn, RescanOut, RescanRunIn, RescanRunOut,
-)
 from ..scanning import engine_runner, nmap_runner
 from ..scanning.nmap_parse import _extract_key_line, pretty_fingerprint
+from ..schemas import (
+    EventOut,
+    FindingOut,
+    FindingPatch,
+    RescanIn,
+    RescanOut,
+    RescanRunIn,
+    RescanRunOut,
+)
 from ..spreadsheet import safe_cell
 from .deps import current_user, require_role
 
@@ -258,7 +264,7 @@ def rescan_due(
 
     닫혔으면 ingest 가 정상처리 자동 확정(조치 완료 검증), 여전히 열렸으면 그대로 남는다.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = db.query(Finding).filter(
         Finding.state == "open",
         or_(and_(Finding.deadline.isnot(None), Finding.deadline <= now),
@@ -324,7 +330,7 @@ def patch_finding(
     if body.manual_note is not None and body.manual_note != row.manual_note:
         log("NOTE", "메모 변경")
         row.manual_note = body.manual_note
-    row.updated_at = datetime.now(timezone.utc)
+    row.updated_at = datetime.now(UTC)
     db.commit()
     db.refresh(row)
     return row

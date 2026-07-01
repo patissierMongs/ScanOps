@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # (script_id 부분일치, 라벨, 정규식) — NSE 출력에서 한 줄 핵심 추출
 _REMARK_PATTERNS = [
@@ -128,7 +128,7 @@ def scan_start(source) -> datetime | None:
     if not start:
         return None
     try:
-        return datetime.fromtimestamp(int(start), tz=timezone.utc)
+        return datetime.fromtimestamp(int(start), tz=UTC)
     except (ValueError, OverflowError, OSError):
         return None
 

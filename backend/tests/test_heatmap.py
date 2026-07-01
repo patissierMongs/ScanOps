@@ -5,6 +5,7 @@ import io
 from pathlib import Path
 
 import openpyxl
+
 from tests.conftest import make_user, token_for
 
 SAMPLES = Path(__file__).resolve().parents[2] / "samples"

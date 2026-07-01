@@ -18,6 +18,16 @@ samples/.token
 frontend/node_modules/
 # frontend/dist 는 에어갭 배포용으로 커밋(빌드 산출물 동봉)
 
+# E2E(Playwright)·테스트/린트 산출물 — 재생성되므로 커밋 안 함
+frontend/test-results/
+frontend/playwright-report/
+frontend/.e2e-data/
+frontend/coverage/
+backend/.e2e-data/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
 # 패키징 wheelhouse 는 에어갭 배포용으로 포함(cp312 + 순수파이썬만 — 임베디드 3.12 와 일치)
 
 # 데모 스크린샷은 추적 안 함(레포 비대) — 필요하면 mockups/ 나 위키로

@@ -19,14 +19,18 @@ def test_closure_by_absence_with_real_scans():
     init_db()
     db = SessionLocal()
     try:
-        s1 = ScanRun(name="A", status="done"); db.add(s1); db.commit()
+        s1 = ScanRun(name="A", status="done")
+        db.add(s1)
+        db.commit()
         ingest(db, s1.id, parse_xml(A), up_hosts(A))
         # 3000 에 마감 배정
         f3000 = db.query(Finding).filter_by(port=3000).first()
         f3000.status = "처리중"
         db.commit()
 
-        s2 = ScanRun(name="B", status="done"); db.add(s2); db.commit()
+        s2 = ScanRun(name="B", status="done")
+        db.add(s2)
+        db.commit()
         counts = ingest(db, s2.id, parse_xml(B), up_hosts(B))
 
         # 3000 은 scanB 에서 부재 → 닫힘 + 조치 자동확인(정상처리)

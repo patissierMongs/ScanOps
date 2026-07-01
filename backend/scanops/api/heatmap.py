@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import get_db
-from ..models import Finding, RISK_LABELS_KO, ScanRun, User
+from ..models import RISK_LABELS_KO, Finding, ScanRun, User
 from ..scanning.nmap_parse import scan_start
 from ..spreadsheet import safe_cell
 from .deps import current_user

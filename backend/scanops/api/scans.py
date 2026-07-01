@@ -10,7 +10,7 @@ import json
 import re
 import threading
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -19,10 +19,10 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import SessionLocal, get_db
 from ..models import Finding, ScanRun, User
-from ..schemas import IngestSummary, RawCommandIn, ScanOut, ScanRunIn
 from ..scanning import chunker, engine_runner, nmap_runner, scan_options, scope, taxonomy
 from ..scanning.ingest import ingest
 from ..scanning.nmap_parse import parse_xml, scan_start, up_hosts
+from ..schemas import IngestSummary, RawCommandIn, ScanOut, ScanRunIn
 from .audit import record
 from .deps import current_user, require_role
 
@@ -69,7 +69,7 @@ def reconcile_orphans() -> int:
         for scan in orphans:
             scan.status = "interrupted"
             if scan.finished_at is None:
-                scan.finished_at = datetime.now(timezone.utc)
+                scan.finished_at = datetime.now(UTC)
         if orphans:
             db.commit()
         return len(orphans)
@@ -84,7 +84,7 @@ def _mark(scan_id: int, status: str) -> None:
         scan = db.get(ScanRun, scan_id)
         if scan is not None:
             scan.status = status
-            scan.finished_at = datetime.now(timezone.utc)
+            scan.finished_at = datetime.now(UTC)
             db.commit()
     finally:
         db.close()
@@ -261,7 +261,7 @@ def _closed_port_el(port_num: int, proto: str, service: str = "") -> ET.Element:
 def _write_merged_xml(db: Session, xml_path: Path, findings: list[dict], scanned_hosts: set[str],
                       scope_keys: set[str], scan_date: datetime | None = None) -> None:
     """Write one XML snapshot that heatmap can read consistently with Finding ingest."""
-    when = scan_date or datetime.now(timezone.utc)
+    when = scan_date or datetime.now(UTC)
     root = ET.Element(
         "nmaprun",
         scanner="scanops",
@@ -317,7 +317,7 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
     scan.host_count = len({f["host_ip"] for f in enriched})
     scan.port_count = len(enriched)
     scan.status = "done"
-    scan.finished_at = datetime.now(timezone.utc)
+    scan.finished_at = datetime.now(UTC)
     db.commit()
     return counts
 
@@ -469,7 +469,7 @@ def _chunk_worker(scan_id: int) -> None:
         batch = batches[cursor]
         b_base = Path(str(base) + f".b{cursor}")
         b_log = Path(str(b_base) + ".log")
-        t0 = datetime.now(timezone.utc)
+        t0 = datetime.now(UTC)
         if st.get("workflow") == "auto":
             try:
                 ok = _run_auto_batch(scan_id, nmap, batch, b_base, st)
@@ -482,7 +482,7 @@ def _chunk_worker(scan_id: int) -> None:
             if not ok:
                 _mark(scan_id, "failed")
                 return
-            dt = (datetime.now(timezone.utc) - t0).total_seconds()
+            dt = (datetime.now(UTC) - t0).total_seconds()
             st["cursor"] = cursor + 1
             st["active_seconds"] = round(st.get("active_seconds", 0) + dt, 1)
             chunker.write_state(base, st)
@@ -521,7 +521,7 @@ def _chunk_worker(scan_id: int) -> None:
             _mark(scan_id, "failed")
             return
         # 배치 완료 → 커서 전진 + 실제 스캔 시간 누적(영속). 누적은 멈춤시간 제외 → ETA 정확.
-        dt = (datetime.now(timezone.utc) - t0).total_seconds()
+        dt = (datetime.now(UTC) - t0).total_seconds()
         st["cursor"] = cursor + 1
         st["active_seconds"] = round(st.get("active_seconds", 0) + dt, 1)
         chunker.write_state(base, st)
@@ -617,7 +617,7 @@ def _engine_worker(scan_id: int) -> None:
         if scan is not None:
             engine_runner.ingest_results(db, scan, out_dir, scope_keys=scope_keys)
             scan.status = "done"
-            scan.finished_at = datetime.now(timezone.utc)
+            scan.finished_at = datetime.now(UTC)
             db.commit()
     except Exception:
         db.rollback()
@@ -672,7 +672,7 @@ def _import_single_xml(db: Session, user: User, name: str, xml_bytes: bytes) -> 
         counts = _ingest_xml(db, scan, xml_bytes, scan_date=sdate, filename=name)
     except Exception:
         scan.status = "failed"
-        scan.finished_at = datetime.now(timezone.utc)
+        scan.finished_at = datetime.now(UTC)
         db.commit()
         raise
     record(db, user, "SCAN_IMPORT", target=name, detail=f"#{scan.id}")
@@ -736,7 +736,7 @@ def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, d
         )
     except Exception:
         scan.status = "failed"
-        scan.finished_at = datetime.now(timezone.utc)
+        scan.finished_at = datetime.now(UTC)
         db.commit()
         raise
     files = [stages[k]["name"] for k in sorted(stages)]
@@ -777,17 +777,19 @@ async def import_xml(
     db: Session = Depends(get_db),
 ):
     xml_bytes = await file.read()
-    # 가져온 XML 의 '스캔 날짜'는 파일 안의 실제 스캔 시각(없으면 현재). 인입 시각이 아님.
-    sdate = scan_start(xml_bytes)
     scan = ScanRun(name=f"가져오기: {file.filename}", status="running", created_by=user.id)
     db.add(scan)
     db.commit()
-    if sdate is not None:
-        scan.started_at = sdate
     xml_path = _settings.scans_dir / f"scan_{scan.id}.xml"
     xml_path.write_bytes(xml_bytes)
     scan.raw_xml_path = str(xml_path)
     try:
+        # 가져온 XML 의 '스캔 날짜'는 파일 안의 실제 스캔 시각(없으면 현재). 인입 시각이 아님.
+        # scan_start/parse 는 깨진 XML 에서 ParseError 를 낼 수 있으므로 반드시 try 안에서 호출한다
+        # (밖에서 부르면 잘못된 XML 이 500 으로 새어 나가 사용자에게 원인 없는 오류가 뜬다).
+        sdate = scan_start(xml_bytes)
+        if sdate is not None:
+            scan.started_at = sdate
         counts = _ingest_xml(db, scan, xml_bytes, scan_date=sdate, filename=file.filename)
     except Exception as e:
         scan.status = "failed"

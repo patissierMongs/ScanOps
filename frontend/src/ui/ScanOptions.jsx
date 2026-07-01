@@ -54,7 +54,8 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
   const [showNse, setShowNse] = useState(false);
   const [presets, setPresets] = useState(loadPresets);
   const [presetId, setPresetId] = useState("");
-  const [touchedPorts, setTouchedPorts] = useState(false);
+  // setter 는 현재 어디에도 연결돼 있지 않아 항상 false — 미사용 setter 만 제거(동작 동일).
+  const [touchedPorts] = useState(false);
 
   useEffect(() => {
     let live = true;

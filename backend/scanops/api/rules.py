@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import RISK_LEVELS, Finding, RiskRule, User
-from ..schemas import RuleIn, RuleOut
 from ..scanning import taxonomy
+from ..schemas import RuleIn, RuleOut
 from .audit import record
 from .deps import current_user, require_role
 

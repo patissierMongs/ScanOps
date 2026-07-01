@@ -1,0 +1,43 @@
+# ScanOps 백엔드 도구 설정(ruff/mypy/pytest).
+# 운영 의존성은 requirements.txt, 개발/CI 는 requirements-dev.txt 로 관리한다.
+# 여기엔 [project]/[build-system] 을 두지 않는다 — 패키지 빌드가 아니라 도구 설정 전용.
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# 실질 가치가 큰 규칙만: pycodestyle(E/W), pyflakes(F), isort(I), pyupgrade(UP), bugbear(B).
+select = ["E", "F", "W", "I", "UP", "B"]
+# E501: 한국어 주석이 많아 줄길이 강제는 실익이 적다(line-length 는 참고용).
+# B008: FastAPI 의 Depends()/File() 기본인자 패턴이라 오탐 — 프로젝트 전반에서 정상 관용구.
+# B904: except 안 raise ... from 스타일. 기존 코드에 광범위해 게이트 도입 단계에선 완화.
+ignore = ["E501", "B008", "B904"]
+
+[tool.ruff.lint.per-file-ignores]
+# conftest 는 scanops import 전에 데이터 경로(env)를 세팅해야 해서 import 가 상단이 아니다(의도).
+"tests/conftest.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+# 에어갭 3rd-party(openpyxl 등) 스텁 부재는 무시 — 우리 코드 타입만 본다.
+ignore_missing_imports = true
+warn_unused_ignores = false
+
+# 점진 도입(incremental typing): 아래 모듈은 복잡한 Excel/스캔 워크플로 로직이라
+# 타입 정리 전까지 grandfather 로 제외한다. 나머지 모듈과 '새로 추가되는 코드'는 검사 대상이라
+# 회귀를 잡는 게이트 역할은 유지된다. (제외 목록은 정리되는 대로 하나씩 줄여 나가면 된다.)
+[[tool.mypy.overrides]]
+module = [
+    "scanops.api.scans",
+    "scanops.api.heatmap",
+    "scanops.api.findings",
+    "scanops.scanning.engine_runner",
+    "scanops.scanning.scope",
+    "scanops.scanning.scan_options",
+    "scanops.scanning.nmap_runner",
+]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

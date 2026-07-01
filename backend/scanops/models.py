@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
@@ -22,7 +22,7 @@ from .db import Base
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ---- 역할/상태 상수 (자유 문자열이지만 의미 고정) ----
@@ -131,7 +131,7 @@ class Finding(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
-    events: Mapped[list["FindingEvent"]] = relationship(
+    events: Mapped[list[FindingEvent]] = relationship(
         back_populates="finding", cascade="all, delete-orphan", order_by="FindingEvent.created_at"
     )
 
