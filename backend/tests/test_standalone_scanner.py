@@ -817,6 +817,33 @@ def test_connect_scan_strips_udp_everywhere(tmp_path):
     assert udp.get("skipped") is True
 
 
+def test_connect_scan_strips_syn_only_flags():
+    """connect(비권한)는 SYN/raw 전용 플래그(--defeat-rst-ratelimit·-PE)를 제거해야 한다.
+
+    이전엔 auto discovery(및 phase1)가 -sT 로 바뀌어도 --defeat-rst-ratelimit 를 남겨,
+    첫 nmap 이 '--defeat-rst-ratelimit works only with a SYN scan (-sS)' 로 QUITTING →
+    connect 워크플로 전체가 실패했다(권한 유무 무관, root 도 실패). -PS/-PA(TCP ping)는 유지.
+    """
+    scanner = _load_scanner()
+    src = ["-sS", "-PE", "-PS80", "-PA443", "--defeat-rst-ratelimit"]
+    syn = scanner.set_scan_type(list(src), "syn")
+    assert syn[0] == "-sS" and "--defeat-rst-ratelimit" in syn and "-PE" in syn  # SYN 유지(회귀 방지)
+    con = scanner.set_scan_type(list(src), "connect")
+    assert con[0] == "-sT"
+    assert "--defeat-rst-ratelimit" not in con and "-PE" not in con
+    assert "-PS80" in con and "-PA443" in con                                   # TCP ping 은 폴백 → 유지
+
+    # 통합: auto tcp_discovery 와 phase1 단일 프리셋 모두 connect 에서 SYN 전용 플래그 제거
+    disc = scanner.apply_auto_modifiers(list(scanner.AUTO_TCP_DISCOVERY_FLAGS), {"scan_type": "connect"}, "tcp_discovery")
+    assert "-sT" in disc and "--defeat-rst-ratelimit" not in disc and "-PE" not in disc
+    assert any(f.startswith("-PS") for f in disc)
+    p1 = scanner.build_base_flags(_args(profile="phase1", scan_type="connect"))
+    assert "-sT" in p1 and "--defeat-rst-ratelimit" not in p1
+    # SYN·기본 모드는 유지(회귀)
+    disc_syn = scanner.apply_auto_modifiers(list(scanner.AUTO_TCP_DISCOVERY_FLAGS), {"scan_type": "syn"}, "tcp_discovery")
+    assert "--defeat-rst-ratelimit" in disc_syn and "-PE" in disc_syn
+
+
 def test_large_cidr_rejected_before_materialization(tmp_path):
     """QA-015: 큰 CIDR 은 전개 전에 캡으로 즉시 거절(메모리/시간 폭발 방지)."""
     import pytest

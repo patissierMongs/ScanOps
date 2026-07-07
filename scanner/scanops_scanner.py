@@ -374,11 +374,22 @@ def strip_flags(flags: list[str], names: set[str], value_flags: set[str] | None 
     return out
 
 
+# connect(-sT, 비권한) 모드와 양립 불가한 SYN/raw-socket 전용 플래그.
+# --defeat-rst-ratelimit: nmap 이 -sT 와 함께 쓰면 "works only with a SYN scan (-sS)" 로 즉시
+# 종료(QUITTING) — 권한 유무와 무관한 인자 거부라 root 도 실패한다. -PE(ICMP echo)는 raw 소켓 필요.
+# -PS/-PA(TCP SYN/ACK ping)는 비권한 시 nmap 이 connect() 로 폴백하므로 유지한다.
+SYN_ONLY_FLAGS = {"--defeat-rst-ratelimit", "-PE"}
+
+
 def set_scan_type(flags: list[str], scan_type: str) -> list[str]:
     if not scan_type:
         return flags
     mapped = {"connect": "-sT", "syn": "-sS"}[scan_type]
     flags = [f for f in flags if f not in SCAN_TYPE_FLAGS]
+    if scan_type == "connect":
+        # SYN/raw 전용 플래그 제거 — 안 그러면 auto discovery(및 phase1) 첫 단계에서 nmap 이
+        # --defeat-rst-ratelimit 로 fatal 종료해 connect(비권한) 워크플로 전체가 실패한다.
+        flags = strip_flags(flags, SYN_ONLY_FLAGS)
     return [mapped, *flags]
 
 
