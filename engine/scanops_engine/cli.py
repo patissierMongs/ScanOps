@@ -61,7 +61,7 @@ def main(argv=None) -> int:
     except (ValueError, OSError, json.JSONDecodeError) as e:
         print(f"spec 오류: {e}", file=sys.stderr)
         return 2
-    if not spec.targets and not spec.targets_ports:
+    if not spec.targets and not spec.targets_ports and not spec.rescan_units:
         print("타겟이 없습니다 (--target 또는 --spec).", file=sys.stderr)
         return 2
     nmap = nmaprun.find_nmap(a.nmap)

@@ -15,37 +15,78 @@ const TYPE_META = {
   NOTE: { label: "메모", cls: "info" },
   EXCEPTION: { label: "예외", cls: "info" },
 };
-const FILTERS = ["", "NEW_OPEN", "CLOSED", "REOPENED", "SERVICE_CHANGED", "VERSION_CHANGED", "STATUS_CHANGE"];
+// 필터 가능한 타입 — 타임라인에 나타나는 모든 이벤트 타입(백엔드가 임의 타입 필터 지원)
+const FILTERS = [
+  "NEW_OPEN", "CLOSED", "REOPENED", "SERVICE_CHANGED", "VERSION_CHANGED",
+  "STATUS_CHANGE", "ASSIGN", "DEADLINE", "NOTE",
+];
+const PAGE = 100;
 
 export default function History() {
   const [feed, setFeed] = useState({ total: 0, items: [] });
   const [type, setType] = useState("");
   const [host, setHost] = useState("");
+  const [since, setSince] = useState("");
+  const [until, setUntil] = useState("");
+  const [offset, setOffset] = useState(0);
   const toast = useToast();
+
+  // type/offset 은 즉시 반영, host/기간은 [적용] 으로 커밋된 값(applied)만 질의에 쓴다.
+  const [applied, setApplied] = useState({ host: "", since: "", until: "" });
 
   function load() {
     const qs = new URLSearchParams();
     if (type) qs.set("type", type);
-    if (host.trim()) qs.set("host", host.trim());
-    qs.set("limit", "200");
+    if (applied.host.trim()) qs.set("host", applied.host.trim());
+    if (applied.since) qs.set("since", applied.since);
+    if (applied.until) qs.set("until", applied.until + "T23:59:59");   // 그날 끝까지 포함
+    qs.set("limit", String(PAGE));
+    qs.set("offset", String(offset));
     api(`/events?${qs.toString()}`)
       .then(setFeed)
       .catch((e) => toast(e.message, { type: "err" }));
   }
-  useEffect(() => { load(); }, [type]);
+  useEffect(() => { load(); }, [type, offset, applied]);
+
+  function applyFilters() {
+    setOffset(0);
+    setApplied({ host, since, until });   // load 는 applied 변경으로 트리거
+  }
+  function changeType(v) { setOffset(0); setType(v); }
+
+  const from = feed.total === 0 ? 0 : offset + 1;
+  const to = Math.min(offset + PAGE, feed.total);
+  const hasPrev = offset > 0;
+  const hasNext = offset + PAGE < feed.total;
 
   return (
     <div className="content">
       <div className="panel">
         <div className="row">
-          <select value={type} onChange={(e) => setType(e.target.value)}>
+          <select value={type} onChange={(e) => changeType(e.target.value)}>
             <option value="">전체 타입</option>
-            {FILTERS.filter(Boolean).map((t) => <option key={t} value={t}>{TYPE_META[t]?.label || t}</option>)}
+            {FILTERS.map((t) => <option key={t} value={t}>{TYPE_META[t]?.label || t}</option>)}
           </select>
           <input placeholder="호스트 IP 필터" value={host} onChange={(e) => setHost(e.target.value)}
-                 onKeyDown={(e) => e.key === "Enter" && load()} />
-          <button onClick={load}>적용</button>
-          <span className="muted" style={{ marginLeft: "auto" }}>총 {feed.total}건</span>
+                 onKeyDown={(e) => e.key === "Enter" && applyFilters()} />
+          <label className="muted" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            기간
+            <input type="date" value={since} max={until || undefined}
+                   onChange={(e) => setSince(e.target.value)} />
+            ~
+            <input type="date" value={until} min={since || undefined}
+                   onChange={(e) => setUntil(e.target.value)} />
+          </label>
+          <button onClick={applyFilters}>적용</button>
+          {(applied.host || applied.since || applied.until) && (
+            <button className="sm" onClick={() => {
+              setHost(""); setSince(""); setUntil(""); setOffset(0);
+              setApplied({ host: "", since: "", until: "" });
+            }}>초기화</button>
+          )}
+          <span className="muted" style={{ marginLeft: "auto" }}>
+            {feed.total > 0 ? `${from}–${to} / 총 ${feed.total}건` : "총 0건"}
+          </span>
         </div>
       </div>
 
@@ -68,6 +109,13 @@ export default function History() {
             );
           })}
         </div>
+        {(hasPrev || hasNext) && (
+          <div className="row" style={{ marginTop: 12, justifyContent: "center", gap: 12 }}>
+            <button className="sm" disabled={!hasPrev} onClick={() => setOffset(Math.max(0, offset - PAGE))}>← 이전</button>
+            <span className="muted">{Math.floor(offset / PAGE) + 1} / {Math.max(1, Math.ceil(feed.total / PAGE))}</span>
+            <button className="sm" disabled={!hasNext} onClick={() => setOffset(offset + PAGE)}>다음 →</button>
+          </div>
+        )}
       </div>
     </div>
   );

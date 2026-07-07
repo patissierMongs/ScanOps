@@ -1,11 +1,23 @@
 """engine_runner 순수 로직 — 옵션→단계 매핑 + 이벤트→단계요약(스폰 없이 결정적)."""
 import json
 import shutil
+import sys
 from pathlib import Path
 
+from scanops.config import get_settings
 from scanops.db import SessionLocal
-from scanops.models import Finding, ScanRun
+from scanops.models import Finding, FindingEvent, ScanRun
 from scanops.scanning import engine_runner
+from scanops.scanning.ingest import ingest
+
+
+def _open_finding(db, scan_id, host_ip, port, proto="tcp"):
+    ingest(db, scan_id, [{
+        "host_ip": host_ip, "hostname": "", "port": port, "proto": proto, "state": "open",
+        "service": "http", "product": "", "version": "", "banner": "", "cpe": "", "rtt": "",
+        "identification": "확인", "nse_json": [], "remarks": "",
+        "category": "", "usage": "", "risk_level": "info", "compliance_json": [],
+    }], {host_ip})
 
 
 def test_build_job_spec_maps_options_to_stages():
@@ -116,6 +128,70 @@ def test_parse_events_missing_file(tmp_path):
     res = engine_runner.parse_events(tmp_path)
     assert res["stages"] == []
     assert res["overall"]["status"] == "running"
+
+
+def test_ingest_results_closes_rescanned_port(client, tmp_path):
+    """헤드라인 기능 회귀 — 발견별 재스캔(rescan_units)은 발견·찾기를 건너뛰어 엔진이 open_map/live
+    를 안 남긴다. 그래도 scope_keys 로 스캔한 호스트를 보강해 닫힘 자동검증(정상처리)이 동작해야 한다.
+
+    이전 버그: scanned_hosts 가 빈 집합 → ingest 의 닫힘 패스가 통째로 건너뛰어져 '조치 완료 자동
+    확인'이 절대 발생하지 않았다(포트가 닫혔는데도 open/처리중 그대로).
+    """
+    db = SessionLocal()
+    try:
+        s1 = ScanRun(name="base", status="done"); db.add(s1); db.commit()
+        _open_finding(db, s1.id, "10.9.9.9", 9999)
+        f = db.query(Finding).filter_by(port=9999).first()
+        f.status = "처리중"; db.commit()
+
+        # 재스캔 결과: 포트 닫힘 → stage3 XML 없음, run-state 에 open_map/live 없음(재스캔 경로)
+        s2 = ScanRun(name="rescan", status="running"); db.add(s2); db.commit()
+        counts = engine_runner.ingest_results(db, s2, tmp_path, scope_keys={"10.9.9.9|9999|tcp"})
+        assert counts["closed"] == 1
+        f = db.query(Finding).filter_by(port=9999).first()
+        assert f.state == "closed" and f.status == "정상처리"
+        assert "CLOSED" in {e.type for e in db.query(FindingEvent).filter_by(finding_id=f.id)}
+    finally:
+        db.close()
+
+
+def test_ingest_results_rescan_scope_does_not_touch_other_ports(client, tmp_path):
+    """재스캔 닫힘 판정은 scope_keys(선택 발견)로만 한정 — 같은 호스트의 다른 열린 포트는 손대지 않음."""
+    db = SessionLocal()
+    try:
+        s1 = ScanRun(name="base", status="done"); db.add(s1); db.commit()
+        _open_finding(db, s1.id, "10.9.9.9", 9999)
+        _open_finding(db, s1.id, "10.9.9.9", 22)   # 재스캔 대상 아님
+        s2 = ScanRun(name="rescan", status="running"); db.add(s2); db.commit()
+        engine_runner.ingest_results(db, s2, tmp_path, scope_keys={"10.9.9.9|9999|tcp"})
+        assert db.query(Finding).filter_by(port=9999).first().state == "closed"
+        assert db.query(Finding).filter_by(port=22).first().state == "open"   # 범위 밖 → 불변
+    finally:
+        db.close()
+
+
+def test_engine_cli_accepts_rescan_only_spec(tmp_path, monkeypatch):
+    """엔진 CLI 가 rescan_units-only spec(targets 비어있음)을 '타겟 없음'으로 거부하지 않아야 한다.
+
+    이전 버그: cli 의 타겟 존재 검사가 rescan_units 를 안 봐서 재스캔 스캔이 즉시 rc=2 로 죽고
+    (엔진 로그 '타겟이 없습니다'), 워커가 scan 을 'failed' 로 표기 → 재스캔이 항상 실패했다.
+    """
+    engine_dir = str(get_settings().engine_dir)
+    if engine_dir not in sys.path:
+        sys.path.insert(0, engine_dir)
+    from scanops_engine import cli, nmaprun, pipeline
+
+    spec = {
+        "job_id": "scan_1", "targets": [], "out_dir": str(tmp_path),
+        "rescan_units": [{"ip": "10.0.0.5", "port": 22, "proto": "tcp"}],
+        "stages": {"service": {"enabled": True, "confirm": True}},
+    }
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(nmaprun, "find_nmap", lambda p="": "nmap")
+    monkeypatch.setattr(pipeline.Pipeline, "run", lambda self: {"errors": 0})
+    rc = cli.main(["--spec", str(spec_path), "--no-stdout"])
+    assert rc == 0   # 이전엔 2 ("타겟이 없습니다")
 
 
 def test_ingest_results_creates_findings(client, tmp_path):

@@ -231,6 +231,11 @@ def ingest_results(db, scan, out_dir, scope_keys: set | None = None) -> dict:
     open_map = state.get("open_map") or {}
     live = state.get("live") or []
     scanned = set(open_map.keys()) | {h for h in live if isinstance(h, str) and _is_ip(h)}
+    # 발견(IP:포트)별 개별 재스캔은 발견·찾기 단계를 건너뛰어 open_map/live 를 남기지 않는다.
+    # 그럴 때도 '스캔한 호스트'는 scope_keys(host|port|proto)가 확정하므로 여기서 보강한다 —
+    # 안 그러면 ingest 의 닫힘 판정(if scanned_hosts)이 통째로 건너뛰어져 조치검증(정상처리)이 안 된다.
+    if scope_keys:
+        scanned |= {k.split("|", 1)[0] for k in scope_keys}
 
     by_key: dict[tuple, dict] = {}
     for x in sorted(out.glob("stage3-*.xml")):
