@@ -28,6 +28,8 @@ def create_user(
 ) -> User:
     if body.role not in ROLES:
         raise HTTPException(status_code=400, detail=f"역할은 {ROLES} 중 하나여야 합니다.")
+    if len(body.password) < _MIN_PASSWORD_LEN:
+        raise HTTPException(status_code=400, detail=f"비밀번호는 {_MIN_PASSWORD_LEN}자 이상이어야 합니다.")
     if db.query(User).filter(User.username == body.username).first():
         raise HTTPException(status_code=409, detail="이미 존재하는 아이디입니다.")
     user = User(

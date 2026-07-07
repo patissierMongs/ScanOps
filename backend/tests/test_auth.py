@@ -39,9 +39,18 @@ def test_admin_can_create_user(client):
     make_user("admin1", "pw", role="admin")
     tok = token_for(client, "admin1", "pw")
     r = client.post("/api/users", headers={"Authorization": f"Bearer {tok}"},
-                    json={"username": "newbie", "password": "pw", "role": "auditor"})
+                    json={"username": "newbie", "password": "pw123456", "role": "auditor"})
     assert r.status_code == 201
     assert r.json()["username"] == "newbie"
+
+
+def test_create_user_rejects_short_password(client):
+    """계정 생성도 reset/change 와 동일하게 비밀번호 최소길이를 강제한다(일관성)."""
+    make_user("admin2", "pw", role="admin")
+    tok = token_for(client, "admin2", "pw")
+    r = client.post("/api/users", headers={"Authorization": f"Bearer {tok}"},
+                    json={"username": "weakpw", "password": "short", "role": "viewer"})
+    assert r.status_code == 400
 
 
 # ---- 비밀번호 변경(본인) ----
