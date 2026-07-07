@@ -170,6 +170,39 @@ def test_ingest_results_rescan_scope_does_not_touch_other_ports(client, tmp_path
         db.close()
 
 
+def test_rescan_close_records_basis(client, tmp_path):
+    """닫힘 자동확정 시 근거를 CLOSED 이벤트에 구분 기록 — RST(확실 닫힘) vs 필터드/무응답(도달불가 추정).
+
+    닫힘=부재 판정은 '열림 아니면 닫힘'이라 방화벽 드롭·오프라인도 정상처리로 확정된다. 재스캔은
+    --open 없이 해당 포트를 직접 프로브하므로 실제 상태가 XML 에 남고, 그 근거를 감사 타임라인에 남긴다.
+    """
+    db = SessionLocal()
+    try:
+        s1 = ScanRun(name="base", status="done"); db.add(s1); db.commit()
+        _open_finding(db, s1.id, "10.1.1.1", 80)    # 재스캔서 RST 로 확실히 닫힘
+        _open_finding(db, s1.id, "10.2.2.2", 443)   # 재스캔서 filtered(무응답)
+        (tmp_path / "stage3-10_1_1_1-tcp80.xml").write_text(
+            '<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="10.1.1.1" addrtype="ipv4"/>'
+            '<ports><port protocol="tcp" portid="80"><state state="closed" reason="reset"/></port></ports>'
+            '</host><runstats><finished/></runstats></nmaprun>', encoding="utf-8")
+        (tmp_path / "stage3-10_2_2_2-tcp443.xml").write_text(
+            '<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="10.2.2.2" addrtype="ipv4"/>'
+            '<ports><port protocol="tcp" portid="443"><state state="filtered" reason="no-response"/></port></ports>'
+            '</host><runstats><finished/></runstats></nmaprun>', encoding="utf-8")
+        s2 = ScanRun(name="rescan", status="running"); db.add(s2); db.commit()
+        engine_runner.ingest_results(db, s2, tmp_path,
+                                     scope_keys={"10.1.1.1|80|tcp", "10.2.2.2|443|tcp"})
+        f_rst = db.query(Finding).filter_by(host_ip="10.1.1.1", port=80).first()
+        f_flt = db.query(Finding).filter_by(host_ip="10.2.2.2", port=443).first()
+        assert f_rst.state == "closed" and f_flt.state == "closed"   # 둘 다 자동 정상처리(워크플로우 유지)
+        d_rst = db.query(FindingEvent).filter_by(finding_id=f_rst.id, type="CLOSED").first().detail
+        d_flt = db.query(FindingEvent).filter_by(finding_id=f_flt.id, type="CLOSED").first().detail
+        assert "RST" in d_rst and "도달불가" not in d_rst          # 확실히 닫힘
+        assert "도달불가" in d_flt and "미도달" in d_flt            # 도달불가 추정 — 확인 요망 플래그
+    finally:
+        db.close()
+
+
 def test_engine_cli_accepts_rescan_only_spec(tmp_path, monkeypatch):
     """엔진 CLI 가 rescan_units-only spec(targets 비어있음)을 '타겟 없음'으로 거부하지 않아야 한다.
 

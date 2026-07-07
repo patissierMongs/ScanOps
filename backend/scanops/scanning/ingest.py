@@ -20,14 +20,34 @@ def _key(f: dict) -> str:
     return f"{f['host_ip']}|{f['port']}|{f['proto']}"
 
 
+def _close_detail(key: str, observed_states: dict | None, verified: bool) -> str:
+    """닫힘 이벤트의 근거 문구 — 조치 자동확정의 신뢰도를 감사 타임라인에 정직하게 남긴다.
+
+    닫힘=부재 판정은 '열림으로 안 보임'을 닫힘으로 본다. 그런데 그게 (a) RST 로 확실히 닫힌 것인지
+    (b) 무응답/필터드(방화벽 차단이거나 재스캔 순간 도달불가)인지에 따라 '조치 완료'의 확실성이 다르다.
+    observed_states 가 주어지면(재스캔: --open 없이 해당 포트를 직접 프로브해 실제 상태를 남김) 구분한다.
+    """
+    confirm = " — 조치 완료 자동 확인" if verified else ""
+    if observed_states is None:          # 상태 관측 없음(전체 스캔 --open 등) → 기존 일반 문구
+        return "포트 닫힘" + confirm
+    st = observed_states.get(key)
+    if st == "closed":                   # RST 등 능동 거부 → 확실히 닫힘
+        return "포트 닫힘(응답 거부·RST)" + confirm
+    # filtered / open|filtered / 부재(호스트 무응답·미프로브) → 미도달 가능성
+    reason = "필터드(방화벽 차단·도달불가 추정)" if (st and "filtered" in st) else "호스트 무응답·미프로브(도달불가 추정)"
+    return f"포트 미관측 — {reason}{confirm} · 미도달 가능성 확인 요망"
+
+
 def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[str],
-           scope_keys: set[str] | None = None, scan_date: datetime | None = None) -> dict:
+           scope_keys: set[str] | None = None, scan_date: datetime | None = None,
+           observed_states: dict | None = None) -> dict:
     """findings(이번 스캔의 열린 포트들)와 scanned_hosts(up 호스트)로 DB 갱신.
 
     scope_keys 가 주어지면(타겟 포트 재스캔) 닫힘 판정을 그 키(host|port|proto)로만
     한정 — 스캔하지 않은 다른 포트가 거짓 닫힘 처리되지 않게 한다. None 이면 호스트 전체.
     scan_date 는 '실제 스캔 실행일'(가져온 XML 은 파일 내 시각). first/last_seen 에 쓴다.
-    None 이면 현재시각. 리턴: 변화 요약 카운트.
+    None 이면 현재시각. observed_states(host|port|proto→관측상태)가 주어지면 닫힘 이벤트에
+    근거(RST 확실 닫힘 vs 무응답/필터드=도달불가 추정)를 구분 기록한다. 리턴: 변화 요약 카운트.
     """
     when = scan_date or _now()
     counts = {"new": 0, "reopened": 0, "service_changed": 0,
@@ -90,7 +110,7 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
             # 마감/배정이 걸려 있던 항목이 닫힘 → 조치 완료 자동 검증
             verified = row.status == "처리중" or row.deadline is not None
             row.status = "정상처리"
-            detail = "포트 닫힘 — 조치 완료 자동 확인" if verified else "포트 닫힘"
+            detail = _close_detail(row.finding_key, observed_states, verified)
             _event(db, row.id, scan_id, "CLOSED", detail, when=when)
             counts["closed"] += 1
 

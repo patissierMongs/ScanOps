@@ -200,3 +200,37 @@ def parse_xml(source) -> list[dict]:
                 "remarks": _remarks(detail, nse),
             })
     return findings
+
+
+def port_states(source) -> dict[str, str]:
+    """host_ip|port|proto → 관측된 포트 상태(open/closed/filtered/…). 열림뿐 아니라 모든 상태.
+
+    닫힘 자동확정 시 '근거'를 구분하는 데 쓴다: 재스캔은 --open 없이 특정 포트를 직접 프로브하므로
+    XML 에 실제 상태(closed=RST 확실 / filtered=무응답=방화벽차단·도달불가 추정)가 남는다.
+    down 호스트는 포트 element 가 없어 이 map 에 안 들어온다(=부재 → 도달불가 추정으로 처리).
+    """
+    root = _root_of(source)
+    out: dict[str, str] = {}
+    for host in root.findall("host"):
+        status = host.find("status")
+        if status is not None and status.get("state") == "down":
+            continue
+        addr_el = host.find("address[@addrtype='ipv4']")
+        if addr_el is None:
+            addr_el = host.find("address")
+        host_ip = addr_el.get("addr") if addr_el is not None else ""
+        if not host_ip:
+            continue
+        ports = host.find("ports")
+        if ports is None:
+            continue
+        for port in ports.findall("port"):
+            st = port.find("state")
+            state = (st.get("state") if st is not None else "") or ""
+            proto = port.get("protocol") or "tcp"
+            key = f"{host_ip}|{int(port.get('portid'))}|{proto}"
+            # 한 스캔에 같은 포트가 여러 XML(base+confirm)에 있으면 '열림'을 우선(재확인이 잡았으면 열림).
+            if key in out and out[key].startswith("open"):
+                continue
+            out[key] = state
+    return out

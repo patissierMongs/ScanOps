@@ -23,7 +23,7 @@ from pathlib import Path
 from ..config import get_settings
 from . import taxonomy
 from .ingest import ingest
-from .nmap_parse import parse_xml
+from .nmap_parse import parse_xml, port_states
 
 _settings = get_settings()
 
@@ -238,17 +238,29 @@ def ingest_results(db, scan, out_dir, scope_keys: set | None = None) -> dict:
         scanned |= {k.split("|", 1)[0] for k in scope_keys}
 
     by_key: dict[tuple, dict] = {}
+    observed_states: dict[str, str] = {}
     for x in sorted(out.glob("stage3-*.xml")):
         try:
-            fnd = parse_xml(x.read_bytes())
+            raw = x.read_bytes()
+            fnd = parse_xml(raw)
         except Exception:
             continue
         for f in fnd:
             by_key[(f["host_ip"], f["port"], f["proto"])] = f   # confirm/base 중복 제거(존재값 우선)
+        # 재스캔은 --open 없이 해당 포트를 직접 프로브 → XML 에 실제 상태(closed/filtered)가 남는다.
+        # 닫힘 자동확정의 근거(RST 확실 vs 무응답/도달불가 추정)를 구분하는 데 쓴다.
+        try:
+            for k, st in port_states(raw).items():
+                if not (k in observed_states and observed_states[k].startswith("open")):
+                    observed_states[k] = st
+        except Exception:
+            pass
     findings = list(by_key.values())
 
     enriched = taxonomy.enrich_all(db, findings)
-    counts = ingest(db, scan.id, enriched, scanned, scope_keys=scope_keys)
+    # 재스캔(scope_keys 지정)일 때만 근거 구분 — 전체 스캔은 --open 이라 닫힘/필터 상태가 XML 에 없다.
+    states = observed_states if scope_keys is not None else None
+    counts = ingest(db, scan.id, enriched, scanned, scope_keys=scope_keys, observed_states=states)
     from ..api.assets import match_assets
     match_assets(db)
     scan.host_count = len({f["host_ip"] for f in findings})
