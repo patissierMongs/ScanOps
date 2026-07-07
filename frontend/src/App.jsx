@@ -13,6 +13,7 @@ import Assets from "./views/Assets.jsx";
 import Notifications from "./views/Notifications.jsx";
 import Scans from "./views/Scans.jsx";
 import Users from "./views/Users.jsx";
+import Audit from "./views/Audit.jsx";
 
 const NAV = [
   { k: "dashboard", label: "대시보드", ico: "▦" },
@@ -24,11 +25,13 @@ const NAV = [
   { k: "notify", label: "부서통보", ico: "✉" },
   { k: "scans", label: "스캔", ico: "◎" },
   { k: "users", label: "사용자", ico: "◍", admin: true },
+  { k: "audit", label: "감사 로그", ico: "❑", admin: true },
 ];
 
 const TITLES = {
   dashboard: "대시보드", findings: "발견 관리", rules: "규칙", history: "변경 이력",
   heatmap: "시간축 히트맵", assets: "자산대장", notify: "부서통보", scans: "스캔", users: "사용자 관리",
+  audit: "감사 로그",
 };
 
 export default function App() {
@@ -85,6 +88,7 @@ function Shell({ user, onLogout }) {
     notify: <Notifications user={user} />,
     scans: <Scans user={user} />,
     users: <Users user={user} />,
+    audit: <Audit />,
   };
 
   return (

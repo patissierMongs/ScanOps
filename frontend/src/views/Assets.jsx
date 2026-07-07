@@ -19,11 +19,40 @@ export default function Assets({ user }) {
   const fileRef = useRef(null);
   const toast = useToast();
   const canEdit = user.role === "admin" || user.role === "auditor";
+  const canDelete = user.role === "admin";   // 백엔드 DELETE /assets/{id} 는 admin 전용
+  const [edit, setEdit] = useState(null);     // 단건 편집/추가 폼: null=닫힘, {id?,...}=열림
 
   function load() {
     api("/assets").then(setAssets).catch((e) => toast(e.message, { type: "err" }));
   }
   useEffect(() => { load(); }, []);
+
+  const EMPTY_ASSET = { ip: "", hostname: "", dept: "", owner: "", contact: "", asset_no: "", note: "", extra: {} };
+  function openCreate() { setEdit({ ...EMPTY_ASSET }); }
+  function openEdit(a) {
+    setEdit({ id: a.id, ip: a.ip || "", hostname: a.hostname || "", dept: a.dept || "",
+              owner: a.owner || "", contact: a.contact || "", asset_no: a.asset_no || "",
+              note: a.note || "", extra: a.extra || {} });
+  }
+  function saveEdit() {
+    const ip = (edit.ip || "").trim();
+    if (!ip) { toast("IP 는 필수입니다.", { type: "err" }); return; }
+    // 백엔드 AssetIn 전체를 보낸다(PATCH 는 전체 치환 — extra 도 함께 보내 보존).
+    const body = { ip, hostname: edit.hostname.trim(), dept: edit.dept.trim(), owner: edit.owner.trim(),
+                   contact: edit.contact.trim(), asset_no: edit.asset_no.trim(), note: edit.note.trim(),
+                   extra: edit.extra || {} };
+    const path = edit.id ? `/assets/${edit.id}` : "/assets";
+    const method = edit.id ? "PATCH" : "POST";
+    api(path, { method, json: body })
+      .then(() => { toast(edit.id ? "자산이 수정되었습니다." : "자산이 추가되었습니다."); setEdit(null); load(); })
+      .catch((e) => toast(e.message, { type: "err" }));
+  }
+  function removeAsset(a) {
+    if (!window.confirm(`자산 ${a.ip}${a.hostname ? " (" + a.hostname + ")" : ""} 를 삭제할까요?`)) return;
+    api(`/assets/${a.id}`, { method: "DELETE" })
+      .then(() => { toast("자산이 삭제되었습니다."); load(); })
+      .catch((e) => toast(e.message, { type: "err" }));
+  }
 
   function selectSheet(wb, sheetNames, sheet) {
     const { aoa, mergeCount } = unmergeFillWs(wb.Sheets[sheet]);
@@ -384,15 +413,19 @@ export default function Assets({ user }) {
       <div className="panel">
         <div className="row" style={{ marginBottom: 12 }}>
           <h3 style={{ margin: 0 }}>자산 목록 · {filtered.length}{q && `/${assets.length}`}건</h3>
+          {canEdit && <button className="sm" onClick={openCreate}>+ 자산 추가</button>}
           <input style={{ marginLeft: "auto", minWidth: 220 }} placeholder="검색 (IP/부서/담당/연락처/커스텀)"
                  value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
         <div style={{ overflowX: "auto" }}>
           <table className="tbl">
-            <thead><tr><th>IP</th><th>호스트명</th><th>부서</th><th>담당자</th><th>연락처</th><th>자산번호</th><th>커스텀</th></tr></thead>
+            <thead><tr>
+              <th>IP</th><th>호스트명</th><th>부서</th><th>담당자</th><th>연락처</th><th>자산번호</th><th>커스텀</th>
+              {canEdit && <th style={{ width: 120 }}>관리</th>}
+            </tr></thead>
             <tbody>
               {filtered.length === 0 ? (
-                <tr><td className="empty" colSpan={7}>{assets.length ? "검색 결과 없음" : "자산 없음"}</td></tr>
+                <tr><td className="empty" colSpan={canEdit ? 8 : 7}>{assets.length ? "검색 결과 없음" : "자산 없음"}</td></tr>
               ) : filtered.map((a) => (
                 <tr key={a.id}>
                   <td className="mono">{a.ip}</td><td>{a.hostname}</td>
@@ -402,12 +435,60 @@ export default function Assets({ user }) {
                     {a.extra && Object.keys(a.extra).length
                       ? Object.entries(a.extra).map(([k, v]) => `${k}:${v}`).join(" · ") : ""}
                   </td>
+                  {canEdit && (
+                    <td>
+                      <button className="sm" onClick={() => openEdit(a)}>편집</button>
+                      {canDelete && <button className="sm" style={{ marginLeft: 6, color: "var(--high)" }} onClick={() => removeAsset(a)}>삭제</button>}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </div>
+
+      {edit && (
+        <div className="modal" onMouseDown={(e) => { if (e.target === e.currentTarget) setEdit(null); }}>
+          <div className="panel modal-card" style={{ width: 420 }} onMouseDown={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: 0 }}>{edit.id ? "자산 편집" : "자산 추가"}</h3>
+            <label className="field">IP *
+              <input value={edit.ip} autoFocus onChange={(e) => setEdit({ ...edit, ip: e.target.value })} />
+            </label>
+            <label className="field">호스트명
+              <input value={edit.hostname} onChange={(e) => setEdit({ ...edit, hostname: e.target.value })} />
+            </label>
+            <div className="row">
+              <label className="field" style={{ flex: 1 }}>부서
+                <input value={edit.dept} onChange={(e) => setEdit({ ...edit, dept: e.target.value })} />
+              </label>
+              <label className="field" style={{ flex: 1 }}>담당자
+                <input value={edit.owner} onChange={(e) => setEdit({ ...edit, owner: e.target.value })} />
+              </label>
+            </div>
+            <div className="row">
+              <label className="field" style={{ flex: 1 }}>연락처
+                <input value={edit.contact} onChange={(e) => setEdit({ ...edit, contact: e.target.value })} />
+              </label>
+              <label className="field" style={{ flex: 1 }}>자산번호
+                <input value={edit.asset_no} onChange={(e) => setEdit({ ...edit, asset_no: e.target.value })} />
+              </label>
+            </div>
+            <label className="field">비고
+              <input value={edit.note} onChange={(e) => setEdit({ ...edit, note: e.target.value })} />
+            </label>
+            {edit.extra && Object.keys(edit.extra).length > 0 && (
+              <div className="muted" style={{ fontSize: 11.5 }}>
+                커스텀(유지): {Object.entries(edit.extra).map(([k, v]) => `${k}:${v}`).join(" · ")}
+              </div>
+            )}
+            <div className="row" style={{ marginTop: 4 }}>
+              <button className="primary" onClick={saveEdit}>{edit.id ? "저장" : "추가"}</button>
+              <button onClick={() => setEdit(null)}>취소</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
