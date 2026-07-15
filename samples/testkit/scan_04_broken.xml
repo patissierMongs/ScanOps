@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun scanner="nmap" args="nmap -sV 10.10.20.11" start="1789000000" version="7.94">
+<host><status state="up" reason="syn-ack"/>
+<address addr="10.10.20.11" addrtype="ipv4"/>
+<ports><port protocol="tcp" portid="445"><state state="open" reason="syn-ack"/>
+<service name="microsoft-ds" method="probed" conf="10"

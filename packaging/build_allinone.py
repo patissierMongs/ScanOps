@@ -73,6 +73,15 @@ def copy_app(app: Path) -> None:
         src = ROOT / "scanner" / f
         if src.exists():
             shutil.copy2(src, scanner_dst / f)
+    # 테스트킷(엣지케이스 스캔 결과 + dirty 자산대장). 헤드리스 시더(load_testkit.py)는
+    # stdlib + openpyxl(런타임 site 에 사전설치)만 쓰므로 번들 임베디드 파이썬으로 적재 가능.
+    testkit_src = ROOT / "samples" / "testkit"
+    if testkit_src.exists():
+        testkit_dst = app / "samples" / "testkit"
+        testkit_dst.mkdir(parents=True, exist_ok=True)
+        for p in testkit_src.iterdir():
+            if p.is_file() and p.suffix not in SKIP_EXT:
+                shutil.copy2(p, testkit_dst / p.name)
 
 
 def install_site(app: Path) -> None:
@@ -126,6 +135,19 @@ def write_launcher(app: Path) -> None:
     (app / "SCAN.bat").write_text(
         "@echo off\r\n"
         "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0scanner\\scanops_scanner.py\" %*\r\n",
+        encoding="ascii",
+    )
+    # 테스트킷 시더 — 서버 기동 후 엣지케이스 스캔결과 + dirty 자산대장을 한 번에 적재.
+    # 사용: LOAD_SAMPLES.bat <admin_password>  (admin 비번은 backend\data\INITIAL_ADMIN.txt)
+    (app / "LOAD_SAMPLES.bat").write_text(
+        "@echo off\r\n"
+        "if \"%~1\"==\"\" (\r\n"
+        "  echo Usage: LOAD_SAMPLES.bat ^<admin_password^>\r\n"
+        "  echo   admin password is in backend\\data\\INITIAL_ADMIN.txt after first START.bat\r\n"
+        "  pause & exit /b 1\r\n"
+        ")\r\n"
+        "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0samples\\testkit\\load_testkit.py\" -- %1\r\n"
+        "pause\r\n",
         encoding="ascii",
     )
 
