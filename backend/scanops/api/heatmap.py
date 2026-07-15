@@ -257,12 +257,10 @@ def _last_scan_label(phases: list[dict], key: str, last_idx: int | None) -> str:
 
 def _key_sort(key: str):
     host, proto, port = _split_key(key)
-    parts = []
-    for p in host.split("."):
-        try:
-            parts.append(int(p))
-        except ValueError:
-            parts.append(p)
+    # IPv4 옥텟은 숫자로 정렬하되, IPv6·MAC·호스트명(점으로 안 나뉘는 주소)이 섞여도
+    # 정렬키에서 int 와 str 를 직접 비교(TypeError)하지 않도록 (타입태그, 값) 으로 감싼다.
+    # 태그 0=숫자 옥텟, 1=문자 — 태그가 다르면 값 비교까지 가지 않는다.
+    parts = tuple((0, int(p)) if p.isdigit() else (1, p) for p in host.split("."))
     return (parts, proto, port)
 
 

@@ -876,6 +876,9 @@ def run_scan(
         if not hosts:
             raise ValueError("유효한 타겟이 없습니다.")
         scope.check_scope(hosts)   # 허용 대역(scope) 밖이면 시작 전에 거절
+        hosts = scope.apply_exclude(hosts, body.exclude)   # 제외 대역 필터
+        if not hosts:
+            raise ValueError("제외 대역을 적용하니 스캔할 호스트가 남지 않았습니다.")
         batches = chunker.make_batches(hosts, body.batch_size)
         # 옵션/프리셋·포트·NSE 사전 검증(첫 배치로) — 잘못된 입력은 시작 전에 거절.
         if body.workflow == "auto":
@@ -928,6 +931,8 @@ def run_scan(
                 continue
             parts.append(t)
         scan.command = f"{' '.join(parts)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
+    if scope.has_exclude_tokens(body.exclude):
+        scan.command += f"  ·  제외 {body.exclude.strip()}"
     db.commit()
     db.refresh(scan)
     record(db, user, "SCAN_RUN", target=scan.targets,
@@ -988,6 +993,9 @@ def run_staged(
         if not hosts:
             raise ValueError("유효한 타겟이 없습니다.")
         scope.check_scope(hosts)
+        hosts = scope.apply_exclude(hosts, body.exclude)   # 제외 대역 필터
+        if not hosts:
+            raise ValueError("제외 대역을 적용하니 스캔할 호스트가 남지 않았습니다.")
         scan_options.validate_keys(body.options)
         scan_options.validate_nse(body.nse)
         scan_options.validate_ports(body.ports)
@@ -1000,10 +1008,14 @@ def run_staged(
     db.commit()
     out_dir = _settings.scans_dir / f"scan_{scan.id}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    spec = engine_runner.build_job_spec(scan.id, body.targets, [], body.options, body.ports,
+    # 제외 대역이 있으면 확장·필터된 호스트 목록을 엔진에 넘긴다(제외 없으면 원본 타깃 그대로 — 효율).
+    engine_targets = hosts if scope.has_exclude_tokens(body.exclude) else body.targets
+    spec = engine_runner.build_job_spec(scan.id, engine_targets, [], body.options, body.ports,
                                         body.nse, out_dir, body.batch_size, discovery=body.discovery)
     (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
     scan.command = f"{engine_runner.describe(spec)}  ·  {len(hosts)}호스트"
+    if scope.has_exclude_tokens(body.exclude):
+        scan.command += f"  ·  제외 {body.exclude.strip()}"
     db.commit()
     db.refresh(scan)
     record(db, user, "SCAN_RUN", target=scan.targets, detail=f"#{scan.id} 단계스캔 · {len(hosts)}호스트")
@@ -1173,6 +1185,7 @@ def estimate_scan(body: ScanRunIn, _: User = Depends(current_user), db: Session 
         hosts = chunker.expand_targets(body.targets)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    hosts = scope.apply_exclude(hosts, body.exclude)   # 제외 대역 반영(예상 호스트 수)
     host_count = len(hosts)
     size = max(1, body.batch_size)
     batch_count = (host_count + size - 1) // size if host_count else 0

@@ -70,6 +70,23 @@ def check_scope(hosts: list[str], spec: str | None = None) -> None:
 
 
 # 직접 명령에서 타겟이 아닌 파일/랜덤 입력 — scope 검증을 우회하므로 scope 설정 시 차단.
+def apply_exclude(hosts: list[str], spec: str | None) -> list[str]:
+    """제외 대역(콤마/공백 구분 CIDR·IP)에 드는 호스트를 걸러낸다.
+
+    확장된 호스트 목록에서 직접 필터하므로 자동/단일/단계 스캔 어디서나 동일하게 동작한다.
+    spec 이 비었거나 유효 토큰이 없으면 원본을 그대로 돌려준다.
+    """
+    nets = parse_scope(spec or "")
+    if not nets:
+        return hosts
+    return [h for h in hosts if not _in_scope(h, nets)]
+
+
+def has_exclude_tokens(spec: str | None) -> bool:
+    """제외 스펙에 최소 하나의 유효한 IP/CIDR 토큰이 있는지."""
+    return bool(parse_scope(spec or ""))
+
+
 _UNSCOPED_TARGET_FLAGS = ("-iL", "-iR", "--excludefile", "--exclude-file")
 
 

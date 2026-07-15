@@ -5,8 +5,8 @@
 자동매핑·결합셀·중복/누락)를 한 번에 자극한다. 실제 nmap·엑셀 툴 없이 재현·적재된다.
 
 ```
-scan_01_baseline.xml        기준 스캔 — 15 호스트, 33 개방포트, 온갖 엣지
-scan_02_rescan.xml          재스캔 — 조치완료(닫힘)/신규개방/버전변경 diff
+scan_01_baseline.xml        기준 스캔 — 엣지 15 + 대량 ~230 호스트 (1000+ 개방포트, ~7000줄)
+scan_02_rescan.xml          중복(재)스캔 — 닫힘/신규개방/버전변경/포트번호이동 diff
 scan_03_discovery_only.xml  발견만(up) · 열린 포트 0 (노출 없음)
 scan_04_broken.xml          깨진 XML — 가져오기 오류 경로
 asset_ledger_dirty.xlsx     일부러 지저분한 자산대장(3 시트, 메인 108 데이터행)
@@ -14,6 +14,11 @@ gen_scan_samples.py         스캔 XML 재생성기 (stdlib)
 gen_dirty_ledger.py         자산대장 재생성기 (openpyxl)
 load_testkit.py             실행 중 서버에 스캔+자산 일괄 적재(헤드리스 시더)
 ```
+
+`scan_01_baseline.xml` 은 **1000개 이상의 개방포트(발견)** 를 담은 대규모 샘플이다.
+아래 15개 엣지 호스트(10.10.20.x)에 더해, 자산대장과 **같은 대역**(10.10.40/41/42.x,
+172.16.10/20.x, 10.10.50.x)의 ~230개 호스트를 역할별(웹·DB·윈도우·레거시·메일·인프라UDP·IoT)로
+채워, 자산대장을 함께 가져오면 IP 매칭으로 **수백 건의 발견에 부서/담당이 연결**된다.
 
 ## 1. 스캔 결과 샘플이 겨냥하는 엣지케이스
 
@@ -37,10 +42,12 @@ load_testkit.py             실행 중 서버에 스캔+자산 일괄 적재(헤
 | 10.10.20.23 ops-vnc-01 | VNC(무인증) |
 | 10.10.20.26 fw-shadow-01 | **전부 filtered**(열린 포트 0) |
 
-`scan_02_rescan.xml` — 11·12·13 재스캔으로 **diff** 를 만든다:
-- infra-aix-01: **telnet 닫힘**(조치완료·능동 거부) · **ftp 필터드**(도달불가 추정) · ssh 유지
-- sec-pc-01: **rdp 닫힘**(조치완료) · 445 유지 · **winrm(5985) 신규개방**
-- hr-srv-01: **nginx 1.18.0 → 1.24.0 버전변경** · mysql 유지
+`scan_02_rescan.xml` — 10.10.20.x / 10.10.40.x 대역을 **다시 훑는 중복(재)스캔**으로 대량 **diff** 를 만든다:
+- **조치완료(닫힘)** — telnet/rdp/redis/ftp 등 고위험·평문 포트를 일부 호스트에서 닫음
+- **신규개방(NEW_OPEN)** — 일부 호스트에 8443(https-alt) 추가
+- **버전변경(SERVICE_CHANGED)** — nginx/OpenSSH/MySQL 등 버전 상향
+- **포트번호 이동** — 웹 역할 호스트의 8080 → 8000 이동(옛 포트 닫고 새 포트 개방)
+- 나머지 대다수는 **unchanged** — 대규모에서 변화만 골라내는 diff 검증
 
 ## 2. dirty 자산대장이 겨냥하는 것 (`asset_ledger_dirty.xlsx`)
 
@@ -78,8 +85,11 @@ python load_testkit.py <admin_password>
 ## 4. 실측된 현재 작동 수준 (참고)
 
 로컬 백엔드에 위 시더로 적재한 결과:
-- `scan_01` new 33 · `scan_02` new 1/version_changed 1/unchanged 3/**closed 5**(조치완료+미재프로브) · `scan_03` 0
-- 자산 129건 적재 · 발견 28건 중 **25건에 부서 자동 연결**
+- `scan_01` new **1118** · `scan_02`(중복 재스캔) new 36 / reopened 28 / **version_changed 195** / unchanged 217 / **closed 15** · `scan_03` 0
+- 자산 129건 적재 · 발견 1072건 중 **324건에 부서 자동 연결**(대역 겹침 검증)
+- 위험등급 분포: high 566 / medium 400 / low 67 / info 39
+- **히트맵**(`GET /api/heatmap`·`/current`·`/report`) 은 IPv4·IPv6·MAC 혼재 1000+ 발견에서도 정상(200).
+  이전엔 주소패밀리 혼재 시 정렬이 `TypeError` 로 500 이 났고, 이 테스트킷이 그 회귀를 드러내 수정했다.
 - **`scan_04_broken.xml` 은 `400`(파싱 실패)이 정답이지만 현재 `main` 은 `500` 을 반환한다.**
   `POST /api/scans/import` 가 `scan_start()` 를 `try` 밖에서 호출하는 버그로, 열려 있는
   PR #12(테스트 기반)에서 이미 수정된다. 이 샘플이 그 회귀를 드러낸다.

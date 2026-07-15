@@ -52,6 +52,7 @@ class ScanRunIn(BaseModel):
     ports: str = ""                # 포트 스펙(예: 22,80,443 또는 1-1024)
     nse: list[str] = []            # NSE 스크립트 키(화이트리스트) — 선택 시 --script 조립
     targets: list[str]
+    exclude: str = ""              # 제외 대역(콤마/공백 구분 CIDR·IP) — 확장 호스트에서 걸러냄
     batch_size: int = 256          # 청킹 배치당 호스트 수(중지/이어가기 단위)
     discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
     udp_all_targets: bool = False  # auto: UDP 식별을 discovery live host 가 아닌 원본 타깃 전체로(-Pn)

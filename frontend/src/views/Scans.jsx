@@ -31,6 +31,7 @@ export default function Scans({ user }) {
   const [scans, setScans] = useState([]);
   const [progress, setProgress] = useState({});   // { [scanId]: { percent, etc, remaining, elapsed, hosts_up, last_line } }
   const [targets, setTargets] = useState("");
+  const [exclude, setExclude] = useState("");
   const [name, setName] = useState("");
   const [opt, setOpt] = useState({ workflow: "auto", options: [], ports: "", nse: [], command: "" });
   const [batchSize, setBatchSize] = useState(256);
@@ -100,13 +101,13 @@ export default function Scans({ user }) {
 
   const targetList = targets.split(/[\s,]+/).filter(Boolean);
 
-  // 실행 전 예상 — 타겟/옵션/포트/배치크기가 바뀌면 디바운스로 /estimate 호출.
-  const estKey = JSON.stringify({ t: targetList, w: opt.workflow, o: opt.options, p: opt.ports, b: batchSize });
+  // 실행 전 예상 — 타겟/제외/옵션/포트/배치크기가 바뀌면 디바운스로 /estimate 호출.
+  const estKey = JSON.stringify({ t: targetList, x: exclude, w: opt.workflow, o: opt.options, p: opt.ports, b: batchSize });
   useEffect(() => {
     if (!canRun || !targetList.length) { setEst(null); return; }
     let alive = true;
     const id = setTimeout(() => {
-      api("/scans/estimate", { method: "POST", json: { targets: targetList, workflow: opt.workflow, options: opt.options, ports: opt.ports, batch_size: batchSize } })
+      api("/scans/estimate", { method: "POST", json: { targets: targetList, exclude, workflow: opt.workflow, options: opt.options, ports: opt.ports, batch_size: batchSize } })
         .then((e) => { if (alive) setEst(e); })
         .catch(() => { if (alive) setEst(null); });
     }, 400);
@@ -159,10 +160,10 @@ export default function Scans({ user }) {
     setBusy(true);
     const endpoint = staged ? "/scans/run-staged" : "/scans/run";
     const body = staged
-      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, batch_size: batchSize, discovery }
-      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, batch_size: batchSize };
+      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude, batch_size: batchSize, discovery }
+      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude, batch_size: batchSize };
     api(endpoint, { method: "POST", json: body })
-      .then((s) => { toast(`${staged ? "단계 " : ""}스캔 시작됨 · #${s.id} (백그라운드 — 진행은 아래 표)`); setTargets(""); setName(""); load(); })
+      .then((s) => { toast(`${staged ? "단계 " : ""}스캔 시작됨 · #${s.id} (백그라운드 — 진행은 아래 표)`); setTargets(""); setExclude(""); setName(""); load(); })
       .catch((e2) => toast(e2.message, { type: "err" }))
       .finally(() => setBusy(false));
   }
@@ -201,10 +202,6 @@ export default function Scans({ user }) {
           </div>
           <div className="row" style={{ marginBottom: 12, marginTop: 10 }}>
             <input placeholder="이름(선택)" value={name} onChange={(e) => setName(e.target.value)} />
-            {!rawMode && (
-              <input style={{ flex: 1, minWidth: 240 }} placeholder="타겟 (예: 10.0.12.0/24 10.0.13.5)"
-                     value={targets} onChange={(e) => setTargets(e.target.value)} />
-            )}
           </div>
 
           {rawMode && (
@@ -228,7 +225,8 @@ export default function Scans({ user }) {
 
           {/* 옵션 빌더는 raw 모드에서도 마운트 유지(숨김만) — opt.command 가 최신이라 '채우기'가 정확하게 동작 */}
           <div style={{ display: rawMode ? "none" : "block" }}>
-            <ScanOptions targets={targetList} staged={staged} onState={setOpt} />
+            <ScanOptions targets={targetList} targetsText={targets} setTargetsText={setTargets}
+                         exclude={exclude} setExclude={setExclude} staged={staged} onState={setOpt} />
 
             <div style={{ marginTop: 12 }}>
               <div className="row" style={{ justifyContent: "space-between" }}>

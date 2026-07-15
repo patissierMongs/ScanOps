@@ -124,6 +124,59 @@ def test_run_scan_auto_records_workflow_state(client, monkeypatch):
     assert state["batches"] == [["127.0.0.1"]]
 
 
+def test_run_scan_exclude_filters_hosts(client, monkeypatch):
+    from scanops.api import scans as scans_api
+    from scanops.scanning import chunker
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    r = client.post("/api/scans/run", headers=h, json={
+        "name": "excl",
+        "workflow": "manual",
+        "preset": "quick",
+        "targets": ["10.10.20.0/29"],
+        "exclude": "10.10.20.1, 10.10.20.2",
+        "batch_size": 256,
+    })
+    assert r.status_code == 200, r.text
+    state = chunker.read_state(scans_api._basename(r.json()["id"]))
+    flat = [ip for b in state["batches"] for ip in b]
+    assert "10.10.20.1" not in flat and "10.10.20.2" not in flat
+    assert "10.10.20.0" in flat and "10.10.20.7" in flat
+    assert "제외" in r.json()["command"]
+
+
+def test_run_scan_exclude_all_hosts_rejected(client, monkeypatch):
+    from scanops.api import scans as scans_api
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    r = client.post("/api/scans/run", headers=h, json={
+        "workflow": "manual", "preset": "quick",
+        "targets": ["10.10.20.0/30"], "exclude": "10.10.20.0/30",
+    })
+    assert r.status_code == 400
+    assert "제외" in r.json()["detail"]
+
+
+def test_estimate_reflects_exclude(client):
+    h = _auth(client)
+    full = client.post("/api/scans/estimate", headers=h,
+                       json={"targets": ["10.10.20.0/29"], "batch_size": 256}).json()
+    excl = client.post("/api/scans/estimate", headers=h,
+                       json={"targets": ["10.10.20.0/29"], "exclude": "10.10.20.0/30", "batch_size": 256}).json()
+    assert full["host_count"] == 8
+    assert excl["host_count"] == 4
+
+
 def test_import_bundle_preserves_discovery_and_scopes_closure(client):
     h = _auth(client)
     initial = _scan_xml(

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 
 const PRESET_KEY = "scanops_scan_presets";
@@ -41,20 +41,26 @@ function commandText(parts) {
 const DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080";
 const DISCOVERY_PA = "-PA80,443,3389";
 
-export default function ScanOptions({ targets = [], portsAuto = "", staged = false, onState }) {
+export default function ScanOptions({
+  targets = [], targetsText = "", setTargetsText,
+  exclude = "", setExclude, staged = false, portsAuto = "", onState,
+}) {
   const [workflow, setWorkflow] = useState("auto");
   const [registry, setRegistry] = useState([]);
+  const [defaultOpts, setDefaultOpts] = useState([]);
   const [sel, setSel] = useState(() => new Set());
   const [ports, setPorts] = useState("");
   const [nseReg, setNseReg] = useState([]);
   const [nseSel, setNseSel] = useState(() => new Set());
   const [nseDefault, setNseDefault] = useState([]);
   const [udpPorts, setUdpPorts] = useState("");
-  const [showManualOptions, setShowManualOptions] = useState(false);
+  const [precision, setPrecision] = useState(false);   // 정밀 옵션(단일 실행 상세) 토글 — 켜고 끌 수 있음
   const [showNse, setShowNse] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);  // 실행될 명령어 — 기본 접힘
   const [presets, setPresets] = useState(loadPresets);
-  const [presetId, setPresetId] = useState("");
   const [touchedPorts, setTouchedPorts] = useState(false);
+  const targetsFileRef = useRef(null);
+  const portsFileRef = useRef(null);
 
   useEffect(() => {
     let live = true;
@@ -62,6 +68,7 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
       .then((r) => {
         if (!live) return;
         setRegistry(r.options || []);
+        setDefaultOpts(r.default || []);
         setSel(new Set(r.default || []));
         setNseReg(r.nse || []);
         setNseDefault(r.nse_default || []);
@@ -127,7 +134,6 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
     return parts.join(" ");
   }, [sel, ports, portsAuto, targets, registry, selectedScripts]);
 
-  // onState.command: manual 은 항상 단일 명령(raw 모드 '채우기'용), 그 외엔 분산 단계 명령.
   const command = workflow === "manual" ? singleCommand : steps.map((s) => s.cmd).join("\n");
 
   useEffect(() => {
@@ -154,76 +160,164 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
 
   function toggle(k) {
     setSel((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
-    setPresetId("");
   }
   function toggleNse(k) {
     setNseSel((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
-    setPresetId("");
   }
-  const setNseAll = (keys) => { setNseSel(new Set(keys)); setPresetId(""); };
-  const setPortPreset = (spec) => { setPorts(spec); setPresetId(""); };
+  const setNseAll = (keys) => setNseSel(new Set(keys));
+  const setPortPreset = (spec) => { setPorts(spec); setTouchedPorts(true); };
 
-  function applyPrecision() {
-    setWorkflow("manual");
-    setSel(new Set(PRECISION_OPTS.filter((k) => registry.some((o) => o.key === k))));
-    setPorts(udpPorts ? `T:1-65535,U:${udpPorts}` : "T:1-65535");
-    setNseSel(new Set(nseDefault));
-    setShowManualOptions(true);
-    setShowNse(true);
-    setPresetId("");
-  }
+  // 모드 전환 — '자동 스캔'으로 가면 정밀 옵션은 끈다(단일 실행 전용 개념).
+  function chooseAuto() { setWorkflow("auto"); setPrecision(false); }
+  function chooseManual() { setWorkflow("manual"); }
 
-  function applyPreset(id) {
-    const p = presets.find((x) => x.id === id);
-    if (p) {
-      setWorkflow(p.workflow || "manual");
-      setSel(new Set(p.keys || []));
-      setPorts(p.ports || "");
-      setNseSel(new Set(p.nse || []));
+  // 정밀 옵션 토글 — 켜면 단일 실행 + 정밀 프리셋 로드, 끄면 기본 구성으로 되돌린다(닫을 수 있음).
+  function togglePrecision(on) {
+    setPrecision(on);
+    if (on) {
+      setWorkflow("manual");
+      setSel(new Set(PRECISION_OPTS.filter((k) => registry.some((o) => o.key === k))));
+      setPorts(udpPorts ? `T:1-65535,U:${udpPorts}` : "T:1-65535");
+      setTouchedPorts(true);
+      setNseSel(new Set(nseDefault));
+      setShowNse(true);
+    } else {
+      setSel(new Set(defaultOpts));
+      setNseSel(new Set(nseDefault));
+      setShowNse(false);
+      setWorkflow("auto");
     }
-    setPresetId(id);
+  }
+
+  function applyPreset(p) {
+    if (!p) return;
+    setWorkflow(p.workflow || "manual");
+    setPrecision(!!p.precision);
+    setSel(new Set(p.keys || []));
+    setPorts(p.ports || "");
+    setTouchedPorts(true);
+    setNseSel(new Set(p.nse || []));
+    if (setTargetsText && p.targets != null) setTargetsText(p.targets);   // IP 텍스트 즉시 반영
+    if (setExclude && p.exclude != null) setExclude(p.exclude);
+    if ((p.keys || []).length || p.precision) setShowNse(true);
   }
 
   function savePreset() {
-    const name = prompt("스캔 프리셋 이름", workflow === "auto" ? "자동 스캔" : "단일 실행");
+    const name = prompt("이 구성을 프리셋으로 저장 — 이름", workflow === "auto" ? "자동 스캔" : "단일 실행");
     if (!name || !name.trim()) return;
     const next = [...presets, {
       id: "sp_" + Date.now(),
       name: name.trim(),
-      workflow,
-      keys: [...sel],
-      ports,
-      nse: [...nseSel],
+      workflow, precision,
+      keys: [...sel], ports, nse: [...nseSel],
+      targets: targetsText, exclude,   // IP·제외까지 저장 → 적용 시 그대로 복원
     }];
     setPresets(next);
     localStorage.setItem(PRESET_KEY, JSON.stringify(next));
-    setPresetId(next[next.length - 1].id);
   }
 
-  function delPreset() {
-    const next = presets.filter((p) => p.id !== presetId);
+  function delPreset(id) {
+    const next = presets.filter((p) => p.id !== id);
     setPresets(next);
     localStorage.setItem(PRESET_KEY, JSON.stringify(next));
-    setPresetId("");
+  }
+
+  function readTokensFromFile(file, cb) {
+    file.text().then((txt) => {
+      const toks = txt.split(/[\s,]+/).map((t) => t.trim()).filter((t) => t && !t.startsWith("#"));
+      cb(toks);
+    }).catch(() => {});
+  }
+  function onTargetsFile(e) {
+    const f = e.target.files?.[0]; e.target.value = "";
+    if (f && setTargetsText) readTokensFromFile(f, (toks) => setTargetsText(toks.join("\n")));
+  }
+  function onPortsFile(e) {
+    const f = e.target.files?.[0]; e.target.value = "";
+    if (f) readTokensFromFile(f, (toks) => setPortPreset(toks.join(",")));
   }
 
   const { tcp, udp } = autoPortSpecs((ports || portsAuto).trim(), udpPorts);
+  const portActive = (spec) => (ports || "").trim() === spec;
 
   return (
     <div className="scan-builder">
+      {/* 모드 + 프리셋(버튼) */}
       <div className="scan-modebar">
         <div className="seg">
-          <button type="button" className={workflow === "auto" ? "on" : ""} onClick={() => setWorkflow("auto")}>자동 스캔</button>
-          <button type="button" className={workflow === "manual" ? "on" : ""} onClick={() => setWorkflow("manual")}>단일 실행</button>
+          <button type="button" className={workflow === "auto" ? "on" : ""} onClick={chooseAuto}>자동 스캔</button>
+          <button type="button" className={workflow === "manual" ? "on" : ""} onClick={chooseManual}>단일 실행</button>
         </div>
-        <select value={presetId} onChange={(e) => applyPreset(e.target.value)} aria-label="프리셋 선택">
-          <option value="">프리셋 선택…</option>
-          {presets.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-        <button type="button" className="sm" onClick={savePreset}>현재 구성 저장</button>
-        {presetId && <button type="button" className="sm" onClick={delPreset}>삭제</button>}
+        <div className="scan-presetbar">
+          <span className="scan-mini-label">구성 프리셋</span>
+          {presets.length === 0 && <span className="muted" style={{ fontSize: 12 }}>저장된 구성 없음</span>}
+          {presets.map((p) => (
+            <span key={p.id} className="preset-chip">
+              <button type="button" className="preset-apply" onClick={() => applyPreset(p)} title="이 구성 적용(IP·포트·옵션 복원)">{p.name}</button>
+              <button type="button" className="preset-del" onClick={() => delPreset(p.id)} title="삭제">×</button>
+            </span>
+          ))}
+          <button type="button" className="sm" onClick={savePreset}>+ 현재 구성 저장</button>
+        </div>
       </div>
 
+      {/* ① 대상 IP 패널 */}
+      <section className="scan-panel scan-panel-ip">
+        <div className="scan-panel-head">
+          <span className="scan-panel-title"><span className="scan-panel-kbd">IP</span> 대상</span>
+          <label className="linkbtn">
+            파일 불러오기(.txt)
+            <input ref={targetsFileRef} type="file" accept=".txt,.csv,text/plain" style={{ display: "none" }} onChange={onTargetsFile} />
+          </label>
+        </div>
+        <textarea
+          className="scan-target-input"
+          rows={3}
+          placeholder="예: 10.10.20.0/24  10.10.30.5  10.10.40.1-50  (공백·줄바꿈·콤마 구분)"
+          value={targetsText}
+          onChange={(e) => setTargetsText && setTargetsText(e.target.value)}
+        />
+        <div className="scan-subfield">
+          <label className="scan-mini-label">제외 대역 (선택)</label>
+          <input
+            className="scan-exclude-input"
+            placeholder="스캔에서 뺄 IP·CIDR — 예: 10.10.20.19, 10.10.30.0/24"
+            value={exclude}
+            onChange={(e) => setExclude && setExclude(e.target.value)}
+          />
+        </div>
+        <div className="scan-hint">IP·CIDR·범위(10.0.0.1-50)를 자유롭게. 제외 대역은 대상 확장 후 걸러냅니다(자동/단일/단계 모두 적용).</div>
+      </section>
+
+      {/* ② 포트 패널 (강조) */}
+      <section className="scan-panel scan-panel-port">
+        <div className="scan-panel-head">
+          <span className="scan-panel-title"><span className="scan-panel-kbd">PORT</span> 포트</span>
+          <label className="linkbtn">
+            파일 불러오기(.txt)
+            <input ref={portsFileRef} type="file" accept=".txt,.csv,text/plain" style={{ display: "none" }} onChange={onPortsFile} />
+          </label>
+        </div>
+        <div className="scan-preset-row">
+          <button type="button" className={`portpreset ${portActive("") ? "on" : ""}`} onClick={() => setPortPreset("")}>최적화된 포트</button>
+          <button type="button" className={`portpreset ${portActive("T:1-65535") ? "on" : ""}`} onClick={() => setPortPreset("T:1-65535")}>TCP 전체</button>
+          {udpPorts && <button type="button" className={`portpreset ${portActive(`U:${udpPorts}`) ? "on" : ""}`} onClick={() => setPortPreset(`U:${udpPorts}`)}>UDP 주요만</button>}
+          {udpPorts && <button type="button" className={`portpreset ${portActive(`T:1-65535,U:${udpPorts}`) ? "on" : ""}`} onClick={() => setPortPreset(`T:1-65535,U:${udpPorts}`)}>TCP + UDP</button>}
+        </div>
+        <input
+          className="scan-port-input"
+          placeholder={workflow === "auto" ? "비우면 TCP 전체 + 주요 UDP · 예: 22,443 또는 U:53" : "예: 22,80,443 또는 1-1024"}
+          value={ports}
+          onChange={(e) => setPortPreset(e.target.value)}
+        />
+        <div className="scan-hint">
+          위 버튼을 누르면 아래 칸에 <b>즉시 반영</b>됩니다(직접 편집도 가능).
+          {" "}현재: TCP <b className="mono">{tcp || "없음"}</b>{udp ? <> · UDP <b className="mono">{udp}</b></> : null}
+          {!ports ? "  ·  최적화된 포트 = 자동 발견 프로파일(권장)" : ""}
+        </div>
+      </section>
+
+      {/* 스캔 흐름 설명(자동) / 참고(단일) */}
       {workflow === "auto" ? (
         <div className="scan-auto">
           <div className="scan-flow">
@@ -242,104 +336,107 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
         </div>
       )}
 
-      <div className="scan-actions">
-        <button type="button" className="sm" onClick={() => setPortPreset("")}>자동 기본 포트</button>
-        <button type="button" className="sm" onClick={() => setPortPreset("T:1-65535")}>TCP 전체</button>
-        {udpPorts && <button type="button" className="sm" onClick={() => setPortPreset(`U:${udpPorts}`)}>UDP 주요만</button>}
-        {udpPorts && <button type="button" className="sm" onClick={() => setPortPreset(`T:1-65535,U:${udpPorts}`)}>TCP+UDP</button>}
-        <button type="button" className="sm" onClick={applyPrecision}>단일 정밀 구성</button>
-      </div>
+      {/* 정밀 옵션 — 포트 프리셋과 분리된 별도 토글(켜고 끌 수 있음) */}
+      <section className="scan-panel scan-panel-precision">
+        <label className="scan-precision-toggle">
+          <input type="checkbox" checked={precision} onChange={(e) => togglePrecision(e.target.checked)} />
+          <span>
+            <b>정밀 옵션 (단일 실행 상세 구성)</b>
+            <small>개별 nmap 스캔 옵션·NSE 스크립트를 직접 켜고 끕니다. 끄면 기본 구성으로 되돌아갑니다.</small>
+          </span>
+        </label>
 
-      <div className="scan-collapsible">
-        <button type="button" className="sm" onClick={() => setShowManualOptions((v) => !v)}>
-          {showManualOptions ? "접기" : "펼치기"} 상세 옵션
-        </button>
-        <button type="button" className="sm" onClick={() => setShowNse((v) => !v)}>
-          {showNse ? "접기" : "펼치기"} NSE <span className="pill info">{nseSel.size}</span>
-        </button>
-      </div>
-
-      <label className="field scan-ports">
-        포트 {portsAuto && <span className="muted">(비우면 {portsAuto})</span>}
-        <input placeholder={workflow === "auto" ? "비우면 TCP 전체 + 주요 UDP, 예: 22,443 또는 U:53" : "예: 22,80,443 또는 1-1024"}
-               value={ports} onChange={(e) => setPortPreset(e.target.value)} />
-      </label>
-
-      {showManualOptions && (
-        <div className="scan-option-groups">
-          {Object.entries(groups).map(([grp, opts]) => (
-            <div key={grp} className="scan-option-group">
-              <div className="cb-label">{grp}</div>
-              <div className="scan-option-grid">
-                {opts.map((o) => {
-                  const on = sel.has(o.key);
-                  return (
-                    <label key={o.key} title={o.desc || ""} className={`scan-toggle ${on ? "on" : ""}`}>
-                      <input type="checkbox" checked={on} onChange={() => toggle(o.key)} />
-                      <span>
-                        <b>{o.label}</b>
-                        {o.note && <em>{o.note}</em>}
-                        {o.desc && <small>{o.desc}</small>}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
+        {precision && (
+          <div className="scan-precision-body">
+            <div className="scan-option-groups">
+              {Object.entries(groups).map(([grp, opts]) => (
+                <div key={grp} className="scan-option-group">
+                  <div className="cb-label">{grp}</div>
+                  <div className="scan-option-grid">
+                    {opts.map((o) => {
+                      const on = sel.has(o.key);
+                      return (
+                        <label key={o.key} title={o.desc || ""} className={`scan-toggle ${on ? "on" : ""}`}>
+                          <input type="checkbox" checked={on} onChange={() => toggle(o.key)} />
+                          <span>
+                            <b>{o.label}</b>
+                            {o.note && <em>{o.note}</em>}
+                            {o.desc && <small>{o.desc}</small>}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
 
-      {showNse && (
-        <div className="scan-nse">
-          <div className="scan-actions">
-            <button type="button" className="sm" onClick={() => setNseAll(nseDefault)}>기본 단서</button>
-            <button type="button" className="sm" onClick={() => setNseAll(nseReg.map((s) => s.key))}>전체</button>
-            <button type="button" className="sm" onClick={() => setNseAll([])}>끄기</button>
+            <div className="scan-collapsible" style={{ marginTop: 12 }}>
+              <button type="button" className="sm" onClick={() => setShowNse((v) => !v)}>
+                {showNse ? "접기" : "펼치기"} NSE 스크립트 <span className="pill info">{nseSel.size}</span>
+              </button>
+            </div>
+            {showNse && (
+              <div className="scan-nse">
+                <div className="scan-actions">
+                  <button type="button" className="sm" onClick={() => setNseAll(nseDefault)}>기본 단서</button>
+                  <button type="button" className="sm" onClick={() => setNseAll(nseReg.map((s) => s.key))}>전체</button>
+                  <button type="button" className="sm" onClick={() => setNseAll([])}>끄기</button>
+                </div>
+                {Object.entries(nseGroups).map(([grp, scripts]) => (
+                  <div key={grp} className="scan-option-group">
+                    <div className="cb-label">{grp}</div>
+                    <div className="scan-nse-grid">
+                      {scripts.map((s) => {
+                        const on = nseSel.has(s.key);
+                        return (
+                          <label key={s.key} title={s.desc || ""} className={`scan-toggle compact ${on ? "on" : ""}`}>
+                            <input type="checkbox" checked={on} onChange={() => toggleNse(s.key)} />
+                            <span>
+                              <b className="mono">{s.key}</b>
+                              {s.nmap_default === false && <em>주의</em>}
+                              {s.desc && <small>{s.desc}</small>}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-          {Object.entries(nseGroups).map(([grp, scripts]) => (
-            <div key={grp} className="scan-option-group">
-              <div className="cb-label">{grp}</div>
-              <div className="scan-nse-grid">
-                {scripts.map((s) => {
-                  const on = nseSel.has(s.key);
-                  return (
-                    <label key={s.key} title={s.desc || ""} className={`scan-toggle compact ${on ? "on" : ""}`}>
-                      <input type="checkbox" checked={on} onChange={() => toggleNse(s.key)} />
-                      <span>
-                        <b className="mono">{s.key}</b>
-                        {s.nmap_default === false && <em>주의</em>}
-                        {s.desc && <small>{s.desc}</small>}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+        )}
+      </section>
 
-      <div className="cb-label" style={{ marginTop: 12 }}>실행될 명령어</div>
-      {stepped ? (
-        <>
-          <div className="scan-result-note" style={{ marginBottom: 8 }}>
-            아래 {steps.length}개 명령은 <b>한 번에 실행되지 않습니다.</b> {staged ? "단계 분리 엔진이 " : "자동 스캔이 "}
-            각 단계를 <b>나눠서(분산) 순차 실행</b>하며, 앞 단계의 결과가 다음 단계의 입력이 됩니다
-            (예: TCP 발견에서 열린 포트만 골라 식별 단계로 넘김). 각 단계는 별도 명령·별도 산출물(<span className="mono">-oA</span>)로 남습니다.
-          </div>
-          {steps.map((s, i) => (
-            <div key={i} style={{ marginTop: i ? 10 : 0 }}>
-              <div className="cb-label" style={{ fontSize: 12, marginBottom: 4 }}>
-                {i + 1}단계 · {s.title} <span className="muted" style={{ fontWeight: 400 }}>— {s.desc}</span>
+      {/* 실행될 명령어 — 기본 접힘 */}
+      <div className="scan-preview">
+        <button type="button" className="scan-preview-toggle" onClick={() => setShowPreview((v) => !v)}>
+          <span className="scan-caret">{showPreview ? "▾" : "▸"}</span> 실행될 명령어 미리보기
+          <span className="pill info">{stepped ? `${steps.length}단계` : "1개"}</span>
+        </button>
+        {showPreview && (
+          stepped ? (
+            <div className="scan-preview-body">
+              <div className="scan-result-note" style={{ marginBottom: 8 }}>
+                아래 {steps.length}개 명령은 <b>한 번에 실행되지 않습니다.</b> {staged ? "단계 분리 엔진이 " : "자동 스캔이 "}
+                각 단계를 <b>나눠서(분산) 순차 실행</b>하며, 앞 단계의 결과가 다음 단계의 입력이 됩니다
+                (예: TCP 발견에서 열린 포트만 골라 식별 단계로 넘김). 각 단계는 별도 명령·별도 산출물(<span className="mono">-oA</span>)로 남습니다.
               </div>
-              <div className="pre scan-command">{s.cmd}</div>
+              {steps.map((s, i) => (
+                <div key={i} style={{ marginTop: i ? 10 : 0 }}>
+                  <div className="cb-label" style={{ fontSize: 12, marginBottom: 4 }}>
+                    {i + 1}단계 · {s.title} <span className="muted" style={{ fontWeight: 400 }}>— {s.desc}</span>
+                  </div>
+                  <div className="pre scan-command">{s.cmd}</div>
+                </div>
+              ))}
             </div>
-          ))}
-        </>
-      ) : (
-        <div className="pre scan-command">{command}</div>
-      )}
+          ) : (
+            <div className="scan-preview-body"><div className="pre scan-command">{command}</div></div>
+          )
+        )}
+      </div>
     </div>
   );
 }

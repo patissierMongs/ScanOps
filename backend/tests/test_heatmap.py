@@ -80,6 +80,41 @@ def test_narrow_port_scan_does_not_overwrite_heatmap_current(client, tmp_path):
     assert any(r["host_ip"] == "127.0.0.1" and r["port"] == 3000 for r in current["items"])
 
 
+def test_heatmap_handles_mixed_address_families(client, tmp_path):
+    """IPv4·IPv6·MAC 주소가 한 스캔에 섞여도 히트맵 정렬이 죽지 않는다(회귀: int/str 비교 TypeError)."""
+    headers = _auth(client)
+    mixed_xml = tmp_path / "mixed.xml"
+    mixed_xml.write_text(
+        """<?xml version="1.0"?>
+<nmaprun start="1893456000">
+  <host><status state="up"/>
+    <address addr="10.10.20.11" addrtype="ipv4"/>
+    <ports><port protocol="tcp" portid="445"><state state="open"/>
+      <service name="microsoft-ds" method="probed" conf="10"/></port></ports>
+  </host>
+  <host><status state="up"/>
+    <address addr="2001:db8:20::a" addrtype="ipv6"/>
+    <ports><port protocol="tcp" portid="22"><state state="open"/>
+      <service name="ssh" method="probed" conf="10"/></port></ports>
+  </host>
+  <host><status state="up"/>
+    <address addr="A4:BB:6D:11:22:33" addrtype="mac"/>
+    <ports><port protocol="tcp" portid="9100"><state state="open"/>
+      <service name="jetdirect" method="probed" conf="10"/></port></ports>
+  </host>
+</nmaprun>
+""",
+        encoding="utf-8",
+    )
+    assert _import(client, headers, mixed_xml, "mixed.xml").status_code == 200
+
+    res = client.get("/api/heatmap", headers=headers)
+    assert res.status_code == 200
+    hosts = {r["host_ip"] for r in res.json()["rows"]}
+    assert {"10.10.20.11", "2001:db8:20::a", "A4:BB:6D:11:22:33"} <= hosts
+    assert client.get("/api/heatmap/report", headers=headers).status_code == 200
+
+
 def test_heatmap_report_xlsx_has_operational_sheets(client):
     headers = _auth(client)
     assert _import(client, headers, SAMPLES / "scanA.xml").status_code == 200
