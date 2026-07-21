@@ -1,0 +1,950 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/share/nmap/nmap.xsl" type="text/xsl"?>
+<nmaprun scanner="nmap" args="nmap -sS -sV -sC -oX scan_dmz_public.xml 203.0.113.0/24" start="1753171200" startstr="Mon Jul 20 09:00:00 2026" version="7.94SVN" xmloutputversion="1.05">
+  <scaninfo type="syn" protocol="tcp" numservices="6" services="21,22,80,443,8009,9418"/>
+  <verbose level="0"/>
+  <debugging level="0"/>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.10" addrtype="ipv4"/>
+    <address addr="52:54:00:0a:03:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-001" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.11" addrtype="ipv4"/>
+    <address addr="52:54:00:0b:04:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-002" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.12" addrtype="ipv4"/>
+    <address addr="52:54:00:0c:05:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-003" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.13" addrtype="ipv4"/>
+    <address addr="52:54:00:0d:06:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-004" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="8009">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ajp13" method="probed" conf="10" product="Apache Jserv"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.14" addrtype="ipv4"/>
+    <address addr="52:54:00:0e:00:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-005" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="8009">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ajp13" method="probed" conf="10" product="Apache Jserv"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.15" addrtype="ipv4"/>
+    <address addr="52:54:00:0f:01:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-006" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.16" addrtype="ipv4"/>
+    <address addr="52:54:00:10:02:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-007" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.17" addrtype="ipv4"/>
+    <address addr="52:54:00:11:03:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-008" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.18" addrtype="ipv4"/>
+    <address addr="52:54:00:12:04:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-009" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.19" addrtype="ipv4"/>
+    <address addr="52:54:00:13:05:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-010" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.20" addrtype="ipv4"/>
+    <address addr="52:54:00:14:06:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-011" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
+          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="9418">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="git" method="probed" conf="10" product="Git smart HTTP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.21" addrtype="ipv4"/>
+    <address addr="52:54:00:15:00:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-012" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.22" addrtype="ipv4"/>
+    <address addr="52:54:00:16:01:09" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-013" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.23" addrtype="ipv4"/>
+    <address addr="52:54:00:17:02:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-014" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.24" addrtype="ipv4"/>
+    <address addr="52:54:00:18:03:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-015" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
+          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.25" addrtype="ipv4"/>
+    <address addr="52:54:00:19:04:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-016" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.26" addrtype="ipv4"/>
+    <address addr="52:54:00:1a:05:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-017" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="8009">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ajp13" method="probed" conf="10" product="Apache Jserv"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.27" addrtype="ipv4"/>
+    <address addr="52:54:00:1b:06:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-018" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.28" addrtype="ipv4"/>
+    <address addr="52:54:00:1c:00:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-019" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.29" addrtype="ipv4"/>
+    <address addr="52:54:00:1d:01:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-020" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.30" addrtype="ipv4"/>
+    <address addr="52:54:00:1e:02:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-021" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.31" addrtype="ipv4"/>
+    <address addr="52:54:00:1f:03:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-022" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
+          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.32" addrtype="ipv4"/>
+    <address addr="52:54:00:20:04:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-023" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.33" addrtype="ipv4"/>
+    <address addr="52:54:00:21:05:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-024" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="8009">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ajp13" method="probed" conf="10" product="Apache Jserv"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.34" addrtype="ipv4"/>
+    <address addr="52:54:00:22:06:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-025" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
+          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.35" addrtype="ipv4"/>
+    <address addr="52:54:00:23:00:09" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-026" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.36" addrtype="ipv4"/>
+    <address addr="52:54:00:24:01:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-027" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.37" addrtype="ipv4"/>
+    <address addr="52:54:00:25:02:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-028" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.38" addrtype="ipv4"/>
+    <address addr="52:54:00:26:03:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-029" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.39" addrtype="ipv4"/>
+    <address addr="52:54:00:27:04:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-030" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.40" addrtype="ipv4"/>
+    <address addr="52:54:00:28:05:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-031" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.41" addrtype="ipv4"/>
+    <address addr="52:54:00:29:06:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-032" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
+          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="9418">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="git" method="probed" conf="10" product="Git smart HTTP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.42" addrtype="ipv4"/>
+    <address addr="52:54:00:2a:00:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-033" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.43" addrtype="ipv4"/>
+    <address addr="52:54:00:2b:01:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-034" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.44" addrtype="ipv4"/>
+    <address addr="52:54:00:2c:02:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-035" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <runstats>
+    <finished time="1753171500" timestr="Mon Jul 20 09:05:00 2026" summary="Nmap done; 35 IP addresses scanned" elapsed="300.00" exit="success"/>
+    <hosts up="35" down="0" total="35"/>
+  </runstats>
+</nmaprun>

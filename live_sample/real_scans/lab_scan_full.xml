@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/bin/../share/nmap/nmap.xsl" type="text/xsl"?>
+<!-- Nmap 7.94SVN scan initiated Tue Jul 21 00:36:04 2026 as: nmap -sV -sC -p- -&#45;min-rate 2000 -oX /home/user/ScanOps/live_sample/real_scans/lab_scan_full.xml 172.30.0.10-15 -->
+<nmaprun scanner="nmap" args="nmap -sV -sC -p- -&#45;min-rate 2000 -oX /home/user/ScanOps/live_sample/real_scans/lab_scan_full.xml 172.30.0.10-15" start="1784594164" startstr="Tue Jul 21 00:36:04 2026" version="7.94SVN" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="65535" services="1-65535"/>
+<verbose level="0"/>
+<debugging level="0"/>
+<hosthint><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.11" addrtype="ipv4"/>
+<address addr="62:E0:3D:99:02:7E" addrtype="mac"/>
+<hostnames>
+</hostnames>
+</hosthint>
+<hosthint><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.12" addrtype="ipv4"/>
+<address addr="6E:35:6B:8B:D7:C7" addrtype="mac"/>
+<hostnames>
+</hostnames>
+</hosthint>
+<hosthint><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.13" addrtype="ipv4"/>
+<address addr="06:04:CB:5B:D4:B7" addrtype="mac"/>
+<hostnames>
+</hostnames>
+</hosthint>
+<hosthint><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.14" addrtype="ipv4"/>
+<address addr="86:CD:02:15:75:16" addrtype="mac"/>
+<hostnames>
+</hostnames>
+</hosthint>
+<hosthint><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.15" addrtype="ipv4"/>
+<address addr="B2:17:DD:5F:5D:E7" addrtype="mac"/>
+<hostnames>
+</hostnames>
+</hosthint>
+<hosthint><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.10" addrtype="ipv4"/>
+<address addr="42:41:9A:51:A4:00" addrtype="mac"/>
+<hostnames>
+</hostnames>
+</hosthint>
+<host starttime="1784594164" endtime="1784594181"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.10" addrtype="ipv4"/>
+<address addr="42:41:9A:51:A4:00" addrtype="mac"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="65534">
+<extrareasons reason="reset" count="65534" proto="tcp" ports="1-79,81-65535"/>
+</extraports>
+<port protocol="tcp" portid="80"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="http" product="nginx" version="1.31.3" method="probed" conf="10"><cpe>cpe:/a:igor_sysoev:nginx:1.31.3</cpe></service><script id="http-title" output="Welcome to nginx!"><elem key="title">Welcome to nginx!</elem>
+</script><script id="http-server-header" output="nginx/1.31.3"><elem>nginx/1.31.3</elem>
+</script></port>
+</ports>
+<times srtt="4" rttvar="1" to="100000"/>
+</host>
+<host starttime="1784594164" endtime="1784594181"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.11" addrtype="ipv4"/>
+<address addr="62:E0:3D:99:02:7E" addrtype="mac"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="65534">
+<extrareasons reason="reset" count="65534" proto="tcp" ports="1-5431,5433-65535"/>
+</extraports>
+<port protocol="tcp" portid="5432"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="postgresql" product="PostgreSQL DB" version="9.6.0 or later" servicefp="SF-Port5432-TCP:V=7.94SVN%I=7%D=7/21%Time=6A5EBEFD%P=x86_64-pc-linux-gnu%r(SMBProgNeg,90,&quot;E\0\0\0\x8fSFATAL\0VFATAL\0C0A000\0Munsupported\x20frontend\x20protocol\x2065363\.19778:\x20server\x20supports\x203\.0\x20to\x203\.2\0Fbackend_startup\.c\0L726\0RProcessStartupPacket\0\0&quot;);" method="probed" conf="10"><cpe>cpe:/a:postgresql:postgresql</cpe></service><script id="fingerprint-strings" output="&#xa;  SMBProgNeg: &#xa;    SFATAL&#xa;    VFATAL&#xa;    C0A000&#xa;    Munsupported frontend protocol 65363.19778: server supports 3.0 to 3.2&#xa;    Fbackend_startup.c&#xa;    L726&#xa;    RProcessStartupPacket"><elem key="SMBProgNeg">&#xa;    SFATAL&#xa;    VFATAL&#xa;    C0A000&#xa;    Munsupported frontend protocol 65363.19778: server supports 3.0 to 3.2&#xa;    Fbackend_startup.c&#xa;    L726&#xa;    RProcessStartupPacket</elem>
+</script></port>
+</ports>
+<times srtt="5" rttvar="0" to="100000"/>
+</host>
+<host starttime="1784594164" endtime="1784594181"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.12" addrtype="ipv4"/>
+<address addr="6E:35:6B:8B:D7:C7" addrtype="mac"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="65534">
+<extrareasons reason="reset" count="65534" proto="tcp" ports="1-6378,6380-65535"/>
+</extraports>
+<port protocol="tcp" portid="6379"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="redis" product="Redis key-value store" version="8.8.0" method="probed" conf="10"><cpe>cpe:/a:redislabs:redis:8.8.0</cpe></service></port>
+</ports>
+<times srtt="4" rttvar="0" to="100000"/>
+</host>
+<host starttime="1784594164" endtime="1784594181"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.13" addrtype="ipv4"/>
+<address addr="06:04:CB:5B:D4:B7" addrtype="mac"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="65534">
+<extrareasons reason="reset" count="65534" proto="tcp" ports="1-20,22-65535"/>
+</extraports>
+<port protocol="tcp" portid="21"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="ftp" product="vsftpd" version="2.0.8 or later" hostname="Welcome" method="probed" conf="10"><cpe>cpe:/a:vsftpd:vsftpd</cpe></service></port>
+</ports>
+<times srtt="5" rttvar="0" to="100000"/>
+</host>
+<host starttime="1784594181" endtime="1784594188"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.14" addrtype="ipv4"/>
+<address addr="86:CD:02:15:75:16" addrtype="mac"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="65534">
+<extrareasons reason="reset" count="65534" proto="tcp" ports="1-79,81-65535"/>
+</extraports>
+<port protocol="tcp" portid="80"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="http" product="nginx" version="1.31.3" method="probed" conf="10"><cpe>cpe:/a:igor_sysoev:nginx:1.31.3</cpe></service><script id="http-server-header" output="nginx/1.31.3"><elem>nginx/1.31.3</elem>
+</script><script id="http-title" output="Welcome to nginx!"><elem key="title">Welcome to nginx!</elem>
+</script></port>
+</ports>
+<times srtt="4" rttvar="1" to="100000"/>
+</host>
+<host starttime="1784594181" endtime="1784594188"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="172.30.0.15" addrtype="ipv4"/>
+<address addr="B2:17:DD:5F:5D:E7" addrtype="mac"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="65535">
+<extrareasons reason="reset" count="65535" proto="tcp" ports="1-65535"/>
+</extraports>
+</ports>
+<times srtt="4" rttvar="1" to="100000"/>
+</host>
+<runstats><finished time="1784594188" timestr="Tue Jul 21 00:36:28 2026" summary="Nmap done at Tue Jul 21 00:36:28 2026; 6 IP addresses (6 hosts up) scanned in 24.16 seconds" elapsed="24.16" exit="success"/><hosts up="6" down="0" total="6"/>
+</runstats>
+</nmaprun>

@@ -1,0 +1,899 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/share/nmap/nmap.xsl" type="text/xsl"?>
+<nmaprun scanner="nmap" args="nmap -sS -sV -O -oX scan_branch_office.xml 10.20.30.0/24" start="1753084800" startstr="Mon Jul 20 09:00:00 2026" version="7.94SVN" xmloutputversion="1.05">
+  <scaninfo type="syn" protocol="tcp" numservices="6" services="22,80,445,631,3389,9100"/>
+  <verbose level="0"/>
+  <debugging level="0"/>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.10" addrtype="ipv4"/>
+    <address addr="52:54:00:0a:03:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-001" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.11" addrtype="ipv4"/>
+    <address addr="52:54:00:0b:04:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-002" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.12" addrtype="ipv4"/>
+    <address addr="52:54:00:0c:05:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-003" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.13" addrtype="ipv4"/>
+    <address addr="52:54:00:0d:06:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-004" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.14" addrtype="ipv4"/>
+    <address addr="52:54:00:0e:00:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-005" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="9100">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="printer" method="probed" conf="10" product="HP LaserJet"/>
+      </port>
+      <port protocol="tcp" portid="631">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.3"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.15" addrtype="ipv4"/>
+    <address addr="52:54:00:0f:01:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-006" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="9100">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="printer" method="probed" conf="10" product="HP LaserJet"/>
+      </port>
+      <port protocol="tcp" portid="631">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.3"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.16" addrtype="ipv4"/>
+    <address addr="52:54:00:10:02:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-007" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.17" addrtype="ipv4"/>
+    <address addr="52:54:00:11:03:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-008" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.18" addrtype="ipv4"/>
+    <address addr="52:54:00:12:04:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-009" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.19" addrtype="ipv4"/>
+    <address addr="52:54:00:13:05:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-010" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.20" addrtype="ipv4"/>
+    <address addr="52:54:00:14:06:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-011" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.21" addrtype="ipv4"/>
+    <address addr="52:54:00:15:00:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-012" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.22" addrtype="ipv4"/>
+    <address addr="52:54:00:16:01:09" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-013" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.23" addrtype="ipv4"/>
+    <address addr="52:54:00:17:02:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-014" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.24" addrtype="ipv4"/>
+    <address addr="52:54:00:18:03:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-015" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="9100">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="printer" method="probed" conf="10" product="HP LaserJet"/>
+      </port>
+      <port protocol="tcp" portid="631">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.3"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.25" addrtype="ipv4"/>
+    <address addr="52:54:00:19:04:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-016" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.26" addrtype="ipv4"/>
+    <address addr="52:54:00:1a:05:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-017" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.27" addrtype="ipv4"/>
+    <address addr="52:54:00:1b:06:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-018" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.28" addrtype="ipv4"/>
+    <address addr="52:54:00:1c:00:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-019" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.29" addrtype="ipv4"/>
+    <address addr="52:54:00:1d:01:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-020" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.30" addrtype="ipv4"/>
+    <address addr="52:54:00:1e:02:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-021" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.31" addrtype="ipv4"/>
+    <address addr="52:54:00:1f:03:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-022" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.32" addrtype="ipv4"/>
+    <address addr="52:54:00:20:04:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-023" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.33" addrtype="ipv4"/>
+    <address addr="52:54:00:21:05:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-024" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.34" addrtype="ipv4"/>
+    <address addr="52:54:00:22:06:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-025" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.35" addrtype="ipv4"/>
+    <address addr="52:54:00:23:00:09" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-026" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.36" addrtype="ipv4"/>
+    <address addr="52:54:00:24:01:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-027" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.37" addrtype="ipv4"/>
+    <address addr="52:54:00:25:02:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-028" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.38" addrtype="ipv4"/>
+    <address addr="52:54:00:26:03:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-029" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.39" addrtype="ipv4"/>
+    <address addr="52:54:00:27:04:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-030" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.40" addrtype="ipv4"/>
+    <address addr="52:54:00:28:05:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-031" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.41" addrtype="ipv4"/>
+    <address addr="52:54:00:29:06:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-032" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.42" addrtype="ipv4"/>
+    <address addr="52:54:00:2a:00:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-033" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.43" addrtype="ipv4"/>
+    <address addr="52:54:00:2b:01:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-034" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.44" addrtype="ipv4"/>
+    <address addr="52:54:00:2c:02:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-035" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.45" addrtype="ipv4"/>
+    <address addr="52:54:00:2d:03:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-036" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="3389">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ms-wbt-server" method="probed" conf="10" product="Microsoft Terminal Services"/>
+        <script id="rdp-ntlm-info" output="Target_Name: CORP
+NetBIOS_Domain_Name: CORP"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.46" addrtype="ipv4"/>
+    <address addr="52:54:00:2e:04:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-037" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.47" addrtype="ipv4"/>
+    <address addr="52:54:00:2f:05:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-038" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="9100">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="printer" method="probed" conf="10" product="HP LaserJet"/>
+      </port>
+      <port protocol="tcp" portid="631">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.48" addrtype="ipv4"/>
+    <address addr="52:54:00:30:06:09" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-039" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="9100">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="printer" method="probed" conf="10" product="HP LaserJet"/>
+      </port>
+      <port protocol="tcp" portid="631">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.49" addrtype="ipv4"/>
+    <address addr="52:54:00:31:00:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-040" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.50" addrtype="ipv4"/>
+    <address addr="52:54:00:32:01:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-041" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="9100">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="printer" method="probed" conf="10" product="HP LaserJet"/>
+      </port>
+      <port protocol="tcp" portid="631">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.51" addrtype="ipv4"/>
+    <address addr="52:54:00:33:02:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-042" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="9100">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="printer" method="probed" conf="10" product="HP LaserJet"/>
+      </port>
+      <port protocol="tcp" portid="631">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.52" addrtype="ipv4"/>
+    <address addr="52:54:00:34:03:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-043" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="microsoft-ds" method="probed" conf="10" product="Microsoft Windows Server 2019 microsoft-ds">
+          <cpe>cpe:/o:microsoft:windows_server_2019</cpe>
+        </service>
+        <script id="smb-os-discovery" output="OS: Windows Server 2019"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.53" addrtype="ipv4"/>
+    <address addr="52:54:00:35:04:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-044" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753084800" endtime="1753084808">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.20.30.54" addrtype="ipv4"/>
+    <address addr="52:54:00:36:05:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="branch-pc-045" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        </service>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <runstats>
+    <finished time="1753085100" timestr="Mon Jul 20 09:05:00 2026" summary="Nmap done; 45 IP addresses scanned" elapsed="300.00" exit="success"/>
+    <hosts up="45" down="0" total="45"/>
+  </runstats>
+</nmaprun>

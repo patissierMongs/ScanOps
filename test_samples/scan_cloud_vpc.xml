@@ -1,0 +1,744 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/share/nmap/nmap.xsl" type="text/xsl"?>
+<nmaprun scanner="nmap" args="nmap -sS -sV -oX scan_cloud_vpc.xml 172.31.10.0/24" start="1753344000" startstr="Mon Jul 20 09:00:00 2026" version="7.94SVN" xmloutputversion="1.05">
+  <scaninfo type="syn" protocol="tcp" numservices="11" services="22,80,1883,2181,3000,5432,6379,9092,9200,11211,27017"/>
+  <verbose level="0"/>
+  <debugging level="0"/>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.10" addrtype="ipv4"/>
+    <address addr="52:54:00:0a:03:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-001" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="3000">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="grafana" method="probed" conf="10" product="Grafana" version="9.3.6"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.11" addrtype="ipv4"/>
+    <address addr="52:54:00:0b:04:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-002" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.12" addrtype="ipv4"/>
+    <address addr="52:54:00:0c:05:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-003" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.13" addrtype="ipv4"/>
+    <address addr="52:54:00:0d:06:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-004" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.14" addrtype="ipv4"/>
+    <address addr="52:54:00:0e:00:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-005" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.15" addrtype="ipv4"/>
+    <address addr="52:54:00:0f:01:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-006" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5432">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="15.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.16" addrtype="ipv4"/>
+    <address addr="52:54:00:10:02:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-007" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="6379">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="6.2.6"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.17" addrtype="ipv4"/>
+    <address addr="52:54:00:11:03:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-008" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="9200">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="elasticsearch" method="probed" conf="10" product="Elasticsearch REST API" version="8.6.2"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.18" addrtype="ipv4"/>
+    <address addr="52:54:00:12:04:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-009" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.19" addrtype="ipv4"/>
+    <address addr="52:54:00:13:05:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-010" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="3000">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="grafana" method="probed" conf="10" product="Grafana" version="10.1.5"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.20" addrtype="ipv4"/>
+    <address addr="52:54:00:14:06:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-011" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5432">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="15.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.21" addrtype="ipv4"/>
+    <address addr="52:54:00:15:00:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-012" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="6379">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.2.3"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.22" addrtype="ipv4"/>
+    <address addr="52:54:00:16:01:09" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-013" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="9092">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="kafka" method="probed" conf="10" product="Apache Kafka"/>
+      </port>
+      <port protocol="tcp" portid="2181">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="zookeeper" method="probed" conf="10" product="Apache ZooKeeper" version="3.7.1"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.23" addrtype="ipv4"/>
+    <address addr="52:54:00:17:02:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-014" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="27017">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.24" addrtype="ipv4"/>
+    <address addr="52:54:00:18:03:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-015" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="11211">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="memcached" method="probed" conf="10" product="Memcached" version="1.6.18"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.25" addrtype="ipv4"/>
+    <address addr="52:54:00:19:04:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-016" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="11211">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="memcached" method="probed" conf="10" product="Memcached" version="1.6.18"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.26" addrtype="ipv4"/>
+    <address addr="52:54:00:1a:05:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-017" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="6379">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="6.2.6"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.27" addrtype="ipv4"/>
+    <address addr="52:54:00:1b:06:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-018" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="27017">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.28" addrtype="ipv4"/>
+    <address addr="52:54:00:1c:00:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-019" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="27017">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.29" addrtype="ipv4"/>
+    <address addr="52:54:00:1d:01:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-020" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5432">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="14.9"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.30" addrtype="ipv4"/>
+    <address addr="52:54:00:1e:02:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-021" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.31" addrtype="ipv4"/>
+    <address addr="52:54:00:1f:03:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-022" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="6379">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.0.11"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.32" addrtype="ipv4"/>
+    <address addr="52:54:00:20:04:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-023" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.33" addrtype="ipv4"/>
+    <address addr="52:54:00:21:05:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-024" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="6379">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.2.3"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.34" addrtype="ipv4"/>
+    <address addr="52:54:00:22:06:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-025" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="3000">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="grafana" method="probed" conf="10" product="Grafana" version="10.1.5"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.35" addrtype="ipv4"/>
+    <address addr="52:54:00:23:00:09" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-026" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="6379">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.0.11"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.36" addrtype="ipv4"/>
+    <address addr="52:54:00:24:01:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-027" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="6379">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.0.11"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.37" addrtype="ipv4"/>
+    <address addr="52:54:00:25:02:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-028" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5432">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="15.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.38" addrtype="ipv4"/>
+    <address addr="52:54:00:26:03:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-029" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="27017">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="4.4.18"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.39" addrtype="ipv4"/>
+    <address addr="52:54:00:27:04:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-030" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="27017">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="5.0.14"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.40" addrtype="ipv4"/>
+    <address addr="52:54:00:28:05:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-031" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.41" addrtype="ipv4"/>
+    <address addr="52:54:00:29:06:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-032" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5432">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="12.14"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.42" addrtype="ipv4"/>
+    <address addr="52:54:00:2a:00:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-033" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="27017">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.43" addrtype="ipv4"/>
+    <address addr="52:54:00:2b:01:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-034" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.44" addrtype="ipv4"/>
+    <address addr="52:54:00:2c:02:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-035" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="11211">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="memcached" method="probed" conf="10" product="Memcached" version="1.6.18"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.45" addrtype="ipv4"/>
+    <address addr="52:54:00:2d:03:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-036" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="3000">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="grafana" method="probed" conf="10" product="Grafana" version="9.3.6"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.46" addrtype="ipv4"/>
+    <address addr="52:54:00:2e:04:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-037" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="27017">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.47" addrtype="ipv4"/>
+    <address addr="52:54:00:2f:05:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-038" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.48" addrtype="ipv4"/>
+    <address addr="52:54:00:30:06:09" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-039" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+      <port protocol="tcp" portid="3000">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="grafana" method="probed" conf="10" product="Grafana" version="9.3.6"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.49" addrtype="ipv4"/>
+    <address addr="52:54:00:31:00:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-040" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.50" addrtype="ipv4"/>
+    <address addr="52:54:00:32:01:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-041" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5432">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="12.14"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.51" addrtype="ipv4"/>
+    <address addr="52:54:00:33:02:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-042" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="27017">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="4.4.18"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <runstats>
+    <finished time="1753344300" timestr="Mon Jul 20 09:05:00 2026" summary="Nmap done; 42 IP addresses scanned" elapsed="300.00" exit="success"/>
+    <hosts up="42" down="0" total="42"/>
+  </runstats>
+</nmaprun>
