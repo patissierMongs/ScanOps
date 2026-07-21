@@ -778,7 +778,12 @@ async def import_xml(
 ):
     xml_bytes = await file.read()
     # 가져온 XML 의 '스캔 날짜'는 파일 안의 실제 스캔 시각(없으면 현재). 인입 시각이 아님.
-    sdate = scan_start(xml_bytes)
+    # 깨진 XML 은 여기서 파싱 실패 → 좀비 스캔 생성 전에 400 으로 정직하게 거절(500 방지).
+    try:
+        sdate = scan_start(xml_bytes)
+    except Exception as e:
+        record(db, user, "SCAN_IMPORT", target=file.filename or "", detail="파싱 실패(XML 오류)", ok=False)
+        raise HTTPException(status_code=400, detail=f"XML 파싱 실패: {e}")
     scan = ScanRun(name=f"가져오기: {file.filename}", status="running", created_by=user.id)
     db.add(scan)
     db.commit()
