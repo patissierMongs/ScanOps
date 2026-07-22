@@ -73,6 +73,7 @@ class ScanOut(BaseModel):
     finished_at: datetime | None
     host_count: int
     port_count: int
+    error: str = ""          # 실패/중단 원인(추적성) — 성공 시 빈 문자열
 
 
 class IngestSummary(BaseModel):

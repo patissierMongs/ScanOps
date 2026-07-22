@@ -68,6 +68,7 @@ def reconcile_orphans() -> int:
         orphans = db.query(ScanRun).filter(ScanRun.status.in_(("running", "canceling"))).all()
         for scan in orphans:
             scan.status = "interrupted"
+            scan.error = "서버 재시작으로 워커가 사라져 중단됨 — [이어하기]로 재개하세요."
             if scan.finished_at is None:
                 scan.finished_at = datetime.now(timezone.utc)
         if orphans:
@@ -77,13 +78,51 @@ def reconcile_orphans() -> int:
         db.close()
 
 
-def _mark(scan_id: int, status: str) -> None:
-    """종료 상태 확정(done/failed/canceled) — finished_at 기록."""
+class ScanFailed(Exception):
+    """스캔 실패 + 사람이 읽을 원인. 워커가 잡아 ScanRun.error 에 남긴다(추적성)."""
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+# nmap 오류/경고 신호어 — 로그 꼬리에서 이 줄들을 우선 뽑아 원인으로 삼는다.
+_NMAP_ERR_HINTS = (
+    "QUITTING", "ERROR", "Error", "error", "WARNING", "Warning", "Failed", "failed",
+    "cannot", "Cannot", "denied", "Permission", "permission", "requires", "privileg",
+    "not permitted", "No route", "unreachable", "Unable", "Invalid", "invalid",
+)
+
+
+def _log_tail(path: Path, max_chars: int = 4000) -> str:
+    """로그 파일 꼬리에서 원인 후보 줄을 뽑는다 — nmap stderr(오류/경고) 우선, 없으면 마지막 줄들."""
+    try:
+        data = path.read_bytes()[-max_chars:].decode("utf-8", "replace")
+    except OSError:
+        return ""
+    lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    hits = [ln for ln in lines if any(h in ln for h in _NMAP_ERR_HINTS)]
+    picked = hits[-4:] if hits else lines[-3:]
+    return " / ".join(picked)[:800]
+
+
+def _stage_reason(stage: str, rc: int, log_path: Path) -> str:
+    """단계 실패 원인 문자열 — 단계명 + nmap 종료코드 + 로그 꼬리(있으면)."""
+    tail = _log_tail(log_path)
+    head = f"{stage} 단계 실패 — nmap 종료코드 {rc}"
+    return f"{head}. {tail}" if tail else f"{head} (로그 출력 없음 — nmap 실행 경로/권한 확인)"
+
+
+def _mark(scan_id: int, status: str, error: str = "") -> None:
+    """종료 상태 확정(done/failed/canceled) — finished_at + 실패 원인(error) 기록.
+    성공/취소 등 error 미전달 시 기존 원인을 비운다(재시도·이어가기 후 잔재 방지)."""
     db = SessionLocal()
     try:
         scan = db.get(ScanRun, scan_id)
         if scan is not None:
             scan.status = status
+            scan.error = (error or "")[:2000]
             scan.finished_at = datetime.now(timezone.utc)
             db.commit()
     finally:
@@ -396,11 +435,14 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
         discovery_base = Path(str(b_base) + ".tcp_discovery")
         discovery_log = Path(str(discovery_base) + ".log")
         argv = nmap_runner.build_auto_command(nmap, "tcp_discovery", batch, discovery_base, ports=ports, nse=nse)
-        if _run_stage(scan_id, argv, discovery_log) != 0:
-            return False
+        rc = _run_stage(scan_id, argv, discovery_log)
+        if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
+            return False   # 중지로 종료된 nmap → 실패 아님(취소)
+        if rc != 0:
+            raise ScanFailed(_stage_reason("TCP 발견", rc, discovery_log))
         discovery_xml = nmap_runner.xml_of(discovery_base)
         if not discovery_xml.exists():
-            return False
+            raise ScanFailed("TCP 발견 단계: nmap XML 산출물이 없습니다. " + (_log_tail(discovery_log) or "(로그 없음)"))
         discovery_live = sorted(up_hosts(discovery_xml))
         scanned_hosts |= set(discovery_live)
         tcp_discovery_findings = parse_xml(discovery_xml)
@@ -411,11 +453,14 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             identify_base = Path(str(b_base) + ".tcp_identify")
             identify_log = Path(str(identify_base) + ".log")
             argv = nmap_runner.build_auto_command(nmap, "tcp_identify", discovery_live or batch, identify_base, ports=ports, tcp_ports=tcp_ports, nse=nse)
-            if _run_stage(scan_id, argv, identify_log) != 0:
+            rc = _run_stage(scan_id, argv, identify_log)
+            if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
                 return False
+            if rc != 0:
+                raise ScanFailed(_stage_reason("TCP 식별", rc, identify_log))
             identify_xml = nmap_runner.xml_of(identify_base)
             if not identify_xml.exists():
-                return False
+                raise ScanFailed("TCP 식별 단계: nmap XML 산출물이 없습니다. " + (_log_tail(identify_log) or "(로그 없음)"))
             scanned_hosts |= up_hosts(identify_xml)
             findings.extend(_prefer_identified(parse_xml(identify_xml), tcp_discovery_findings))
         else:
@@ -432,16 +477,19 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
         udp_log = Path(str(udp_base) + ".log")
         udp_targets = batch if udp_all_targets else (discovery_live or batch)
         argv = nmap_runner.build_auto_command(nmap, "udp_identify", udp_targets, udp_base, ports=ports, nse=nse)
-        if _run_stage(scan_id, argv, udp_log) != 0:
+        rc = _run_stage(scan_id, argv, udp_log)
+        if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
             return False
+        if rc != 0:
+            raise ScanFailed(_stage_reason("UDP 식별", rc, udp_log))
         udp_xml = nmap_runner.xml_of(udp_base)
         if not udp_xml.exists():
-            return False
+            raise ScanFailed("UDP 식별 단계: nmap XML 산출물이 없습니다. " + (_log_tail(udp_log) or "(로그 없음)"))
         scanned_hosts |= up_hosts(udp_xml)
         findings.extend(parse_xml(udp_xml))
 
     if not tcp_port_spec and not udp_port_spec:
-        return False
+        raise ScanFailed("자동 스캔에 사용할 TCP/UDP 포트가 없습니다.")
     _ingest_auto_findings(scan_id, findings, scanned_hosts, tcp_scope, udp_scope)
     return True
 
@@ -453,8 +501,11 @@ def _chunk_worker(scan_id: int) -> None:
     base = _basename(scan_id)
     nmap = nmap_runner.find_nmap(_settings.nmap_path)
     state = chunker.read_state(base)
-    if not nmap or state is None:
-        _mark(scan_id, "failed")
+    if not nmap:
+        _mark(scan_id, "failed", "서버에서 nmap 실행 파일을 찾을 수 없습니다. (설치 여부·SCANOPS_NMAP_PATH 확인)")
+        return
+    if state is None:
+        _mark(scan_id, "failed", "스캔 상태 파일을 읽을 수 없습니다 (사이드카 손실).")
         return
     batches = state["batches"]
     while True:
@@ -473,14 +524,23 @@ def _chunk_worker(scan_id: int) -> None:
         if st.get("workflow") == "auto":
             try:
                 ok = _run_auto_batch(scan_id, nmap, batch, b_base, st)
-            except ValueError:
-                _mark(scan_id, "failed")
+            except ScanFailed as e:
+                if (chunker.read_state(base) or st).get("stop"):
+                    _mark(scan_id, "canceled")
+                else:
+                    _mark(scan_id, "failed", e.reason)
+                return
+            except ValueError as e:
+                _mark(scan_id, "failed", f"명령 구성 오류: {e}")
+                return
+            except Exception as e:
+                _mark(scan_id, "failed", f"자동 스캔 내부 오류: {type(e).__name__}: {e}")
                 return
             if (chunker.read_state(base) or st).get("stop"):
                 _mark(scan_id, "canceled")
                 return
             if not ok:
-                _mark(scan_id, "failed")
+                _mark(scan_id, "failed", "자동 스캔 배치가 결과를 내지 못했습니다.")
                 return
             dt = (datetime.now(timezone.utc) - t0).total_seconds()
             st["cursor"] = cursor + 1
@@ -492,14 +552,14 @@ def _chunk_worker(scan_id: int) -> None:
                 argv = nmap_runner.build_command_opts(nmap, st.get("options") or [], st.get("ports", ""), batch, b_base, nse=st.get("nse"))
             else:
                 argv = nmap_runner.build_command(nmap, st.get("preset", "quick"), batch, b_base)
-        except ValueError:
-            _mark(scan_id, "failed")
+        except ValueError as e:
+            _mark(scan_id, "failed", f"명령 구성 오류: {e}")
             return
         _set_current_log(scan_id, b_log)
         try:
             proc = nmap_runner.popen(argv, b_log)
-        except OSError:
-            _mark(scan_id, "failed")
+        except OSError as e:
+            _mark(scan_id, "failed", f"nmap 프로세스 실행 실패: {e}")
             return
         with _LOCK:
             _PROCS[scan_id] = proc
@@ -513,12 +573,12 @@ def _chunk_worker(scan_id: int) -> None:
             return
         xml_path = nmap_runner.xml_of(b_base)
         if rc != 0 or not xml_path.exists():
-            _mark(scan_id, "failed")
+            _mark(scan_id, "failed", _stage_reason("스캔", rc, b_log))
             return
         try:
             _ingest_batch(scan_id, xml_path.read_bytes())
-        except Exception:
-            _mark(scan_id, "failed")
+        except Exception as e:
+            _mark(scan_id, "failed", f"결과 인입 오류: {type(e).__name__}: {e}")
             return
         # 배치 완료 → 커서 전진 + 실제 스캔 시간 누적(영속). 누적은 멈춤시간 제외 → ETA 정확.
         dt = (datetime.now(timezone.utc) - t0).total_seconds()
@@ -534,7 +594,7 @@ def _command_worker(scan_id: int) -> None:
     state = chunker.read_state(base) or {}
     argv = state.get("raw_argv")
     if not argv:
-        _mark(scan_id, "failed")
+        _mark(scan_id, "failed", "직접 명령 인자를 복원할 수 없습니다 (상태 파일 손실).")
         return
     log = Path(str(base) + ".log")
     _set_current_log(scan_id, log)
@@ -543,8 +603,8 @@ def _command_worker(scan_id: int) -> None:
         return
     try:
         proc = nmap_runner.popen(argv, log)
-    except OSError:
-        _mark(scan_id, "failed")
+    except OSError as e:
+        _mark(scan_id, "failed", f"nmap 프로세스 실행 실패: {e}")
         return
     with _LOCK:
         _PROCS[scan_id] = proc
@@ -556,13 +616,13 @@ def _command_worker(scan_id: int) -> None:
         return
     xml_path = nmap_runner.xml_of(base)
     if rc != 0 or not xml_path.exists():
-        _mark(scan_id, "failed")
+        _mark(scan_id, "failed", _stage_reason("직접 명령", rc, log))
         return
     try:
         # 직접 명령은 -p 범위가 불투명 → 닫힘 판정을 끄고 가산만(미스캔 포트 오closure 방지).
         _ingest_batch(scan_id, xml_path.read_bytes(), no_close=True)
-    except Exception:
-        _mark(scan_id, "failed")
+    except Exception as e:
+        _mark(scan_id, "failed", f"결과 인입 오류: {type(e).__name__}: {e}")
         return
     _mark(scan_id, "done")
 
@@ -588,7 +648,7 @@ def _engine_worker(scan_id: int) -> None:
     out_dir = _settings.scans_dir / f"scan_{scan_id}"
     spec_path = out_dir / "spec.json"
     if not spec_path.exists():
-        _mark(scan_id, "failed")
+        _mark(scan_id, "failed", "엔진 spec.json 파일이 없습니다.")
         return
     # 타겟 재스캔이면 spec 에 scope_keys 가 들어있음 → 닫힘 판정을 그 발견으로만 한정.
     scope_keys = None
@@ -600,8 +660,8 @@ def _engine_worker(scan_id: int) -> None:
         pass
     try:
         proc = engine_runner.spawn(spec_path, out_dir, out_dir / "engine.log")
-    except OSError:
-        _mark(scan_id, "failed")
+    except OSError as e:
+        _mark(scan_id, "failed", f"엔진 프로세스 실행 실패: {e}")
         return
     proc.wait()
     _persist_stages(scan_id, out_dir)
@@ -609,7 +669,7 @@ def _engine_worker(scan_id: int) -> None:
         _mark(scan_id, "canceled")
         return
     if not engine_runner.is_done(out_dir):
-        _mark(scan_id, "failed")
+        _mark(scan_id, "failed", "엔진 단계가 완료 상태에 도달하지 못했습니다. " + (_log_tail(out_dir / "engine.log") or "(엔진 로그 없음)"))
         return
     db = SessionLocal()
     try:
@@ -619,9 +679,9 @@ def _engine_worker(scan_id: int) -> None:
             scan.status = "done"
             scan.finished_at = datetime.now(timezone.utc)
             db.commit()
-    except Exception:
+    except Exception as e:
         db.rollback()
-        _mark(scan_id, "failed")
+        _mark(scan_id, "failed", f"엔진 결과 인입 오류: {type(e).__name__}: {e}")
     finally:
         db.close()
 
@@ -1150,6 +1210,7 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
         "batches_done": done,
         "overall_percent": overall,
         "eta_seconds": eta,
+        "error": scan.error or "",   # 실패/중단 원인(추적성)
     })
     return prog
 

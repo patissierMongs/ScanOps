@@ -60,6 +60,8 @@ def _migrate() -> None:
         sc_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(scan_runs)").fetchall()}
         if "stages_json" not in sc_cols:
             conn.exec_driver_sql("ALTER TABLE scan_runs ADD COLUMN stages_json JSON")
+        if "error" not in sc_cols:  # 실패 원인 추적 컬럼(기존 DB 보강)
+            conn.exec_driver_sql("ALTER TABLE scan_runs ADD COLUMN error TEXT DEFAULT ''")
 
 
 def get_db() -> Iterator[Session]:

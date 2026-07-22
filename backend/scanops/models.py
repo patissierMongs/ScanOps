@@ -75,6 +75,8 @@ class ScanRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     raw_xml_path: Mapped[str] = mapped_column(Text, default="")
     log_path: Mapped[str] = mapped_column(Text, default="")
+    # 실패 원인(추적성) — nmap 종료코드·오류 로그 꼬리·내부 예외 메시지. 성공/취소 시 비운다.
+    error: Mapped[str] = mapped_column(Text, default="")
     host_count: Mapped[int] = mapped_column(Integer, default=0)
     port_count: Mapped[int] = mapped_column(Integer, default=0)
     # 단계분리 엔진 스캔의 단계별 요약(상태/소요/카운트/에러) — 진행 타임라인·이력용. 청킹 스캔은 빈 값.

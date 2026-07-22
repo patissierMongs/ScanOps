@@ -302,7 +302,14 @@ export default function Scans({ user }) {
                     <td className="mono">{s.id}</td>
                     <td>{s.name}</td>
                     <td className="mono" style={{ fontSize: 11, maxWidth: 300, whiteSpace: "normal", color: "var(--muted)" }}>{s.command}</td>
-                    <td><span className={`pill ${st.cls}`}>{st.label}</span></td>
+                    <td>
+                      <span className={`pill ${st.cls}`}>{st.label}</span>
+                      {(() => {
+                        const err = s.error || p?.error;
+                        return err && (s.status === "failed" || s.status === "interrupted")
+                          ? <div className="scan-error" title={err}>{err}</div> : null;
+                      })()}
+                    </td>
                     <td>{stages[s.id]?.stages?.length
                       ? <StageTimeline s={stages[s.id]} />
                       : isActive(s.status) ? <Progress p={p} /> : <span className="muted">—</span>}</td>

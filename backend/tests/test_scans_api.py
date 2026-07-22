@@ -140,6 +140,51 @@ def test_run_scan_auto_blocked_without_admin(client, monkeypatch):
     assert "관리자 권한" in r.json()["detail"]
 
 
+def test_scan_failure_reason_is_traceable(client, tmp_path):
+    """실패 원인 추적성 — 단계 로그의 nmap 오류를 원인으로 뽑아 ScanRun.error 에 남기고 API 로 노출."""
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    h = _auth(client)
+    db = SessionLocal()
+    scan = ScanRun(name="fail", status="running")
+    db.add(scan)
+    db.commit()
+    sid = scan.id
+    db.close()
+
+    # nmap stderr 스타일 로그 → 원인 추출(오류 줄 우선) + 종료코드 포함.
+    log = tmp_path / "stage.log"
+    log.write_text(
+        "Starting Nmap 7.94 ( https://nmap.org )\n"
+        "QUITTING! You requested a scan type which requires root privileges.\n",
+        encoding="utf-8",
+    )
+    reason = scans_api._stage_reason("TCP 발견", 1, log)
+    assert "QUITTING" in reason and "종료코드 1" in reason and "TCP 발견" in reason
+
+    scans_api._mark(sid, "failed", reason)
+    out = client.get(f"/api/scans/{sid}", headers=h).json()
+    assert out["status"] == "failed"
+    assert "QUITTING" in out["error"]          # API(ScanOut)로 원인 노출
+
+    # 성공/취소로 다시 마킹하면 원인은 비워진다(잔재 방지).
+    scans_api._mark(sid, "done")
+    assert client.get(f"/api/scans/{sid}", headers=h).json()["error"] == ""
+
+
+def test_log_tail_prefers_error_lines(tmp_path):
+    from scanops.api import scans as scans_api
+    log = tmp_path / "l.log"
+    log.write_text("\n".join([
+        "Starting Nmap", "Scanning 10.0.0.1", "Nmap scan report for 10.0.0.1",
+        "Failed to resolve \"badhost\".", "line", "another",
+    ]), encoding="utf-8")
+    tail = scans_api._log_tail(log)
+    assert "Failed to resolve" in tail          # 오류 줄이 마지막 평범한 줄보다 우선
+
+
 def test_import_bundle_preserves_discovery_and_scopes_closure(client):
     h = _auth(client)
     initial = _scan_xml(
