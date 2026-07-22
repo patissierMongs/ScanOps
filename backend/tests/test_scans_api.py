@@ -185,6 +185,43 @@ def test_log_tail_prefers_error_lines(tmp_path):
     assert "Failed to resolve" in tail          # 오류 줄이 마지막 평범한 줄보다 우선
 
 
+def test_auto_batch_parallelizes_tcp_and_udp_identify(monkeypatch, tmp_path):
+    """발견 이후 tcp_identify 와 udp_identify 가 동시(병렬)에 돈다 — 두 구간이 시간상 겹친다."""
+    import time
+    from pathlib import Path
+    from scanops.api import scans as scans_api
+
+    monkeypatch.setattr(scans_api.chunker, "read_state", lambda base: {})          # stop 없음
+    monkeypatch.setattr(scans_api, "up_hosts", lambda x: {"10.0.0.5"})
+    monkeypatch.setattr(scans_api, "parse_xml", lambda x: [])
+    monkeypatch.setattr(scans_api, "_set_current_log", lambda sid, log: None)
+    monkeypatch.setattr(scans_api, "_ingest_auto_findings", lambda *a, **k: None)
+    monkeypatch.setattr(scans_api.nmap_runner, "open_ports_from_xml",
+                        lambda p, protocol="tcp": [80] if str(p).endswith("tcp_discovery.xml") else [])
+
+    intervals: dict = {}
+
+    def fake_run_stage(sid, argv, log, set_current=True):
+        s = str(log)
+        stage = "discovery" if ".tcp_discovery." in s else ("tcp" if ".tcp_identify." in s else "udp")
+        t0 = time.monotonic()
+        Path(s[:-4] + ".xml").write_bytes(b"<nmaprun/>")   # .exists() 통과용
+        time.sleep(0.15)
+        intervals[stage] = (t0, time.monotonic())
+        return 0
+
+    monkeypatch.setattr(scans_api, "_run_stage", fake_run_stage)
+
+    ok = scans_api._run_auto_batch(4242, "nmap", ["10.0.0.5"], tmp_path / "scan_4242.b0",
+                                   {"ports": "", "nse": []})
+    assert ok is True
+    assert {"discovery", "tcp", "udp"} <= set(intervals)              # 세 단계 모두 실행
+    assert intervals["discovery"][1] <= intervals["tcp"][0]           # 발견은 식별보다 먼저 끝남
+    tcp_s, tcp_e = intervals["tcp"]
+    udp_s, udp_e = intervals["udp"]
+    assert tcp_s < udp_e and udp_s < tcp_e                            # tcp ∥ udp 구간 겹침(병렬)
+
+
 def test_import_bundle_preserves_discovery_and_scopes_closure(client):
     h = _auth(client)
     initial = _scan_xml(

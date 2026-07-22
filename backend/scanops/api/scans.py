@@ -399,22 +399,62 @@ def _ingest_auto_findings(scan_id: int, findings: list[dict], scanned_hosts: set
         db.close()
 
 
-def _run_stage(scan_id: int, argv: list[str], log_path: Path) -> int:
-    _set_current_log(scan_id, log_path)
+def _register_proc(scan_id: int, proc) -> None:
+    """한 스캔이 동시에 여러 nmap 프로세스를 띄울 수 있다(예: tcp_identify ∥ udp_identify).
+    중지 버튼이 그 스캔의 모든 프로세스를 찾아 종료하도록 set 으로 모은다."""
+    with _LOCK:
+        _PROCS.setdefault(scan_id, set()).add(proc)
+
+
+def _unregister_proc(scan_id: int, proc) -> None:
+    with _LOCK:
+        procs = _PROCS.get(scan_id)
+        if procs is not None:
+            procs.discard(proc)
+            if not procs:
+                _PROCS.pop(scan_id, None)
+
+
+def _run_stage(scan_id: int, argv: list[str], log_path: Path, set_current: bool = True) -> int:
+    # 병렬 단계에선 set_current=False 로 두고 호출자가 대표 로그를 한 번만 지정한다
+    # (동시 두 단계가 log_path 를 서로 덮어쓰는 경합 방지).
+    if set_current:
+        _set_current_log(scan_id, log_path)
     try:
         proc = nmap_runner.popen(argv, log_path)
     except OSError:
         return -1
-    with _LOCK:
-        _PROCS[scan_id] = proc
+    _register_proc(scan_id, proc)
     rc = proc.wait()
-    with _LOCK:
-        _PROCS.pop(scan_id, None)
+    _unregister_proc(scan_id, proc)
     return rc
 
 
+def _run_identify_parallel(scan_id: int, tasks: list[tuple]) -> dict:
+    """발견 이후의 식별 단계들을 동시에 돌린다 — tcp_identify 와 udp_identify 는 둘 다 발견 결과에만
+    의존하고 서로 독립적이라 병렬 가능. UDP 는 지연(ICMP rate-limit 대기) 위주라 부하 증가는 미미하고,
+    그 대기가 TCP 식별과 겹쳐 벽시계 시간이 준다.
+
+    tasks: (label, base, log, argv) 목록. 반환: {label: (rc, base, log)}.
+    단계별 산출물(base.xml)·로그(log)가 파일로 분리돼 있어 동시 실행해도 서로 안 섞인다."""
+    results: dict = {}
+
+    def _one(label: str, base: Path, log: Path, argv: list[str]) -> None:
+        results[label] = (_run_stage(scan_id, argv, log, set_current=False), base, log)
+
+    if len(tasks) == 1:
+        _one(*tasks[0])
+    else:
+        threads = [threading.Thread(target=_one, args=t, daemon=True) for t in tasks]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+    return results
+
+
 def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, state: dict) -> bool:
-    """Run discovery -> identify -> UDP for one batch, then ingest the final observations once."""
+    """Run discovery, then tcp_identify ∥ udp_identify (parallel), then ingest observations once."""
     ports = state.get("ports", "")
     nse = state.get("nse") if state.get("nse") is not None else scan_options.NSE_DEFAULT_KEYS
     udp_all_targets = bool(state.get("udp_all_targets"))
@@ -425,6 +465,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
     findings: list[dict] = []
     scanned_hosts: set[str] = set()
     tcp_discovery_findings: list[dict] = []
+    tcp_ports: list[int] = []
     # identify 단계는 discovery 에서 살아난 호스트로만 좁힌다(죽은 IP 재스캔·PTR 폭증 방지).
     # discovery 를 안 돌린 UDP-only 경우엔 비어 있어 배치 전체로 폴백.
     discovery_live: list[str] = []
@@ -447,46 +488,49 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
         scanned_hosts |= set(discovery_live)
         tcp_discovery_findings = parse_xml(discovery_xml)
         tcp_ports = nmap_runner.open_ports_from_xml(discovery_xml, "tcp")
-        if tcp_ports:
-            if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
-                return False
-            identify_base = Path(str(b_base) + ".tcp_identify")
-            identify_log = Path(str(identify_base) + ".log")
-            argv = nmap_runner.build_auto_command(nmap, "tcp_identify", discovery_live or batch, identify_base, ports=ports, tcp_ports=tcp_ports, nse=nse)
-            rc = _run_stage(scan_id, argv, identify_log)
-            if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
-                return False
-            if rc != 0:
-                raise ScanFailed(_stage_reason("TCP 식별", rc, identify_log))
-            identify_xml = nmap_runner.xml_of(identify_base)
-            if not identify_xml.exists():
-                raise ScanFailed("TCP 식별 단계: nmap XML 산출물이 없습니다. " + (_log_tail(identify_log) or "(로그 없음)"))
-            scanned_hosts |= up_hosts(identify_xml)
-            findings.extend(_prefer_identified(parse_xml(identify_xml), tcp_discovery_findings))
-        else:
-            findings.extend(tcp_discovery_findings)
 
-    # discovery 를 돌렸는데 생존 호스트가 0이면 UDP 도 스킵(죽은 대역에 -Pn UDP 낭비 방지).
-    # udp_all_targets(opt-in)면 discovery 결과 무관하게 원본 배치 전체로 UDP(죽은 IP 비용 감수,
-    # TCP/ICMP/ACK 다 침묵하지만 UDP만 여는 호스트·부분 누락까지 보장). 아니면 생존 호스트로 제한,
-    # discovery 를 돌렸는데 생존 0이면 skip(죽은 대역 UDP 낭비 방지).
+    # ── 식별 단계 구성 ── tcp_identify(열린 TCP 서비스/버전) 와 udp_identify(주요 UDP) 는
+    # 둘 다 '발견 결과'에만 의존하고 서로 독립적 → 병렬 실행(UDP 지연이 TCP 식별과 겹쳐 시간 절약).
+    # UDP 스킵 규칙: discovery 를 돌렸는데 생존 0이면 죽은 대역 -Pn UDP 낭비 방지로 제외.
+    # udp_all_targets(opt-in)면 discovery 무관 배치 전체로.
+    tasks: list[tuple] = []
+    if tcp_port_spec and tcp_ports:
+        tcp_identify_base = Path(str(b_base) + ".tcp_identify")
+        argv_tcp = nmap_runner.build_auto_command(nmap, "tcp_identify", discovery_live or batch, tcp_identify_base, ports=ports, tcp_ports=tcp_ports, nse=nse)
+        tasks.append(("tcp_identify", tcp_identify_base, Path(str(tcp_identify_base) + ".log"), argv_tcp))
     if udp_port_spec and (udp_all_targets or not tcp_port_spec or discovery_live):
-        if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
-            return False
         udp_base = Path(str(b_base) + ".udp_identify")
-        udp_log = Path(str(udp_base) + ".log")
         udp_targets = batch if udp_all_targets else (discovery_live or batch)
-        argv = nmap_runner.build_auto_command(nmap, "udp_identify", udp_targets, udp_base, ports=ports, nse=nse)
-        rc = _run_stage(scan_id, argv, udp_log)
+        argv_udp = nmap_runner.build_auto_command(nmap, "udp_identify", udp_targets, udp_base, ports=ports, nse=nse)
+        tasks.append(("udp_identify", udp_base, Path(str(udp_base) + ".log"), argv_udp))
+
+    if tasks:
         if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
             return False
-        if rc != 0:
-            raise ScanFailed(_stage_reason("UDP 식별", rc, udp_log))
-        udp_xml = nmap_runner.xml_of(udp_base)
-        if not udp_xml.exists():
-            raise ScanFailed("UDP 식별 단계: nmap XML 산출물이 없습니다. " + (_log_tail(udp_log) or "(로그 없음)"))
-        scanned_hosts |= up_hosts(udp_xml)
-        findings.extend(parse_xml(udp_xml))
+        _set_current_log(scan_id, tasks[-1][2])   # 대표 진행 로그: UDP 있으면 UDP(장기 단계)를 가리켜 라이브 진행 표시
+        results = _run_identify_parallel(scan_id, tasks)
+        if (chunker.read_state(_basename(scan_id)) or state).get("stop"):
+            return False   # 중지로 종료 → 실패 아님(취소)
+        # 두 단계 모두 검증(실패한 쪽의 원인을 정확히 남긴다)
+        for label, (rc, base, log) in results.items():
+            stage_ko = "TCP 식별" if label == "tcp_identify" else "UDP 식별"
+            if rc != 0:
+                raise ScanFailed(_stage_reason(stage_ko, rc, log))
+            if not nmap_runner.xml_of(base).exists():
+                raise ScanFailed(f"{stage_ko} 단계: nmap XML 산출물이 없습니다. " + (_log_tail(log) or "(로그 없음)"))
+        # 병합: TCP 는 식별본 우선(발견 열린포트 보존), UDP 는 가산.
+        if "tcp_identify" in results:
+            tcp_xml = nmap_runner.xml_of(results["tcp_identify"][1])
+            scanned_hosts |= up_hosts(tcp_xml)
+            findings.extend(_prefer_identified(parse_xml(tcp_xml), tcp_discovery_findings))
+        if "udp_identify" in results:
+            udp_xml = nmap_runner.xml_of(results["udp_identify"][1])
+            scanned_hosts |= up_hosts(udp_xml)
+            findings.extend(parse_xml(udp_xml))
+
+    # 발견은 돌렸지만 열린 TCP 0 → 식별 스킵. 발견이 본 개방포트(있으면)를 그대로 반영.
+    if tcp_port_spec and not tcp_ports:
+        findings.extend(tcp_discovery_findings)
 
     if not tcp_port_spec and not udp_port_spec:
         raise ScanFailed("자동 스캔에 사용할 TCP/UDP 포트가 없습니다.")
@@ -561,11 +605,9 @@ def _chunk_worker(scan_id: int) -> None:
         except OSError as e:
             _mark(scan_id, "failed", f"nmap 프로세스 실행 실패: {e}")
             return
-        with _LOCK:
-            _PROCS[scan_id] = proc
+        _register_proc(scan_id, proc)
         rc = proc.wait()
-        with _LOCK:
-            _PROCS.pop(scan_id, None)
+        _unregister_proc(scan_id, proc)
 
         # 중지로 종료됐으면 이 배치는 미완 → 커서 유지하고 canceled.
         if (chunker.read_state(base) or st).get("stop"):
@@ -606,11 +648,9 @@ def _command_worker(scan_id: int) -> None:
     except OSError as e:
         _mark(scan_id, "failed", f"nmap 프로세스 실행 실패: {e}")
         return
-    with _LOCK:
-        _PROCS[scan_id] = proc
+    _register_proc(scan_id, proc)
     rc = proc.wait()
-    with _LOCK:
-        _PROCS.pop(scan_id, None)
+    _unregister_proc(scan_id, proc)
     if (chunker.read_state(base) or {}).get("stop"):
         _mark(scan_id, "canceled")
         return
@@ -1103,8 +1143,8 @@ def stop_scan(
     scan.status = "canceling"   # 워커가 배치 종료를 감지하면 canceled 로 확정
     db.commit()
     with _LOCK:
-        proc = _PROCS.get(scan_id)
-    if proc is not None:
+        procs = list(_PROCS.get(scan_id, ()))   # 병렬 단계면 동시에 뜬 nmap 이 여럿 → 전부 종료
+    for proc in procs:
         proc.terminate()        # 현재 배치 즉시 중단(그 배치는 버려지고 커서 유지)
     db.refresh(scan)
     record(db, user, "SCAN_STOP", target=scan.targets, detail=f"#{scan.id}")
