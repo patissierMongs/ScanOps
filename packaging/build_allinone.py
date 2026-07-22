@@ -31,8 +31,10 @@ STAGE = ROOT.parent / "_allinone_stage"
 OUT = ROOT.parent / os.environ.get("SCANOPS_ALLINONE_OUT", "ScanOps_allinone.zip")
 PREFIX = "ScanOps"
 
-SKIP_DIR = {".venv", ".venv312", ".venv313", "__pycache__", ".pytest_cache", "tests", ".vite"}
-SKIP_EXT = {".pyc", ".pyo", ".log"}
+# "data": 런타임 데이터 디렉터리(생성된 SQLite DB · INITIAL_ADMIN.txt 임시 비번 · secret.key).
+# 빌드 머신에서 서버를 한 번이라도 실행하면 여기에 비밀이 쌓이므로, 번들에 절대 안 들어가게 제외.
+SKIP_DIR = {".venv", ".venv312", ".venv313", "__pycache__", ".pytest_cache", "tests", ".vite", "data"}
+SKIP_EXT = {".pyc", ".pyo", ".log", ".db", ".db-shm", ".db-wal"}
 
 
 def log(msg: str) -> None:
