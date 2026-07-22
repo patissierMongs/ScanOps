@@ -8,6 +8,7 @@ Output: ../ScanOps_allinone.zip
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -18,11 +19,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "packaging"
 CACHE = PKG / "_cache"
-WHEELHOUSE = PKG / "wheelhouse"
-PYVER = "3.12.8"
+# 파이썬 버전·휠하우스·산출물은 env 로 오버라이드 가능(기본은 3.12.8 + 커밋된 cp312 wheelhouse).
+# 예) 3.13 번들: SCANOPS_ALLINONE_PYVER=3.13.14
+#     SCANOPS_ALLINONE_WHEELHOUSE=/path/to/cp313-wheels 로 실행.
+PYVER = os.environ.get("SCANOPS_ALLINONE_PYVER", "3.12.8")
+_MINOR = ".".join(PYVER.split(".")[:2])          # "3.13"
+_PYTAG = "cp" + _MINOR.replace(".", "")          # "cp313" — 타깃 abi
+WHEELHOUSE = Path(os.environ.get("SCANOPS_ALLINONE_WHEELHOUSE", str(PKG / "wheelhouse")))
 EMBED_URL = f"https://www.python.org/ftp/python/{PYVER}/python-{PYVER}-embed-amd64.zip"
 STAGE = ROOT.parent / "_allinone_stage"
-OUT = ROOT.parent / "ScanOps_allinone.zip"
+OUT = ROOT.parent / os.environ.get("SCANOPS_ALLINONE_OUT", "ScanOps_allinone.zip")
 PREFIX = "ScanOps"
 
 SKIP_DIR = {".venv", ".venv312", ".venv313", "__pycache__", ".pytest_cache", "tests", ".vite"}
@@ -78,14 +84,14 @@ def copy_app(app: Path) -> None:
 def install_site(app: Path) -> None:
     site = app / "runtime" / "site"
     site.mkdir(parents=True)
-    log("pip install --target runtime/site (offline, win_amd64 cp312 wheels)")
+    log(f"pip install --target runtime/site (offline, win_amd64 {_PYTAG} wheels)")
     # 타깃 고정 설치: 빌드 호스트 OS/파이썬과 무관하게 Windows cp312 휠로 설치(리눅스에서 크로스빌드 가능).
     # --only-binary=:all: 가 있어야 --platform/--abi/--python-version 가 허용된다(소스빌드 금지).
     subprocess.check_call([
         sys.executable, "-m", "pip", "install", "--no-index",
         "--find-links", str(WHEELHOUSE), "--target", str(site),
-        "--platform", "win_amd64", "--python-version", "3.12",
-        "--abi", "cp312", "--implementation", "cp", "--only-binary=:all:",
+        "--platform", "win_amd64", "--python-version", _MINOR,
+        "--abi", _PYTAG, "--implementation", "cp", "--only-binary=:all:",
         "-r", str(ROOT / "backend" / "requirements.txt"),
     ])
     # 용량/잡음 줄이기: 사전설치본의 캐시 제거
