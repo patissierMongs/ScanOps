@@ -26,7 +26,11 @@ VERSION = "0.2.0"
 STATS_EVERY_DEFAULT = "10s"
 # 호스트당 상한. nmap 은 이 시간을 넘긴 호스트를 포기하고 다음으로 넘어가며 0으로 정상 종료(부분 결과 유지).
 # 한 호스트가 스캔 전체를 무한정 멈추는 사고(QA-007)를 막는다. 비우면("") 미적용.
-HOST_TIMEOUT_DEFAULT = "15m"
+# 기본 미적용("0"): 전 65535포트 발견 스캔은 방화벽/필터 대역에서 호스트당 15분을 쉽게 넘겨,
+# 고정 --host-timeout 이 "멈춘 호스트"로 오인해 열린 포트가 있어도 결과를 통째로 버렸다(hosts up 만
+# 남고 open 0). 원본 스캔·웹 백엔드에도 host-timeout 은 없다 → 기본 끔으로 일치. 진짜 무한정 멈춤이
+# 걱정되면 --host-timeout 30m 처럼 opt-in.
+HOST_TIMEOUT_DEFAULT = "0"
 UDP_DEFAULT_PORTS = "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 용도 식별형 NSE만(취약점/노이즈/부작용 스크립트 제외) — 빠르고 부작용 적게 '무엇/왜' 파악.
@@ -1297,7 +1301,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--include-closed", action="store_true", help="Remove --open so closed/filtered ports remain in XML.")
     p.add_argument("--stats-every", default=STATS_EVERY_DEFAULT, help="nmap --stats-every value.")
     p.add_argument("--host-timeout", default=HOST_TIMEOUT_DEFAULT,
-                   help="Per-host nmap --host-timeout so one host cannot hang the whole scan. 0 disables.")
+                   help="Per-host nmap --host-timeout. Off by default (0): a full-port scan on filtered "
+                        "networks legitimately exceeds a fixed cap and would be dropped. Set e.g. 30m to opt in.")
     p.add_argument("--scan-scope", default="",
                    help="Allowed scan range(s): comma/space CIDR or IP. Targets outside are rejected before scanning. "
                         "Falls back to the SCANOPS_SCAN_SCOPE env var. Empty means unrestricted.")

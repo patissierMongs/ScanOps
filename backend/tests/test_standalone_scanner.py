@@ -774,20 +774,22 @@ def test_empty_scan_reports_done_with_warning(tmp_path):
     assert "가져올 결과가 없습니다" in r.stderr
 
 
-def test_host_timeout_in_all_auto_commands(tmp_path):
-    """QA-007: 모든 자동 단계 명령에 --host-timeout 주입(끄기는 --host-timeout 0)."""
+def test_host_timeout_off_by_default_optin_when_set(tmp_path):
+    """--host-timeout 은 기본 미적용(전 65535포트 발견을 15분에 잘라 호스트를 버리던 결함 제거,
+    웹 백엔드·원본과 일치). --host-timeout 30m 처럼 명시할 때만 모든 단계에 주입된다."""
     scanner = _load_scanner()
+    # 기본: 어떤 자동 단계에도 --host-timeout 이 없다.
     args = scanner.parser().parse_args(["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
     plan = scanner.create_plan(args)
-    for cmd in (
-        scanner.build_command(plan, 0, "tcp_discovery"),
-        scanner.build_command(plan, 0, "tcp_identify", [22]),
-        scanner.build_command(plan, 0, "udp_identify"),
-    ):
-        assert "--host-timeout" in cmd and cmd[cmd.index("--host-timeout") + 1] == "15m"
-    off = scanner.parser().parse_args(
-        ["--dry-run", "--nmap", "nmap", "--host-timeout", "0", "--output-dir", str(tmp_path), "127.0.0.1"])
-    assert "--host-timeout" not in scanner.build_command(scanner.create_plan(off), 0, "tcp_discovery")
+    for stage_args in (("tcp_discovery",), ("tcp_identify", [22]), ("udp_identify",)):
+        assert "--host-timeout" not in scanner.build_command(plan, 0, *stage_args)
+    # opt-in: 지정하면 전 단계에 그 값으로 주입.
+    on = scanner.parser().parse_args(
+        ["--dry-run", "--nmap", "nmap", "--host-timeout", "30m", "--output-dir", str(tmp_path), "127.0.0.1"])
+    plan_on = scanner.create_plan(on)
+    for stage_args in (("tcp_discovery",), ("tcp_identify", [22]), ("udp_identify",)):
+        cmd = scanner.build_command(plan_on, 0, *stage_args)
+        assert "--host-timeout" in cmd and cmd[cmd.index("--host-timeout") + 1] == "30m"
 
 
 def test_ipv6_target_rejected(tmp_path):
