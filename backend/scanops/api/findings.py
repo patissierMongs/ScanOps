@@ -102,8 +102,21 @@ def _filtered(db: Session, status, risk, host, q, state, dept=None):
     if dept:
         query = query.filter(Finding.dept == dept)
     if q:
-        like = f"%{q}%"
-        query = query.filter(Finding.service.like(like) | Finding.hostname.like(like))
+        like = f"%{q.strip()}%"
+        # 모든 텍스트 필드를 아우르는 검색(과거엔 service+hostname 만) — 배너·제품·버전·CPE·분류·
+        # 용도·비고(NSE 추출)·부서·담당자·연락처·메모까지. 숫자면 포트 정확일치도 OR 로 포함.
+        text_cols = [
+            Finding.host_ip, Finding.hostname, Finding.service, Finding.product,
+            Finding.version, Finding.banner, Finding.cpe, Finding.category,
+            Finding.usage, Finding.remarks, Finding.dept, Finding.owner,
+            Finding.contact, Finding.manual_note,
+        ]
+        cond = text_cols[0].like(like)
+        for col in text_cols[1:]:
+            cond = cond | col.like(like)
+        if q.strip().isdigit():
+            cond = cond | (Finding.port == int(q.strip()))
+        query = query.filter(cond)
     return query.order_by(Finding.host_ip, Finding.port)
 
 

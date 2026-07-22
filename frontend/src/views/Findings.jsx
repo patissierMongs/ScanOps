@@ -24,6 +24,12 @@ export default function Findings({ user }) {
   const [status, setStatus] = useState("");
   const [overdueOnly, setOverdueOnly] = useState(false);
   const [hideNormal, setHideNormal] = useState(true);
+  // 노이즈 숨김 토글 — tcpwrapped/미확인(식별 실패)/닫힘 포트.
+  const [hideTcpwrapped, setHideTcpwrapped] = useState(false);
+  const [hideUnidentified, setHideUnidentified] = useState(false);
+  const [hideClosed, setHideClosed] = useState(true);   // 서버 기본(state=open)과 일치
+  // 열별 필터 — {컬럼키: 부분문자열}. 로드된 결과에 클라이언트 필터(셀 표시값 기준).
+  const [colFilters, setColFilters] = useState({});
   const [selected, setSelected] = useState(() => new Set());
   const [confirmId, setConfirmId] = useState(null);
   const [rescanDrawer, setRescanDrawer] = useState(null);
@@ -35,7 +41,9 @@ export default function Findings({ user }) {
   function persistCols(next) { setCols(next); localStorage.setItem(COLS_KEY, JSON.stringify(next)); setPresetId(""); }
 
   function load() {
-    const qs = new URLSearchParams({ state: "open" });
+    const qs = new URLSearchParams();
+    // 닫힘 숨김이 켜져 있으면 열린 포트만(서버). 끄면 전체 상태를 불러와 닫힘/필터드도 본다.
+    if (hideClosed) qs.set("state", "open");
     if (risk) qs.set("risk", risk);
     if (status) qs.set("status", status);
     if (q.trim()) qs.set("q", q.trim());
@@ -43,14 +51,22 @@ export default function Findings({ user }) {
       .then(setFindings)
       .catch((e) => toast(e.message, { type: "err" }));
   }
-  useEffect(() => { load(); }, [risk, status]);
+  useEffect(() => { load(); }, [risk, status, hideClosed]);
 
   const view = useMemo(() => {
     let v = findings;
     if (hideNormal) v = v.filter((f) => f.status !== "정상처리");
     if (overdueOnly) v = v.filter((f) => dday(f.deadline).over);
+    if (hideTcpwrapped) v = v.filter((f) => f.service !== "tcpwrapped" && f.identification !== "tcpwrapped");
+    if (hideUnidentified) v = v.filter((f) => f.identification !== "미확인");
+    // 열별 필터 — 각 활성 필터에 대해 셀 표시값(대소문자 무시) 부분일치.
+    const active = Object.entries(colFilters).filter(([, s]) => s && s.trim());
+    if (active.length) {
+      v = v.filter((f) => active.every(([k, s]) =>
+        String(cellValue(f, k) ?? "").toLowerCase().includes(s.trim().toLowerCase())));
+    }
     return v;
-  }, [findings, overdueOnly, hideNormal]);
+  }, [findings, overdueOnly, hideNormal, hideTcpwrapped, hideUnidentified, colFilters]);
 
   // ---- 컬럼 빌더 ----
   function applyPreset(id) {
@@ -151,7 +167,7 @@ export default function Findings({ user }) {
 
       <div className="panel">
         <div className="row" style={{ marginBottom: 12 }}>
-          <input style={{ flex: 1, minWidth: 180 }} placeholder="검색 (서비스/호스트명)" value={q}
+          <input style={{ flex: 1, minWidth: 180 }} placeholder="검색 (모든 필드 · IP·호스트명·서비스·배너·비고·부서·담당자 등)" value={q}
                  onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} />
           <select value={risk} onChange={(e) => setRisk(e.target.value)}>
             <option value="">위험 전체</option>
@@ -170,6 +186,18 @@ export default function Findings({ user }) {
           <label className="row" style={{ gap: 5 }}>
             <input type="checkbox" checked={overdueOnly} onChange={(e) => setOverdueOnly(e.target.checked)} />
             마감초과만
+          </label>
+          <label className="row" style={{ gap: 5 }} title="service=tcpwrapped(방화벽/래퍼로 프로토콜 미확인) 숨김">
+            <input type="checkbox" checked={hideTcpwrapped} onChange={(e) => setHideTcpwrapped(e.target.checked)} />
+            tcpwrapped 숨김
+          </label>
+          <label className="row" style={{ gap: 5 }} title="식별=미확인(서비스 정체 미상) 숨김">
+            <input type="checkbox" checked={hideUnidentified} onChange={(e) => setHideUnidentified(e.target.checked)} />
+            미확인 숨김
+          </label>
+          <label className="row" style={{ gap: 5 }} title="끄면 닫힘·필터드 포트까지 서버에서 함께 불러옵니다">
+            <input type="checkbox" checked={hideClosed} onChange={(e) => setHideClosed(e.target.checked)} />
+            닫힘 숨김
           </label>
           {canEdit && (
             <button className="sm" disabled={selected.size === 0}
@@ -192,6 +220,20 @@ export default function Findings({ user }) {
                 <th><input type="checkbox" checked={view.length > 0 && selected.size === view.length} onChange={selectAll} /></th>
                 {cols.map((k) => <th key={k}>{COLUMN_MAP[k]?.label || k}</th>)}
                 <th>마감</th>
+                {canEdit && <th></th>}
+              </tr>
+              {/* 열별 필터 — 각 컬럼 표시값에 대한 부분일치(클라이언트). 비우면 해제. */}
+              <tr className="col-filter-row">
+                <th></th>
+                {cols.map((k) => (
+                  <th key={k}>
+                    <input className="col-filter" value={colFilters[k] || ""}
+                           placeholder="필터…"
+                           onClick={(e) => e.stopPropagation()}
+                           onChange={(e) => setColFilters((c) => ({ ...c, [k]: e.target.value }))} />
+                  </th>
+                ))}
+                <th></th>
                 {canEdit && <th></th>}
               </tr>
             </thead>

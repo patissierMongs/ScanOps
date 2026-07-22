@@ -37,6 +37,23 @@ def test_rule_crud_and_match_count(client):
     assert client.get("/api/rules", headers=h).json() == []
 
 
+def test_findings_search_spans_all_fields(client):
+    # 검색 q 가 service/hostname 뿐 아니라 host_ip·포트번호까지 아우른다(전 필드 검색).
+    h = _auth(client)
+    findings = _seed_findings(client, h)
+    assert findings
+    target = findings[0]
+
+    by_ip = client.get(f"/api/findings?q={target['host_ip']}", headers=h).json()
+    assert any(f["id"] == target["id"] for f in by_ip)          # 과거엔 host_ip 검색 불가였음
+
+    by_port = client.get(f"/api/findings?q={target['port']}", headers=h).json()
+    assert any(f["id"] == target["id"] for f in by_port)         # 숫자 → 포트 정확일치 OR
+
+    miss = client.get("/api/findings?q=zzz_no_such_token_zzz", headers=h).json()
+    assert miss == []
+
+
 def test_banned_service_promotes_to_banned(client):
     h = _auth(client)
     findings = _seed_findings(client, h)
