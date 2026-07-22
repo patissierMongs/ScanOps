@@ -58,15 +58,21 @@ def test_unknown_preset_rejected():
         r.build_command("nmap", "bogus", ["127.0.0.1"], Path("/s/x"))
 
 
-def test_slow_preset_is_gentle_full_port_syn():
-    # 느린 프리셋: 전 65535 TCP 커버리지 + 저동시성(병렬 5)·참을성 RTT. 관리자 권한(-sS) 전제.
+def test_slow_preset_is_gentle_full_tcp_plus_udp():
+    # 느린 프리셋: 전 65535 TCP + 주요 UDP 커버리지 + 저동시성(병렬 5)·참을성 RTT. 관리자 권한(-sS·-sU).
     cmd = r.build_command("nmap", "slow", ["10.0.0.0/24"], Path("/s/scan_1"), admin=True)
-    assert "-sS" in cmd
-    assert cmd[cmd.index("-p") + 1] == "T:1-65535"
+    assert "-sS" in cmd and "-sU" in cmd
+    port_spec = cmd[cmd.index("-p") + 1]
+    assert port_spec.startswith("T:1-65535,U:")   # TCP 전체 + UDP 주요 포트셋
+    assert "--version-all" not in cmd              # UDP 안전 위해 강도 7(-sV)만
     assert cmd[cmd.index("--max-parallelism") + 1] == "5"
     assert cmd[cmd.index("--max-rtt-timeout") + 1] == "1000ms"
     assert cmd[cmd.index("--max-retries") + 1] == "6"
     assert cmd[-1] == "10.0.0.0/24"
+    # 비특권 강등: -sU 제거 + U: 포트 스트립 → -sT, TCP 전용.
+    down = r.build_command("nmap", "slow", ["10.0.0.0/24"], Path("/s/scan_1"), admin=False)
+    assert "-sT" in down and "-sU" not in down and "-sS" not in down
+    assert down[down.index("-p") + 1] == "T:1-65535"
 
 
 def test_apply_privilege_downgrades_syn_to_connect_and_strips_udp():

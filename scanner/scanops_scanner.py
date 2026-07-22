@@ -101,12 +101,13 @@ PRESETS: dict[str, list[str]] = {
     ],
     # 느린(젠틀) 점검(slow): 전 TCP 포트 SYN + 서비스 버전. 부하를 낮추는 축은 '동시성'이라
     # --max-parallelism 5(호스트그룹 전역 상한)로 회선·장비 부하를 크게 줄이고, --max-rtt-timeout
-    # 1000ms 로 느린 레거시 장비까지 참을성 있게 포착한다(정확도 유리). 관리자 권한 필요(-sS).
-    # 커버리지는 quick/phase1 과 달리 전 65535 TCP — 방화벽 예외(포트 응답) 환경 기준 병렬 5 가
-    # 처리량 병목이라 넓은 대역은 오래 걸린다(예: /24·136 up ≈ 1.5~3.5h). 부하만 낮춘 조용한 프로파일.
+    # 1000ms 로 느린 레거시 장비까지 참을성 있게 포착한다(정확도 유리). 관리자 권한 필요(-sS·-sU).
+    # 커버리지: TCP 전 65535 + UDP 주요 포트셋(quick/light 와 달리 전 TCP). 병렬 5 가 처리량
+    # 병목이라 넓은 대역은 오래 걸린다(TCP≈1.5~3.5h + UDP 추가분). UDP 는 --version-all 미적용
+    # (-sV 강도 7): 강도 9 는 증폭형 UDP 에서 nmap fatal 위험 → 안전하게. 부하만 낮춘 조용한 프로파일.
     # 역DNS 는 켠다(-n 없음): 호스트명(PTR)이 식별 근거로 유용. 젠틀 단일 스캔이라 PTR 비용은 미미.
     "slow": [
-        "-sS", "-T4", "-p", "T:1-65535", "-sV", "--open", "--reason",
+        "-sS", "-sU", "-T4", "-p", f"T:1-65535,U:{UDP_DEFAULT_PORTS}", "-sV", "--open", "--reason",
         "--min-hostgroup", "16", "--max-parallelism", "5",
         "--max-rtt-timeout", "1000ms", "--initial-rtt-timeout", "300ms",
         "--max-retries", "6",
