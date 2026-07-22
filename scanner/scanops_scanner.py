@@ -104,8 +104,9 @@ PRESETS: dict[str, list[str]] = {
     # 1000ms 로 느린 레거시 장비까지 참을성 있게 포착한다(정확도 유리). 관리자 권한 필요(-sS).
     # 커버리지는 quick/phase1 과 달리 전 65535 TCP — 방화벽 예외(포트 응답) 환경 기준 병렬 5 가
     # 처리량 병목이라 넓은 대역은 오래 걸린다(예: /24·136 up ≈ 1.5~3.5h). 부하만 낮춘 조용한 프로파일.
+    # 역DNS 는 켠다(-n 없음): 호스트명(PTR)이 식별 근거로 유용. 젠틀 단일 스캔이라 PTR 비용은 미미.
     "slow": [
-        "-sS", "-T4", "-p", "T:1-65535", "-sV", "-n", "--open", "--reason",
+        "-sS", "-T4", "-p", "T:1-65535", "-sV", "--open", "--reason",
         "--min-hostgroup", "16", "--max-parallelism", "5",
         "--max-rtt-timeout", "1000ms", "--initial-rtt-timeout", "300ms",
         "--max-retries", "6",

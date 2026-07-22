@@ -140,7 +140,7 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
 
   // 내장 '느린 스캔' 프리셋 미리보기 — 백엔드 presets.py 의 slow 와 동기화(전 65535 TCP·병렬5·참을성 RTT).
   const slowCommand = useMemo(() => commandText([
-    "nmap", "--stats-every", "10s", "-sS", "-T4", "-p", "T:1-65535", "-sV", "-n",
+    "nmap", "--stats-every", "10s", "-sS", "-T4", "-p", "T:1-65535", "-sV",
     "--open", "--reason", "--min-hostgroup", "16", "--max-parallelism", "5",
     "--max-rtt-timeout", "1000ms", "--initial-rtt-timeout", "300ms", "--max-retries", "6",
     "-oA", "scan_<id>", ...targets,
@@ -295,8 +295,8 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
       {builtinPreset === "slow" && (
         <div className="scan-result-note">
           <b>느린(젠틀) 스캔</b> — 커버리지는 전 65535 TCP로 빠른 스캔과 동일하되, 동시성을 병렬 5로 낮춰
-          회선·장비 부하를 크게 줄입니다. 참을성 있는 RTT(1000ms)로 느린 레거시 장비까지 포착합니다.
-          병렬 5가 처리량 병목이라 넓은 대역은 느립니다(예: /24·136 up ≈ 1.5~3.5시간). 옵션을 만지면 해제됩니다.
+          회선·장비 부하를 크게 줄입니다. 참을성 있는 RTT(1000ms)로 느린 레거시 장비까지 포착하고,
+          역DNS(호스트명)도 수집합니다. 병렬 5가 처리량 병목이라 넓은 대역은 느립니다(예: /24·136 up ≈ 1.5~3.5시간). 옵션을 만지면 해제됩니다.
         </div>
       )}
 
