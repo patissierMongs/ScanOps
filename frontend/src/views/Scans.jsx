@@ -32,7 +32,7 @@ export default function Scans({ user }) {
   const [progress, setProgress] = useState({});   // { [scanId]: { percent, etc, remaining, elapsed, hosts_up, last_line } }
   const [targets, setTargets] = useState("");
   const [name, setName] = useState("");
-  const [opt, setOpt] = useState({ workflow: "auto", options: [], ports: "", nse: [], command: "" });
+  const [opt, setOpt] = useState({ workflow: "auto", options: [], ports: "", nse: [], preset: "quick", command: "" });
   const [batchSize, setBatchSize] = useState(256);
   const [staged, setStaged] = useState(true);      // 단계 분리 엔진 스캔(발견→포트→서비스) — 기본 ON
   const [discovery, setDiscovery] = useState("sn");
@@ -101,12 +101,12 @@ export default function Scans({ user }) {
   const targetList = targets.split(/[\s,]+/).filter(Boolean);
 
   // 실행 전 예상 — 타겟/옵션/포트/배치크기가 바뀌면 디바운스로 /estimate 호출.
-  const estKey = JSON.stringify({ t: targetList, w: opt.workflow, o: opt.options, p: opt.ports, b: batchSize });
+  const estKey = JSON.stringify({ t: targetList, w: opt.workflow, o: opt.options, p: opt.ports, pr: opt.preset, b: batchSize });
   useEffect(() => {
     if (!canRun || !targetList.length) { setEst(null); return; }
     let alive = true;
     const id = setTimeout(() => {
-      api("/scans/estimate", { method: "POST", json: { targets: targetList, workflow: opt.workflow, options: opt.options, ports: opt.ports, batch_size: batchSize } })
+      api("/scans/estimate", { method: "POST", json: { targets: targetList, workflow: opt.workflow, options: opt.options, ports: opt.ports, preset: opt.preset, batch_size: batchSize } })
         .then((e) => { if (alive) setEst(e); })
         .catch(() => { if (alive) setEst(null); });
     }, 400);
@@ -157,10 +157,13 @@ export default function Scans({ user }) {
     }
     if (!targetList.length) { toast("타겟을 입력하세요", { type: "err" }); return; }
     setBusy(true);
-    const endpoint = staged ? "/scans/run-staged" : "/scans/run";
-    const body = staged
+    // 내장 프리셋(slow 등)은 단계 엔진이 아니라 /run 청킹 워커의 build_command(preset)로 실행한다.
+    const useBuiltin = !!opt.preset && opt.preset !== "quick";
+    const engine = staged && !useBuiltin;
+    const endpoint = engine ? "/scans/run-staged" : "/scans/run";
+    const body = engine
       ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, batch_size: batchSize, discovery }
-      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, batch_size: batchSize };
+      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, preset: opt.preset, targets: targetList, batch_size: batchSize };
     api(endpoint, { method: "POST", json: body })
       .then((s) => { toast(`${staged ? "단계 " : ""}스캔 시작됨 · #${s.id} (백그라운드 — 진행은 아래 표)`); setTargets(""); setName(""); load(); })
       .catch((e2) => toast(e2.message, { type: "err" }))

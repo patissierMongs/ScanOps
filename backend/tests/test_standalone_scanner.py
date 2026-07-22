@@ -207,6 +207,22 @@ def test_ports_override_profile_port_selection():
     assert flags[flags.index("-p") + 1] == "22,80,443"
 
 
+def test_slow_profile_is_gentle_full_port_syn():
+    # 느린(젠틀) 프리셋: 전 65535 TCP SYN + 저동시성(병렬5)·참을성 RTT. UDP 없음(순수 TCP).
+    scanner = _load_scanner()
+
+    flags = scanner.build_base_flags(_args(profile="slow"))
+
+    assert "-sS" in flags and "-sU" not in flags
+    assert flags[flags.index("-p") + 1] == "T:1-65535"
+    assert flags[flags.index("--max-parallelism") + 1] == "5"
+    assert flags[flags.index("--max-rtt-timeout") + 1] == "1000ms"
+    assert flags[flags.index("--max-retries") + 1] == "6"
+    # 비특권으로도 젠틀 스캔을 돌리려면 connect 로 강등 가능(UDP 없음이라 포트 스트립 무관).
+    connect = scanner.build_base_flags(_args(profile="slow", scan_type="connect"))
+    assert "-sT" in connect and "-sS" not in connect
+
+
 def test_phase1_can_drop_udp_scripts_and_open_filter():
     scanner = _load_scanner()
 

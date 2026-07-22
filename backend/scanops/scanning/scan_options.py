@@ -80,8 +80,9 @@ SCAN_OPTIONS = [
      "note": "누락 위험", "desc": "최대 속도(Insane). 혼잡하거나 느린 망에서는 결과가 누락될 수 있다."},
 
     # ── 성능·안정 ──
-    {"key": "max_retries", "label": "재시도 제한 (--max-retries 1)", "flags": ["--max-retries", "1"], "group": "성능·안정", "default": True,
-     "desc": "프로브 재전송을 1회로 제한해 느린 호스트에서 시간을 절약한다. 신뢰성 높은 내부망에 적합."},
+    {"key": "max_retries", "label": "재시도 제한 (--max-retries 2)", "flags": ["--max-retries", "2"], "group": "성능·안정", "default": True,
+     "desc": "프로브 재전송을 2회로 제한해 느린 호스트에서 시간을 절약하되 손실 구간의 누락(거짓 음성)을 줄인다. "
+             "자동 워크플로·프리셋과 동일한 값(단일 진실원천). 재시도 1은 원격/손실 링크에서 열린 포트를 놓칠 수 있어 상향."},
     {"key": "min_hostgroup", "label": "호스트 그룹 64 (--min-hostgroup 64)", "flags": ["--min-hostgroup", "64"], "group": "성능·안정", "default": True,
      "desc": "한 번에 64대씩 병렬 처리해 넓은 대역 스캔을 가속한다."},
     {"key": "max_parallel", "label": "병렬 100 (--max-parallelism 100)", "flags": ["--max-parallelism", "100"], "group": "성능·안정", "default": True,
@@ -156,6 +157,19 @@ def validate_keys(keys: list[str]) -> list[str]:
     bad = [k for k in keys if k not in _BY_KEY]
     if bad:
         raise ValueError(f"알 수 없는 스캔 옵션: {bad}")
+    return keys
+
+
+def resolve_option_conflicts(keys: list[str]) -> list[str]:
+    """단일 실행에서 공존하면 위험/모순인 옵션을 정리(레지스트리 순서 보존).
+
+    udp(-sU) + version_all(--version-all): 한 번의 nmap 실행에선 --version-all(강도 9)이
+    UDP 버전탐지에도 걸려, 증폭형 UDP(SNMP·SSDP·DNS 등)에서 거대·비정상 응답으로 nmap 을
+    fatal 종료시킬 위험이 크다. UDP 는 강도 7(-sV)로 충분히 식별되므로 version_all 을 드롭한다
+    (강도 9 TCP 식별이 필요하면 자동 워크플로의 TCP 식별 단계가 UDP 없이 이미 제공)."""
+    keys = list(keys)
+    if "udp" in keys and "version_all" in keys:
+        keys = [k for k in keys if k != "version_all"]
     return keys
 
 

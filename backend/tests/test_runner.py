@@ -58,6 +58,55 @@ def test_unknown_preset_rejected():
         r.build_command("nmap", "bogus", ["127.0.0.1"], Path("/s/x"))
 
 
+def test_slow_preset_is_gentle_full_port_syn():
+    # 느린 프리셋: 전 65535 TCP 커버리지 + 저동시성(병렬 5)·참을성 RTT. 관리자 권한(-sS) 전제.
+    cmd = r.build_command("nmap", "slow", ["10.0.0.0/24"], Path("/s/scan_1"), admin=True)
+    assert "-sS" in cmd
+    assert cmd[cmd.index("-p") + 1] == "T:1-65535"
+    assert cmd[cmd.index("--max-parallelism") + 1] == "5"
+    assert cmd[cmd.index("--max-rtt-timeout") + 1] == "1000ms"
+    assert cmd[cmd.index("--max-retries") + 1] == "6"
+    assert cmd[-1] == "10.0.0.0/24"
+
+
+def test_apply_privilege_downgrades_syn_to_connect_and_strips_udp():
+    # 비특권: -sS→-sT(중복 없이), -sU/-O 제거, -p 의 U: 포트도 제거(nmap fatal 방지).
+    flags = r.apply_privilege(["-sS", "-sU", "-O", "-sV", "-p", "T:22,U:53"], admin=False)
+    assert "-sT" in flags and "-sS" not in flags
+    assert "-sU" not in flags and "-O" not in flags
+    assert flags[flags.index("-p") + 1] == "T:22"       # U:53 제거, T:22 유지
+    # 관리자면 원본 그대로.
+    assert r.apply_privilege(["-sS", "-sU"], admin=True) == ["-sS", "-sU"]
+
+
+def test_apply_privilege_drops_port_when_tcp_empty():
+    # UDP 전용 포트만 있으면 비특권 강등 후 -p 를 통째로 제거(nmap 기본 TCP 로).
+    flags = r.apply_privilege(["-sU", "-p", "U:53,161"], admin=False)
+    assert "-p" not in flags and "U:53" not in " ".join(flags)
+
+
+def test_build_command_opts_drops_version_all_with_udp():
+    # udp + version_all 공존 → version_all 드롭(단일 실행 UDP 강도9 fatal 방지). WYSIWYG 대상.
+    cmd = r.build_command_opts("nmap", ["syn", "udp", "version", "version_all"],
+                               "T:1-65535,U:53", ["127.0.0.1"], Path("/s/x"), admin=True)
+    assert "--version-all" not in cmd
+    assert "-sV" in cmd and "-sU" in cmd and "-sS" in cmd
+
+
+def test_build_command_opts_keeps_version_all_without_udp():
+    cmd = r.build_command_opts("nmap", ["syn", "version", "version_all"],
+                               "T:1-65535", ["127.0.0.1"], Path("/s/x"), admin=True)
+    assert "--version-all" in cmd
+
+
+def test_build_command_opts_unprivileged_connect_no_udp():
+    # 비특권 단일 실행: -sT 강등, -sU 제거, U: 포트 스트립.
+    cmd = r.build_command_opts("nmap", ["syn", "udp", "version"],
+                               "T:1-65535,U:53", ["127.0.0.1"], Path("/s/x"), admin=False)
+    assert "-sT" in cmd and "-sS" not in cmd and "-sU" not in cmd
+    assert cmd[cmd.index("-p") + 1] == "T:1-65535"
+
+
 def test_target_validation_blocks_injection():
     with pytest.raises(ValueError):
         r.build_command("nmap", "quick", ["127.0.0.1; rm -rf /"], Path("/s/x"))

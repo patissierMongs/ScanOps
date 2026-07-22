@@ -100,6 +100,8 @@ def test_run_scan_auto_records_workflow_state(client, monkeypatch):
 
     h = _auth(client)
     monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    # 자동 워크플로는 관리자 권한을 전제하므로 테스트에선 특권 환경을 가정한다.
+    monkeypatch.setattr(scans_api.nmap_runner, "is_admin", lambda: True)
 
     class NoopThread:
         def __init__(self, *args, **kwargs):
@@ -122,6 +124,20 @@ def test_run_scan_auto_records_workflow_state(client, monkeypatch):
     assert state["workflow"] == "auto"
     assert state["nse"] == []
     assert state["batches"] == [["127.0.0.1"]]
+
+
+def test_run_scan_auto_blocked_without_admin(client, monkeypatch):
+    """비특권이면 자동 스캔은 관리자 권한 안내와 함께 거절(반쪽짜리 -sT 발견 방지)."""
+    from scanops.api import scans as scans_api
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.nmap_runner, "is_admin", lambda: False)
+    r = client.post("/api/scans/run", headers=h, json={
+        "name": "auto", "workflow": "auto", "targets": ["127.0.0.1"], "batch_size": 1,
+    })
+    assert r.status_code == 400
+    assert "관리자 권한" in r.json()["detail"]
 
 
 def test_import_bundle_preserves_discovery_and_scopes_closure(client):

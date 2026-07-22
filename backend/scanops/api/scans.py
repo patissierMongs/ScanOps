@@ -759,6 +759,9 @@ def list_scan_options(_: User = Depends(current_user)):
         "nse_default": scan_options.NSE_DEFAULT_KEYS,
         "udp_default_ports": scan_options.UDP_DEFAULT_PORTS,
         "default_ports": scan_options.DEFAULT_PORTS,
+        # 관리자 권한 여부 — UI 가 '관리자 권한/비특권(-sT)' 배지를 그리고, 비특권이면
+        # 자동 스캔이 막히므로 단일 실행으로 유도한다(-sS→-sT 자동 강등).
+        "privileged": nmap_runner.is_admin(),
     }
 
 
@@ -869,6 +872,13 @@ def run_scan(
     nmap = nmap_runner.find_nmap(_settings.nmap_path)
     if not nmap:
         raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
+    # 자동 워크플로는 -sS·raw 호스트 발견(-PE/-PA)을 전제하므로 관리자 권한이 없으면 반쪽짜리
+    # 스캔이 된다 → 정직하게 차단하고 비특권 대안('단일 실행' -sT)을 안내한다. 단일 실행은
+    # build_command_opts/build_command 가 -sT 로 자동 강등하므로 비특권에서도 안전하게 돈다.
+    if body.workflow == "auto" and not nmap_runner.is_admin():
+        raise HTTPException(status_code=400, detail=(
+            "자동 스캔은 관리자 권한(-sS·raw 호스트 발견)이 필요합니다. "
+            "서버를 관리자 권한으로 실행하거나, '단일 실행'(비특권 -sT)으로 스캔하세요."))
     try:
         if body.workflow not in ("auto", "manual"):
             raise ValueError("workflow 는 auto 또는 manual 이어야 합니다.")

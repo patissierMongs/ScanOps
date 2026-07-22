@@ -55,6 +55,9 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
   const [presets, setPresets] = useState(loadPresets);
   const [presetId, setPresetId] = useState("");
   const [touchedPorts, setTouchedPorts] = useState(false);
+  // 내장 프리셋(slow 등) — 선택 시 옵션/NSE 를 비우고 서버 프리셋으로 실행한다(백엔드 build_command).
+  const [builtinPreset, setBuiltinPreset] = useState("");
+  const [privileged, setPrivileged] = useState(true);
 
   useEffect(() => {
     let live = true;
@@ -68,6 +71,8 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
         setNseSel(new Set(r.nse_default || []));
         setUdpPorts(r.udp_default_ports || "");
         if (!touchedPorts) setPorts(r.default_ports || "");
+        setPrivileged(r.privileged !== false);
+        if (r.privileged === false) setWorkflow("manual");   // 비특권: 자동 스캔은 서버가 거절
       })
       .catch(() => {});
     return () => { live = false; };
@@ -79,7 +84,8 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
   );
 
   // 단계 분리(staged) 또는 자동 스캔이면 한 번에 안 돌고 단계별로 나눠 순차 실행된다.
-  const stepped = staged || workflow === "auto";
+  // 단, 내장 프리셋(slow 등)은 /run 청킹의 단일 명령이라 단계 뷰가 아닌 단일 명령 뷰로 보여준다.
+  const stepped = builtinPreset ? false : (staged || workflow === "auto");
 
   // 분산 실행되는 각 단계 명령 — 백엔드 nmap_runner.build_auto_command 의 플래그와 동기화.
   const steps = useMemo(() => {
@@ -118,7 +124,12 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
   // 단일 실행(manual) 명령 — raw 모드 '채우기' 및 하위호환용.
   const singleCommand = useMemo(() => {
     const p = (ports || portsAuto).trim();
-    const flags = registry.filter((o) => sel.has(o.key)).flatMap((o) => o.flags);
+    // WYSIWYG: udp + version_all 공존 시 version_all 제외(백엔드 resolve_option_conflicts 와 일치).
+    // 단일 실행에선 --version-all(강도9)이 UDP 에도 걸려 증폭형 서비스에서 nmap 이 죽는다 → UDP 우선.
+    const conflictUdpVall = sel.has("udp") && sel.has("version_all");
+    const flags = registry
+      .filter((o) => sel.has(o.key) && !(conflictUdpVall && o.key === "version_all"))
+      .flatMap((o) => o.flags);
     const parts = ["nmap", ...flags];
     if (p) parts.push("-p", p);
     if (selectedScripts.length) parts.push("--script", selectedScripts.join(","));
@@ -127,18 +138,30 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
     return parts.join(" ");
   }, [sel, ports, portsAuto, targets, registry, selectedScripts]);
 
-  // onState.command: manual 은 항상 단일 명령(raw 모드 '채우기'용), 그 외엔 분산 단계 명령.
-  const command = workflow === "manual" ? singleCommand : steps.map((s) => s.cmd).join("\n");
+  // 내장 '느린 스캔' 프리셋 미리보기 — 백엔드 presets.py 의 slow 와 동기화(전 65535 TCP·병렬5·참을성 RTT).
+  const slowCommand = useMemo(() => commandText([
+    "nmap", "--stats-every", "10s", "-sS", "-T4", "-p", "T:1-65535", "-sV", "-n",
+    "--open", "--reason", "--min-hostgroup", "16", "--max-parallelism", "5",
+    "--max-rtt-timeout", "1000ms", "--initial-rtt-timeout", "300ms", "--max-retries", "6",
+    "-oA", "scan_<id>", ...targets,
+  ]), [targets]);
+
+  // onState.command: slow 프리셋이면 슬로우 명령, manual 은 단일 명령, 그 외엔 분산 단계 명령.
+  const command = builtinPreset === "slow" ? slowCommand
+    : workflow === "manual" ? singleCommand
+      : steps.map((s) => s.cmd).join("\n");
 
   useEffect(() => {
     onState && onState({
       workflow,
-      options: workflow === "manual" ? [...sel] : [],
-      ports,
-      nse: [...nseSel],
+      // slow 프리셋: 옵션/NSE/포트를 비워 서버가 build_command(preset)로 실행하게 한다.
+      options: builtinPreset ? [] : (workflow === "manual" ? [...sel] : []),
+      ports: builtinPreset ? "" : ports,
+      nse: builtinPreset ? [] : [...nseSel],
+      preset: builtinPreset || "quick",
       command,
     });
-  }, [workflow, sel, ports, nseSel, command]);
+  }, [workflow, sel, ports, nseSel, command, builtinPreset]);
 
   const groups = useMemo(() => {
     const g = {};
@@ -154,14 +177,14 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
 
   function toggle(k) {
     setSel((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
-    setPresetId("");
+    setPresetId(""); setBuiltinPreset("");
   }
   function toggleNse(k) {
     setNseSel((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
-    setPresetId("");
+    setPresetId(""); setBuiltinPreset("");
   }
-  const setNseAll = (keys) => { setNseSel(new Set(keys)); setPresetId(""); };
-  const setPortPreset = (spec) => { setPorts(spec); setPresetId(""); };
+  const setNseAll = (keys) => { setNseSel(new Set(keys)); setPresetId(""); setBuiltinPreset(""); };
+  const setPortPreset = (spec) => { setPorts(spec); setPresetId(""); setBuiltinPreset(""); };
 
   function applyPrecision() {
     setWorkflow("manual");
@@ -170,6 +193,13 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
     setNseSel(new Set(nseDefault));
     setShowManualOptions(true);
     setShowNse(true);
+    setPresetId(""); setBuiltinPreset("");
+  }
+
+  // 느린(젠틀) 스캔 — 서버 내장 slow 프리셋으로 실행(전 65535 TCP·저동시성). 관리자 권한 필요.
+  function applySlow() {
+    setWorkflow("manual");
+    setBuiltinPreset("slow");
     setPresetId("");
   }
 
@@ -181,7 +211,7 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
       setPorts(p.ports || "");
       setNseSel(new Set(p.nse || []));
     }
-    setPresetId(id);
+    setPresetId(id); setBuiltinPreset("");
   }
 
   function savePreset() {
@@ -213,9 +243,17 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
     <div className="scan-builder">
       <div className="scan-modebar">
         <div className="seg">
-          <button type="button" className={workflow === "auto" ? "on" : ""} onClick={() => setWorkflow("auto")}>자동 스캔</button>
-          <button type="button" className={workflow === "manual" ? "on" : ""} onClick={() => setWorkflow("manual")}>단일 실행</button>
+          <button type="button" className={workflow === "auto" ? "on" : ""}
+                  disabled={!privileged}
+                  title={privileged ? "" : "자동 스캔은 관리자 권한(-sS)이 필요합니다"}
+                  onClick={() => { setWorkflow("auto"); setBuiltinPreset(""); }}>자동 스캔</button>
+          <button type="button" className={workflow === "manual" ? "on" : ""} onClick={() => { setWorkflow("manual"); setBuiltinPreset(""); }}>단일 실행</button>
         </div>
+        <span className={`pill ${privileged ? "low" : "medium"}`} title={privileged
+          ? "raw 소켓 사용 가능 — -sS/-sU 스캔 가능"
+          : "raw 소켓 불가 — 자동 스캔 비활성, 단일 실행은 -sT 로 자동 강등되고 UDP 는 제외됩니다"}>
+          {privileged ? "관리자 권한" : "비특권(-sT)"}
+        </span>
         <select value={presetId} onChange={(e) => applyPreset(e.target.value)} aria-label="프리셋 선택">
           <option value="">프리셋 선택…</option>
           {presets.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
@@ -248,7 +286,19 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
         {udpPorts && <button type="button" className="sm" onClick={() => setPortPreset(`U:${udpPorts}`)}>UDP 주요만</button>}
         {udpPorts && <button type="button" className="sm" onClick={() => setPortPreset(`T:1-65535,U:${udpPorts}`)}>TCP+UDP</button>}
         <button type="button" className="sm" onClick={applyPrecision}>단일 정밀 구성</button>
+        <button type="button" className={`sm ${builtinPreset === "slow" ? "on" : ""}`}
+                disabled={!privileged}
+                title={privileged ? "전 65535 TCP, 저동시성(병렬5)·참을성 RTT — 부하만 낮춘 조용한 전포트 스캔"
+                                   : "관리자 권한(-sS)이 필요합니다"}
+                onClick={applySlow}>느린 스캔(젠틀·전포트)</button>
       </div>
+      {builtinPreset === "slow" && (
+        <div className="scan-result-note">
+          <b>느린(젠틀) 스캔</b> — 커버리지는 전 65535 TCP로 빠른 스캔과 동일하되, 동시성을 병렬 5로 낮춰
+          회선·장비 부하를 크게 줄입니다. 참을성 있는 RTT(1000ms)로 느린 레거시 장비까지 포착합니다.
+          병렬 5가 처리량 병목이라 넓은 대역은 느립니다(예: /24·136 up ≈ 1.5~3.5시간). 옵션을 만지면 해제됩니다.
+        </div>
+      )}
 
       <div className="scan-collapsible">
         <button type="button" className="sm" onClick={() => setShowManualOptions((v) => !v)}>

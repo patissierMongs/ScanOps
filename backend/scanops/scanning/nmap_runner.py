@@ -14,6 +14,78 @@ from .presets import PRESETS
 # 타겟 화이트리스트: IPv4/CIDR/호스트명/범위. shell 미사용이라도 입력은 검증.
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_.:/\-]+$")
 
+# raw 소켓(관리자 권한)이 필요해 비특권에선 쓸 수 없는 기법 — -sT 로 강등하거나 제거한다.
+# -sU/-O/스텔스(-sN/-sF/-sX/-sA/-sW/-sM)/-sO 는 비특권 대체가 없어 제거.
+_RAW_ONLY_TECH = {"-sU", "-sN", "-sF", "-sX", "-sA", "-sW", "-sM", "-sO", "-O"}
+
+
+def is_admin() -> bool:
+    """관리자 권한(raw 소켓 가능) 여부. Windows=IsUserAnAdmin, POSIX=euid 0.
+    ScanOps 는 사내 Windows 배포가 기본 전제라 IsUserAnAdmin 을 우선 본다."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return False
+
+
+def _tcp_only_ports(spec: str) -> str:
+    """포트 스펙에서 TCP 부분만 남긴다(nmap sticky T:/U: 규칙 존중).
+    비특권(-sU 불가) 강등 시 U: 포트가 -p 에 새면 nmap 이 fatal 종료하므로 제거.
+    스탠드얼론 스캐너 tcp_only_ports 와 동일 규칙(단일 진실원천 취지)."""
+    current = ""
+    parts: list[str] = []
+    for raw in (spec or "").split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        if ":" in item:
+            prefix, value = item.split(":", 1)
+            up = prefix.upper()
+            if up in ("T", "U"):
+                current = up
+                if up == "T" and value:
+                    parts.append(f"T:{value}")
+                continue
+        if current in ("", "T"):
+            parts.append(item)
+    return ",".join(parts)
+
+
+def apply_privilege(flags: list[str], admin: bool | None = None) -> list[str]:
+    """관리자 권한이 없으면 raw 소켓 기법을 비특권 대체로 낮춘다.
+    -sS→-sT(중복 방지), -sU/-O/스텔스는 제거, -p 의 U: 포트도 제거(-sU 없이 새면 fatal).
+    admin=None 이면 실행 환경에서 감지. 관리자면 원본 그대로."""
+    if admin is None:
+        admin = is_admin()
+    if admin:
+        return list(flags)
+    out: list[str] = []
+    seen_connect = False
+    for f in flags:
+        if f in ("-sS", "-sT"):
+            if not seen_connect:
+                out.append("-sT")
+                seen_connect = True
+            continue
+        if f in _RAW_ONLY_TECH:
+            continue
+        out.append(f)
+    if "-p" in out:
+        idx = out.index("-p")
+        if idx + 1 < len(out):
+            tcp = _tcp_only_ports(out[idx + 1])
+            if tcp:
+                out[idx + 1] = tcp
+            else:
+                del out[idx:idx + 2]   # TCP 포트가 안 남으면 -p 제거(nmap 기본 top-1000 TCP)
+    return out
+
 # 직접 명령 입력에서 거절할 셸 메타문자 — shell=False 라 해석은 안 되지만, 의도치 않은
 # 토큰이 nmap 인자로 새는 걸 막고 명확히 거절한다.
 _SHELL_META = set(";|&`$<>\n\r")
@@ -119,22 +191,33 @@ def normal_log_of(basename: Path) -> Path:
     return Path(str(basename) + ".nmap")
 
 
-def build_command(nmap: str, preset: str, targets: list[str], out_basename: Path) -> list[str]:
+def build_command(nmap: str, preset: str, targets: list[str], out_basename: Path,
+                  admin: bool | None = None) -> list[str]:
     if preset not in PRESETS:
         raise ValueError(f"알 수 없는 프리셋: {preset}")
     validate_targets(targets)
+    # 관리자 권한이 없으면 -sS→-sT 등으로 강등(quick 은 이미 -sT 라 무변).
+    flags = apply_privilege(PRESETS[preset], admin)
     # -oA : .nmap(normal)/.xml/.gnmap 동시 출력. .nmap 이 있어야 --resume 가능,
     # .xml 은 ScanOps 파싱용. 중단 후 --resume 시 nmap 이 세 파일을 모두 이어 쓴다.
-    return [nmap, *STATS_FLAGS, *PRESETS[preset], "-oA", str(out_basename), *targets]
+    return [nmap, *STATS_FLAGS, *flags, "-oA", str(out_basename), *targets]
 
 
 def build_command_opts(nmap: str, option_keys: list[str], ports: str,
                        targets: list[str], out_basename: Path,
-                       nse: list[str] | None = None) -> list[str]:
-    """옵션 키 화이트리스트 + 포트 + (선택)NSE 스크립트 + 타겟 → 검증된 nmap argv (-oA 강제)."""
+                       nse: list[str] | None = None, admin: bool | None = None) -> list[str]:
+    """옵션 키 화이트리스트 + 포트 + (선택)NSE 스크립트 + 타겟 → 검증된 nmap argv (-oA 강제).
+
+    충돌 옵션은 정리하고(udp+version_all → version_all 드롭, UDP 강도9 fatal 방지),
+    비특권이면 -sS→-sT 강등·UDP 제거·U:포트 스트립한다."""
     scan_options.validate_keys(option_keys)
-    flags = scan_options.flags_for(option_keys)
+    keys = scan_options.resolve_option_conflicts(option_keys)
+    if admin is None:
+        admin = is_admin()
+    flags = apply_privilege(scan_options.flags_for(keys), admin)
     port_spec = scan_options.validate_ports(ports)
+    if not admin and port_spec:
+        port_spec = _tcp_only_ports(port_spec)   # UDP 스캔이 빠졌으니 U: 포트도 제거
     script_flags = scan_options.script_flag(nse or [])
     validate_targets(targets)
     argv = [nmap, *STATS_FLAGS, *flags]

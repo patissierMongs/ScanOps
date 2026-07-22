@@ -99,6 +99,17 @@ PRESETS: dict[str, list[str]] = {
         "-p", PRECISION_PORTS,
         "--script", DEFAULT_NSE_SCRIPTS + "," + UDP_NSE_SCRIPTS,
     ],
+    # 느린(젠틀) 점검(slow): 전 TCP 포트 SYN + 서비스 버전. 부하를 낮추는 축은 '동시성'이라
+    # --max-parallelism 5(호스트그룹 전역 상한)로 회선·장비 부하를 크게 줄이고, --max-rtt-timeout
+    # 1000ms 로 느린 레거시 장비까지 참을성 있게 포착한다(정확도 유리). 관리자 권한 필요(-sS).
+    # 커버리지는 quick/phase1 과 달리 전 65535 TCP — 방화벽 예외(포트 응답) 환경 기준 병렬 5 가
+    # 처리량 병목이라 넓은 대역은 오래 걸린다(예: /24·136 up ≈ 1.5~3.5h). 부하만 낮춘 조용한 프로파일.
+    "slow": [
+        "-sS", "-T4", "-p", "T:1-65535", "-sV", "-n", "--open", "--reason",
+        "--min-hostgroup", "16", "--max-parallelism", "5",
+        "--max-rtt-timeout", "1000ms", "--initial-rtt-timeout", "300ms",
+        "--max-retries", "6",
+    ],
 }
 
 TARGET_RE = re.compile(r"^[A-Za-z0-9_.:/\-]+$")
