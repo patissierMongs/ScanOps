@@ -105,12 +105,36 @@ def test_build_command_opts_keeps_version_all_without_udp():
     assert "--version-all" in cmd
 
 
+def test_resolve_conflicts_rejects_two_tcp_techniques():
+    from scanops.scanning import scan_options as o
+    # TCP 스캔 기법 2개 → nmap 이 "only one scan type" 로 실행 즉시 죽음 → 시작 전에 거절.
+    for combo in (["fin", "xmas"], ["syn", "connect"], ["syn", "ack"], ["null", "xmas"]):
+        with pytest.raises(ValueError):
+            o.resolve_option_conflicts(combo)
+    # syn + udp 는 정상(-sU 는 TCP 기법과 병행 가능).
+    assert set(o.resolve_option_conflicts(["syn", "udp"])) == {"syn", "udp"}
+    # 단일 기법은 통과.
+    assert o.resolve_option_conflicts(["connect"]) == ["connect"]
+
+
 def test_build_command_opts_unprivileged_connect_no_udp():
     # 비특권 단일 실행: -sT 강등, -sU 제거, U: 포트 스트립.
     cmd = r.build_command_opts("nmap", ["syn", "udp", "version"],
                                "T:1-65535,U:53", ["127.0.0.1"], Path("/s/x"), admin=False)
     assert "-sT" in cmd and "-sS" not in cmd and "-sU" not in cmd
     assert cmd[cmd.index("-p") + 1] == "T:1-65535"
+
+
+def test_build_command_opts_rejects_udp_only_ports_when_unprivileged():
+    # 비특권인데 UDP 포트만 지정 → -p 를 조용히 빼고 엉뚱한 top-1000 TCP 를 스캔하던 버그.
+    # 이제 거절(무성 오작동 방지).
+    with pytest.raises(ValueError):
+        r.build_command_opts("nmap", ["connect", "udp"], "U:161,U:162",
+                             ["127.0.0.1"], Path("/s/x"), admin=False)
+    # 관리자면 그대로 UDP 스캔(거절 안 함).
+    ok = r.build_command_opts("nmap", ["connect", "udp"], "U:161,U:162",
+                              ["127.0.0.1"], Path("/s/x"), admin=True)
+    assert "-sU" in ok and ok[ok.index("-p") + 1] == "U:161,U:162"
 
 
 def test_target_validation_blocks_injection():

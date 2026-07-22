@@ -185,6 +185,31 @@ def test_log_tail_prefers_error_lines(tmp_path):
     assert "Failed to resolve" in tail          # 오류 줄이 마지막 평범한 줄보다 우선
 
 
+def test_advance_cursor_does_not_clobber_concurrent_stop(tmp_path):
+    """커서 전진이 그 사이 들어온 stop 을 덮어쓰지 않는다(중지 유실 레이스 수정).
+    stale in-memory state 로 호출해도 fresh 재읽기로 stop 을 감지해 전진하지 않고 stop 을 보존."""
+    from scanops.api import scans as scans_api
+    from scanops.scanning import chunker
+
+    base = tmp_path / "scan_9"
+    chunker.write_state(base, {"batches": [["a"], ["b"]], "cursor": 0, "stop": False, "active_seconds": 0})
+
+    st = chunker.read_state(base)
+    assert scans_api._advance_cursor(base, st, 0, 1.0) is True     # 정상 전진
+    assert chunker.read_state(base)["cursor"] == 1
+
+    # 그 사이 stop 이 디스크에 반영됨 — 워커는 아직 stale st(stop=False)를 들고 있음.
+    disk = chunker.read_state(base)
+    disk["stop"] = True
+    chunker.write_state(base, disk)
+    stale = {"batches": [["a"], ["b"]], "cursor": 1, "stop": False, "active_seconds": 1.0}
+
+    assert scans_api._advance_cursor(base, stale, 1, 1.0) is False  # 전진 거부
+    after = chunker.read_state(base)
+    assert after["stop"] is True                                   # stop 유실 안 됨
+    assert after["cursor"] == 1                                    # 커서 안 밀림
+
+
 def test_auto_batch_parallelizes_tcp_and_udp_identify(monkeypatch, tmp_path):
     """발견 이후 tcp_identify 와 udp_identify 가 동시(병렬)에 돈다 — 두 구간이 시간상 겹친다."""
     import time

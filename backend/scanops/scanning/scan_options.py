@@ -160,14 +160,27 @@ def validate_keys(keys: list[str]) -> list[str]:
     return keys
 
 
+# TCP 스캔 기법(상호 배타) — nmap 은 한 실행에 TCP 스캔 타입을 하나만 허용한다.
+# (udp(-sU)는 별개라 이들 중 하나와 함께 쓸 수 있어 제외.)
+_TCP_TECHNIQUE_KEYS = ("syn", "connect", "ack", "fin", "null", "xmas")
+
+
 def resolve_option_conflicts(keys: list[str]) -> list[str]:
     """단일 실행에서 공존하면 위험/모순인 옵션을 정리(레지스트리 순서 보존).
 
     udp(-sU) + version_all(--version-all): 한 번의 nmap 실행에선 --version-all(강도 9)이
     UDP 버전탐지에도 걸려, 증폭형 UDP(SNMP·SSDP·DNS 등)에서 거대·비정상 응답으로 nmap 을
     fatal 종료시킬 위험이 크다. UDP 는 강도 7(-sV)로 충분히 식별되므로 version_all 을 드롭한다
-    (강도 9 TCP 식별이 필요하면 자동 워크플로의 TCP 식별 단계가 UDP 없이 이미 제공)."""
+    (강도 9 TCP 식별이 필요하면 자동 워크플로의 TCP 식별 단계가 UDP 없이 이미 제공).
+
+    TCP 스캔 기법을 둘 이상 고르면 nmap 이 "only one scan type is allowed"로 실행 즉시 죽어
+    스캔 전체가 실패한다 → 시작 전에 명확히 거절한다."""
     keys = list(keys)
+    techniques = [k for k in keys if k in _TCP_TECHNIQUE_KEYS]
+    if len(techniques) > 1:
+        raise ValueError(
+            f"TCP 스캔 기법은 하나만 선택할 수 있습니다(선택됨: {', '.join(techniques)}). "
+            "nmap 은 한 번에 하나의 TCP 스캔 타입만 허용합니다.")
     if "udp" in keys and "version_all" in keys:
         keys = [k for k in keys if k != "version_all"]
     return keys

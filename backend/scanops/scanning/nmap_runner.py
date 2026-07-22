@@ -217,7 +217,14 @@ def build_command_opts(nmap: str, option_keys: list[str], ports: str,
     flags = apply_privilege(scan_options.flags_for(keys), admin)
     port_spec = scan_options.validate_ports(ports)
     if not admin and port_spec:
-        port_spec = _tcp_only_ports(port_spec)   # UDP 스캔이 빠졌으니 U: 포트도 제거
+        stripped = _tcp_only_ports(port_spec)   # UDP 스캔이 빠졌으니 U: 포트도 제거
+        # 사용자가 UDP 포트만 지정했는데 비특권이라 다 잘려나가면, -p 를 그냥 빼면 nmap 이
+        # 엉뚱한 기본 포트(top-1000 TCP)를 스캔해 '성공'으로 보고한다(무성 오작동) → 정직하게 거절.
+        if not stripped:
+            raise ValueError(
+                "관리자 권한이 없어 UDP 스캔을 할 수 없습니다. TCP 포트를 지정하거나 "
+                "관리자 권한으로 서버를 실행하세요.")
+        port_spec = stripped
     script_flags = scan_options.script_flag(nse or [])
     validate_targets(targets)
     argv = [nmap, *STATS_FLAGS, *flags]

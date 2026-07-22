@@ -34,6 +34,10 @@ _settings = get_settings()
 # 이어가기는 가능(다음 배치부터). 청킹이 native --resume(Windows 깨짐)을 대체한다.
 _PROCS: dict = {}
 _LOCK = threading.Lock()
+# 사이드카 상태(state.json)의 read-modify-write 직렬화 — 워커의 커서 전진과 stop_scan 의 stop 쓰기가
+# 겹치면, 워커가 stale in-memory state 로 전체를 덮어써 stop 플래그를 지워버린다(중지 유실). 이 락으로
+# 두 경로의 RMW 를 직렬화해 lost-update 를 막는다.
+_STATE_LOCK = threading.Lock()
 AUTO_STAGE_LABELS = {
     "tcp_discovery": "TCP 전체 포트 발견",
     "tcp_identify": "발견된 TCP 포트 용도/서비스 식별",
@@ -127,6 +131,20 @@ def _mark(scan_id: int, status: str, error: str = "") -> None:
             db.commit()
     finally:
         db.close()
+
+
+def _advance_cursor(base: Path, st: dict, cursor: int, dt: float) -> bool:
+    """배치 완료 후 커서 전진. 사이드카를 fresh 로 다시 읽어(stale 덮어쓰기 방지) 그 사이 stop 이
+    들어왔으면 전진하지 않고 False 반환(→ 호출자가 canceled 처리). _STATE_LOCK 으로 stop_scan 의
+    stop 쓰기와 직렬화 → 중지 유실(lost-update) 방지. read 실패 시에만 워커의 st 로 폴백."""
+    with _STATE_LOCK:
+        fresh = chunker.read_state(base) or st
+        if fresh.get("stop"):
+            return False
+        fresh["cursor"] = cursor + 1
+        fresh["active_seconds"] = round(fresh.get("active_seconds", 0) + dt, 1)
+        chunker.write_state(base, fresh)
+        return True
 
 
 def _set_current_log(scan_id: int, log_path: Path) -> None:
@@ -587,9 +605,9 @@ def _chunk_worker(scan_id: int) -> None:
                 _mark(scan_id, "failed", "자동 스캔 배치가 결과를 내지 못했습니다.")
                 return
             dt = (datetime.now(timezone.utc) - t0).total_seconds()
-            st["cursor"] = cursor + 1
-            st["active_seconds"] = round(st.get("active_seconds", 0) + dt, 1)
-            chunker.write_state(base, st)
+            if not _advance_cursor(base, st, cursor, dt):   # 그 사이 stop 이면 전진 안 함 → canceled
+                _mark(scan_id, "canceled")
+                return
             continue
         try:
             if st.get("options") or st.get("nse"):
@@ -623,10 +641,11 @@ def _chunk_worker(scan_id: int) -> None:
             _mark(scan_id, "failed", f"결과 인입 오류: {type(e).__name__}: {e}")
             return
         # 배치 완료 → 커서 전진 + 실제 스캔 시간 누적(영속). 누적은 멈춤시간 제외 → ETA 정확.
+        # 전진 직전 stop 이 들어왔으면(레이스) fresh 로 감지해 커서를 안 밀고 canceled 로 확정.
         dt = (datetime.now(timezone.utc) - t0).total_seconds()
-        st["cursor"] = cursor + 1
-        st["active_seconds"] = round(st.get("active_seconds", 0) + dt, 1)
-        chunker.write_state(base, st)
+        if not _advance_cursor(base, st, cursor, dt):
+            _mark(scan_id, "canceled")
+            return
 
 
 def _command_worker(scan_id: int) -> None:
@@ -717,6 +736,7 @@ def _engine_worker(scan_id: int) -> None:
         if scan is not None:
             engine_runner.ingest_results(db, scan, out_dir, scope_keys=scope_keys)
             scan.status = "done"
+            scan.error = ""   # 이전 실패/중단 후 이어하기로 완주한 경우의 잔재 원인 제거(_mark 우회 경로라 직접 비움)
             scan.finished_at = datetime.now(timezone.utc)
             db.commit()
     except Exception as e:
@@ -770,8 +790,9 @@ def _import_single_xml(db: Session, user: User, name: str, xml_bytes: bytes) -> 
     scan.raw_xml_path = str(xml_path)
     try:
         counts = _ingest_xml(db, scan, xml_bytes, scan_date=sdate, filename=name)
-    except Exception:
+    except Exception as e:
         scan.status = "failed"
+        scan.error = f"가져오기 실패: {type(e).__name__}: {e}"[:2000]
         scan.finished_at = datetime.now(timezone.utc)
         db.commit()
         raise
@@ -834,8 +855,9 @@ def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, d
             scan_date=sdate,
             raw_xml_path=merged_path,
         )
-    except Exception:
+    except Exception as e:
         scan.status = "failed"
+        scan.error = f"묶음 가져오기 실패: {type(e).__name__}: {e}"[:2000]
         scan.finished_at = datetime.now(timezone.utc)
         db.commit()
         raise
@@ -894,6 +916,7 @@ async def import_xml(
         counts = _ingest_xml(db, scan, xml_bytes, scan_date=sdate, filename=file.filename)
     except Exception as e:
         scan.status = "failed"
+        scan.error = f"가져오기 실패: {type(e).__name__}: {e}"[:2000]
         db.commit()
         record(db, user, "SCAN_IMPORT", target=file.filename or "", detail=f"#{scan.id} 실패", ok=False)
         raise HTTPException(status_code=400, detail=f"XML 파싱 실패: {e}")
@@ -1134,10 +1157,11 @@ def stop_scan(
     if scan.status not in ("running", "canceling"):
         raise HTTPException(status_code=400, detail="실행 중인 스캔이 아닙니다.")
     base = _basename(scan_id)
-    state = chunker.read_state(base)
-    if state is not None:
-        state["stop"] = True
-        chunker.write_state(base, state)
+    with _STATE_LOCK:   # 워커의 커서 전진(_advance_cursor)과 직렬화 → stop 플래그 유실 방지
+        state = chunker.read_state(base)
+        if state is not None:
+            state["stop"] = True
+            chunker.write_state(base, state)
     # 엔진 스캔이면 run-state 에 graceful stop 플래그(엔진이 단계/호스트 경계에서 감지). 무해.
     engine_runner.signal_stop(_settings.scans_dir / f"scan_{scan_id}")
     scan.status = "canceling"   # 워커가 배치 종료를 감지하면 canceled 로 확정

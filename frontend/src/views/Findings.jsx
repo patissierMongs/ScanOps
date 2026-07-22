@@ -42,8 +42,9 @@ export default function Findings({ user }) {
 
   function load() {
     const qs = new URLSearchParams();
-    // 닫힘 숨김이 켜져 있으면 열린 포트만(서버). 끄면 전체 상태를 불러와 닫힘/필터드도 본다.
-    if (hideClosed) qs.set("state", "open");
+    // 닫힘 숨김이 켜져 있으면 열린 포트만(서버). 끄면 state="" 를 명시해 전체 상태(닫힘/필터드 포함)를
+    // 불러온다. (state 를 아예 안 보내면 서버 기본값 "open" 이 적용돼 토글 OFF 가 무력화됐던 버그 수정.)
+    qs.set("state", hideClosed ? "open" : "");
     if (risk) qs.set("risk", risk);
     if (status) qs.set("status", status);
     if (q.trim()) qs.set("q", q.trim());

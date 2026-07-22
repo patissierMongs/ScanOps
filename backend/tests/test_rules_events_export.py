@@ -53,6 +53,11 @@ def test_findings_search_spans_all_fields(client):
     miss = client.get("/api/findings?q=zzz_no_such_token_zzz", headers=h).json()
     assert miss == []
 
+    # 유니코드 숫자('²' 위첨자·'①' 원숫자)는 isdigit()=True 지만 int() 불가 → 예전엔 HTTP 500.
+    # isdecimal() 가드로 500 대신 정상 200(포트 매칭만 건너뜀).
+    for weird in ("²", "①", "⑫"):
+        assert client.get(f"/api/findings?q={weird}", headers=h).status_code == 200
+
 
 def test_banned_service_promotes_to_banned(client):
     h = _auth(client)

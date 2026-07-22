@@ -114,7 +114,9 @@ def _filtered(db: Session, status, risk, host, q, state, dept=None):
         cond = text_cols[0].like(like)
         for col in text_cols[1:]:
             cond = cond | col.like(like)
-        if q.strip().isdigit():
+        # isdecimal(): 0-9 만(포트로 int 변환 가능). isdigit()은 위첨자 '²'·원숫자 '①' 등
+        # int() 로 못 바꾸는 유니코드 숫자에도 True → int() ValueError → HTTP 500(버그).
+        if q.strip().isdecimal():
             cond = cond | (Finding.port == int(q.strip()))
         query = query.filter(cond)
     return query.order_by(Finding.host_ip, Finding.port)
