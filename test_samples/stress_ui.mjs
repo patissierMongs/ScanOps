@@ -1,11 +1,16 @@
 // SC12-15: UI 확인/취소 반복 분기 — 상태전이, markNormal 확인/취소/되돌림, 재스캔 드로어 열기/취소, 자산 위저드 취소/재시도.
-import { connect } from "/home/user/ScanOps/test_samples/driver.mjs";
+import { connect } from "./driver.mjs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { readFileSync } from "node:fs";
-const PW = readFileSync("/home/user/ScanOps/data/INITIAL_ADMIN.txt", "utf8").match(/비밀번호:\s*(\S+)/)[1];
-const BASE = "http://127.0.0.1:8770";
-const SHOT = "/tmp/claude-0/-home-user-ScanOps/643b79d8-67d5-5b45-bdb3-af09a6af07db/scratchpad";
-const T = "/home/user/ScanOps/test_samples";
+import { dirname, join, resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+const DIR = import.meta.dirname;
+const REPO = resolve(DIR, "..");
+const ADMIN = process.env.SCANOPS_ADMIN_FILE || join(REPO, "data/INITIAL_ADMIN.txt");
+const PW = readFileSync(ADMIN, "utf8").match(/비밀번호:\s*(\S+)/)[1];
+const BASE = process.env.SCANOPS_URL || "http://127.0.0.1:8770";
+const SHOT = process.env.SCANOPS_SHOTS || join(DIR, "shots"); mkdirSync(SHOT, { recursive: true });
+const T = DIR;
 const c = await connect();
 const R = [];
 const log = (sc, hypo, ok, actual) => { R.push({ sc, ok: !!ok }); console.log(`[${ok ? "PASS" : "FAIL"}] ${sc}\n      가정: ${hypo}\n      실제: ${actual}`); };
@@ -145,4 +150,4 @@ await c.screenshot(`${SHOT}/sc15_wizard.png`);
 console.log("\n=== UI 분기 결과 ===");
 console.log("exceptions:", c.exceptions.length, "| console errors:", c.consoleMsgs.filter(m => m.type === "error").length);
 console.log("PASS:", R.filter(r => r.ok).length, "/", R.length, "| FAIL:", R.filter(r => !r.ok).map(r => r.sc));
-c.close(); process.exit(0);
+c.close(); process.exit(R.some(r => !r.ok) ? 1 : 0);

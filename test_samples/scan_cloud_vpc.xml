@@ -15,8 +15,8 @@
     <ports>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -38,31 +38,6 @@
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
-        </service>
-      </port>
-      <port protocol="tcp" portid="80">
-        <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
-        </service>
-        <script id="http-title" output="사내 포털"/>
-        <script id="http-server-header" output="nginx"/>
-      </port>
-    </ports>
-    <times srtt="42000" rttvar="8000" to="120000"/>
-  </host>
-  <host starttime="1753344000" endtime="1753344008">
-    <status state="up" reason="syn-ack" reason_ttl="64"/>
-    <address addr="172.31.10.12" addrtype="ipv4"/>
-    <address addr="52:54:00:0c:05:0c" addrtype="mac"/>
-    <hostnames>
-      <hostname name="vpc-node-003" type="PTR"/>
-    </hostnames>
-    <ports>
-      <port protocol="tcp" portid="22">
-        <state state="open" reason="syn-ack" reason_ttl="63"/>
         <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
           <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
@@ -80,6 +55,31 @@
   </host>
   <host starttime="1753344000" endtime="1753344008">
     <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="172.31.10.12" addrtype="ipv4"/>
+    <address addr="52:54:00:0c:05:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="vpc-node-003" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753344000" endtime="1753344008">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
     <address addr="172.31.10.13" addrtype="ipv4"/>
     <address addr="52:54:00:0d:06:00" addrtype="mac"/>
     <hostnames>
@@ -88,7 +88,7 @@
     <ports>
       <port protocol="tcp" portid="1883">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -143,7 +143,7 @@
     <ports>
       <port protocol="tcp" portid="6379">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="6.2.6"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.2.3"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -181,7 +181,7 @@
     <ports>
       <port protocol="tcp" portid="1883">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -196,8 +196,8 @@
     <ports>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -219,7 +219,7 @@
     <ports>
       <port protocol="tcp" portid="5432">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="15.4"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="14.9"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -234,7 +234,7 @@
     <ports>
       <port protocol="tcp" portid="6379">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.2.3"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.0.11"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -268,7 +268,7 @@
     <ports>
       <port protocol="tcp" portid="27017">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="5.0.14"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -343,7 +343,7 @@
     <ports>
       <port protocol="tcp" portid="27017">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="4.4.18"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -379,8 +379,8 @@
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -398,7 +398,7 @@
     <ports>
       <port protocol="tcp" portid="6379">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.0.11"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.2.3"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -413,14 +413,14 @@
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -438,7 +438,7 @@
     <ports>
       <port protocol="tcp" portid="6379">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.2.3"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.0.11"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -461,7 +461,7 @@
       </port>
       <port protocol="tcp" portid="3000">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="grafana" method="probed" conf="10" product="Grafana" version="10.1.5"/>
+        <service name="grafana" method="probed" conf="10" product="Grafana" version="9.3.6"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -476,7 +476,7 @@
     <ports>
       <port protocol="tcp" portid="6379">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.0.11"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="6.2.6"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -506,7 +506,7 @@
     <ports>
       <port protocol="tcp" portid="5432">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="15.4"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="12.14"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -521,7 +521,7 @@
     <ports>
       <port protocol="tcp" portid="27017">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="4.4.18"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="5.0.14"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -536,7 +536,7 @@
     <ports>
       <port protocol="tcp" portid="27017">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="5.0.14"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -551,7 +551,7 @@
     <ports>
       <port protocol="tcp" portid="1883">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -566,7 +566,7 @@
     <ports>
       <port protocol="tcp" portid="5432">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="12.14"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="14.9"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -596,7 +596,7 @@
     <ports>
       <port protocol="tcp" portid="1883">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -626,15 +626,15 @@
     <ports>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="3000">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="grafana" method="probed" conf="10" product="Grafana" version="9.3.6"/>
+        <service name="grafana" method="probed" conf="10" product="Grafana" version="10.1.5"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -649,7 +649,7 @@
     <ports>
       <port protocol="tcp" portid="27017">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="4.4.18"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -664,7 +664,7 @@
     <ports>
       <port protocol="tcp" portid="1883">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -679,8 +679,8 @@
     <ports>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -702,7 +702,7 @@
     <ports>
       <port protocol="tcp" portid="1883">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -717,7 +717,7 @@
     <ports>
       <port protocol="tcp" portid="5432">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="12.14"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="14.9"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -732,7 +732,7 @@
     <ports>
       <port protocol="tcp" portid="27017">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="4.4.18"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>

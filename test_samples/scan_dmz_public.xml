@@ -23,16 +23,16 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
     </ports>
@@ -56,7 +56,7 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
     </ports>
@@ -80,7 +80,7 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
     </ports>
@@ -119,8 +119,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
-          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -142,24 +142,24 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
-          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
+          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
     </ports>
@@ -183,16 +183,16 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
         </service>
       </port>
     </ports>
@@ -208,13 +208,13 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -232,24 +232,24 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
-          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
+          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
     </ports>
@@ -265,16 +265,16 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
-          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -298,16 +298,16 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
-          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -329,15 +329,15 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
     </ports>
@@ -377,15 +377,15 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
     </ports>
@@ -401,8 +401,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
-          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="443">
@@ -434,8 +434,8 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -459,8 +459,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
-          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -482,13 +482,13 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -506,8 +506,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -530,14 +530,14 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
-          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
-          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -561,8 +561,8 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
-          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
+          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -580,8 +580,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
-          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -596,8 +596,8 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
     </ports>
@@ -613,14 +613,14 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
-          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -638,8 +638,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
-          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
+          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -661,24 +661,24 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
-          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
     </ports>
@@ -694,8 +694,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
-          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -710,8 +710,8 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
     </ports>
@@ -727,13 +727,13 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -751,15 +751,15 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
     </ports>
@@ -771,55 +771,6 @@ Not valid after: 2026-11-30"/>
     <address addr="52:54:00:26:03:0c" addrtype="mac"/>
     <hostnames>
       <hostname name="dmz-pub-029" type="PTR"/>
-    </hostnames>
-    <ports>
-      <port protocol="tcp" portid="22">
-        <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
-        </service>
-      </port>
-      <port protocol="tcp" portid="443">
-        <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
-          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
-        </service>
-        <script id="ssl-cert" output="Subject: commonName=srv.example.local
-Not valid after: 2026-11-30"/>
-      </port>
-    </ports>
-    <times srtt="42000" rttvar="8000" to="120000"/>
-  </host>
-  <host starttime="1753171200" endtime="1753171208">
-    <status state="up" reason="syn-ack" reason_ttl="64"/>
-    <address addr="203.0.113.39" addrtype="ipv4"/>
-    <address addr="52:54:00:27:04:00" addrtype="mac"/>
-    <hostnames>
-      <hostname name="dmz-pub-030" type="PTR"/>
-    </hostnames>
-    <ports>
-      <port protocol="tcp" portid="21">
-        <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
-        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
-      </port>
-      <port protocol="tcp" portid="80">
-        <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
-        </service>
-        <script id="http-title" output="사내 포털"/>
-        <script id="http-server-header" output="nginx"/>
-      </port>
-    </ports>
-    <times srtt="42000" rttvar="8000" to="120000"/>
-  </host>
-  <host starttime="1753171200" endtime="1753171208">
-    <status state="up" reason="syn-ack" reason_ttl="64"/>
-    <address addr="203.0.113.40" addrtype="ipv4"/>
-    <address addr="52:54:00:28:05:01" addrtype="mac"/>
-    <hostnames>
-      <hostname name="dmz-pub-031" type="PTR"/>
     </hostnames>
     <ports>
       <port protocol="tcp" portid="22">
@@ -841,6 +792,55 @@ Not valid after: 2026-11-30"/>
   </host>
   <host starttime="1753171200" endtime="1753171208">
     <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.39" addrtype="ipv4"/>
+    <address addr="52:54:00:27:04:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-030" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="203.0.113.40" addrtype="ipv4"/>
+    <address addr="52:54:00:28:05:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="dmz-pub-031" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753171200" endtime="1753171208">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
     <address addr="203.0.113.41" addrtype="ipv4"/>
     <address addr="52:54:00:29:06:02" addrtype="mac"/>
     <hostnames>
@@ -849,16 +849,16 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
-          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -880,8 +880,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -904,8 +904,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="443">
@@ -929,8 +929,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>

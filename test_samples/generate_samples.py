@@ -109,7 +109,8 @@ def make_scan(name, subnet_prefix, host_defs, args_cmd, start_epoch):
             portid = PORT_OF[skey]
             p = ET.SubElement(ports, "port", protocol=proto, portid=str(portid))
             ET.SubElement(p, "state", state="open", reason="syn-ack", reason_ttl="63")
-            version = random.choice(versions)
+            # 버전 선택은 (호스트옥텟, 포트) 기반 결정론적 — 전역 random 미사용(매 실행 동일 SHA 보장).
+            version = versions[(last * 7 + portid) % len(versions)] if versions else ""
             svc = ET.SubElement(p, "service", name=svc_name, method="probed", conf="10")
             if product:
                 svc.set("product", product)

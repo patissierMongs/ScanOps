@@ -15,8 +15,8 @@
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
     </ports>
@@ -32,8 +32,8 @@
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
-          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
     </ports>
@@ -101,7 +101,7 @@ NetBIOS_Domain_Name: CORP"/>
       </port>
       <port protocol="tcp" portid="631">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.3"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.4"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -285,7 +285,7 @@ NetBIOS_Domain_Name: CORP"/>
       </port>
       <port protocol="tcp" portid="631">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.3"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.4"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -300,8 +300,8 @@ NetBIOS_Domain_Name: CORP"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
         </service>
       </port>
     </ports>
@@ -317,8 +317,8 @@ NetBIOS_Domain_Name: CORP"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
     </ports>
@@ -502,8 +502,8 @@ NetBIOS_Domain_Name: CORP"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -664,8 +664,8 @@ NetBIOS_Domain_Name: CORP"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
     </ports>
@@ -752,7 +752,7 @@ NetBIOS_Domain_Name: CORP"/>
       </port>
       <port protocol="tcp" portid="631">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.4"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.3"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -793,8 +793,8 @@ NetBIOS_Domain_Name: CORP"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -835,7 +835,7 @@ NetBIOS_Domain_Name: CORP"/>
       </port>
       <port protocol="tcp" portid="631">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.4"/>
+        <service name="ipp" method="probed" conf="10" product="CUPS" version="2.3"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>

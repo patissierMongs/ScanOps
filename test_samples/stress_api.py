@@ -3,12 +3,27 @@
 각 케이스는 (상황 구성 → 기대결과 가정 → 실제 실행 → 대조) 형식. 기존 데이터와
 충돌 없도록 198.51.100.x(TEST-NET-2) 대역 사용. 결과는 PASS/FAIL 로 출력.
 """
-import io, json, time, urllib.request, urllib.error
+import json, os, time, urllib.request, urllib.error
 from urllib.parse import quote
 from pathlib import Path
 
-BASE = "http://127.0.0.1:8770"
-TOK = Path("/tmp/scanops_tok.txt").read_text().strip()
+# 자기완결: URL·관리자계정파일은 env 로 덮어쓸 수 있고, 기본은 스크립트 위치 기준 리포지토리 경로.
+REPO = Path(__file__).resolve().parent.parent
+BASE = os.environ.get("SCANOPS_URL", "http://127.0.0.1:8770")
+ADMIN_FILE = Path(os.environ.get("SCANOPS_ADMIN_FILE", REPO / "data" / "INITIAL_ADMIN.txt"))
+ADMIN_PW = os.environ.get("SCANOPS_ADMIN_PW") or \
+    ADMIN_FILE.read_text(encoding="utf-8").split("비밀번호:")[1].split()[0]
+
+
+def _login():
+    data = json.dumps({"username": "admin", "password": ADMIN_PW}).encode()
+    r = urllib.request.Request(BASE + "/api/auth/login", data=data,
+                               headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(r, timeout=30) as resp:
+        return json.loads(resp.read().decode())["token"]
+
+
+TOK = _login()
 R = []
 
 
@@ -201,13 +216,16 @@ logc("SC17 rescan-command(무실행)", "명령 텍스트만 반환·실제 스�
      f"command='{(rc.get('command') or '')[:60]}...', ports={rc.get('ports')}, 스캔생성={scans_after-scans_before}")
 
 # ── SC19 rescan-due (마감초과/처리중 일괄) 대상 산정 ────────────
-# 마감 지난 처리중 발견 하나 만들기.
-did = [x for x in findings("198.51.100.6") if x["port"] == 8443][0]["id"]
+# 자기완결: 전용 발견(198.51.100.19:8443)을 만들어 마감초과 처리중으로 세팅(다른 SC 의존 없음).
+upload_xml(wrap(host("198.51.100.19", port(8443, name="https", product="nginx"), hostname="due-host")))
+due = [x for x in findings("198.51.100.19") if x["port"] == 8443]
+assert due, "SC19 setup: 198.51.100.19:8443 발견 생성 실패"
+did = due[0]["id"]
 req("PATCH", f"/api/findings/{did}", {"status": "처리중", "deadline": "2020-01-01T00:00:00"})
 # rescan-due 는 실제 엔진 스캔을 백그라운드 기동 → 대상 hosts 에 포함되는지 확인(스캔 생성 여부)
 st_rd, rd = req("POST", "/api/findings/rescan-due", {})
 logc("SC19 rescan-due 일괄재검증", "마감초과·처리중 발견을 모아 재스캔 스캔 생성(scan_id 반환)",
-     st_rd == 200 and rd.get("scan_id") and "198.51.100.6" in (rd.get("hosts") or []),
+     st_rd == 200 and rd.get("scan_id") and "198.51.100.19" in (rd.get("hosts") or []),
      f"status={st_rd}, scan_id={rd.get('scan_id')}, hosts_count={len(rd.get('hosts') or [])}")
 
 # ── SC20 스트레스: 반복 PATCH race + 대량 필터/내보내기 응답시간 ──
@@ -231,3 +249,5 @@ logc("SC20 반복PATCH race+대량응답시간",
 print("\n=== API 스트레스 결과 ===")
 print("PASS:", sum(1 for x in R if x["ok"]), "/", len(R))
 print("FAIL cases:", [x["sc"] for x in R if not x["ok"]])
+import sys as _sys
+_sys.exit(1 if any(not x["ok"] for x in R) else 0)  # 실패 시 비영 종료(CI 연동)

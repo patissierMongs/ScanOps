@@ -62,7 +62,7 @@
       </port>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
     </ports>
@@ -125,7 +125,7 @@
       </port>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
     </ports>
@@ -181,8 +181,8 @@
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -320,7 +320,7 @@
     <ports>
       <port protocol="tcp" portid="1883">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -457,8 +457,8 @@
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -552,8 +552,8 @@
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -612,7 +612,7 @@
       </port>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
     </ports>
@@ -658,7 +658,7 @@
       </port>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.5"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
     </ports>
@@ -709,7 +709,7 @@
       </port>
       <port protocol="tcp" portid="21">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
         <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
       </port>
     </ports>
@@ -725,7 +725,7 @@
     <ports>
       <port protocol="tcp" portid="1883">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>

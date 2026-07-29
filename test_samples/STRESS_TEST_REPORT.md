@@ -88,7 +88,22 @@
 
 ### 재현
 ```bash
-python3 test_samples/stress_api.py     # SC01-11, 16, 17, 19, 20
-node   test_samples/stress_ui.mjs      # SC12-15 (CDP :9222 필요)
+python3 test_samples/stress_api.py     # SC01-11, 16, 17, 19, 20 — 자기인증, 실패 시 exit 1
+node   test_samples/stress_ui.mjs      # SC12-15 (CDP :9222 필요), 실패 시 exit 1
 # SC18: localhost 서비스 기동→스캔→마감배정→서비스 종료→재스캔→"조치 완료 자동 확인" 확인
 ```
+
+## 8. 리뷰 반영 — 하네스 견고화 (PR #33 리뷰 피드백)
+
+PR #33 리뷰에서 검증 자산의 재현성 결함이 정확히 지적되어 모두 수정했다.
+
+| 지적 | 조치 |
+|---|---|
+| UI 스크립트가 `/home/user/...` 하드코딩 → 타 환경에서 `ERR_MODULE_NOT_FOUND` | 드라이버는 상대 임포트(`./driver.mjs`), 경로는 `import.meta.dirname` 기준으로 도출. `SCANOPS_URL`/`SCANOPS_ADMIN_FILE`/`SCANOPS_SHOTS` env 로 덮어쓰기 가능 |
+| SC06(동적 `100.64.*.6`)과 SC19(`198.51.100.6`) 불일치 → fresh DB 에서 `IndexError` | SC19 를 자기완결화(전용 발견 `198.51.100.19` 생성 후 검증). 스테일 상태 의존 제거 |
+| 실패해도 exit 0 | `stress_api.py`·모든 `*.mjs` 를 실패 시 **비영(exit 1)** 종료로 변경(CI 연동 가능) |
+| XML 5개가 실행마다 SHA 상이(“결정론적” 주장과 불일치) | 버전 선택이 전역 `random` 을 쓰던 것을 `(호스트옥텟,포트)` 기반 결정론으로 교체 → 재실행 시 동일 SHA |
+| 제품 수정에 회귀 테스트 부재 | 깨진 XML→400·좀비스캔 0·정상 XML→200 을 검증하는 `test_import_malformed_xml_returns_400_no_orphan_scan` pytest 추가 |
+
+검증: 샘플 2회 생성 시 동일 SHA, **fresh DB 에서 `stress_api.py` 15/15·exit 0**, 다른 cwd(`/tmp`)에서도
+자기인증으로 동작, 강제 실패 시 exit 1, 백엔드 pytest 통과(회귀 테스트 포함).

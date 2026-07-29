@@ -194,3 +194,22 @@ def test_udp_stage_import_does_not_close_existing_tcp(client):
     by_port = {(f["proto"], f["port"]): f for f in findings}
     assert by_port[("tcp", 22)]["state"] == "open"
     assert by_port[("udp", 53)]["state"] == "open|filtered"
+
+
+def test_import_malformed_xml_returns_400_no_orphan_scan(client):
+    """깨진 XML 가져오기 → 500 이 아니라 400 으로 정직하게 거절하고 좀비 스캔을 남기지 않는다.
+
+    회귀 방지: scan_start() 의 ParseError 가 try 밖에서 500 으로 전파되던 버그 수정 검증.
+    """
+    h = _auth(client)
+    for bad in (b"<nmaprun><host><ports><port unclosed", b"not xml at all @#$", b""):
+        r = client.post("/api/scans/import", headers=h,
+                        files={"file": ("bad.xml", bad, "text/xml")})
+        assert r.status_code == 400, f"expected 400 for malformed, got {r.status_code}: {r.text}"
+    # 파싱 실패로 좀비 running 스캔이 생성되지 않아야 한다.
+    scans = client.get("/api/scans", headers=h).json()
+    assert all(s["status"] != "running" for s in scans), scans
+    # 정상 XML 은 여전히 200(회귀 없음).
+    good = _scan_xml(1700000000, '<scaninfo type="syn" protocol="tcp" services="22"/>', _port("tcp", 22))
+    assert client.post("/api/scans/import", headers=h,
+                       files={"file": ("good.xml", good, "text/xml")}).status_code == 200

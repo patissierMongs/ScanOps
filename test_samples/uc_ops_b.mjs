@@ -1,10 +1,15 @@
 // UC8 부서통보, UC9 내보내기(감사/CSV/히트맵), UC10 사용자관리, UC11 이력, UC12 감사로그, UC13 히트맵.
-import { connect } from "/home/user/ScanOps/test_samples/driver.mjs";
+import { connect } from "./driver.mjs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { readFileSync } from "node:fs";
-const PW = readFileSync("/home/user/ScanOps/data/INITIAL_ADMIN.txt", "utf8").match(/비밀번호:\s*(\S+)/)[1];
-const BASE = "http://127.0.0.1:8770";
-const SHOT = "/tmp/claude-0/-home-user-ScanOps/643b79d8-67d5-5b45-bdb3-af09a6af07db/scratchpad";
+import { dirname, join, resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+const DIR = import.meta.dirname;
+const REPO = resolve(DIR, "..");
+const ADMIN = process.env.SCANOPS_ADMIN_FILE || join(REPO, "data/INITIAL_ADMIN.txt");
+const PW = readFileSync(ADMIN, "utf8").match(/비밀번호:\s*(\S+)/)[1];
+const BASE = process.env.SCANOPS_URL || "http://127.0.0.1:8770";
+const SHOT = process.env.SCANOPS_SHOTS || join(DIR, "shots"); mkdirSync(SHOT, { recursive: true });
 const c = await connect();
 const R = [];
 const log = (uc, ok, msg) => { R.push({ uc, ok: !!ok, msg }); console.log(`[${ok ? "PASS" : "FAIL"}] ${uc}: ${msg}`); };
@@ -81,4 +86,4 @@ await c.screenshot(`${SHOT}/uc13_heatmap.png`);
 console.log("\nPASS:", R.filter(r => r.ok).length, "/", R.length);
 console.log("exceptions:", c.exceptions.length, "| console errors:", c.consoleMsgs.filter(m => m.type === "error").length, JSON.stringify(c.consoleMsgs.filter(m => m.type === "error").slice(0, 3)));
 console.log(JSON.stringify(R));
-c.close(); process.exit(0);
+c.close(); process.exit(R.some(r => !r.ok) ? 1 : 0);

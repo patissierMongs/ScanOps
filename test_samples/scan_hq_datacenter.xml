@@ -21,16 +21,16 @@
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="3306">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mysql" method="probed" conf="10" product="MySQL" version="5.7.38">
-          <cpe>cpe:/a:mysql:mysql:5.7.38</cpe>
+        <service name="mysql" method="probed" conf="10" product="MySQL" version="8.0.32">
+          <cpe>cpe:/a:mysql:mysql:8.0.32</cpe>
         </service>
       </port>
     </ports>
@@ -46,13 +46,13 @@
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="8080">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="jenkins" method="probed" conf="10" product="Jenkins" version="2.387"/>
+        <service name="jenkins" method="probed" conf="10" product="Jenkins" version="2.414"/>
       </port>
       <port protocol="tcp" portid="9418">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
@@ -71,8 +71,8 @@
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="25">
@@ -97,21 +97,21 @@
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
-          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="5432">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="15.4"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="12.14"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -126,14 +126,14 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -151,14 +151,14 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
-          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -176,8 +176,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="3000">
@@ -205,8 +205,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="25">
@@ -231,8 +231,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
@@ -268,16 +268,16 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="3306">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mysql" method="probed" conf="10" product="MySQL" version="5.7.38">
-          <cpe>cpe:/a:mysql:mysql:5.7.38</cpe>
+        <service name="mysql" method="probed" conf="10" product="MySQL" version="8.0.32">
+          <cpe>cpe:/a:mysql:mysql:8.0.32</cpe>
         </service>
       </port>
     </ports>
@@ -299,7 +299,7 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="8080">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="jenkins" method="probed" conf="10" product="Jenkins" version="2.414"/>
+        <service name="jenkins" method="probed" conf="10" product="Jenkins" version="2.387"/>
       </port>
       <port protocol="tcp" portid="9418">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
@@ -318,14 +318,14 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
-          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -369,22 +369,22 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="3306">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mysql" method="probed" conf="10" product="MySQL" version="5.7.38">
-          <cpe>cpe:/a:mysql:mysql:5.7.38</cpe>
+        <service name="mysql" method="probed" conf="10" product="MySQL" version="8.0.35">
+          <cpe>cpe:/a:mysql:mysql:8.0.35</cpe>
         </service>
       </port>
     </ports>
@@ -400,8 +400,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
@@ -425,18 +425,18 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
-          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="9200">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="elasticsearch" method="probed" conf="10" product="Elasticsearch REST API" version="7.17.9"/>
+        <service name="elasticsearch" method="probed" conf="10" product="Elasticsearch REST API" version="8.6.2"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -468,7 +468,7 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="5432">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="15.4"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="14.9"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -483,8 +483,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="389">
@@ -510,7 +510,7 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="27017">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="6.0.4"/>
+        <service name="mongodb" method="probed" conf="10" product="MongoDB" version="4.4.18"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -531,16 +531,16 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="3306">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mysql" method="probed" conf="10" product="MySQL" version="8.0.32">
-          <cpe>cpe:/a:mysql:mysql:8.0.32</cpe>
+        <service name="mysql" method="probed" conf="10" product="MySQL" version="8.0.35">
+          <cpe>cpe:/a:mysql:mysql:8.0.35</cpe>
         </service>
       </port>
     </ports>
@@ -556,22 +556,22 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="3306">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mysql" method="probed" conf="10" product="MySQL" version="8.0.32">
-          <cpe>cpe:/a:mysql:mysql:8.0.32</cpe>
+        <service name="mysql" method="probed" conf="10" product="MySQL" version="5.7.38">
+          <cpe>cpe:/a:mysql:mysql:5.7.38</cpe>
         </service>
       </port>
     </ports>
@@ -587,13 +587,13 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="6379">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="6.2.6"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.2.3"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -614,7 +614,7 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="389">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ldap" method="probed" conf="10" product="OpenLDAP" version="2.4.57"/>
+        <service name="ldap" method="probed" conf="10" product="OpenLDAP" version="2.5.13"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -629,8 +629,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
@@ -654,14 +654,14 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
-          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -683,14 +683,14 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -708,22 +708,22 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
-          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="3306">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mysql" method="probed" conf="10" product="MySQL" version="8.0.32">
-          <cpe>cpe:/a:mysql:mysql:8.0.32</cpe>
+        <service name="mysql" method="probed" conf="10" product="MySQL" version="5.7.38">
+          <cpe>cpe:/a:mysql:mysql:5.7.38</cpe>
         </service>
       </port>
     </ports>
@@ -739,21 +739,21 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
-          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="5432">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="14.9"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="12.14"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -768,14 +768,14 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -793,8 +793,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
-          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
@@ -824,8 +824,8 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
-          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
+          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -847,8 +847,37 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        </service>
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
+        </service>
+        <script id="ssl-cert" output="Subject: commonName=srv.example.local
+Not valid after: 2026-11-30"/>
+      </port>
+      <port protocol="tcp" portid="5432">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="14.9"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1752998400" endtime="1752998408">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="10.10.10.42" addrtype="ipv4"/>
+    <address addr="52:54:00:2a:00:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="hq-srv-033" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="443">
@@ -868,35 +897,6 @@ Not valid after: 2026-11-30"/>
   </host>
   <host starttime="1752998400" endtime="1752998408">
     <status state="up" reason="syn-ack" reason_ttl="64"/>
-    <address addr="10.10.10.42" addrtype="ipv4"/>
-    <address addr="52:54:00:2a:00:03" addrtype="mac"/>
-    <hostnames>
-      <hostname name="hq-srv-033" type="PTR"/>
-    </hostnames>
-    <ports>
-      <port protocol="tcp" portid="22">
-        <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
-        </service>
-      </port>
-      <port protocol="tcp" portid="443">
-        <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.58">
-          <cpe>cpe:/a:apache:http_server:2.4.58</cpe>
-        </service>
-        <script id="ssl-cert" output="Subject: commonName=srv.example.local
-Not valid after: 2026-11-30"/>
-      </port>
-      <port protocol="tcp" portid="5432">
-        <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="postgresql" method="probed" conf="10" product="PostgreSQL DB" version="12.14"/>
-      </port>
-    </ports>
-    <times srtt="42000" rttvar="8000" to="120000"/>
-  </host>
-  <host starttime="1752998400" endtime="1752998408">
-    <status state="up" reason="syn-ack" reason_ttl="64"/>
     <address addr="10.10.10.43" addrtype="ipv4"/>
     <address addr="52:54:00:2b:01:04" addrtype="mac"/>
     <hostnames>
@@ -905,14 +905,14 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
-          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.20.1">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.20.1</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -936,8 +936,8 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="443">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.41">
-          <cpe>cpe:/a:apache:http_server:2.4.41</cpe>
+        <service name="https" method="probed" conf="10" product="Apache httpd" version="2.4.52">
+          <cpe>cpe:/a:apache:http_server:2.4.52</cpe>
         </service>
         <script id="ssl-cert" output="Subject: commonName=srv.example.local
 Not valid after: 2026-11-30"/>
@@ -959,22 +959,22 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
       </port>
       <port protocol="tcp" portid="3306">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="mysql" method="probed" conf="10" product="MySQL" version="8.0.35">
-          <cpe>cpe:/a:mysql:mysql:8.0.35</cpe>
+        <service name="mysql" method="probed" conf="10" product="MySQL" version="5.7.38">
+          <cpe>cpe:/a:mysql:mysql:5.7.38</cpe>
         </service>
       </port>
     </ports>
@@ -990,8 +990,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="7.4">
+          <cpe>cpe:/a:openbsd:openssh:7.4</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="8080">
@@ -1015,13 +1015,13 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
-          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="6379">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="7.2.3"/>
+        <service name="redis" method="probed" conf="10" product="Redis key-value store" version="6.2.6"/>
       </port>
     </ports>
     <times srtt="42000" rttvar="8000" to="120000"/>
@@ -1036,8 +1036,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1">
+          <cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="3000">
@@ -1046,8 +1046,8 @@ Not valid after: 2026-11-30"/>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
-          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
         </service>
         <script id="http-title" output="사내 포털"/>
         <script id="http-server-header" output="nginx"/>
@@ -1065,8 +1065,8 @@ Not valid after: 2026-11-30"/>
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack" reason_ttl="63"/>
-        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="9.6p1">
-          <cpe>cpe:/a:openbsd:openssh:9.6p1</cpe>
+        <service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.2p1 Ubuntu 4ubuntu0.5">
+          <cpe>cpe:/a:openbsd:openssh:8.2p1 Ubuntu 4ubuntu0.5</cpe>
         </service>
       </port>
       <port protocol="tcp" portid="80">
