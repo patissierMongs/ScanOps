@@ -8,7 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Finding, ScanRun, User
+from ..models import ACTIVE_FINDING_STATES, Finding, ScanRun, User
 from .deps import current_user
 
 router = APIRouter()
@@ -16,21 +16,21 @@ router = APIRouter()
 
 @router.get("")
 def dashboard(_: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    open_q = db.query(Finding).filter(Finding.state == "open")
+    open_q = db.query(Finding).filter(Finding.state.in_(ACTIVE_FINDING_STATES))
     now = datetime.now(timezone.utc)
 
     by_risk = dict(
         db.query(Finding.risk_level, func.count())
-        .filter(Finding.state == "open").group_by(Finding.risk_level).all()
+        .filter(Finding.state.in_(ACTIVE_FINDING_STATES)).group_by(Finding.risk_level).all()
     )
     by_status = dict(
         db.query(Finding.status, func.count())
-        .filter(Finding.state == "open").group_by(Finding.status).all()
+        .filter(Finding.state.in_(ACTIVE_FINDING_STATES)).group_by(Finding.status).all()
     )
     by_dept = [
         {"dept": d or "(미지정)", "count": c}
         for d, c in db.query(Finding.dept, func.count())
-        .filter(Finding.state == "open").group_by(Finding.dept).order_by(func.count().desc()).all()
+        .filter(Finding.state.in_(ACTIVE_FINDING_STATES)).group_by(Finding.dept).order_by(func.count().desc()).all()
     ]
     overdue = (
         open_q.filter(Finding.deadline.isnot(None), Finding.deadline < now,

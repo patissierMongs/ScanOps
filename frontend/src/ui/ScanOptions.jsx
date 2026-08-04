@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 
 const PRESET_KEY = "scanops_scan_presets";
+const RESCAN_OPTION_KEYS = new Set(["version_all", "version_light"]);
 const loadPresets = () => { try { return JSON.parse(localStorage.getItem(PRESET_KEY)) || []; } catch { return []; } };
 
 const PRECISION_OPTS = ["noping", "dns_no", "syn", "fast", "version", "version_all",
@@ -41,7 +42,9 @@ function commandText(parts) {
 const DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080";
 const DISCOVERY_PA = "-PA80,443,3389";
 
-export default function ScanOptions({ targets = [], portsAuto = "", staged = false, onState }) {
+export default function ScanOptions({
+  targets = [], portsAuto = "", staged = false, fixedTargetPorts = false, onState,
+}) {
   const [workflow, setWorkflow] = useState("auto");
   const [registry, setRegistry] = useState([]);
   const [sel, setSel] = useState(() => new Set());
@@ -133,7 +136,9 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
   useEffect(() => {
     onState && onState({
       workflow,
-      options: workflow === "manual" ? [...sel] : [],
+      options: fixedTargetPorts
+        ? [...sel].filter((key) => RESCAN_OPTION_KEYS.has(key))
+        : staged || workflow === "manual" ? [...sel] : [],
       ports,
       nse: [...nseSel],
       command,
@@ -142,9 +147,11 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
 
   const groups = useMemo(() => {
     const g = {};
-    registry.forEach((o) => { (g[o.group] ||= []).push(o); });
+    registry
+      .filter((option) => !fixedTargetPorts || RESCAN_OPTION_KEYS.has(option.key))
+      .forEach((o) => { (g[o.group] ||= []).push(o); });
     return g;
-  }, [registry]);
+  }, [registry, fixedTargetPorts]);
 
   const nseGroups = useMemo(() => {
     const g = {};
@@ -211,7 +218,7 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
 
   return (
     <div className="scan-builder">
-      <div className="scan-modebar">
+      {!fixedTargetPorts && <div className="scan-modebar">
         <div className="seg">
           <button type="button" className={workflow === "auto" ? "on" : ""} onClick={() => setWorkflow("auto")}>자동 스캔</button>
           <button type="button" className={workflow === "manual" ? "on" : ""} onClick={() => setWorkflow("manual")}>단일 실행</button>
@@ -222,9 +229,13 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
         </select>
         <button type="button" className="sm" onClick={savePreset}>현재 구성 저장</button>
         {presetId && <button type="button" className="sm" onClick={delPreset}>삭제</button>}
-      </div>
+      </div>}
 
-      {workflow === "auto" ? (
+      {fixedTargetPorts ? (
+        <div className="scan-result-note">
+          재스캔 대상은 선택한 발견의 IP:포트로 고정됩니다. 서비스·버전·NSE 단서만 2-pass로 다시 확인합니다.
+        </div>
+      ) : workflow === "auto" ? (
         <div className="scan-auto">
           <div className="scan-flow">
             <div className={tcp ? "" : "muted-step"}><b>TCP 발견</b><span>전체 또는 지정 TCP에서 현재 열린 포트를 먼저 줄입니다.</span></div>
@@ -242,13 +253,13 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
         </div>
       )}
 
-      <div className="scan-actions">
+      {!fixedTargetPorts && <div className="scan-actions">
         <button type="button" className="sm" onClick={() => setPortPreset("")}>자동 기본 포트</button>
         <button type="button" className="sm" onClick={() => setPortPreset("T:1-65535")}>TCP 전체</button>
         {udpPorts && <button type="button" className="sm" onClick={() => setPortPreset(`U:${udpPorts}`)}>UDP 주요만</button>}
         {udpPorts && <button type="button" className="sm" onClick={() => setPortPreset(`T:1-65535,U:${udpPorts}`)}>TCP+UDP</button>}
         <button type="button" className="sm" onClick={applyPrecision}>단일 정밀 구성</button>
-      </div>
+      </div>}
 
       <div className="scan-collapsible">
         <button type="button" className="sm" onClick={() => setShowManualOptions((v) => !v)}>
@@ -259,11 +270,18 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
         </button>
       </div>
 
-      <label className="field scan-ports">
-        포트 {portsAuto && <span className="muted">(비우면 {portsAuto})</span>}
-        <input placeholder={workflow === "auto" ? "비우면 TCP 전체 + 주요 UDP, 예: 22,443 또는 U:53" : "예: 22,80,443 또는 1-1024"}
-               value={ports} onChange={(e) => setPortPreset(e.target.value)} />
-      </label>
+      {fixedTargetPorts ? (
+        <div className="field scan-ports">
+          포트 <span className="mono">{portsAuto || "선택한 IP:포트"}</span>
+          <small className="muted">선택한 발견의 포트만 재검증하므로 변경할 수 없습니다.</small>
+        </div>
+      ) : (
+        <label className="field scan-ports">
+          포트 {portsAuto && <span className="muted">(비우면 {portsAuto})</span>}
+          <input placeholder={workflow === "auto" ? "비우면 TCP 전체 + 주요 UDP, 예: 22,443 또는 U:53" : "예: 22,80,443 또는 1-1024"}
+                 value={ports} onChange={(e) => setPortPreset(e.target.value)} />
+        </label>
+      )}
 
       {showManualOptions && (
         <div className="scan-option-groups">
@@ -320,25 +338,33 @@ export default function ScanOptions({ targets = [], portsAuto = "", staged = fal
         </div>
       )}
 
-      <div className="cb-label" style={{ marginTop: 12 }}>실행될 명령어</div>
-      {stepped ? (
-        <>
-          <div className="scan-result-note" style={{ marginBottom: 8 }}>
-            아래 {steps.length}개 명령은 <b>한 번에 실행되지 않습니다.</b> {staged ? "단계 분리 엔진이 " : "자동 스캔이 "}
-            각 단계를 <b>나눠서(분산) 순차 실행</b>하며, 앞 단계의 결과가 다음 단계의 입력이 됩니다
-            (예: TCP 발견에서 열린 포트만 골라 식별 단계로 넘김). 각 단계는 별도 명령·별도 산출물(<span className="mono">-oA</span>)로 남습니다.
-          </div>
-          {steps.map((s, i) => (
-            <div key={i} style={{ marginTop: i ? 10 : 0 }}>
-              <div className="cb-label" style={{ fontSize: 12, marginBottom: 4 }}>
-                {i + 1}단계 · {s.title} <span className="muted" style={{ fontWeight: 400 }}>— {s.desc}</span>
-              </div>
-              <div className="pre scan-command">{s.cmd}</div>
-            </div>
-          ))}
-        </>
+      {fixedTargetPorts ? (
+        <div className="scan-result-note" style={{ marginTop: 12 }}>
+          실행 명령은 위에 표시된 발견별 IP:포트 개별 명령을 기준으로 합니다.
+        </div>
       ) : (
-        <div className="pre scan-command">{command}</div>
+        <>
+          <div className="cb-label" style={{ marginTop: 12 }}>실행될 명령어</div>
+          {stepped ? (
+            <>
+              <div className="scan-result-note" style={{ marginBottom: 8 }}>
+                아래 {steps.length}개 명령은 <b>한 번에 실행되지 않습니다.</b> {staged ? "단계 분리 엔진이 " : "자동 스캔이 "}
+                각 단계를 <b>나눠서(분산) 순차 실행</b>하며, 앞 단계의 결과가 다음 단계의 입력이 됩니다
+                (예: TCP 발견에서 열린 포트만 골라 식별 단계로 넘김). 각 단계는 별도 명령·별도 산출물(<span className="mono">-oA</span>)로 남습니다.
+              </div>
+              {steps.map((s, i) => (
+                <div key={i} style={{ marginTop: i ? 10 : 0 }}>
+                  <div className="cb-label" style={{ fontSize: 12, marginBottom: 4 }}>
+                    {i + 1}단계 · {s.title} <span className="muted" style={{ fontWeight: 400 }}>— {s.desc}</span>
+                  </div>
+                  <div className="pre scan-command">{s.cmd}</div>
+                </div>
+              ))}
+            </>
+          ) : (
+            <div className="pre scan-command">{command}</div>
+          )}
+        </>
       )}
     </div>
   );

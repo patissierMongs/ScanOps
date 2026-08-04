@@ -2,16 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { api, uploadMany } from "../api.js";
 import { useToast } from "../ui/Toast.jsx";
 import ScanOptions from "../ui/ScanOptions.jsx";
+import { scanKind, scanStatus, shouldLoadStages } from "../lib/scanStatus.js";
 
-// 스캔 상태 → 표시 라벨/색
-const STATUS = {
-  running:     { label: "실행 중", cls: "info" },
-  canceling:   { label: "중지 중", cls: "medium" },
-  canceled:    { label: "중지됨", cls: "medium" },
-  interrupted: { label: "중단됨(재시작)", cls: "high" },
-  failed:      { label: "실패",   cls: "high" },
-  done:        { label: "완료",   cls: "low" },
-};
 const isActive = (s) => s === "running" || s === "canceling";
 // 중단됨(interrupted): 서버 재시작으로 워커가 사라진 실행 — 자동 복구는 안 하고 수동 이어하기만.
 const canResume = (s) => s === "canceled" || s === "failed" || s === "interrupted";
@@ -27,9 +19,22 @@ function fmtDur(sec) {
   return mm ? `${h}시간 ${mm}분` : `${h}시간`;
 }
 
+function withPersistedStages(previous, scans) {
+  const next = { ...previous };
+  scans.forEach((scan) => {
+    if (!scan.stages_json?.length) return;
+    next[scan.id] = {
+      ...(next[scan.id] || {}),
+      stages: scan.stages_json,
+      overall: { status: scan.status, percent: isActive(scan.status) ? null : 100 },
+    };
+  });
+  return next;
+}
+
 export default function Scans({ user }) {
   const [scans, setScans] = useState([]);
-  const [progress, setProgress] = useState({});   // { [scanId]: { percent, etc, remaining, elapsed, hosts_up, last_line } }
+  const [progress, setProgress] = useState({});   // { [scanId]: { percent, etc, remaining, elapsed, hosts_up } }
   const [targets, setTargets] = useState("");
   const [name, setName] = useState("");
   const [opt, setOpt] = useState({ workflow: "auto", options: [], ports: "", nse: [], command: "" });
@@ -42,21 +47,38 @@ export default function Scans({ user }) {
   const [rawEdited, setRawEdited] = useState(false);
   const [est, setEst] = useState(null);
   const [busy, setBusy] = useState(false);
-  const folderRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
+  const fileButtonRef = useRef(null);
+  const folderButtonRef = useRef(null);
+  const importRestoreFocusRef = useRef(null);
+  const [expanded, setExpanded] = useState(() => new Set());
   const toast = useToast();
   const canRun = user.role === "admin" || user.role === "auditor";
 
   function load() {
-    api("/scans").then(setScans).catch((e) => toast(e.message, { type: "err" }));
+    api("/scans").then(async (list) => {
+      setScans(list);
+      setStages((prev) => withPersistedStages(prev, list));
+      const stageEntries = await Promise.all(
+        list.filter(shouldLoadStages)
+          .map((scan) => api(`/scans/${scan.id}/stages`).then((detail) => [scan.id, detail]).catch(() => null))
+      );
+      setStages((prev) => {
+        const next = { ...prev };
+        stageEntries.filter(Boolean).forEach(([id, detail]) => { next[id] = detail; });
+        return next;
+      });
+    }).catch((e) => toast(e.message, { type: "err" }));
   }
   useEffect(() => { load(); }, []);
 
   // 폴더 선택 속성은 React 가 prop 으로 안정적으로 안 넘기므로 DOM 에 직접 설정.
   // webkitdirectory 면 선택 폴더의 하위까지 재귀로 파일이 들어오고, .xml 만 importFiles 에서 거른다.
   useEffect(() => {
-    if (folderRef.current) {
-      folderRef.current.setAttribute("webkitdirectory", "");
-      folderRef.current.setAttribute("directory", "");
+    if (folderInputRef.current) {
+      folderInputRef.current.setAttribute("webkitdirectory", "");
+      folderInputRef.current.setAttribute("directory", "");
     }
   }, []);
 
@@ -71,6 +93,7 @@ export default function Scans({ user }) {
         const list = await api("/scans");
         if (!alive) return;
         setScans(list);
+        setStages((prev) => withPersistedStages(prev, list));
         const act = list.filter((s) => isActive(s.status));
         const entries = await Promise.all(
           act.map((s) => api(`/scans/${s.id}/progress`).then((p) => [s.id, p]).catch(() => null))
@@ -114,7 +137,7 @@ export default function Scans({ user }) {
   }, [estKey]);
 
   // 여러 .xml 또는 폴더째 가져오기 — 자동 스캔 단계 파일은 서버에서 한 실행 결과로 묶어 인입한다.
-  async function importFiles(fileList) {
+  async function importFiles(fileList, restoreFocusTo = null) {
     const xmls = [...fileList]
       .filter((f) => f.name.toLowerCase().endsWith(".xml"))
       .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
@@ -130,14 +153,48 @@ export default function Scans({ user }) {
       toast(e.message, { type: "err" });
     } finally {
       setBusy(false);
+      window.setTimeout(() => {
+        if (restoreFocusTo?.isConnected && !restoreFocusTo.disabled) restoreFocusTo.focus();
+      }, 0);
     }
+  }
+
+  function restoreImportFocus() {
+    const restore = importRestoreFocusRef.current;
+    importRestoreFocusRef.current = null;
+    if (restore?.isConnected) restore.focus();
+    // 네이티브 선택기가 이벤트 종료 뒤 포커스를 다시 가져가는 브라우저도 있어 한 번 더 복구한다.
+    if (restore?.isConnected) window.setTimeout(() => {
+      if (restore.isConnected && !restore.disabled) restore.focus();
+    }, 0);
+    return restore;
   }
 
   function onImport(e) {
     // value 를 비우면 라이브 FileList 가 같이 비므로, 먼저 배열로 스냅샷한 뒤 리셋한다.
     const files = e.target.files ? [...e.target.files] : [];
     e.target.value = "";
-    if (files.length) importFiles(files);
+    const restore = restoreImportFocus();
+    if (files.length) importFiles(files, restore);
+  }
+
+  function openImport(inputRef, buttonRef) {
+    importRestoreFocusRef.current = buttonRef.current;
+    inputRef.current?.click();
+  }
+
+  function toggleDetails(scan) {
+    const opening = !expanded.has(scan.id);
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (opening) next.add(scan.id);
+      else next.delete(scan.id);
+      return next;
+    });
+    if (!opening) return;
+    api(`/scans/${scan.id}/stages`)
+      .then((detail) => setStages((current) => ({ ...current, [scan.id]: detail })))
+      .catch((e) => toast(e.message, { type: "err" }));
   }
 
   // 직접 명령 모드 진입 시(또는 옵션 변경 시) 사용자가 손대기 전까진 조립된 명령을 따라간다.
@@ -265,14 +322,18 @@ export default function Scans({ user }) {
             <button className="primary" disabled={busy || (rawMode ? !rawCmd.trim() : !targetList.length)} onClick={runScan}>
               {busy ? "시작 중…" : "스캔 실행"}
             </button>
-            <label className="linkbtn">
+            <button ref={fileButtonRef} type="button" className="linkbtn inline-action" disabled={busy}
+                    onClick={() => openImport(fileInputRef, fileButtonRef)}>
               XML 가져오기(여러 개)
-              <input type="file" accept=".xml" multiple style={{ display: "none" }} disabled={busy} onChange={onImport} />
-            </label>
-            <label className="linkbtn">
+            </button>
+            <button ref={folderButtonRef} type="button" className="linkbtn inline-action" disabled={busy}
+                    onClick={() => openImport(folderInputRef, folderButtonRef)}>
               폴더째 가져오기(.xml만)
-              <input ref={folderRef} type="file" style={{ display: "none" }} disabled={busy} onChange={onImport} />
-            </label>
+            </button>
+            <input ref={fileInputRef} type="file" accept=".xml" multiple hidden tabIndex={-1}
+                   disabled={busy} onChange={onImport} onCancel={restoreImportFocus} />
+            <input ref={folderInputRef} type="file" hidden tabIndex={-1}
+                   disabled={busy} onChange={onImport} onCancel={restoreImportFocus} />
             <span className="muted" style={{ fontSize: 12 }}>
               자동 스캔은 발견·식별·UDP 확인을 배치 안에서 순서대로 실행합니다. 실행 중엔 [중지], 중단분은 [이어하기]로 재개합니다.
             </span>
@@ -292,14 +353,19 @@ export default function Scans({ user }) {
               {scans.length === 0 ? (
                 <tr><td className="empty" colSpan={8}>스캔 이력 없음</td></tr>
               ) : scans.map((s) => {
-                const st = STATUS[s.status] || { label: s.status, cls: "info" };
+                const st = scanStatus(s.status);
+                const kind = scanKind({ ...s, kind: stages[s.id]?.kind || s.kind });
                 const p = progress[s.id];
                 return (
-                  <tr key={s.id}>
+                  <React.Fragment key={s.id}>
+                  <tr>
                     <td className="mono">{s.id}</td>
-                    <td>{s.name}</td>
+                    <td>{s.name}<div><span className="tag">{kind.label}</span></div></td>
                     <td className="mono" style={{ fontSize: 11, maxWidth: 300, whiteSpace: "normal", color: "var(--muted)" }}>{s.command}</td>
-                    <td><span className={`pill ${st.cls}`}>{st.label}</span></td>
+                    <td style={{ whiteSpace: "normal", minWidth: 150 }}>
+                      <span className={`pill ${st.cls}`}>{st.label}</span>
+                      {s.failure_message && <div className="scan-failure">{s.failure_message}</div>}
+                    </td>
                     <td>{stages[s.id]?.stages?.length
                       ? <StageTimeline s={stages[s.id]} />
                       : isActive(s.status) ? <Progress p={p} /> : <span className="muted">—</span>}</td>
@@ -312,8 +378,18 @@ export default function Scans({ user }) {
                       {canRun && canResume(s.status) && (
                         <button className="sm" onClick={() => resumeScan(s.id)}>이어하기</button>
                       )}
+                      <button className="sm" aria-expanded={expanded.has(s.id)}
+                              aria-controls={`scan-detail-${s.id}`} onClick={() => toggleDetails(s)}>
+                        {expanded.has(s.id) ? "상세 닫기" : "상세"}
+                      </button>
                     </td>
                   </tr>
+                  {expanded.has(s.id) && (
+                    <tr id={`scan-detail-${s.id}`}>
+                      <td colSpan={8}><ScanDetails scan={s} detail={stages[s.id]} /></td>
+                    </tr>
+                  )}
+                  </React.Fragment>
                 );
               })}
             </tbody>
@@ -332,7 +408,9 @@ function Progress({ p }) {
   const known = overall != null;
   return (
     <div style={{ minWidth: 200 }}>
-      <div style={{ height: 6, borderRadius: 4, background: "var(--line)", overflow: "hidden" }}>
+      <div role="progressbar" aria-label="스캔 진행률" aria-valuemin="0" aria-valuemax="100"
+           aria-valuenow={known ? Math.round(overall) : undefined}
+           style={{ height: 6, borderRadius: 4, background: "var(--line)", overflow: "hidden" }}>
         <div style={{
           width: known ? `${Math.min(overall, 100)}%` : "12%",
           height: "100%", background: "var(--accent)",
@@ -353,6 +431,11 @@ function Progress({ p }) {
 const STAGE_LABEL = { discovery: "발견", tcp: "TCP", udp: "UDP", service: "서비스" };
 const STAGE_CLS = { pending: "info", running: "info", done: "low", stopped: "medium", error: "high" };
 
+function stageLabel(stage) {
+  const key = stage.stage || stage.name;
+  return STAGE_LABEL[key] || key || "단계";
+}
+
 function StageTimeline({ s }) {
   const list = s?.stages || [];
   if (!list.length) return <span className="muted">…</span>;
@@ -360,27 +443,58 @@ function StageTimeline({ s }) {
   const known = overall != null;
   return (
     <div style={{ minWidth: 220 }}>
-      <div style={{ height: 6, borderRadius: 4, background: "var(--line)", overflow: "hidden" }}>
+      <div role="progressbar" aria-label="단계 스캔 진행률" aria-valuemin="0" aria-valuemax="100"
+           aria-valuenow={known ? Math.round(overall) : undefined}
+           style={{ height: 6, borderRadius: 4, background: "var(--line)", overflow: "hidden" }}>
         <div style={{
           width: known ? `${Math.min(overall, 100)}%` : "12%",
           height: "100%", background: "var(--accent)", transition: "width .4s", opacity: known ? 1 : 0.45,
         }} />
       </div>
       <div className="row" style={{ gap: 4, marginTop: 4, flexWrap: "wrap" }}>
-        {list.map((st) => {
+        {list.map((st, index) => {
           const c = st.counts || {};
           const extra = st.status === "running" && st.percent != null ? ` ${Math.round(st.percent)}%`
             : c.live != null ? ` ${c.live}대`
             : c.open_ports != null ? ` ${c.open_ports}p`
             : c.services != null ? ` ${c.services}svc` : "";
           return (
-            <span key={st.stage} className={`pill ${STAGE_CLS[st.status] || "info"}`}
+            <span key={`${st.stage || st.name || "stage"}-${index}`}
+                  className={`pill ${STAGE_CLS[st.status] || "info"}`}
                   title={st.error || ""} style={{ fontSize: 10.5 }}>
-              {STAGE_LABEL[st.stage] || st.stage}{extra}{st.status === "error" ? " ⚠" : ""}
+              {stageLabel(st)}{extra}{st.status === "error" ? " ⚠" : ""}
             </span>
           );
         })}
       </div>
+      {list.filter((stage) => stage.error).map((stage, index) => (
+        <div key={`${stage.stage || stage.name || "stage"}-error-${index}`} className="scan-failure">
+          {stageLabel(stage)}: {stage.error}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ScanDetails({ scan, detail }) {
+  const kind = detail?.kind === "staged" ? "단계 엔진" : scanKind(scan).label;
+  const failureMessage = detail?.failure_message || scan.failure_message;
+  const failureCode = detail?.failure_code || scan.failure_code;
+  return (
+    <div className="scan-detail">
+      <div className="row">
+        <b>실행 유형</b><span>{kind}</span>
+        <b>상태</b><span>{scanStatus(detail?.status || scan.status).label}</span>
+      </div>
+      {detail?.stages?.length
+        ? <StageTimeline s={detail} />
+        : <div className="muted">{detail?.timeline_available === false ? "저장된 단계 이벤트가 없습니다." : "단계 정보를 불러오는 중…"}</div>}
+      {failureMessage && (
+        <div className="scan-failure-detail">
+          <b>실패 원인</b> {failureMessage}
+          {failureCode && <code>{failureCode}</code>}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 """스캔 러너 — -oA 출력 + --resume 명령 생성 + 타겟 검증."""
 from pathlib import Path
+import subprocess
 
 import pytest
 from scanops.scanning import nmap_runner as r
@@ -23,6 +24,46 @@ def test_build_command_includes_stats_every():
     assert "--stats-every" in cmd2 and cmd2[-1] == "127.0.0.1"
 
 
+@pytest.mark.parametrize("preset", ["quick", "phase1"])
+def test_explicit_ports_override_preset_port_selection(preset):
+    cmd = r.build_command(
+        "nmap", preset, ["127.0.0.1"], Path("/s/scan_ports"), ports="443",
+    )
+
+    assert cmd.count("-p") == 1
+    assert cmd[cmd.index("-p") + 1] == "443"
+    assert "--top-ports" not in cmd
+
+
+@pytest.mark.parametrize("preset", ["quick", "phase1"])
+def test_legacy_presets_collect_http_server_identity(preset):
+    cmd = r.build_command("nmap", preset, ["127.0.0.1"], Path("/s/scan_server"))
+    scripts = cmd[cmd.index("--script") + 1].split(",")
+    assert "http-headers" in scripts
+    assert "http-server-header" in scripts
+
+
+def test_manual_nse_omitted_empty_and_selected_are_distinct():
+    base = Path("/s/scan_nse")
+    omitted = r.build_command("nmap", "quick", ["127.0.0.1"], base)
+    disabled = r.build_command("nmap", "quick", ["127.0.0.1"], base, nse=[])
+    selected = r.build_command(
+        "nmap", "quick", ["127.0.0.1"], base, nse=["ssl-cert"],
+    )
+    custom_default = r.build_command_opts(
+        "nmap", ["connect"], "443", ["127.0.0.1"], base,
+    )
+    custom_disabled = r.build_command_opts(
+        "nmap", ["connect"], "443", ["127.0.0.1"], base, nse=[],
+    )
+
+    assert "--script" in omitted
+    assert "--script" not in disabled
+    assert selected[selected.index("--script") + 1] == "ssl-cert"
+    assert "http-server-header" in custom_default[custom_default.index("--script") + 1]
+    assert "--script" not in custom_disabled
+
+
 def test_parse_progress_extracts_percent_and_elapsed(tmp_path):
     log = tmp_path / "scan.log"
     log.write_text(
@@ -39,7 +80,7 @@ def test_parse_progress_extracts_percent_and_elapsed(tmp_path):
 
 def test_parse_progress_missing_log_is_safe(tmp_path):
     prog = r.parse_progress(tmp_path / "nope.log")
-    assert prog["percent"] is None and prog["last_line"] == ""
+    assert prog["percent"] is None and "last_line" not in prog
 
 
 def test_xml_and_log_paths():
@@ -58,9 +99,38 @@ def test_unknown_preset_rejected():
         r.build_command("nmap", "bogus", ["127.0.0.1"], Path("/s/x"))
 
 
-def test_target_validation_blocks_injection():
+@pytest.mark.parametrize("target", ["127.0.0.1; rm -rf /", "-oX/tmp/structured.xml"])
+def test_target_validation_blocks_injection(target):
     with pytest.raises(ValueError):
-        r.build_command("nmap", "quick", ["127.0.0.1; rm -rf /"], Path("/s/x"))
+        r.build_command("nmap", "quick", [target], Path("/s/x"))
+
+
+def test_structured_target_validation_rejects_unsupported_ipv6():
+    with pytest.raises(ValueError, match="IPv6"):
+        r.build_command("nmap", "quick", ["2001:db8::1"], Path("/s/x"))
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["0-255.0-255.0-255.0-255", "10.0-255.0.1", "10-11.0.0.1"],
+)
+def test_structured_target_validation_rejects_composite_ipv4_range(target):
+    with pytest.raises(ValueError, match="지원하지 않는 복합 IP 범위"):
+        r.validate_targets([target])
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["scan-node.example.internal", "192.0.2.1", "192.0.2.0/24", "192.0.2.1-3"],
+)
+def test_structured_target_validation_preserves_supported_forms(target):
+    assert r.validate_targets([target]) == [target]
+
+
+@pytest.mark.parametrize("ports", ["99999", "443-22", "22,,80", "T:", "0"])
+def test_structured_port_validation_rejects_invalid_semantics(ports):
+    with pytest.raises(ValueError):
+        r.build_command_opts("nmap", ["connect"], ports, ["127.0.0.1"], Path("/s/x"))
 
 
 def test_build_with_nse_scripts():
@@ -124,3 +194,52 @@ def test_options_endpoint_exposes_nse(client=None):
     keys = {o["key"] for o in s.SCAN_OPTIONS}
     for k in ["t0", "t1", "t2", "max_retries", "min_hostgroup", "max_parallel", "defeat_rst"]:
         assert k in keys
+
+
+def test_popen_uses_backend_owned_tree_and_closes_parent_log(monkeypatch, tmp_path):
+    process = object()
+    captured = {}
+
+    def owned_spawn(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["log"] = kwargs["stdout"]
+        assert captured["log"].closed is False
+        return process
+
+    monkeypatch.setattr(r.process_control, "popen_owned", owned_spawn)
+
+    assert r.popen(["nmap", "-sn", "127.0.0.1"], tmp_path / "nmap.log") is process
+    assert captured["cmd"] == ["nmap", "-sn", "127.0.0.1"]
+    assert captured["log"].closed is True
+
+
+def test_wait_owned_preserves_returncode_and_releases_ownership(monkeypatch):
+    closed = []
+
+    class Process:
+        @staticmethod
+        def wait(timeout=None):
+            assert timeout == 7
+            return 9
+
+    process = Process()
+    monkeypatch.setattr(r.process_control, "close_owned", closed.append)
+
+    assert r.wait_owned(process, timeout=7) == 9
+    assert closed == [process]
+
+
+def test_wait_owned_preserves_timeout_and_releases_ownership(monkeypatch):
+    closed = []
+
+    class Process:
+        @staticmethod
+        def wait(timeout=None):
+            raise subprocess.TimeoutExpired("nmap", timeout)
+
+    process = Process()
+    monkeypatch.setattr(r.process_control, "close_owned", closed.append)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        r.wait_owned(process, timeout=1)
+    assert closed == [process]

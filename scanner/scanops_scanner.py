@@ -101,7 +101,8 @@ PRESETS: dict[str, list[str]] = {
     ],
 }
 
-TARGET_RE = re.compile(r"^[A-Za-z0-9_.:/\-]+$")
+# 타겟은 argv 맨 뒤에 와도 '-' 시작 시 Nmap 옵션으로 재해석된다.
+TARGET_RE = re.compile(r"^(?!-)[A-Za-z0-9_.:/\-]+$")
 PORTS_RE = re.compile(r"^[0-9TUtu:,\-\s]+$")
 # 포트 본문(프로토콜 접두사 제거 후): 단일 포트·범위·열린 범위(1-, -1024) 허용.
 PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
@@ -109,6 +110,7 @@ SCRIPT_RE = re.compile(r"^[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*$")
 STATS_RE = re.compile(r"^\d+[smh]?$")
 NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 RANGE_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})-(\d{1,3})$")
+IPV4_RANGE_TOKEN_RE = re.compile(r"^[\d-]+(?:\.[\d-]+){3}$")
 VALUE_FLAGS = {"-p", "--top-ports"}
 SCAN_TYPE_FLAGS = {"-sS", "-sT"}
 
@@ -182,7 +184,7 @@ def collect_targets(args: argparse.Namespace) -> list[str]:
 
 
 def validate_targets(targets: list[str]) -> None:
-    bad = [t for t in targets if not TARGET_RE.match(t)]
+    bad = [t for t in targets if not isinstance(t, str) or not TARGET_RE.fullmatch(t)]
     if bad:
         raise ValueError(f"허용되지 않는 target 형식: {bad}")
     # IPv6 는 자동 워크플로 플래그(-6 없음)와 호환되지 않아 nmap 이 실패하고, 실패하면
@@ -190,6 +192,21 @@ def validate_targets(targets: list[str]) -> None:
     ipv6 = [t for t in targets if ":" in t]
     if ipv6:
         raise ValueError(f"IPv6 대상은 아직 지원하지 않습니다: {ipv6}. IPv4 주소/대역으로 지정하세요.")
+    composite_ranges = [t for t in targets if is_unsupported_composite_ipv4_range(t)]
+    if composite_ranges:
+        raise ValueError(
+            f"지원하지 않는 복합 IP 범위: {composite_ranges}. "
+            "마지막 옥텟 범위만 사용할 수 있습니다."
+        )
+
+
+def is_unsupported_composite_ipv4_range(target: str) -> bool:
+    """숫자 옥텟의 Nmap 복합 범위 중 마지막 옥텟 단순 범위가 아닌 형식인지 반환."""
+    return bool(
+        "-" in target
+        and IPV4_RANGE_TOKEN_RE.fullmatch(target)
+        and not RANGE_RE.fullmatch(target)
+    )
 
 
 def warn_ambiguous_ports(spec: str) -> None:
@@ -211,13 +228,13 @@ def warn_ambiguous_ports(spec: str) -> None:
 
 
 def parse_scope(spec: str) -> list:
-    """콤마/공백 구분 CIDR·IP 목록 → 네트워크 객체. 잘못된 토큰은 건너뛴다."""
+    """콤마/공백 구분 CIDR·IP 목록. 토큰 하나라도 잘못되면 전체 설정을 거절한다."""
     nets = []
     for raw in (spec or "").replace(",", " ").split():
         try:
             nets.append(ipaddress.ip_network(raw.strip(), strict=False))
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise ValueError(f"잘못된 스캔 대역(scope) 설정입니다: {raw.strip()!r}") from exc
     return nets
 
 
@@ -330,6 +347,8 @@ def expand_targets(targets: list[str], cap: int) -> list[str]:
                 raise ValueError(f"잘못된 IP 범위: {t}")
             for i in range(lo, hi + 1):
                 hosts[f"{base}.{i}"] = None
+        elif is_unsupported_composite_ipv4_range(t):
+            raise ValueError(f"지원하지 않는 복합 IP 범위: {t}. 마지막 옥텟 범위만 사용할 수 있습니다.")
         else:
             hosts[t] = None
         if len(hosts) > cap:
@@ -600,7 +619,7 @@ def open_ports_from_xml(path: Path, protocol: str = "tcp") -> list[int]:
         if (port.get("protocol") or "").lower() != protocol:
             continue
         state = port.find("state")
-        if state is None or (state.get("state") or "").lower() != "open":
+        if state is None or not (state.get("state") or "").lower().startswith("open"):
             continue
         try:
             ports.add(int(port.get("portid") or ""))
@@ -637,7 +656,7 @@ def open_host_ports_from_xml(path: Path, protocol: str = "tcp") -> list[tuple[st
             if (port.get("protocol") or "").lower() != protocol:
                 continue
             state = port.find("state")
-            if state is None or (state.get("state") or "").lower() != "open":
+            if state is None or not (state.get("state") or "").lower().startswith("open"):
                 continue
             try:
                 pid = int(port.get("portid") or "")
@@ -670,7 +689,7 @@ def live_hosts_from_xml(path: Path) -> list[str]:
                 continue
             ip = addr.get("addr") or ""
             # nmap 자체 출력이지만 argv 주입 전 한 번 더 검증.
-            if ip and ip not in seen and TARGET_RE.match(ip):
+            if ip and ip not in seen and TARGET_RE.fullmatch(ip):
                 seen.add(ip)
                 hosts.append(ip)
     return hosts
@@ -690,7 +709,8 @@ def hosts_with_open_ports_from_xml(path: Path) -> list[str]:
     seen: set[str] = set()
     for host in root.findall(".//host"):
         has_open = any(
-            (state := port.find("state")) is not None and (state.get("state") or "").lower() == "open"
+            (state := port.find("state")) is not None
+            and (state.get("state") or "").lower().startswith("open")
             for port in host.findall(".//port")
         )
         if not has_open:
@@ -699,7 +719,7 @@ def hosts_with_open_ports_from_xml(path: Path) -> list[str]:
             if (addr.get("addrtype") or "").lower() == "mac":
                 continue
             ip = addr.get("addr") or ""
-            if ip and ip not in seen and TARGET_RE.match(ip):
+            if ip and ip not in seen and TARGET_RE.fullmatch(ip):
                 seen.add(ip)
                 hosts.append(ip)
     return hosts

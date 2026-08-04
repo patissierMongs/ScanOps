@@ -14,7 +14,7 @@
 **사용자 결정 규칙 적용**: "최대한 새로, 단 진짜 우수+재작성이 못할 것 같으면 재사용" → 백엔드는 그 "재사용" 조건에 정확히 부합(검증됨). 프론트는 새로.
 
 ## 1. 확정 스택 (DESIGN §0 유지)
-FastAPI + SQLite(백엔드, **재사용**) / React 18 + Vite(프론트, **재구축**) · 단일 포트 SPA 서빙 · 로컬계정+역할(admin/auditor/viewer) · 완전 에어갭 · 서버 nmap · KISA+NIS · 한국어 UI · win_amd64 + Python 3.10–3.13.
+FastAPI + SQLite(백엔드, **재사용**) / React 18 + Vite(프론트, **재구축**) · 단일 포트 SPA 서빙 · 로컬계정+역할(admin/auditor/viewer) · 완전 에어갭 · 서버 nmap · KISA+NIS · 한국어 UI · win_amd64 + Python 3.12.
 
 ## 2. 백엔드 확장 (가산만 — 기존 엔드포인트 불변)
 - `GET/POST/DELETE /api/rules` — RiskRule CRUD. 응답에 규칙별 **매칭 발견 수** 포함.
@@ -68,10 +68,10 @@ frontend/src/
 
 ## 6. 검증 환경 (모든 환경 활용)
 - 백엔드: `backend/.venv/Scripts/python.exe -m pytest -q` (Win) / 필요시 WSL Ubuntu 교차검증.
-- 프론트 빌드: `cd frontend && npm run build`.
+- 프론트 빌드: Node.js 20.19+ 또는 22.12+에서 `cd frontend && npm run build`.
 - E2E: Chrome `--remote-debugging-port=9222` + `samples/shot*.mjs` CDP. 토큰 `samples/.token`.
 - 서버: `SCANOPS_DATA_DIR=<dir> .venv/Scripts/python.exe -m uvicorn scanops.main:app --port 8770`.
-- 좀비서버 함정: 재시작 전 `taskkill //F //IM python.exe` + 포트 LISTENING 확인. 임시 admin 비번은 로그인 API로 검증 후 안내.
+- 좀비서버 함정: 재시작 전 기록한 ScanOps PID/Job을 종료하고 `Get-NetTCPConnection -LocalPort 8770 -State Listen`으로 소유 PID를 확인한다. 남은 리스너는 ScanOps 프로세스임을 검증한 뒤 해당 PID만 종료한다(`taskkill /IM python.exe` 금지). 임시 admin 비번은 로그인 API로 검증 후 안내.
 
 ## 7. 완료 정의 (HANDOFF §10)
 TSnmap 7뷰 **기능**(특히 컬럼빌더·위험규칙·전역이력·엑셀고급)이 살아 영속 백엔드에 연결, 완전 오프라인 설치/실행, 백엔드 테스트 + 프론트 E2E(빈화면0) 통과, 한국어 UI로 전 기능 사용 가능. **형태만이 아니라 기능까지.**

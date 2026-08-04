@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8770
 
+    # Uploads are read in chunks and rejected before unbounded in-memory parsing.
+    upload_max_bytes: int = 25 * 1024 * 1024
+    upload_bundle_max_bytes: int = 100 * 1024 * 1024
+    asset_xlsx_max_uncompressed_bytes: int = 100 * 1024 * 1024
+    asset_xlsx_max_entries: int = 10_000
+    asset_sheet_max_rows: int = 100_000
+    asset_sheet_max_columns: int = 512
+    asset_sheet_max_cells: int = 2_000_000
+
     # 인증
     # 시크릿은 최초 부팅 시 data_dir/secret.key 에 생성·보관(에어갭에서 안전한 난수).
     token_ttl_hours: int = 12

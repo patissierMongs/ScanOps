@@ -7,15 +7,20 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 _DEFAULT = {"stages_done": [], "open_map": {}, "live": None, "service_done": [], "stop": False}
+_STOP_SENTINEL = "stop-requested"
 
 
 class RunState:
     def __init__(self, path):
         self.path = Path(path)
-        self.data = dict(_DEFAULT)
+        self.stop_path = self.path.parent / _STOP_SENTINEL
+        # Lists/dicts are per-run state. A shallow copy leaks completed stages and hosts into
+        # later Pipeline instances in the same process (notably tests and embedded callers).
+        self.data = deepcopy(_DEFAULT)
         if self.path.exists():
             try:
                 self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
@@ -43,7 +48,9 @@ class RunState:
             self.data["service_done"].append(ip)
 
     def stopped(self) -> bool:
-        """외부가 파일에 stop=true 를 쓰면 감지 — 디스크 신선 읽기(메모리 캐시 우회)."""
+        """외부 중지 sentinel을 우선 감지하고 구형 JSON stop=true도 이어받는다."""
+        if self.stop_path.exists():
+            return True
         if self.path.exists():
             try:
                 return bool(json.loads(self.path.read_text(encoding="utf-8")).get("stop"))
@@ -52,7 +59,9 @@ class RunState:
         return bool(self.data.get("stop"))
 
     def save(self):
-        # 외부(ScanOps)가 디스크에 쓴 stop=true 를 엔진의 저장이 덮어쓰지 않도록 보존한다.
+        # sentinel은 진행 state JSON과 분리되어 stale save가 중지 요청을 덮을 수 없다.
         if self.stopped():
             self.data["stop"] = True
-        self.path.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
+        temp = self.path.with_name(f"{self.path.name}.tmp")
+        temp.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
+        temp.replace(self.path)

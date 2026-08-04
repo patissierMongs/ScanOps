@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -10,35 +11,56 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .config import get_settings
 from .db import init_db
+from .uploads import UploadBodyLimitMiddleware
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    init_db()
-    # 시드(기본 admin·taxonomy)는 B/D 단계에서 seed 모듈이 채운다.
+    from .scanning.scope import parse_scope
+
+    _app.state.ready = False
+    _app.state.readiness_errors = []
+    # A malformed non-empty scope must never turn into unrestricted scanning.
     try:
-        from .seed.bootstrap import run_bootstrap
+        parse_scope(settings.scan_scope)
+    except ValueError:
+        logger.exception("invalid scan scope configuration")
+        _app.state.readiness_errors.append("invalid scan scope configuration")
+    init_db()
+    from .seed.bootstrap import run_bootstrap
+    try:
         run_bootstrap()
     except Exception:
-        # 시드 모듈이 아직 없거나 실패해도 앱 부팅은 막지 않는다(개발 단계).
-        pass
+        # 계정/taxonomy가 준비되지 않은 서버를 정상으로 띄우지 않는다.
+        logger.exception("required bootstrap failed")
+        raise
     # 재시작으로 고아가 된 실행을 interrupted 로 정직하게 표기(자동 복구 안 함, 좀비 방지).
     try:
         from .api.scans import reconcile_orphans
         reconcile_orphans()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.exception("scan orphan reconciliation failed")
+        _app.state.readiness_errors.append(f"scan reconciliation failed: {type(exc).__name__}")
+    _app.state.ready = not _app.state.readiness_errors
     yield
 
 
 app = FastAPI(title="ScanOps", version=__version__, lifespan=lifespan)
+app.add_middleware(UploadBodyLimitMiddleware)
 
 
 @app.get("/api/health")
-def health() -> dict:
-    return {"ok": True, "service": "scanops", "version": __version__}
+def health() -> JSONResponse:
+    ready = bool(getattr(app.state, "ready", False))
+    errors = list(getattr(app.state, "readiness_errors", []))
+    return JSONResponse(
+        {"ok": ready, "ready": ready, "service": "scanops", "version": __version__,
+         "errors": errors},
+        status_code=200 if ready else 503,
+    )
 
 
 def _mount_routers() -> None:

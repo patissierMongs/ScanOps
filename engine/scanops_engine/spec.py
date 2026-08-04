@@ -8,8 +8,10 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 
-_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:/\-]+$")
+# argv 옵션 주입을 막는 타겟 계약: 허용 문자여도 '-' 로 시작할 수 없다.
+_TARGET_RE = re.compile(r"^(?!-)[A-Za-z0-9_.:/\-]+$")
 _PORTS_RE = re.compile(r"^[0-9TUtu:,\-\s]*$")
+_PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
 _NSE_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 _TIMINGS = {"-T0", "-T1", "-T2", "-T3", "-T4", "-T5"}
 
@@ -56,6 +58,35 @@ class ServiceStage:
 
 
 _STAGE_CLASSES = {"discovery": DiscoveryStage, "tcp": TcpStage, "udp": UdpStage, "service": ServiceStage}
+
+
+def _validate_target(value, label: str) -> None:
+    if not isinstance(value, str) or not _TARGET_RE.fullmatch(value):
+        raise ValueError(f"허용되지 않는 {label}: {value!r}")
+    if ":" in value:
+        raise ValueError(f"IPv6 {label}은 아직 지원하지 않습니다: {value!r}")
+
+
+def _validate_ports(value: str, label: str) -> None:
+    if not isinstance(value, str) or not _PORTS_RE.fullmatch(value):
+        raise ValueError(f"허용되지 않는 {label} 포트 스펙: {value!r}")
+    if not value:
+        return
+    for segment in value.replace(" ", "").split(","):
+        if not segment:
+            raise ValueError(f"{label} 포트 목록에 빈 항목이 있습니다.")
+        body = segment
+        if ":" in segment:
+            prefix, body = segment.split(":", 1)
+            if prefix.upper() not in ("T", "U"):
+                raise ValueError(f"알 수 없는 프로토콜 접두사: {segment!r}")
+        if not body or not _PORT_BODY_RE.fullmatch(body):
+            raise ValueError(f"잘못된 {label} 포트/범위: {segment!r}")
+        numbers = [int(item) for item in re.findall(r"\d+", body)]
+        if any(not 1 <= item <= 65535 for item in numbers):
+            raise ValueError(f"{label} 포트는 1-65535 범위여야 합니다: {segment!r}")
+        if "-" in body and len(numbers) == 2 and numbers[0] > numbers[1]:
+            raise ValueError(f"{label} 포트 범위가 거꾸로입니다: {segment!r}")
 
 
 def _build(cls, d):
@@ -113,11 +144,13 @@ class JobSpec:
 
     def validate(self) -> "JobSpec":
         for t in self.targets + self.exclude:
-            if not _TARGET_RE.match(t):
-                raise ValueError(f"허용되지 않는 타겟 형식: {t!r}")
+            _validate_target(t, "타겟 형식")
         for label, p in (("tcp", self.tcp.ports), ("udp", self.udp.ports)):
-            if p and not _PORTS_RE.match(p):
-                raise ValueError(f"허용되지 않는 {label} 포트 스펙: {p!r}")
+            _validate_ports(p, label)
+        if self.tcp.enabled and not self.tcp.ports.strip():
+            raise ValueError("TCP 단계가 활성화되었지만 포트가 비어 있습니다.")
+        if self.udp.enabled and not self.udp.ports.strip():
+            raise ValueError("UDP 단계가 활성화되었지만 포트가 비어 있습니다.")
         for label, tm in (("tcp", self.tcp.timing), ("udp", self.udp.timing)):
             if tm not in _TIMINGS:
                 raise ValueError(f"허용되지 않는 {label} 타이밍: {tm!r}")
@@ -129,11 +162,12 @@ class JobSpec:
         if self.discovery.mode not in ("sn", "pn"):
             raise ValueError(f"discovery.mode 는 sn/pn: {self.discovery.mode!r}")
         for ip in (self.targets_ports or {}):
-            if not _TARGET_RE.match(ip):
-                raise ValueError(f"허용되지 않는 재스캔 타겟: {ip!r}")
+            _validate_target(ip, "재스캔 타겟")
         for u in (self.rescan_units or []):
-            if not _TARGET_RE.match(str(u.get("ip", ""))):
-                raise ValueError(f"허용되지 않는 재스캔 단위 IP: {u!r}")
+            try:
+                _validate_target(u.get("ip", ""), "재스캔 단위 IP")
+            except ValueError as exc:
+                raise ValueError(f"{exc} ({u!r})") from exc
             if not (1 <= int(u.get("port", 0)) <= 65535):
                 raise ValueError(f"허용되지 않는 재스캔 단위 포트: {u!r}")
             if u.get("proto", "tcp") not in ("tcp", "udp"):

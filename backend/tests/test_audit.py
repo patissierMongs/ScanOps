@@ -15,13 +15,87 @@ def test_login_recorded_and_admin_can_read(client):
     assert any(x["action"] == "LOGIN" and x["ok"] == 1 for x in logs)
 
 
-def test_failed_login_recorded(client):
-    make_user("boss", "pw", role="admin")
-    r = client.post("/api/auth/login", json={"username": "boss", "password": "wrong"})
-    assert r.status_code == 401
-    h = _hdr(client, "boss", "pw")
-    logs = client.get("/api/audit", headers=h).json()
-    assert any(x["action"] == "LOGIN" and x["ok"] == 0 and x["target"] == "boss" for x in logs)
+def test_failed_login_is_globally_bounded_by_utc_hour(client, monkeypatch):
+    from scanops.api import auth as auth_api
+    from scanops.db import SessionLocal
+    from scanops.models import AuditLog
+
+    make_user("known-a", "rightpass12")
+    make_user("known-b", "rightpass12")
+    hour = {"value": "2026-07-29T08:00Z"}
+    monkeypatch.setattr(auth_api, "_utc_hour_bucket", lambda: hour["value"])
+
+    for username in ("known-a", "known-a", "known-b", "attacker-chosen-name"):
+        response = client.post(
+            "/api/auth/login", json={"username": username, "password": "wrong"},
+        )
+        assert response.status_code == 401
+
+    db = SessionLocal()
+    try:
+        failed = db.query(AuditLog).filter_by(action="LOGIN", ok=0).all()
+        assert len(failed) == 1
+        assert failed[0].actor_user_id is None
+        assert failed[0].actor_name == ""
+        assert failed[0].target == "global"
+        assert failed[0].detail == "실패 (UTC hour 2026-07-29T08:00Z)"
+    finally:
+        db.close()
+
+    hour["value"] = "2026-07-29T09:00Z"
+    response = client.post(
+        "/api/auth/login", json={"username": "known-a", "password": "wrong"},
+    )
+    assert response.status_code == 401
+
+    db = SessionLocal()
+    try:
+        failed = db.query(AuditLog).filter_by(action="LOGIN", ok=0).all()
+        assert len(failed) == 2
+        assert {row.detail for row in failed} == {
+            "실패 (UTC hour 2026-07-29T08:00Z)",
+            "실패 (UTC hour 2026-07-29T09:00Z)",
+        }
+    finally:
+        db.close()
+
+
+def test_bounded_audit_lookup_failure_does_not_break_auth_flow():
+    from scanops.api.audit import record_once
+
+    class BrokenAuditSession:
+        rolled_back = False
+
+        def query(self, *_args):
+            raise RuntimeError("audit storage unavailable")
+
+        def rollback(self):
+            self.rolled_back = True
+
+    db = BrokenAuditSession()
+    record_once(db, None, "LOGIN", target="global", detail="failed", ok=False)
+    assert db.rolled_back is True
+
+
+def test_successful_login_is_recorded_every_time(client):
+    from scanops.db import SessionLocal
+    from scanops.models import AuditLog
+
+    make_user("repeat-success", "rightpass12")
+    for _ in range(2):
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "repeat-success", "password": "rightpass12"},
+        )
+        assert response.status_code == 200
+
+    db = SessionLocal()
+    try:
+        assert db.query(AuditLog).filter_by(
+            action="LOGIN", target="repeat-success", ok=1,
+        ).count() == 2
+    finally:
+        db.close()
 
 
 def test_import_recorded(client):

@@ -13,8 +13,9 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import get_db
+from ..identity import display_identity
 from ..models import Finding, RISK_LABELS_KO, ScanRun, User
-from ..scanning.nmap_parse import scan_start
+from ..scanning.nmap_parse import extract_server, scan_start
 from ..spreadsheet import safe_cell
 from .deps import current_user
 
@@ -111,6 +112,11 @@ def _parse_xml_rows(path: Path) -> list[dict]:
             ostype = _text(svc, "ostype")
             detail = " ".join(x for x in (product, version, extrainfo, ostype) if x)
             service = _text(svc, "name")
+            nse = [
+                {"id": script.get("id") or "", "output": script.get("output") or ""}
+                for script in port.findall("script")
+            ]
+            server = extract_server(nse)
             key = f"{host_ip}|{port_num}|{proto}"
             rows.append({
                 "key": key,
@@ -122,6 +128,7 @@ def _parse_xml_rows(path: Path) -> list[dict]:
                 "service": service,
                 "product": product,
                 "version": version,
+                "server": server,
                 "banner": detail,
             })
     return rows
@@ -289,7 +296,9 @@ def build_heatmap(db: Session) -> dict:
         detail = last_open or latest
         risk = finding.risk_level if finding else ""
         service = (detail.get("service") or (finding.service if finding else "")) if detail else (finding.service if finding else "")
+        product = (detail.get("product") or (finding.product if finding else "")) if detail else (finding.product if finding else "")
         version = (detail.get("version") or (finding.version if finding else "")) if detail else (finding.version if finding else "")
+        server = (detail.get("server") or (finding.server if finding else "")) if detail else (finding.server if finding else "")
         rows.append({
             "key": key,
             "finding_id": finding.id if finding else None,
@@ -298,7 +307,12 @@ def build_heatmap(db: Session) -> dict:
             "proto": proto,
             "port": port,
             "service": service,
+            "product": product,
             "version": version,
+            "server": server,
+            "display_identity": display_identity(
+                server=server, product=product, version=version, service=service,
+            ),
             "risk_level": risk,
             "risk_label": RISK_LABELS_KO.get(risk, risk),
             "status": finding.status if finding else "",
@@ -396,27 +410,38 @@ def _report_bytes(data: dict) -> io.BytesIO:
     _append_sheet(wb, "00_보고요약", ["항목", "값"], summary_rows)
 
     phase_headers = [p["label"] for p in data["phases"]]
-    heat_headers = ["IP", "프로토콜", "포트", "서비스", "위험도", "현재상태", "관측 phase 수", "마지막 스캔 시점"] + phase_headers
+    heat_headers = [
+        "IP", "프로토콜", "포트", "표시 식별", "Server", "서비스", "위험도", "현재상태",
+        "관측 phase 수", "마지막 스캔 시점",
+    ] + phase_headers
     heat_rows = []
     heat_fills = []
     for row in data["rows"]:
         tokens = [c["state"] for c in row["cells"]]
         heat_rows.append([
-            row["host_ip"], row["proto"], row["port"], row["service"], row["risk_label"],
-            row["current_state"], row["observed_count"], row["last_scan_label"], *tokens,
+            row["host_ip"], row["proto"], row["port"], row["display_identity"], row["server"],
+            row["service"], row["risk_label"], row["current_state"], row["observed_count"],
+            row["last_scan_label"], *tokens,
         ])
         fills = [None] * len(heat_headers)
-        fills[5] = STATE_COLORS.get(row["current_state"])
+        fills[7] = STATE_COLORS.get(row["current_state"])
         if row["risk_level"] in ("banned", "high"):
-            fills[4] = HIGH_FILL
+            fills[6] = HIGH_FILL
         for i, token in enumerate(tokens):
-            fills[8 + i] = STATE_COLORS.get(token)
+            fills[10 + i] = STATE_COLORS.get(token)
         heat_fills.append(fills)
     _append_sheet(wb, "01_시간축히트맵", heat_headers, heat_rows, heat_fills)
 
-    current_headers = ["마지막 스캔 시점", "현재상태", "IP", "프로토콜", "포트", "서비스", "버전", "위험도", "운영상태", "부서"]
+    current_headers = [
+        "마지막 스캔 시점", "현재상태", "IP", "프로토콜", "포트", "표시 식별", "Server",
+        "서비스", "제품", "버전", "위험도", "운영상태", "부서",
+    ]
     current_rows = [
-        [r["last_scan_label"], r["current_state"], r["host_ip"], r["proto"], r["port"], r["service"], r["version"], r["risk_label"], r["status"], r["dept"]]
+        [
+            r["last_scan_label"], r["current_state"], r["host_ip"], r["proto"], r["port"],
+            r["display_identity"], r["server"], r["service"], r["product"], r["version"],
+            r["risk_label"], r["status"], r["dept"],
+        ]
         for r in data["current_ports"]
     ]
     current_fills = []
@@ -424,11 +449,14 @@ def _report_bytes(data: dict) -> io.BytesIO:
         fills = [None] * len(current_headers)
         fills[1] = STATE_COLORS.get(r["current_state"])
         if r["risk_level"] in ("banned", "high"):
-            fills[7] = HIGH_FILL
+            fills[10] = HIGH_FILL
         current_fills.append(fills)
     _append_sheet(wb, "02_현재포트현황", current_headers, current_rows, current_fills)
 
-    cmp_headers = ["변경유형", "IP", "프로토콜", "포트", "서비스", "위험도", "첫 phase", "현재상태", "마지막 스캔 시점"]
+    cmp_headers = [
+        "변경유형", "IP", "프로토콜", "포트", "표시 식별", "Server", "서비스", "위험도",
+        "첫 phase", "현재상태", "마지막 스캔 시점",
+    ]
     cmp_rows = []
     cmp_fills = []
     for r in data["rows"]:
@@ -437,7 +465,10 @@ def _report_bytes(data: dict) -> io.BytesIO:
         if first == cur and cur != STATE_NEW_OPEN:
             continue
         ctype = "신규열림" if cur in OPEN_STATES and first not in OPEN_STATES else "닫힘" if cur in CLOSED_STATES and first in OPEN_STATES else "상태변화"
-        cmp_rows.append([ctype, r["host_ip"], r["proto"], r["port"], r["service"], r["risk_label"], first, cur, r["last_scan_label"]])
+        cmp_rows.append([
+            ctype, r["host_ip"], r["proto"], r["port"], r["display_identity"], r["server"],
+            r["service"], r["risk_label"], first, cur, r["last_scan_label"],
+        ])
         fills = [STATE_COLORS.get(cur)] + [None] * (len(cmp_headers) - 1)
         cmp_fills.append(fills)
     _append_sheet(wb, "03_시점비교", cmp_headers, cmp_rows, cmp_fills)

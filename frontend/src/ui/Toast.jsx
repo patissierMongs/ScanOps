@@ -1,4 +1,5 @@
 import React, { createContext, useCallback, useContext, useRef, useState } from "react";
+import { toastAnnouncement, toastDuration } from "../lib/toast.js";
 
 // 토스트 + 되돌리기(undo) 패턴. push(msg, {type, action:{label,onClick}, timeout}).
 const ToastCtx = createContext(() => {});
@@ -21,7 +22,7 @@ export function ToastProvider({ children }) {
   const push = useCallback(
     (msg, opts = {}) => {
       const id = ++_id;
-      const timeout = opts.timeout ?? (opts.action ? 6000 : 3000);
+      const timeout = toastDuration(opts);
       setItems((xs) => [...xs, { id, msg, type: opts.type || "", action: opts.action || null }]);
       timers.current[id] = setTimeout(() => remove(id), timeout);
       return id;
@@ -32,9 +33,12 @@ export function ToastProvider({ children }) {
   return (
     <ToastCtx.Provider value={push}>
       {children}
-      <div className="toasts">
-        {items.map((t) => (
-          <div key={t.id} className={"toast " + t.type}>
+      <div className="toasts" aria-label="알림">
+        {items.map((t) => {
+          const announcement = toastAnnouncement(t.type);
+          return (
+          <div key={t.id} className={"toast " + t.type}
+               role={announcement.role} aria-live={announcement.live} aria-atomic="true">
             <span>{t.msg}</span>
             {t.action && (
               <button
@@ -49,7 +53,8 @@ export function ToastProvider({ children }) {
               </button>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
     </ToastCtx.Provider>
   );

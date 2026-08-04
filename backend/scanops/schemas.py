@@ -50,7 +50,8 @@ class ScanRunIn(BaseModel):
     preset: str = "quick"          # 옵션 미지정 시 사용(하위호환)
     options: list[str] = []        # 스캔 옵션 키(화이트리스트) — 지정 시 우선
     ports: str = ""                # 포트 스펙(예: 22,80,443 또는 1-1024)
-    nse: list[str] = []            # NSE 스크립트 키(화이트리스트) — 선택 시 --script 조립
+    # 생략(None)=각 워크플로 기본, 빈 목록=[]=명시적으로 끄기, 목록=선택값.
+    nse: list[str] | None = None
     targets: list[str]
     batch_size: int = 256          # 청킹 배치당 호스트 수(중지/이어가기 단위)
     discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
@@ -73,6 +74,9 @@ class ScanOut(BaseModel):
     finished_at: datetime | None
     host_count: int
     port_count: int
+    stages_json: list | None = None
+    failure_code: str = ""
+    failure_message: str = ""
 
 
 class IngestSummary(BaseModel):
@@ -105,6 +109,8 @@ class FindingOut(BaseModel):
     service: str
     product: str
     version: str
+    server: str
+    display_identity: str
     banner: str
     cpe: str
     fingerprint: str = ""      # -sV 미식별 서비스 원시 응답(nse_json 의 fingerprint-strings)
@@ -202,7 +208,9 @@ class RescanOut(BaseModel):
 class RescanRunIn(BaseModel):
     finding_ids: list[int]
     options: list[str] = []
-    ports: str = ""  # 빈값이면 선택 발견의 포트 자동
+    nse: list[str] | None = None
+    # 구버전 클라이언트의 빈 값만 허용. non-empty는 API가 선택 IP:port 고정 계약으로 명시 거절한다.
+    ports: str = ""
 
 
 class RescanRunOut(BaseModel):

@@ -1,0 +1,4 @@
+frontend/index.html text eol=lf
+frontend/dist/*.html text eol=lf
+frontend/dist/assets/*.js text eol=lf
+frontend/dist/assets/*.css text eol=lf

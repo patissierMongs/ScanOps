@@ -5,6 +5,95 @@
 // (원본: TSnmap "Column Builder A.dc.html" unmergeFillWs/detectHeaderRow/computeAutoMap)
 import * as XLSX from "xlsx";
 
+const MAX_SHEET_ROWS = 100000;
+const MAX_SHEET_COLS = 512;
+const MAX_SHEET_CELLS = 2_000_000;
+const MAX_WORKBOOK_BYTES = 25 * 1024 * 1024;
+const MAX_WORKBOOK_EXPANDED_BYTES = 100 * 1024 * 1024;
+const MAX_ZIP_ENTRIES = 10_000;
+
+const sheetLimitError = () =>
+  new Error("시트가 처리 한도(100,000행, 512열, 2,000,000셀)를 초과했습니다");
+
+const validateGrid = (rows, cols) => {
+  if (!Number.isSafeInteger(rows) || !Number.isSafeInteger(cols) || rows < 0 || cols < 0 ||
+      rows > MAX_SHEET_ROWS || cols > MAX_SHEET_COLS || rows * cols > MAX_SHEET_CELLS) {
+    throw sheetLimitError();
+  }
+};
+
+const asBytes = (buf) => {
+  if (buf instanceof Uint8Array) return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  if (ArrayBuffer.isView(buf)) return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  return new Uint8Array(buf);
+};
+
+// XLSX는 ZIP이므로 SheetJS가 압축을 풀기 전에 중앙 디렉터리의 총 해제 크기를 제한한다.
+// XLS/CSV는 ZIP이 아니므로 파일 크기만 확인하고 그대로 통과한다.
+export function validateWorkbookArchive(buf, maxExpandedBytes = MAX_WORKBOOK_EXPANDED_BYTES) {
+  const bytes = asBytes(buf);
+  if (bytes.byteLength > MAX_WORKBOOK_BYTES) {
+    throw new Error("자산 파일은 25MB 이하만 가져올 수 있습니다");
+  }
+  const startsWithLocalHeader = bytes.byteLength >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b &&
+    bytes[2] === 0x03 && bytes[3] === 0x04;
+  if (bytes.byteLength < 22) {
+    if (startsWithLocalHeader) throw new Error("손상된 XLSX ZIP 구조입니다");
+    return bytes;
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const minEocd = Math.max(0, bytes.byteLength - 22 - 0xffff);
+  let eocd = -1;
+  for (let pos = bytes.byteLength - 22; pos >= minEocd; pos--) {
+    if (view.getUint32(pos, true) === 0x06054b50 &&
+        pos + 22 + view.getUint16(pos + 20, true) === bytes.byteLength) {
+      eocd = pos;
+      break;
+    }
+  }
+  if (eocd < 0) {
+    if (startsWithLocalHeader) throw new Error("손상된 XLSX ZIP 구조입니다");
+    return bytes;
+  }
+  // ZIP은 실행파일 등 임의 prefix를 허용하지만 SheetJS도 이를 열 수 있다. 그런 파일을 XLS/CSV로
+  // 오인해 압축 해제 사전검사를 우회하지 않도록 EOCD가 있으면 정규 XLSX 시작 시그니처를 강제한다.
+  if (!startsWithLocalHeader) {
+    throw new Error("XLSX ZIP 앞에 허용되지 않는 데이터가 있습니다");
+  }
+
+  const diskNumber = view.getUint16(eocd + 4, true);
+  const centralDisk = view.getUint16(eocd + 6, true);
+  const diskEntryCount = view.getUint16(eocd + 8, true);
+  const entryCount = view.getUint16(eocd + 10, true);
+  const centralSize = view.getUint32(eocd + 12, true);
+  const centralOffset = view.getUint32(eocd + 16, true);
+  if (diskNumber !== 0 || centralDisk !== 0 || diskEntryCount !== entryCount ||
+      entryCount === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff ||
+      entryCount > MAX_ZIP_ENTRIES || centralOffset + centralSize > eocd) {
+    throw new Error("지원하지 않거나 손상된 XLSX ZIP 구조입니다");
+  }
+
+  let expanded = 0;
+  let pos = centralOffset;
+  const centralEnd = centralOffset + centralSize;
+  for (let i = 0; i < entryCount; i++) {
+    if (pos + 46 > centralEnd || view.getUint32(pos, true) !== 0x02014b50) {
+      throw new Error("손상된 XLSX ZIP 중앙 디렉터리입니다");
+    }
+    expanded += view.getUint32(pos + 24, true);
+    if (expanded > maxExpandedBytes) {
+      throw new Error(`XLSX 압축 해제 크기가 처리 한도(${maxExpandedBytes} bytes)를 초과했습니다`);
+    }
+    const nameLength = view.getUint16(pos + 28, true);
+    const extraLength = view.getUint16(pos + 30, true);
+    const commentLength = view.getUint16(pos + 32, true);
+    pos += 46 + nameLength + extraLength + commentLength;
+  }
+  if (pos !== centralEnd) throw new Error("손상된 XLSX ZIP 중앙 디렉터리입니다");
+  return bytes;
+}
+
 // 컬럼명 자동 매핑 별칭 (정규화 후 부분일치)
 export const ASSET_ALIASES = {
   ip: ["ip", "아이피", "ipaddress", "ipaddr", "ip주소"],
@@ -41,12 +130,24 @@ const colLetter = (n) => {
 
 // 워크북 시트 → 병합 해제된 AoA. raw:false 로 표시문자열, defval 로 빈칸 채움.
 export function unmergeFillWs(ws) {
+  const merges = ws?.["!merges"] || [];
+  if (ws?.["!ref"]) {
+    const range = XLSX.utils.decode_range(ws["!ref"]);
+    validateGrid(range.e.r + 1, range.e.c + 1);
+  }
+  let mergedCells = 0;
+  merges.forEach((rng) => {
+    if (!rng?.s || !rng?.e || rng.s.r < 0 || rng.s.c < 0 ||
+        rng.e.r < rng.s.r || rng.e.c < rng.s.c) throw sheetLimitError();
+    validateGrid(rng.e.r + 1, rng.e.c + 1);
+    mergedCells += (rng.e.r - rng.s.r + 1) * (rng.e.c - rng.s.c + 1);
+    if (mergedCells > MAX_SHEET_CELLS) throw sheetLimitError();
+  });
   const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
   const width = aoa.reduce((m, r) => Math.max(m, (r || []).length), 0);
   aoa.forEach((r) => {
     while (r.length < width) r.push("");
   });
-  const merges = ws["!merges"] || [];
   merges.forEach((rng) => {
     const v = (aoa[rng.s.r] || [])[rng.s.c];
     for (let r = rng.s.r; r <= rng.e.r; r++)
@@ -126,7 +227,8 @@ export function computeAutoMap(cols) {
 
 // 파일 ArrayBuffer → {wb, sheetNames}
 export function readWorkbook(buf) {
-  const wb = XLSX.read(new Uint8Array(buf), { type: "array", cellDates: true });
+  const bytes = validateWorkbookArchive(buf);
+  const wb = XLSX.read(bytes, { type: "array", cellDates: true });
   if (!wb.SheetNames || !wb.SheetNames.length) throw new Error("시트를 찾지 못했습니다");
   return { wb, sheetNames: wb.SheetNames.slice() };
 }
@@ -160,6 +262,91 @@ export const ASSET_KNOWN_FIELDS = [
   { key: "note", label: "비고" },
 ];
 const KNOWN_KEYS = new Set(ASSET_KNOWN_FIELDS.map((f) => f.key));
+const ASSET_LABELS = new Map(ASSET_KNOWN_FIELDS.map((f) => [f.key, f.label]));
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+
+const trimmed = (value) => typeof value === "string" ? value.trim() : value;
+
+// 백엔드의 model_fields_set + extra key merge 규칙과 같은 순수 함수.
+// 매핑되지 않은 핵심 필드는 유지하고, 매핑된 빈칸 및 빈 extra 값만 삭제/초기화한다.
+export function mergeAssetRecord(current, record) {
+  const merged = current
+    ? { ...current, extra: { ...(current.extra || {}) } }
+    : {
+        ip: String(record.ip || "").trim(), hostname: "", dept: "", owner: "",
+        contact: "", asset_no: "", note: "", extra: {},
+      };
+  ASSET_KNOWN_FIELDS.forEach(({ key }) => {
+    if (hasOwn(record, key)) merged[key] = trimmed(record[key]);
+  });
+  if (hasOwn(record, "extra")) {
+    Object.entries(record.extra || {}).forEach(([rawKey, rawValue]) => {
+      const key = String(rawKey).trim();
+      if (!key) return;
+      const value = trimmed(rawValue);
+      if (value == null || value === "") delete merged.extra[key];
+      else merged.extra[key] = value;
+    });
+  }
+  return merged;
+}
+
+const displayValue = (value) => {
+  if (value == null) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+};
+
+const sameValue = (a, b) => JSON.stringify(a ?? "") === JSON.stringify(b ?? "");
+
+// 중복 IP도 백엔드와 같은 순서로 접어 최종 업서트 결과 하나만 비교한다.
+export function diffAssetRecords(records, assets) {
+  const existing = new Map();
+  (assets || []).forEach((asset) => {
+    const ip = String(asset.ip || "");
+    const previous = existing.get(ip);
+    if (!previous || Number(asset.id || 0) >= Number(previous.id || 0)) existing.set(ip, asset);
+  });
+
+  const finalByIp = new Map();
+  const order = [];
+  const seen = new Set();
+  (records || []).forEach((record) => {
+    const ip = String(record.ip || "").trim();
+    if (!ip) return;
+    if (!seen.has(ip)) order.push(ip);
+    seen.add(ip);
+    const current = finalByIp.get(ip) || existing.get(ip) || null;
+    finalByIp.set(ip, mergeAssetRecord(current, { ...record, ip }));
+  });
+
+  const result = { neu: [], changed: [], same: 0, missing: 0 };
+  order.forEach((ip) => {
+    const current = existing.get(ip);
+    const final = finalByIp.get(ip);
+    if (!current) {
+      result.neu.push(final);
+      return;
+    }
+    const changes = [];
+    ASSET_KNOWN_FIELDS.forEach(({ key }) => {
+      if (!sameValue(current[key], final[key])) {
+        changes.push({ label: ASSET_LABELS.get(key), old: displayValue(current[key]), neu: displayValue(final[key]) });
+      }
+    });
+    const extraKeys = new Set([...Object.keys(current.extra || {}), ...Object.keys(final.extra || {})]);
+    extraKeys.forEach((key) => {
+      const oldHas = hasOwn(current.extra || {}, key);
+      const newHas = hasOwn(final.extra || {}, key);
+      if (oldHas !== newHas || !sameValue(current.extra?.[key], final.extra?.[key])) {
+        changes.push({ label: key, old: displayValue(current.extra?.[key]), neu: displayValue(final.extra?.[key]) });
+      }
+    });
+    if (changes.length) result.changed.push({ ip, changes });
+    else result.same += 1;
+  });
+  result.missing = (assets || []).filter((asset) => !seen.has(String(asset.ip || ""))).length;
+  return result;
+}
 
 // 매핑 + (선택) 커스텀 컬럼 → 백엔드 Asset 임포트용 레코드 배열(ip 필수).
 // mapping[field] = 컬럼번호 또는 {col,sep,part}. fields = 화면에 표시된 필드 정의([{key,label,custom}]).
@@ -172,21 +359,21 @@ export function buildAssetRecords(cols, mapping, extraCols = [], fields = ASSET_
   for (let i = 0; i < n; i++) {
     const ip = resolveCell(cols, mapping.ip, i);
     if (!ip) continue;
-    const rec = { ip, asset_no: "", dept: "", owner: "", contact: "", hostname: "", extra: {} };
+    const rec = { ip, extra: {} };
     for (const fld of fields) {
       if (fld.key === "ip" || mapping[fld.key] == null) continue;
       const v = resolveCell(cols, mapping[fld.key], i);
       if (fld.custom) {
-        if (v) rec.extra[fld.label] = v;          // 사용자 정의 필드 → extra(JSON)
+        rec.extra[fld.label] = v;                 // 매핑된 빈칸은 해당 extra 키 삭제
       } else if (KNOWN_KEYS.has(fld.key)) {
-        rec[fld.key] = v;                          // 알려진 Asset 컬럼
+        rec[fld.key] = v;                         // 매핑된 빈칸은 해당 Asset 필드 초기화
       }
     }
     for (const idx of extraCols) {
       const col = cols[idx];
       if (!col) continue;
       const v = cleanVal(col.values[i]);
-      if (v) rec.extra[col.header] = v;
+      rec.extra[col.header] = v;
     }
     out.push(rec);
   }

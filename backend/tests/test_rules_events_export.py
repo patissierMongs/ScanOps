@@ -1,4 +1,6 @@
 """신규 엔드포인트 검증 — 위험규칙/전역이력/선택컬럼 내보내기/재스캔명령."""
+import pytest
+
 from tests.conftest import make_user, token_for
 
 XML = "tests/fixtures/sample_scan.xml"
@@ -237,6 +239,82 @@ def test_rescan_command_empty(client):
     assert r.json()["command"] == ""
 
 
+def test_rescan_endpoints_reject_imported_leading_dash_host(client, monkeypatch):
+    from scanops.api import findings as findings_api
+
+    h = _auth(client)
+    xml = (
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="-oX/tmp/rescan.xml" addrtype="ipv4"/><ports>'
+        '<port protocol="tcp" portid="80"><state state="open"/>'
+        '<service name="http"/></port></ports></host></nmaprun>'
+    ).encode()
+    imported = client.post(
+        "/api/scans/import", headers=h, files={"file": ("host.xml", xml, "text/xml")},
+    )
+    assert imported.status_code == 200, imported.text
+    finding_id = client.get("/api/findings", headers=h).json()[0]["id"]
+
+    monkeypatch.setattr(
+        findings_api.threading, "Thread",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid imported target started a worker")
+        ),
+    )
+
+    for endpoint in ("/api/findings/rescan-command", "/api/findings/rescan"):
+        response = client.post(endpoint, headers=h, json={"finding_ids": [finding_id]})
+        assert response.status_code == 400
+        assert "허용되지 않는 타겟" in response.json()["detail"]
+    assert len(client.get("/api/scans", headers=h).json()) == 1  # import 스캔만 존재
+
+
+def test_rescan_rejects_port_override_before_engine_or_scan_record(client, monkeypatch):
+    from scanops.api import findings as findings_api
+
+    h = _auth(client)
+    finding = _seed_findings(client, h)[0]
+    scans_before = client.get("/api/scans", headers=h).json()
+    monkeypatch.setattr(
+        findings_api.engine_runner, "ensure_available",
+        lambda: (_ for _ in ()).throw(AssertionError("port override reached engine check")),
+    )
+
+    response = client.post("/api/findings/rescan", headers=h, json={
+        "finding_ids": [finding["id"]], "ports": "443",
+    })
+
+    assert response.status_code == 400
+    assert "선택한 발견의 IP:포트만" in response.json()["detail"]
+    assert client.get("/api/scans", headers=h).json() == scans_before
+
+
+@pytest.mark.parametrize("extra", [
+    {"options": ["not-a-scan-option"]},
+    {"options": ["syn"]},
+    {"nse": ["not-an-nse-script"]},
+])
+def test_rescan_rejects_unknown_options_before_engine_or_scan_record(
+    client, monkeypatch, extra,
+):
+    from scanops.api import findings as findings_api
+
+    h = _auth(client)
+    finding = _seed_findings(client, h)[0]
+    scans_before = client.get("/api/scans", headers=h).json()
+    monkeypatch.setattr(
+        findings_api.engine_runner, "ensure_available",
+        lambda: (_ for _ in ()).throw(AssertionError("invalid rescan option reached engine check")),
+    )
+
+    response = client.post("/api/findings/rescan", headers=h, json={
+        "finding_ids": [finding["id"]], **extra,
+    })
+
+    assert response.status_code == 400
+    assert client.get("/api/scans", headers=h).json() == scans_before
+
+
 # ---- 백그라운드 엔진 재스캔(Stage3-only) ----
 
 def test_rescan_run_starts_engine_job(client, monkeypatch):
@@ -252,7 +330,10 @@ def test_rescan_run_starts_engine_job(client, monkeypatch):
     h = _auth(client)
     findings = _seed_findings(client, h)
     ids = [f["id"] for f in findings[:2]]
-    r = client.post("/api/findings/rescan", headers=h, json={"finding_ids": ids})
+    r = client.post("/api/findings/rescan", headers=h, json={
+        "finding_ids": ids,
+        "nse": ["http-server-header"],
+    })
     assert r.status_code == 200, r.text
     out = r.json()
     assert out["scan_id"] >= 1
@@ -263,6 +344,7 @@ def test_rescan_run_starts_engine_job(client, monkeypatch):
     assert spec["rescan_units"]                           # 발견(IP:포트)별 개별 단위
     assert all({"ip", "port", "proto"} <= set(u) for u in spec["rescan_units"])
     assert spec["stages"]["service"]["confirm"] is True   # 2-pass 정밀 확인
+    assert spec["stages"]["service"]["nse"] == ["http-server-header"]
     assert spec["scanops"]["scope_keys"]                  # 닫힘 판정 한정 키
 
 

@@ -28,6 +28,22 @@ def test_build_strips_user_output_flags():
     assert argv.count("-oA") == 1
 
 
+@pytest.mark.parametrize("flag", [
+    "-oX/tmp/escaped.xml", "-oNout.txt", "-oG=out.gnmap", "-oSout.script", "-oAbase",
+])
+def test_build_strips_compact_user_output_flags(flag):
+    argv, _ = build_command_raw("nmap", f"-sV {flag} --append-output 10.0.0.1", Path("/s/scan_2"))
+    assert flag not in argv
+    assert "--append-output" not in argv
+    assert argv.count("-oA") == 1
+
+
+@pytest.mark.parametrize("resume", ["--resume old.nmap", "--resume=old.nmap"])
+def test_build_rejects_user_resume(resume):
+    with pytest.raises(ValueError, match="--resume"):
+        build_command_raw("nmap", f"{resume} 10.0.0.1", Path("/s/scan_2"))
+
+
 def test_build_rejects_shell_metachars():
     for bad in ["nmap 10.0.0.1; rm -rf /", "nmap 10.0.0.1 | nc x 1", "nmap `id`", "nmap $(whoami)"]:
         with pytest.raises(ValueError):

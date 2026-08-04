@@ -150,6 +150,7 @@ DEFAULT_KEYS = [o["key"] for o in SCAN_OPTIONS if o["default"]]
 
 # 포트 스펙: 숫자/범위/콤마 + T:/U: 프로토콜 접두만 허용
 _PORTS_RE = re.compile(r"^[0-9TUtu:,\-\s]+$")
+_PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
 
 
 def validate_keys(keys: list[str]) -> list[str]:
@@ -169,7 +170,9 @@ def flags_for(keys: list[str]) -> list[str]:
     return out
 
 
-def validate_nse(keys: list[str]) -> list[str]:
+def validate_nse(keys: list[str] | None) -> list[str] | None:
+    if keys is None:
+        return None
     bad = [k for k in keys if k not in _NSE_KEYS]
     if bad:
         raise ValueError(f"알 수 없는 NSE 스크립트: {bad}")
@@ -197,6 +200,22 @@ def validate_ports(ports: str) -> str:
     ports = (ports or "").strip()
     if not ports:
         return ""
-    if not _PORTS_RE.match(ports):
+    if not _PORTS_RE.fullmatch(ports):
         raise ValueError("허용되지 않는 포트 형식입니다. (예: 22,80,443 또는 1-1024)")
-    return ports.replace(" ", "")
+    ports = ports.replace(" ", "")
+    for segment in ports.split(","):
+        if not segment:
+            raise ValueError("포트 목록에 빈 항목이 있습니다(콤마 위치 확인).")
+        body = segment
+        if ":" in segment:
+            prefix, body = segment.split(":", 1)
+            if prefix.upper() not in ("T", "U"):
+                raise ValueError(f"알 수 없는 프로토콜 접두사: {segment!r}")
+        if not body or not _PORT_BODY_RE.fullmatch(body):
+            raise ValueError(f"잘못된 포트/범위: {segment!r}")
+        numbers = [int(value) for value in re.findall(r"\d+", body)]
+        if any(not 1 <= value <= 65535 for value in numbers):
+            raise ValueError(f"포트는 1-65535 범위여야 합니다: {segment!r}")
+        if "-" in body and len(numbers) == 2 and numbers[0] > numbers[1]:
+            raise ValueError(f"포트 범위가 거꾸로입니다(시작>끝): {segment!r}")
+    return ports

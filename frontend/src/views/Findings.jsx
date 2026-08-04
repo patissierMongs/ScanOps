@@ -4,7 +4,11 @@ import { downloadFile } from "../lib/download.js";
 import { useToast } from "../ui/Toast.jsx";
 import ColumnBuilder from "../ui/ColumnBuilder.jsx";
 import ScanOptions from "../ui/ScanOptions.jsx";
-import { COLUMN_MAP, PRESETS, DEFAULT_PRESET_ID, cellValue } from "../lib/columns.js";
+import {
+  COLUMN_MAP, PRESETS, DEFAULT_PRESET_ID, cellValue,
+  primaryServiceIdentity, secondaryServiceIdentity,
+} from "../lib/columns.js";
+import { deadlinePatchValue } from "../lib/findingPatch.js";
 import { dday, STATUS_CLASS, RISK_LABEL } from "../lib/format.js";
 
 const COLS_KEY = "scanops_cols";
@@ -151,8 +155,11 @@ export default function Findings({ user }) {
 
       <div className="panel">
         <div className="row" style={{ marginBottom: 12 }}>
-          <input style={{ flex: 1, minWidth: 180 }} placeholder="검색 (서비스/호스트명)" value={q}
-                 onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} />
+          <input style={{ flex: 1, minWidth: 180 }} placeholder="검색 (Server/서비스/호스트명)" value={q}
+                 onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => {
+                   if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                   if (e.key === "Enter") load();
+                 }} />
           <select value={risk} onChange={(e) => setRisk(e.target.value)}>
             <option value="">위험 전체</option>
             <option value="banned">금지</option>
@@ -287,7 +294,7 @@ function RescanDrawer({ targets, onClose, onDone, toast }) {
 
   function start() {
     setPhase("running");
-    api("/findings/rescan", { method: "POST", json: { finding_ids: ids, options: opt.options, ports: opt.ports } })
+    api("/findings/rescan", { method: "POST", json: { finding_ids: ids, options: opt.options, nse: opt.nse } })
       .then((r) => { setScanId(r.scan_id); poll(r.scan_id); })
       .catch((e) => { toast(e.message, { type: "err" }); setPhase("failed"); });
   }
@@ -314,7 +321,7 @@ function RescanDrawer({ targets, onClose, onDone, toast }) {
         {/* 옵션 + 백그라운드 실행(콘솔이 대상망에 직접 닿을 때) */}
         {phase !== "done" && (
           <>
-            <ScanOptions targets={hosts} portsAuto={portsAuto} onState={setOpt} />
+            <ScanOptions targets={hosts} portsAuto={portsAuto} fixedTargetPorts onState={setOpt} />
             <div className="row" style={{ marginTop: 10 }}>
               <button className="primary" disabled={phase === "running"} onClick={start}>
                 {phase === "running" ? "재스캔 중…" : "백그라운드 재스캔 시작 (조치 검증)"}
@@ -346,7 +353,9 @@ function RescanDrawer({ targets, onClose, onDone, toast }) {
                           ? <span className="pill low">닫힘 · 정상처리</span>
                           : <span className="pill high">여전히 열림{cur.reopened ? " · 재발" : ""}</span>}
                       </td>
-                      <td className="muted">{cur ? `${cur.service || ""} ${cur.version || ""}`.trim() || "—" : "—"}</td>
+                      <td>
+                        {cur ? <ServiceIdentity finding={cur} /> : <span className="muted">—</span>}
+                      </td>
                     </tr>
                   );
                 })}
@@ -385,6 +394,16 @@ function renderCell(finding, key, displayModes) {
   return <span>{val}</span>;
 }
 
+function ServiceIdentity({ finding }) {
+  const secondary = secondaryServiceIdentity(finding);
+  return (
+    <span>
+      <span>{primaryServiceIdentity(finding)}</span>
+      {secondary && <span className="muted" style={{ marginLeft: 5 }}>({secondary})</span>}
+    </span>
+  );
+}
+
 function Drawer({ data, canEdit, onClose, onSaved, toast }) {
   const { finding, events, evidence = [] } = data;
   const [status, setStatus] = useState(finding.status);
@@ -392,8 +411,7 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
   const [note, setNote] = useState(finding.manual_note || "");
 
   function save() {
-    const body = { status };
-    if (deadline) body.deadline = deadline + "T00:00:00";
+    const body = { status, deadline: deadlinePatchValue(deadline) };
     body.manual_note = note;
     api(`/findings/${finding.id}`, { method: "PATCH", json: body })
       .then(() => { toast("저장됨"); onSaved(); })
@@ -405,7 +423,7 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
       <div className="scrim" onClick={onClose} />
       <div className="drawer">
         <h3>{finding.host_ip}:{finding.port}/{finding.proto}</h3>
-        <div className="muted" style={{ marginBottom: 10 }}>{finding.service} {finding.version}</div>
+        <div style={{ marginBottom: 10 }}><ServiceIdentity finding={finding} /></div>
         <div className="row" style={{ marginBottom: 8 }}>
           <span className={"pill " + (finding.risk_level || "info")}>{RISK_LABEL[finding.risk_level]}</span>
           {finding.reopened ? <span className="tag" style={{ color: "var(--high)" }}>재발</span> : null}

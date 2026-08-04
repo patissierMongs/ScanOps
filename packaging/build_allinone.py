@@ -27,6 +27,58 @@ PREFIX = "ScanOps"
 
 SKIP_DIR = {".venv", ".venv312", ".venv313", "__pycache__", ".pytest_cache", "tests", ".vite"}
 SKIP_EXT = {".pyc", ".pyo", ".log"}
+FORBIDDEN_EXACT_NAMES = {
+    "initial_admin.txt", "id_rsa", "id_ed25519", ".npmrc", ".pypirc",
+    "client-secret.md",
+}
+FORBIDDEN_DIR_NAMES = {".ssh", "secrets", "private"}
+FORBIDDEN_DATABASE_MARKERS = (".db", ".sqlite", ".sqlite3")
+FORBIDDEN_KEY_MARKERS = (".key", ".pem", ".p12", ".pfx")
+CREDENTIAL_MARKERS = (
+    "token", "credential", "secret", "api_key", "api-key", "private_key",
+    "private-key", "service_account", "service-account",
+)
+CREDENTIAL_ARTIFACT_SUFFIXES = {
+    "", ".bak", ".cfg", ".conf", ".csv", ".ini", ".json", ".toml", ".txt",
+    ".yaml", ".yml", ".credential", ".credentials", ".token",
+}
+
+
+def _has_artifact_marker(name: str, markers: tuple[str, ...]) -> bool:
+    return any(
+        name.endswith(marker) or f"{marker}-" in name or f"{marker}." in name
+        for marker in markers
+    )
+
+
+def is_forbidden_source_path(path: Path) -> bool:
+    """Reject local runtime data and credential artifacts from release sources."""
+    parts = tuple(part.lower() for part in path.parts)
+    if any(part == "data" or part.startswith(".venv") or part.startswith(".env")
+           or part in FORBIDDEN_DIR_NAMES
+           for part in parts):
+        return True
+    if not parts:
+        return False
+    name = parts[-1]
+    if name in FORBIDDEN_EXACT_NAMES:
+        return True
+    if any(marker in name for marker in FORBIDDEN_DATABASE_MARKERS):
+        return True
+    if _has_artifact_marker(name, FORBIDDEN_KEY_MARKERS):
+        return True
+    return (
+        Path(name).suffix.lower() in CREDENTIAL_ARTIFACT_SUFFIXES
+        and any(marker in name for marker in CREDENTIAL_MARKERS)
+    )
+
+
+def _ignored_source_names(directory: str, names: list[str]) -> set[str]:
+    base = Path(directory)
+    return {
+        name for name in names
+        if is_forbidden_source_path((base / name).relative_to(ROOT))
+    }
 
 
 def log(msg: str) -> None:
@@ -46,21 +98,26 @@ def download_embed() -> Path:
 
 
 def copy_app(app: Path) -> None:
-    # backend 소스(테스트/venv/캐시 제외)
-    for p in (ROOT / "backend").rglob("*"):
-        if p.is_dir():
-            continue
-        rel = p.relative_to(ROOT)
-        if any(part in SKIP_DIR for part in rel.parts) or p.suffix in SKIP_EXT:
-            continue
-        dst = app / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(p, dst)
+    # backend + vendored scan engine source (tests/venv/cache excluded)
+    for top in ("backend", "engine"):
+        for p in (ROOT / top).rglob("*"):
+            if p.is_dir():
+                continue
+            rel = p.relative_to(ROOT)
+            if (is_forbidden_source_path(rel)
+                    or any(part in SKIP_DIR for part in rel.parts)
+                    or p.suffix in SKIP_EXT):
+                continue
+            dst = app / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, dst)
     # 프론트 빌드 산출물
     dist = ROOT / "frontend" / "dist"
     if not (dist / "index.html").exists():
         sys.exit("frontend/dist not built. Run: cd frontend && npm run build")
-    shutil.copytree(dist, app / "frontend" / "dist")
+    shutil.copytree(
+        dist, app / "frontend" / "dist", ignore=_ignored_source_names,
+    )
     # 문서
     for f in ("README.md", "DESIGN.md", "REBUILD.md", "HANDOFF.md", "THIRD_PARTY_NOTICES.md"):
         if (ROOT / f).exists():
@@ -101,11 +158,11 @@ def place_python(app: Path, embed_zip: Path) -> None:
     # ._pth 에 site / backend 경로 추가(임베디드는 PYTHONPATH 무시 → ._pth 로 주입).
     pth = next(pyd.glob("python*._pth"))
     lines = pth.read_text(encoding="ascii").splitlines()
-    for extra in ("..\\site", "..\\..\\backend"):
+    for extra in ("..\\site", "..\\..\\backend", "..\\..\\engine"):
         if extra not in lines:
             lines.append(extra)
     pth.write_text("\n".join(lines) + "\n", encoding="ascii")
-    log(f"patched {pth.name}: + ..\\site + ..\\..\\backend")
+    log(f"patched {pth.name}: + site + backend + engine")
 
 
 def write_launcher(app: Path) -> None:

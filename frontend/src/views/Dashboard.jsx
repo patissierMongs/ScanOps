@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { downloadFile } from "../lib/download.js";
 import { useToast } from "../ui/Toast.jsx";
 import { RISK_LABEL } from "../lib/format.js";
+import { scanStatus } from "../lib/scanStatus.js";
 
 const RISK_ORDER = ["banned", "high", "medium", "low", "info"];
 
@@ -75,14 +76,14 @@ export default function Dashboard({ onNav }) {
       <div className="panel">
         <h3>최근 스캔</h3>
         {d.recent_scans.length === 0 ? (
-          <div className="muted">스캔 이력 없음 — <a className="linkbtn" onClick={() => onNav("scans")}>스캔 실행/가져오기</a></div>
+          <div className="muted">스캔 이력 없음 — <button type="button" className="linkbtn inline-action" onClick={() => onNav("scans")}>스캔 실행/가져오기</button></div>
         ) : (
-          <table className="tbl">
+          <table className="tbl recent-scans-table">
             <thead><tr><th>이름</th><th>상태</th><th>호스트</th><th>포트</th></tr></thead>
             <tbody>
               {d.recent_scans.map((s) => (
                 <tr key={s.id}>
-                  <td>{s.name}</td><td>{s.status}</td>
+                  <td>{s.name}</td><td><span className={`pill ${scanStatus(s.status).cls}`}>{scanStatus(s.status).label}</span></td>
                   <td className="mono">{s.host_count}</td><td className="mono">{s.port_count}</td>
                 </tr>
               ))}

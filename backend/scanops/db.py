@@ -47,11 +47,31 @@ def init_db() -> None:
 def _migrate() -> None:
     """create_all 이 못 하는 기존 DB 보강(SQLite). idempotent."""
     with _engine.begin() as conn:
+        user_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
+        if "auth_version" not in user_cols:
+            conn.exec_driver_sql("ALTER TABLE users ADD COLUMN auth_version INTEGER DEFAULT 0")
         cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(findings)").fetchall()}
         if "owner" not in cols:  # 자산대장 담당자명 전파용 컬럼
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN owner VARCHAR(128) DEFAULT ''")
         if "reopened" not in cols:  # 재발 태그 컬럼
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN reopened INTEGER DEFAULT 0")
+        server_added = "server" not in cols
+        if server_added:  # NSE HTTP Server 구조화 값
+            conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN server VARCHAR(256) DEFAULT ''")
+            import json
+            from .scanning.nmap_parse import extract_server
+
+            for finding_id, raw_nse in conn.exec_driver_sql(
+                "SELECT id, nse_json FROM findings WHERE nse_json IS NOT NULL"
+            ).fetchall():
+                try:
+                    nse = json.loads(raw_nse) if isinstance(raw_nse, str) else raw_nse
+                except (TypeError, ValueError):
+                    continue
+                if server := extract_server(nse):
+                    conn.exec_driver_sql(
+                        "UPDATE findings SET server=? WHERE id=?", (server, finding_id)
+                    )
         # 예외승인 폐지 → 정상처리로 통합
         conn.exec_driver_sql("UPDATE findings SET status='정상처리' WHERE status='예외승인'")
         # 재발 상태 폐지 → 미조치 + reopened 태그로 전환
@@ -60,6 +80,10 @@ def _migrate() -> None:
         sc_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(scan_runs)").fetchall()}
         if "stages_json" not in sc_cols:
             conn.exec_driver_sql("ALTER TABLE scan_runs ADD COLUMN stages_json JSON")
+        if "failure_code" not in sc_cols:
+            conn.exec_driver_sql("ALTER TABLE scan_runs ADD COLUMN failure_code VARCHAR(64) DEFAULT ''")
+        if "failure_message" not in sc_cols:
+            conn.exec_driver_sql("ALTER TABLE scan_runs ADD COLUMN failure_message VARCHAR(256) DEFAULT ''")
 
 
 def get_db() -> Iterator[Session]:

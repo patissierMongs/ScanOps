@@ -21,11 +21,18 @@ def current_user(
     db: Session = Depends(get_db),
 ) -> User:
     token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
-    uid = verify_token(token, _SECRET)
-    if uid is None:
+    verified = verify_token(token, _SECRET)
+    if verified is None:
         raise HTTPException(status_code=401, detail="인증이 필요합니다.")
+    uid, token_version = verified
     user = db.get(User, uid)
-    if user is None or not user.is_active:
+    if user is None:
+        raise HTTPException(status_code=401, detail="유효하지 않은 사용자입니다.")
+    if not user.is_active or user.auth_version != token_version:
+        # Import here to avoid the audit router's dependency on require_role creating a cycle.
+        from .audit import record_once
+        reason = "inactive" if not user.is_active else "auth_version_mismatch"
+        record_once(db, user, "TOKEN_REJECTED", target=user.username, detail=reason, ok=False)
         raise HTTPException(status_code=401, detail="유효하지 않은 사용자입니다.")
     return user
 

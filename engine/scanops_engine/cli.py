@@ -12,6 +12,7 @@ from pathlib import Path
 from . import nmaprun
 from .events import EventSink
 from .pipeline import Pipeline
+from .process_control import start_parent_guard
 from .spec import JobSpec
 
 
@@ -38,6 +39,7 @@ def _build_spec(a) -> JobSpec:
 
 
 def main(argv=None) -> int:
+    start_parent_guard()
     ap = argparse.ArgumentParser("scanops_engine", description="ScanOps 단계분리 포트스캔 엔진")
     ap.add_argument("--spec", help="job spec JSON 경로")
     ap.add_argument("--target", action="append", help="타겟(반복 가능)")
@@ -61,7 +63,7 @@ def main(argv=None) -> int:
     except (ValueError, OSError, json.JSONDecodeError) as e:
         print(f"spec 오류: {e}", file=sys.stderr)
         return 2
-    if not spec.targets and not spec.targets_ports:
+    if not spec.targets and not spec.targets_ports and not spec.rescan_units:
         print("타겟이 없습니다 (--target 또는 --spec).", file=sys.stderr)
         return 2
     nmap = nmaprun.find_nmap(a.nmap)

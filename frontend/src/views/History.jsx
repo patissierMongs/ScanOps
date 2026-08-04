@@ -9,13 +9,16 @@ const TYPE_META = {
   REOPENED: { label: "재발", cls: "high" },
   SERVICE_CHANGED: { label: "서비스 변경", cls: "medium" },
   VERSION_CHANGED: { label: "버전 변경", cls: "medium" },
+  SERVER_CHANGED: { label: "Server 변경", cls: "medium" },
   STATUS_CHANGE: { label: "상태 변경", cls: "info" },
   ASSIGN: { label: "담당 배정", cls: "info" },
   DEADLINE: { label: "마감 설정", cls: "info" },
   NOTE: { label: "메모", cls: "info" },
   EXCEPTION: { label: "예외", cls: "info" },
 };
-const FILTERS = ["", "NEW_OPEN", "CLOSED", "REOPENED", "SERVICE_CHANGED", "VERSION_CHANGED", "STATUS_CHANGE"];
+const FILTERS = [
+  "", "NEW_OPEN", "CLOSED", "REOPENED", "SERVICE_CHANGED", "VERSION_CHANGED", "SERVER_CHANGED", "STATUS_CHANGE",
+];
 
 export default function History() {
   const [feed, setFeed] = useState({ total: 0, items: [] });
@@ -43,7 +46,10 @@ export default function History() {
             {FILTERS.filter(Boolean).map((t) => <option key={t} value={t}>{TYPE_META[t]?.label || t}</option>)}
           </select>
           <input placeholder="호스트 IP 필터" value={host} onChange={(e) => setHost(e.target.value)}
-                 onKeyDown={(e) => e.key === "Enter" && load()} />
+                 onKeyDown={(e) => {
+                   if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                   if (e.key === "Enter") load();
+                 }} />
           <button onClick={load}>적용</button>
           <span className="muted" style={{ marginLeft: "auto" }}>총 {feed.total}건</span>
         </div>

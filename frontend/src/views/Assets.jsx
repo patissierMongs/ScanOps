@@ -4,10 +4,11 @@ import { useToast } from "../ui/Toast.jsx";
 import {
   readWorkbook, unmergeFillWs, detectHeaderRow, assetColumnsFrom,
   computeAutoMap, buildAssetRecords, normalizeSpec, normHeader,
-  ASSET_KNOWN_FIELDS, defaultMapFields,
+  ASSET_KNOWN_FIELDS, defaultMapFields, diffAssetRecords,
 } from "../lib/assetImport.js";
 
 const MAP_PRESET_KEY = "scanops_asset_map_presets";
+const MAX_ASSET_FILE_BYTES = 25 * 1024 * 1024;
 const loadPresets = () => { try { return JSON.parse(localStorage.getItem(MAP_PRESET_KEY)) || []; } catch { return []; } };
 
 export default function Assets({ user }) {
@@ -39,13 +40,17 @@ export default function Assets({ user }) {
     const file = e.target.files && e.target.files[0];
     e.target.value = "";
     if (!file) return;
+    if (file.size > MAX_ASSET_FILE_BYTES) {
+      toast("자산 파일은 25MB 이하만 가져올 수 있습니다", { type: "err" });
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       try {
         const { wb, sheetNames } = readWorkbook(reader.result);
         selectSheet(wb, sheetNames, sheetNames[0]);
-      } catch {
-        toast("엑셀 파싱 실패 — .xlsx/.xls/.csv 확인", { type: "err" });
+      } catch (error) {
+        toast(error.message || "엑셀 파싱 실패 — .xlsx/.xls/.csv 확인", { type: "err" });
       }
     };
     reader.onerror = () => toast("파일을 읽지 못했습니다", { type: "err" });
@@ -165,35 +170,8 @@ export default function Assets({ user }) {
   const records = imp ? buildAssetRecords(imp.cols, imp.mapping, imp.extraCols, imp.fields) : [];
   const preview = records[0] || null;
 
-  // ---- 커밋 전 변경 미리보기(diff) — 현재 대장과 비교(신규/수정/동일/대장에만). 업서트 의미와 동일하게
-  //      '비어있지 않고 값이 다른' 입력만 변경으로 센다. 기존 가져오기 동작은 그대로(여기선 표시만). ----
-  const CMP = [["hostname", "호스트명"], ["dept", "부서"], ["owner", "담당자"], ["contact", "연락처"], ["asset_no", "자산번호"], ["note", "비고"]];
-  const existingByIp = useMemo(() => { const m = {}; assets.forEach((a) => { m[a.ip] = a; }); return m; }, [assets]);
-  const diff = useMemo(() => {
-    const res = { neu: [], changed: [], same: 0, missing: 0 };
-    const seen = new Set();
-    records.forEach((r) => {
-      const ip = (r.ip || "").trim();
-      if (!ip) return;
-      seen.add(ip);
-      const cur = existingByIp[ip];
-      if (!cur) { res.neu.push(r); return; }
-      const changes = [];
-      CMP.forEach(([f, label]) => {
-        const nv = (r[f] ?? "").toString().trim();
-        const ov = (cur[f] ?? "").toString().trim();   // 기존값도 trim — 공백차만으로 오탐 방지
-        if (nv && nv !== ov) changes.push({ label, old: cur[f] || "", neu: nv });
-      });
-      Object.entries(r.extra || {}).forEach(([k, v]) => {
-        const nv = String(v).trim();
-        const ov = String(cur.extra ? (cur.extra[k] ?? "") : "").trim();
-        if (nv && nv !== ov) changes.push({ label: k, old: ov, neu: nv });
-      });
-      if (changes.length) res.changed.push({ ip: r.ip, changes }); else res.same += 1;
-    });
-    res.missing = assets.filter((a) => !seen.has(a.ip)).length;
-    return res;
-  }, [records, existingByIp, assets]);
+  // ---- 커밋 전 변경 미리보기(diff) — 실제 bulk 업서트와 같은 merge/clear 규칙. ----
+  const diff = useMemo(() => diffAssetRecords(records, assets), [records, assets]);
   const dataRows = imp ? (imp.cols[0]?.values.length || 0) : 0;
   const skipped = imp ? Math.max(0, dataRows - records.length) : 0;
 
@@ -305,7 +283,9 @@ export default function Assets({ user }) {
                     `ip       : ${preview.ip}`,
                     ...imp.fields
                       .filter((f) => f.key !== "ip" && !f.custom)
-                      .map((f) => `${f.key.padEnd(9)}: ${preview[f.key] || "—"}`),
+                      .map((f) => Object.prototype.hasOwnProperty.call(preview, f.key)
+                        ? `${f.key.padEnd(9)}: ${preview[f.key] || "— (초기화)"}`
+                        : `${f.key.padEnd(9)}: 미매핑 (기존값 유지)`),
                     `extra    : ${Object.keys(preview.extra).length ? JSON.stringify(preview.extra) : "{}"}`,
                   ].join("\n")}
                 </div>
@@ -336,7 +316,7 @@ export default function Assets({ user }) {
                           {c.changes.map((ch, i) => (
                             <span key={i} style={{ marginRight: 8 }}>
                               {ch.label}: <span style={{ color: "var(--high)", textDecoration: "line-through", opacity: 0.7 }}>{ch.old || "—"}</span>
-                              {" → "}<span style={{ color: "var(--low)", fontWeight: 600 }}>{ch.neu}</span>
+                              {" → "}<span style={{ color: "var(--low)", fontWeight: 600 }}>{ch.neu || "— (초기화)"}</span>
                             </span>
                           ))}
                         </div>

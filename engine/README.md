@@ -12,7 +12,7 @@ ScanOps 본체와 **분리된 별도 패키지**. one-liner(전포트+UDP+버전
 - **입력**: [lab-spec.json](lab-spec.json) 형태의 job spec (타겟·제외·단계별 설정).
 - **출력**: `out_dir/` 에
   - `events.ndjson` — 한 줄 한 이벤트. ScanOps 가 tail 해 진행/단계/에러를 UI 로 흘림.
-  - `stage0-discovery.xml`, `stage-tcp-b*.xml`, `stage-udp-b*.xml`, `stage3-<ip>.xml` — ScanOps ingest 입력.
+  - `stage0-discovery.xml`, `stage-tcp-b*.xml`, `stage-udp-b*.xml`, `stage3-<ip>-<tcp|udp>.xml` — ScanOps ingest 입력.
   - `run-state.json` — 단계/호스트 재개 커서 + 중지 플래그.
 
 ## 단계

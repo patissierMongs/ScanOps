@@ -1,0 +1,76 @@
+name: Runtime E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Monday 03:17 KST (Sunday 18:17 UTC).
+    - cron: "17 18 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  runtime-e2e:
+    name: real Nmap, roles, rescans, exports
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      PYTHONUTF8: "1"
+      SCANOPS_E2E_ARTIFACTS: ${{ runner.temp }}/scanops-runtime-e2e
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+            scripts/requirements-runtime-e2e.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Nmap
+        run: |
+          sudo apt-get update && sudo apt-get install -y nmap
+          nmap --version
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements-dev.txt -r scripts/requirements-runtime-e2e.txt
+
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm audit --audit-level=moderate
+          npm run build
+
+      - name: Run isolated runtime E2E
+        run: >-
+          python scripts/runtime_e2e.py
+          --browser
+          --artifacts-dir "$SCANOPS_E2E_ARTIFACTS"
+
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scanops-runtime-e2e-${{ github.run_id }}
+          path: ${{ env.SCANOPS_E2E_ARTIFACTS }}
+          if-no-files-found: warn
+          retention-days: 14

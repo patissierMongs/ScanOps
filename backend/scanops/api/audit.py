@@ -5,6 +5,8 @@ record() 는 다른 라우터(스캔/규칙/로그인)에서 부른다. 조회�
 """
 from __future__ import annotations
 
+import threading
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,7 @@ from ..schemas import AuditOut
 from .deps import require_role
 
 router = APIRouter()
+_RECORD_ONCE_LOCK = threading.Lock()
 
 
 def record(db: Session, actor: User | None, action: str,
@@ -28,6 +31,36 @@ def record(db: Session, actor: User | None, action: str,
         db.commit()
     except Exception:
         db.rollback()
+
+
+def record_once(db: Session, actor: User | None, action: str,
+                target: str = "", detail: str = "", ok: bool = True) -> None:
+    """동일 행위 키의 반복 감사 쓰기를 1건으로 제한한다.
+
+    actor=None 인 전역 이벤트와 폐기 토큰처럼 공격자가 임의로 무한 재시도할 수
+    있는 경로에만 사용한다.
+    실제 비밀번호 변경/재설정 행위는 별도 감사 이벤트로 매번 남는다.
+    """
+    with _RECORD_ONCE_LOCK:
+        try:
+            actor_filter = (
+                AuditLog.actor_user_id == actor.id
+                if actor is not None
+                else AuditLog.actor_user_id.is_(None)
+            )
+            exists = db.query(AuditLog.id).filter(
+                actor_filter,
+                AuditLog.action == action,
+                AuditLog.target == target[:256],
+                AuditLog.detail == detail,
+                AuditLog.ok == (1 if ok else 0),
+            ).first()
+        except Exception:
+            # 감사 중복 확인 장애도 로그인 응답을 500으로 바꾸지 않는다.
+            db.rollback()
+            return
+        if exists is None:
+            record(db, actor, action, target=target, detail=detail, ok=ok)
 
 
 @router.get("", response_model=list[AuditOut])

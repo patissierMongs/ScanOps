@@ -274,6 +274,21 @@ def test_auto_workflow_reads_open_tcp_ports_from_discovery_xml(tmp_path):
     assert scanner.open_ports_from_xml(xml, "udp") == [53]
 
 
+def test_open_filtered_udp_counts_as_open_for_followup_and_live_host(tmp_path):
+    scanner = _load_scanner()
+    xml = tmp_path / "udp.xml"
+    xml.write_text(
+        '<?xml version="1.0"?><nmaprun><host><address addr="127.0.0.1" addrtype="ipv4"/>'
+        '<ports><port protocol="udp" portid="161"><state state="open|filtered"/></port></ports>'
+        '</host></nmaprun>',
+        encoding="utf-8",
+    )
+
+    assert scanner.open_ports_from_xml(xml, "udp") == [161]
+    assert scanner.open_host_ports_from_xml(xml, "udp") == [("127.0.0.1", 161)]
+    assert scanner.hosts_with_open_ports_from_xml(xml) == ["127.0.0.1"]
+
+
 def test_manifest_recommends_identification_xml_not_discovery_xml(tmp_path):
     scanner = _load_scanner()
     manifest = tmp_path / "scan.manifest.json"
@@ -494,6 +509,21 @@ def test_targets_file_batching_end_to_end_creates_numbered_outputs(tmp_path):
         str(output_dir / "batch.127.0.0.1.b0000.tcp_identify.xml"),
         str(output_dir / "batch.127.0.0.2.b0001.tcp_identify.xml"),
     ]
+
+
+def test_targets_file_cannot_inject_leading_dash_nmap_option(tmp_path):
+    fake_nmap = _fake_nmap(tmp_path)
+    targets = tmp_path / "targets.txt"
+    targets.write_text("-oX/tmp/escaped.xml\n127.0.0.1\n", encoding="utf-8")
+
+    result = _run_scanner([
+        "--nmap", str(fake_nmap), "--output-dir", str(tmp_path / "out"),
+        "--targets-file", str(targets), "--tcp-only",
+    ])
+
+    assert result.returncode == 2
+    assert "허용되지 않는 target" in result.stderr
+    assert not (tmp_path / "escaped.xml").exists()
 
 
 def test_tcp_only_with_udp_only_ports_is_rejected(tmp_path):
@@ -802,6 +832,21 @@ def test_scan_scope_gate_cli_and_env(tmp_path):
     assert ok.returncode == 0, ok.stderr + ok.stdout
 
 
+def test_standalone_scope_rejects_invalid_and_mixed_configuration(tmp_path):
+    fake_nmap = _fake_nmap(tmp_path)
+    invalid = _run_scanner(
+        ["--nmap", str(fake_nmap), "--output-dir", str(tmp_path / "invalid"), "127.0.0.1"],
+        env={"SCANOPS_SCAN_SCOPE": "typo-not-a-cidr"},
+    )
+    mixed = _run_scanner([
+        "--nmap", str(fake_nmap), "--output-dir", str(tmp_path / "mixed"),
+        "--scan-scope", "127.0.0.0/8,broken-cidr", "127.0.0.1",
+    ])
+
+    assert invalid.returncode == 2 and "typo-not-a-cidr" in invalid.stderr
+    assert mixed.returncode == 2 and "broken-cidr" in mixed.stderr
+
+
 def test_connect_scan_strips_udp_everywhere(tmp_path):
     """QA-010: connect(권한 불필요)는 단일 프로필에서 -sU 제거, 자동에서 UDP 단계 건너뜀."""
     scanner = _load_scanner()
@@ -844,6 +889,34 @@ def test_range_octet_validation():
         with pytest.raises(ValueError):
             scanner.expand_targets([bad], cap=100)
     assert scanner.expand_targets(["10.0.0.1-3"], cap=100) == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+
+
+def test_composite_ipv4_range_cannot_bypass_max_hosts(tmp_path):
+    """복합 Nmap IPv4 범위는 1개 토큰으로 계산해 --max-hosts를 우회할 수 없다."""
+    import pytest
+    scanner = _load_scanner()
+    invalid = ("0-255.0-255.0-255.0-255", "10.0-255.0.1", "10-11.0.0.1")
+
+    for target in invalid:
+        with pytest.raises(ValueError, match="지원하지 않는 복합 IP 범위"):
+            scanner.validate_targets([target])
+        with pytest.raises(ValueError, match="지원하지 않는 복합 IP 범위"):
+            scanner.expand_targets([target], cap=1)
+
+    args = scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--max-hosts", "1", invalid[0],
+    ])
+    with pytest.raises(ValueError, match="지원하지 않는 복합 IP 범위"):
+        scanner.create_plan(args)
+
+
+def test_structured_target_forms_remain_supported():
+    scanner = _load_scanner()
+    targets = ["scan-node.example.internal", "192.0.2.1", "192.0.2.0/30", "192.0.2.1-3"]
+
+    scanner.validate_targets(targets)
+    assert scanner.expand_targets([targets[0]], cap=1) == [targets[0]]
 
 
 def test_resume_malformed_state_clean_error(tmp_path):

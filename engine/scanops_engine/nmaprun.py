@@ -9,9 +9,12 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from .process_control import close_kill_job, popen_owned, terminate_owned
 
 _PCT_RE = re.compile(r"About\s+([\d.]+)%\s+done")
 
@@ -34,27 +37,62 @@ def _need_sudo(mode: str) -> bool:
     return os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0
 
 
-def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s") -> dict:
+def _stream_output(stream, log, progress) -> None:
+    for line in stream:
+        log.write(line)
+        log.flush()
+        if progress and (m := _PCT_RE.search(line)):
+            try:
+                progress(float(m.group(1)))
+            except Exception:
+                pass
+
+
+def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
+        stop_requested=None, poll_interval=0.1) -> dict:
     """nmap 한 패스 — -oA out_base 강제 + --stats-every. stdout 스트리밍하며 progress(pct).
 
-    반환: {"rc", "seconds", "cmd"}.
+    stdout 유무와 무관하게 stop_requested 를 짧게 poll하고, 중지 시 이 호출이 소유한
+    프로세스 트리만 종료한다. 반환: {"rc", "seconds", "cmd", "stopped"}.
     """
     out_base = Path(out_base)
     cmd = (["sudo"] if _need_sudo(sudo_mode) else []) + \
         [nmap, "--stats-every", stats, *args, "-oA", str(out_base)]
     t0 = time.time()
     with open(str(out_base) + ".stdout.log", "w", encoding="utf-8") as log:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, bufsize=1)
-        for line in proc.stdout:
-            log.write(line)
-            if progress and (m := _PCT_RE.search(line)):
-                try:
-                    progress(float(m.group(1)))
-                except Exception:
-                    pass
-        rc = proc.wait()
-    return {"rc": rc, "seconds": round(time.time() - t0, 2), "cmd": cmd}
+        proc = popen_owned(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, bufsize=1)
+        reader = threading.Thread(
+            target=_stream_output, args=(proc.stdout, log, progress), daemon=True,
+        )
+        reader.start()
+        stopped = False
+        try:
+            while proc.poll() is None:
+                if stop_requested is not None and stop_requested():
+                    stopped = True
+                    terminate_owned(proc)
+                    break
+                time.sleep(poll_interval)
+            rc = proc.wait()
+        except BaseException:
+            if proc.poll() is None:
+                terminate_owned(proc)
+            raise
+        finally:
+            # Closing the Windows Job Object also removes a descendant that outlived its
+            # parent and still owns the stdout pipe. POSIX stop uses the private process group.
+            close_kill_job(proc)
+            reader.join(timeout=2)
+            if reader.is_alive() and proc.stdout is not None:
+                proc.stdout.close()
+                reader.join(timeout=0.5)
+    return {
+        "rc": rc,
+        "seconds": round(time.time() - t0, 2),
+        "cmd": cmd,
+        "stopped": stopped,
+    }
 
 
 # ── XML 파싱 ──
@@ -94,7 +132,8 @@ def open_ports(xml_path, proto=None) -> dict[str, list[int]]:
             continue
         ports = [int(p.get("portid")) for p in h.findall("ports/port")
                  if (not proto or p.get("protocol") == proto)
-                 and (s := p.find("state")) is not None and s.get("state") == "open"]
+                 and (s := p.find("state")) is not None
+                 and (s.get("state") or "").startswith("open")]
         if ports:
             out[ip] = sorted(ports)
     return out
@@ -108,7 +147,7 @@ def services(xml_path) -> list[dict]:
             continue
         for p in h.findall("ports/port"):
             s = p.find("state")
-            if s is None or s.get("state") != "open":
+            if s is None or not (s.get("state") or "").startswith("open"):
                 continue
             svc = p.find("service")
             scripts = {sc.get("id"): (sc.get("output") or "").strip()[:300]

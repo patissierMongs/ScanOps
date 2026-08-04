@@ -14,17 +14,22 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import get_db
-from ..models import FINDING_STATUSES, RISK_LABELS_KO, Finding, FindingEvent, ScanRun, User
+from ..identity import display_identity
+from ..models import (
+    ACTIVE_FINDING_STATES, FINDING_STATUSES, RISK_LABELS_KO,
+    Finding, FindingEvent, ScanRun, User,
+)
 from ..schemas import (
     EventOut, FindingOut, FindingPatch, RescanIn, RescanOut, RescanRunIn, RescanRunOut,
 )
-from ..scanning import engine_runner, nmap_runner
+from ..scanning import engine_runner, nmap_runner, scan_options, scope
 from ..scanning.nmap_parse import _extract_key_line, pretty_fingerprint
 from ..spreadsheet import safe_cell
 from .deps import current_user, require_role
 
 router = APIRouter()
 _settings = get_settings()
+_RESCAN_OPTION_KEYS = {"version_all", "version_light"}
 
 
 def _purpose_evidence(f: Finding) -> list[str]:
@@ -34,6 +39,8 @@ def _purpose_evidence(f: Finding) -> list[str]:
     ev: list[str] = []
     if f.hostname:
         ev.append(f"호스트명(역DNS): {f.hostname}")
+    if f.server:
+        ev.append(f"Server: {f.server}")
     svc = " ".join(x for x in (f.service, f.product, f.version) if x).strip()
     if svc:
         ev.append(f"서비스: {svc}" + (f" ({f.identification})" if f.identification else ""))
@@ -61,6 +68,10 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("port", "포트", lambda f: f.port),
     ("proto", "프로토콜", lambda f: f.proto),
     ("state", "상태", lambda f: f.state),
+    ("display_identity", "표시 식별", lambda f: display_identity(
+        server=f.server, product=f.product, version=f.version, service=f.service,
+    )),
+    ("server", "Server", lambda f: f.server),
     ("service", "서비스", lambda f: f.service),
     ("product", "제품", lambda f: f.product),
     ("version", "버전", lambda f: f.version),
@@ -86,7 +97,10 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("manual_note", "메모", lambda f: f.manual_note),
 ]
 _COL_MAP = {key: (header, getter) for key, header, getter in COLUMNS}
-_DEFAULT_COLS = ["host_ip", "port", "proto", "service", "version", "risk_level", "status", "dept", "deadline"]
+_DEFAULT_COLS = [
+    "host_ip", "port", "proto", "display_identity", "server", "service",
+    "version", "risk_level", "status", "dept", "deadline",
+]
 
 
 def _filtered(db: Session, status, risk, host, q, state, dept=None):
@@ -98,12 +112,17 @@ def _filtered(db: Session, status, risk, host, q, state, dept=None):
     if host:
         query = query.filter(Finding.host_ip == host)
     if state:
-        query = query.filter(Finding.state == state)
+        query = query.filter(
+            Finding.state.in_(ACTIVE_FINDING_STATES) if state == "open" else Finding.state == state
+        )
     if dept:
         query = query.filter(Finding.dept == dept)
     if q:
         like = f"%{q}%"
-        query = query.filter(Finding.service.like(like) | Finding.hostname.like(like))
+        query = query.filter(or_(
+            Finding.server.like(like), Finding.product.like(like), Finding.version.like(like),
+            Finding.service.like(like), Finding.hostname.like(like),
+        ))
     return query.order_by(Finding.host_ip, Finding.port)
 
 
@@ -184,6 +203,10 @@ def rescan_command(
     ports = sorted({f.port for f in rows})
     if not rows:
         return RescanOut(command="", commands=[], hosts=hosts, ports=ports, finding_count=len(rows))
+    try:
+        nmap_runner.validate_targets(hosts)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     flags = body.preset_flags.strip() or "-sV -Pn -n"
     # 발견(IP:포트:proto)별 개별 명령 — 각 항목 nmap 1개(그 ip·그 포트만). 중복 제거.
     seen: set = set()
@@ -200,9 +223,20 @@ def rescan_command(
                      hosts=hosts, ports=ports, finding_count=len(rows))
 
 
-def _start_engine_rescan(db: Session, user: User, rows: list[Finding], options: list[str]):
+def _start_engine_rescan(db: Session, user: User, rows: list[Finding], options: list[str],
+                         nse: list[str] | None = None):
     """선택 발견 → 백그라운드 단계 엔진 재스캔(Stage3-only). 호스트별 정밀 -p(교차곱 제거),
     2-pass 확인, scope_keys 로 닫힘 판정 한정. scan_id 즉시 반환(진행은 /scans/{id}/stages)."""
+    hosts = sorted({row.host_ip for row in rows})
+    try:
+        nmap_runner.validate_targets(hosts)
+        scope.check_scope(hosts)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        engine_runner.ensure_available()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     if not nmap_runner.find_nmap(_settings.nmap_path):
         raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
     units, scope_keys = engine_runner.rescan_targets(
@@ -215,18 +249,27 @@ def _start_engine_rescan(db: Session, user: User, rows: list[Finding], options: 
     db.add(scan)
     db.commit()
     out_dir = _settings.scans_dir / f"scan_{scan.id}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    spec = engine_runner.build_job_spec(scan.id, [], [], options or [], "", [],
-                                        out_dir, 256, rescan_units=units)
-    spec["scanops"] = {"scope_keys": sorted(scope_keys)}   # 워커가 읽어 ingest 닫힘 판정에 사용
-    (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
-    scan.command = engine_runner.describe(spec)
-    db.commit()
-    db.refresh(scan)
     from .audit import record
-    from .scans import _engine_worker
+    from .scans import _engine_worker, _fail_launch_setup
+    launch_paths = [
+        out_dir / "spec.json", out_dir / "run-state.json", out_dir / "stop-requested",
+    ]
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        spec = engine_runner.build_job_spec(
+            scan.id, [], [], options or [], "", nse, out_dir, 256, rescan_units=units,
+        )
+        spec["scanops"] = {"scope_keys": sorted(scope_keys)}
+        (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        scan.command = engine_runner.describe(spec)
+        db.commit()
+        db.refresh(scan)
+        threading.Thread(target=_engine_worker, args=(scan.id,), daemon=True).start()
+    except Exception:
+        _fail_launch_setup(
+            db, scan.id, user, scan.targets, launch_paths, artifact_dirs=[out_dir],
+        )
     record(db, user, "SCAN_RUN", target=scan.targets, detail=f"#{scan.id} 타겟 재스캔 {len(rows)}건")
-    threading.Thread(target=_engine_worker, args=(scan.id,), daemon=True).start()
     return scan, hosts, ports
 
 
@@ -242,10 +285,23 @@ def rescan_run(
     진행은 GET /scans/{id}/stages. 닫힘 판정은 선택 발견(scope_keys)으로 한정 →
     ingest 자동검증(처리중/마감 → 정상처리).
     """
+    if body.ports.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="타겟 재스캔은 선택한 발견의 IP:포트만 사용합니다. 포트를 별도로 지정할 수 없습니다.",
+        )
+    try:
+        scan_options.validate_keys(body.options)
+        scan_options.validate_nse(body.nse)
+        unsupported = [key for key in body.options if key not in _RESCAN_OPTION_KEYS]
+        if unsupported:
+            raise ValueError(f"타겟 재스캔에서 지원하지 않는 옵션: {unsupported}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     rows = db.query(Finding).filter(Finding.id.in_(body.finding_ids)).all() if body.finding_ids else []
     if not rows:
         raise HTTPException(status_code=400, detail="재스캔할 발견을 선택하세요.")
-    scan, hosts, ports = _start_engine_rescan(db, user, rows, body.options)
+    scan, hosts, ports = _start_engine_rescan(db, user, rows, body.options, body.nse)
     return RescanRunOut(scan_id=scan.id, command=scan.command, counts={}, hosts=hosts, ports=ports)
 
 
@@ -260,13 +316,13 @@ def rescan_due(
     """
     now = datetime.now(timezone.utc)
     rows = db.query(Finding).filter(
-        Finding.state == "open",
+        Finding.state.in_(ACTIVE_FINDING_STATES),
         or_(and_(Finding.deadline.isnot(None), Finding.deadline <= now),
             Finding.status == "처리중"),
     ).all()
     if not rows:
         raise HTTPException(status_code=400, detail="재검증할 마감·처리중 발견이 없습니다.")
-    scan, hosts, ports = _start_engine_rescan(db, user, rows, [])
+    scan, hosts, ports = _start_engine_rescan(db, user, rows, [], None)
     return RescanRunOut(scan_id=scan.id, command=scan.command, counts={}, hosts=hosts, ports=ports)
 
 
@@ -308,20 +364,27 @@ def patch_finding(
     def log(type_: str, detail: str):
         db.add(FindingEvent(finding_id=fid, type=type_, detail=detail, actor_user_id=user.id))
 
-    if body.status is not None and body.status != row.status:
+    supplied = body.model_fields_set
+    if "status" in supplied and body.status is not None and body.status != row.status:
         if body.status not in FINDING_STATUSES:
             raise HTTPException(status_code=400, detail=f"상태는 {FINDING_STATUSES} 중 하나여야 합니다.")
         log("STATUS_CHANGE", f"{row.status} → {body.status}")
         row.status = body.status
-    if body.owner_user_id is not None and body.owner_user_id != row.owner_user_id:
-        log("ASSIGN", f"담당자 #{body.owner_user_id} 배정")
+    if "owner_user_id" in supplied and body.owner_user_id != row.owner_user_id:
+        if body.owner_user_id is not None:
+            owner = db.get(User, body.owner_user_id)
+            if owner is None:
+                raise HTTPException(status_code=400, detail="배정할 사용자를 찾을 수 없습니다.")
+            if not owner.is_active:
+                raise HTTPException(status_code=400, detail="비활성 사용자에게 배정할 수 없습니다.")
+        log("ASSIGN", f"담당자 #{body.owner_user_id} 배정" if body.owner_user_id else "담당자 배정 해제")
         row.owner_user_id = body.owner_user_id
-    if body.deadline is not None and body.deadline != row.deadline:
-        log("DEADLINE", f"마감 {body.deadline:%Y-%m-%d} 설정")
+    if "deadline" in supplied and body.deadline != row.deadline:
+        log("DEADLINE", f"마감 {body.deadline:%Y-%m-%d} 설정" if body.deadline else "마감 해제")
         row.deadline = body.deadline
-    if body.dept is not None:
+    if "dept" in supplied and body.dept is not None:
         row.dept = body.dept
-    if body.manual_note is not None and body.manual_note != row.manual_note:
+    if "manual_note" in supplied and body.manual_note is not None and body.manual_note != row.manual_note:
         log("NOTE", "메모 변경")
         row.manual_note = body.manual_note
     row.updated_at = datetime.now(timezone.utc)
