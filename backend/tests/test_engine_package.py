@@ -1258,18 +1258,23 @@ def test_allinone_copy_and_embedded_python_path_include_engine(tmp_path):
     assert "..\\..\\backend" in pth and "..\\..\\engine" in pth
 
 
-def test_offline_wheelhouse_resolves_only_for_documented_cp312_windows(tmp_path):
+def test_offline_wheelhouse_resolves_only_for_documented_windows_pythons(tmp_path):
+    """wheelhouse 는 문서화된 런타임(all-in-one 의 3.12/3.13)에서만 오프라인 해석돼야 한다.
+
+    문서화되지 않은 버전(3.11)이 우연히 해석되면 '지원한다'는 착각을 만든다."""
     base = [
         sys.executable, "-m", "pip", "install", "--dry-run", "--ignore-installed",
         "--no-index", "--find-links", str(ROOT / "packaging" / "wheelhouse"),
         "--platform", "win_amd64", "--implementation", "cp", "--only-binary=:all:",
         "-r", str(ROOT / "backend" / "requirements.txt"),
     ]
-    cp312 = subprocess.run(
-        [*base, "--python-version", "3.12", "--abi", "cp312"],
-        text=True, capture_output=True, check=False,
-    )
-    assert cp312.returncode == 0, cp312.stdout + cp312.stderr
+    for version in ("3.12", "3.13"):
+        abi = "cp" + version.replace(".", "")
+        resolved = subprocess.run(
+            [*base, "--python-version", version, "--abi", abi],
+            text=True, capture_output=True, check=False,
+        )
+        assert resolved.returncode == 0, resolved.stdout + resolved.stderr
 
     cp311 = subprocess.run(
         [*base, "--python-version", "3.11", "--abi", "cp311"],
@@ -1279,8 +1284,12 @@ def test_offline_wheelhouse_resolves_only_for_documented_cp312_windows(tmp_path)
 
     installer = (ROOT / "packaging" / "install.ps1").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    # install.ps1 은 3.12 만 받는다. README 도 그 전제를 그대로 적어야 한다(둘이 어긋나면
+    # 운영자가 3.13 을 깔아 놓고 설치가 거절되는 이유를 못 찾는다).
     assert "Python 3.12 (x64)" in installer
     assert "Python 3.12 (x64)" in readme
+    # all-in-one 은 두 런타임을 모두 지원하므로 그 사실도 문서에 있어야 한다.
+    assert "--python 3.13" in readme
 
 
 def test_non_ascii_windows_powershell_installer_has_utf8_bom():

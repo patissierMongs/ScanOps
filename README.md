@@ -25,8 +25,9 @@ cd frontend && npm install && npm run dev
 ```
 
 ## 에어갭(오프라인) 배포
-일반 오프라인 ZIP은 wheelhouse 계약에 맞는 **Python 3.12/3.13 (x64)** 와 **nmap**이 필요합니다.
+일반 오프라인 ZIP은 `install.ps1` 이 요구하는 **Python 3.12 (x64)** 와 **nmap**이 필요합니다.
 Python을 설치할 수 없는 Windows x64 서버는 Python 런타임이 포함된 all-in-one ZIP을 사용하세요.
+all-in-one 은 **3.12 / 3.13** 두 런타임으로 만들 수 있습니다.
 
 ```powershell
 python packaging\build_allinone.py                  # 3.12 → ..\ScanOps_allinone.zip
