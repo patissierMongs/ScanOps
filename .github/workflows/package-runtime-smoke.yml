@@ -21,7 +21,6 @@ jobs:
     timeout-minutes: 50
     env:
       PYTHONUTF8: "1"
-      SCANOPS_PACKAGE_EVIDENCE: ${{ runner.temp }}\scanops-package-runtime-smoke
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,6 +66,8 @@ jobs:
 
       - name: Exercise regular and all-in-one archives
         shell: pwsh
+        env:
+          SCANOPS_PACKAGE_EVIDENCE: ${{ runner.temp }}/scanops-package-runtime-smoke
         run: >-
           python scripts/package_runtime_smoke.py
           --artifacts-dir "$env:SCANOPS_PACKAGE_EVIDENCE"
@@ -76,6 +77,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: scanops-package-runtime-smoke-${{ github.run_id }}
-          path: ${{ env.SCANOPS_PACKAGE_EVIDENCE }}
+          path: ${{ runner.temp }}/scanops-package-runtime-smoke
           if-no-files-found: warn
           retention-days: 14
