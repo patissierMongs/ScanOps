@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { downloadText } from "../lib/download.js";
 import { useToast } from "../ui/Toast.jsx";
 import { asDate, dday, today } from "../lib/format.js";
+import { primaryServiceIdentity } from "../lib/columns.js";
 
 const STATUSES = ["미조치", "처리중", "정상처리"];
 const TPL_KEY = "scanops_notify_templates";
@@ -21,13 +22,15 @@ function daysLeft(f) {
   return Math.round((new Date(asDate(f.deadline)) - new Date(today())) / 86400000);
 }
 
-function render(tpl, dept, findings) {
+export function renderNotification(tpl, dept, findings) {
   const contact = findings.find((f) => f.contact)?.contact || "-";
   const owner = [...new Set(findings.map((f) => f.owner).filter(Boolean))].join(", ") || "-";
   const list = findings.map((f) => {
     const dl = f.deadline ? ` · 마감 ${asDate(f.deadline)}(${dday(f.deadline).text})` : "";
     const who = f.owner ? ` (${f.owner})` : "";
-    return `- ${f.host_ip}:${f.port}/${f.proto} ${f.service}${who} ${f.status}${dl}`;
+    const identity = primaryServiceIdentity(f);
+    const service = f.service && f.service !== identity ? ` (서비스: ${f.service})` : "";
+    return `- ${f.host_ip}:${f.port}/${f.proto} ${identity}${service}${who} ${f.status}${dl}`;
   }).join("\n");
   return tpl
     .replaceAll("{dept}", dept || "")
@@ -78,7 +81,7 @@ export default function Notifications({ user }) {
     return true;
   }), [findings, statusSel, deadlineMode]);
 
-  const body = useMemo(() => render(tpl, dept, filtered), [tpl, dept, filtered]);
+  const body = useMemo(() => renderNotification(tpl, dept, filtered), [tpl, dept, filtered]);
 
   function toggleStatus(s) {
     setStatusSel((cur) => { const n = new Set(cur); n.has(s) ? n.delete(s) : n.add(s); return n; });

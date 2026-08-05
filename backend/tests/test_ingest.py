@@ -1,4 +1,6 @@
 """Phase C 검증 — 파싱 + 안정키 upsert + diff 이벤트(핵심 차별점)."""
+from datetime import datetime, timezone
+
 from scanops.db import SessionLocal, init_db
 from scanops.models import Finding, FindingEvent, ScanRun
 from scanops.scanning.ingest import ingest
@@ -119,5 +121,134 @@ def test_empty_scope_keys_disables_closure():
         counts = ingest(db, s2, [], {"127.0.0.1"}, scope_keys=set())
         assert counts["closed"] == 0
         assert db.query(Finding).filter_by(state="open").count() == open_before
+    finally:
+        db.close()
+
+
+def test_open_filtered_is_active_not_reopened_and_can_close():
+    init_db()
+    db = SessionLocal()
+    try:
+        finding = dict(parse_xml(XML)[0])
+        finding["state"] = "open|filtered"
+        s1 = _scan(db)
+        ingest(db, s1, [finding], {finding["host_ip"]})
+
+        s2 = _scan(db)
+        counts = ingest(db, s2, [finding], {finding["host_ip"]})
+        assert counts["reopened"] == 0
+
+        s3 = _scan(db)
+        counts = ingest(
+            db, s3, [], {finding["host_ip"]},
+            scope_keys={f"{finding['host_ip']}|{finding['port']}|{finding['proto']}"},
+        )
+        assert counts["closed"] == 1
+    finally:
+        db.close()
+
+
+def test_stale_absence_does_not_close_or_rewrite_current_open_finding():
+    init_db()
+    db = SessionLocal()
+    try:
+        finding = dict(parse_xml(XML)[0])
+        host = finding["host_ip"]
+        key = f"{host}|{finding['port']}|{finding['proto']}"
+        current_when = datetime(2026, 7, 29, 9, tzinfo=timezone.utc)
+        stale_when = datetime(2025, 7, 29, 9, tzinfo=timezone.utc)
+
+        current_scan = _scan(db)
+        ingest(db, current_scan, [finding], {host}, scan_date=current_when)
+        row = db.query(Finding).filter_by(finding_key=key).one()
+        row.status = "처리중"
+        row.reopened = 1
+        db.commit()
+        db.expire_all()  # SQLite reloads DateTime without tzinfo; comparison must remain safe.
+        before_events = db.query(FindingEvent).count()
+
+        stale_scan = _scan(db)
+        counts = ingest(
+            db, stale_scan, [], {host}, scope_keys={key}, scan_date=stale_when,
+        )
+        row = db.query(Finding).filter_by(finding_key=key).one()
+
+        assert counts == {
+            "new": 0, "reopened": 0, "service_changed": 0,
+            "version_changed": 0, "server_changed": 0, "unchanged": 0, "closed": 0,
+        }
+        assert row.state == finding["state"]
+        assert row.status == "처리중" and row.reopened == 1
+        assert row.last_scan_id == current_scan
+        assert row.last_seen == current_when.replace(tzinfo=None)
+        assert db.query(FindingEvent).count() == before_events
+    finally:
+        db.close()
+
+
+def test_stale_open_only_backfills_first_seen_without_reopening_or_overlaying_identity():
+    init_db()
+    db = SessionLocal()
+    try:
+        finding = dict(parse_xml(XML)[0])
+        host = finding["host_ip"]
+        key = f"{host}|{finding['port']}|{finding['proto']}"
+        first_when = datetime(2025, 7, 29, 9, tzinfo=timezone.utc)
+        closed_when = datetime(2026, 7, 29, 9, tzinfo=timezone.utc)
+        stale_when = datetime(2024, 7, 29, 9, tzinfo=timezone.utc)
+
+        first_scan = _scan(db)
+        ingest(db, first_scan, [finding], {host}, scan_date=first_when)
+        closed_scan = _scan(db)
+        ingest(db, closed_scan, [], {host}, scope_keys={key}, scan_date=closed_when)
+        db.expire_all()
+        before_events = db.query(FindingEvent).count()
+
+        stale = dict(finding)
+        stale.update({
+            "service": "stale-service", "version": "0.1", "server": "stale-server",
+            "server_observed": True,
+        })
+        stale_scan = _scan(db)
+        counts = ingest(db, stale_scan, [stale], {host}, scan_date=stale_when)
+        row = db.query(Finding).filter_by(finding_key=key).one()
+
+        assert all(value == 0 for value in counts.values())
+        assert row.state == "closed" and row.status == "정상처리" and row.reopened == 0
+        assert (row.service, row.version, row.server) == (
+            finding["service"], finding["version"], finding.get("server", ""),
+        )
+        assert row.last_scan_id == closed_scan
+        assert row.last_seen == closed_when.replace(tzinfo=None)
+        assert row.first_scan_id == stale_scan
+        assert row.first_seen == stale_when.replace(tzinfo=None)
+        assert db.query(FindingEvent).count() == before_events
+    finally:
+        db.close()
+
+
+def test_chronological_close_and_reopen_still_update_current_state():
+    init_db()
+    db = SessionLocal()
+    try:
+        finding = dict(parse_xml(XML)[0])
+        host = finding["host_ip"]
+        key = f"{host}|{finding['port']}|{finding['proto']}"
+        times = [datetime(year, 1, 1, tzinfo=timezone.utc) for year in (2024, 2025, 2026)]
+
+        opened_scan = _scan(db)
+        ingest(db, opened_scan, [finding], {host}, scan_date=times[0])
+        closed_scan = _scan(db)
+        closed = ingest(db, closed_scan, [], {host}, scope_keys={key}, scan_date=times[1])
+        reopened_scan = _scan(db)
+        reopened = ingest(db, reopened_scan, [finding], {host}, scan_date=times[2])
+        row = db.query(Finding).filter_by(finding_key=key).one()
+
+        assert closed["closed"] == 1 and reopened["reopened"] == 1
+        assert row.state == finding["state"] and row.reopened == 1
+        assert row.last_scan_id == reopened_scan
+        assert row.last_seen == times[2].replace(tzinfo=None)
+        event_types = [event.type for event in db.query(FindingEvent).order_by(FindingEvent.id)]
+        assert event_types == ["NEW_OPEN", "CLOSED", "REOPENED"]
     finally:
         db.close()

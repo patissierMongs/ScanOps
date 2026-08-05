@@ -22,18 +22,64 @@ EXCLUDE_DIRS = {
     "__pycache__", ".pytest_cache", ".git", ".vite",
 }
 EXCLUDE_EXT = {".pyc", ".pyo", ".log", ".png", ".token"}
+FORBIDDEN_EXACT_NAMES = {
+    "initial_admin.txt", "id_rsa", "id_ed25519", ".npmrc", ".pypirc",
+    "client-secret.md",
+}
+FORBIDDEN_DIR_NAMES = {".ssh", "secrets", "private"}
+FORBIDDEN_DATABASE_MARKERS = (".db", ".sqlite", ".sqlite3")
+FORBIDDEN_KEY_MARKERS = (".key", ".pem", ".p12", ".pfx")
+CREDENTIAL_MARKERS = (
+    "token", "credential", "secret", "api_key", "api-key", "private_key",
+    "private-key", "service_account", "service-account",
+)
+CREDENTIAL_ARTIFACT_SUFFIXES = {
+    "", ".bak", ".cfg", ".conf", ".csv", ".ini", ".json", ".toml", ".txt",
+    ".yaml", ".yml", ".credential", ".credentials", ".token",
+}
 # Top-level entries to include (everything else at root is skipped).
 INCLUDE_TOP = {
-    "backend", "frontend", "packaging", "samples", "scripts",
+    "backend", "engine", "frontend", "packaging", "samples", "scripts",
     "START.bat", "README.md", "DESIGN.md", "REBUILD.md", "HANDOFF.md",
     "THIRD_PARTY_NOTICES.md", ".gitignore",
 }
 # Inside frontend we keep src/dist/public + config, but never node_modules (in EXCLUDE_DIRS).
 
 
+def _has_artifact_marker(name: str, markers: tuple[str, ...]) -> bool:
+    return any(
+        name.endswith(marker) or f"{marker}-" in name or f"{marker}." in name
+        for marker in markers
+    )
+
+
+def is_forbidden_source_path(path: Path) -> bool:
+    """Reject local runtime data and credential artifacts from release sources."""
+    parts = tuple(part.lower() for part in path.parts)
+    if any(part == "data" or part.startswith(".venv") or part.startswith(".env")
+           or part in FORBIDDEN_DIR_NAMES
+           for part in parts):
+        return True
+    if not parts:
+        return False
+    name = parts[-1]
+    if name in FORBIDDEN_EXACT_NAMES:
+        return True
+    if any(marker in name for marker in FORBIDDEN_DATABASE_MARKERS):
+        return True
+    if _has_artifact_marker(name, FORBIDDEN_KEY_MARKERS):
+        return True
+    return (
+        Path(name).suffix.lower() in CREDENTIAL_ARTIFACT_SUFFIXES
+        and any(marker in name for marker in CREDENTIAL_MARKERS)
+    )
+
+
 def keep(path: Path) -> bool:
     parts = path.relative_to(ROOT).parts
     if parts and parts[0] not in INCLUDE_TOP:
+        return False
+    if is_forbidden_source_path(Path(*parts)):
         return False
     if any(p in EXCLUDE_DIRS for p in parts):
         return False
@@ -54,7 +100,11 @@ def main() -> None:
         for dirpath, dirnames, filenames in os.walk(ROOT):
             d = Path(dirpath)
             # prune excluded dirs in-place for speed
-            dirnames[:] = [n for n in dirnames if n not in EXCLUDE_DIRS]
+            dirnames[:] = [
+                n for n in dirnames
+                if n not in EXCLUDE_DIRS
+                and not is_forbidden_source_path((d / n).relative_to(ROOT))
+            ]
             rel0 = d.relative_to(ROOT).parts
             if rel0 and rel0[0] not in INCLUDE_TOP:
                 continue

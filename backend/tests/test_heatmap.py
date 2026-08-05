@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import io
+from datetime import timezone
 from pathlib import Path
 
 import openpyxl
+from scanops.api import scans as scans_api
+from scanops.db import SessionLocal
+from scanops.models import Finding, ScanRun
+from scanops.scanning.nmap_parse import scan_start
 from tests.conftest import make_user, token_for
 
 SAMPLES = Path(__file__).resolve().parents[2] / "samples"
@@ -78,6 +83,99 @@ def test_narrow_port_scan_does_not_overwrite_heatmap_current(client, tmp_path):
 
     current = client.get("/api/heatmap/current", headers=headers).json()
     assert any(r["host_ip"] == "127.0.0.1" and r["port"] == 3000 for r in current["items"])
+
+
+def test_staged_heatmap_uses_sweep_fallback_then_selected_rescan_force_close(
+    client, monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    headers = _auth(client)
+    key = "127.0.0.1|18443|tcp"
+    sweep_xml = (
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="127.0.0.1" addrtype="ipv4"/><ports>'
+        '<port protocol="tcp" portid="18443"><state state="open"/>'
+        '<service name="unknown" method="table"/></port>'
+        '</ports></host></nmaprun>'
+    )
+
+    db = SessionLocal()
+    try:
+        existing = Finding(
+            finding_key=key, host_ip="127.0.0.1", port=18443, proto="tcp", state="open",
+            service="http", product="Uvicorn", version="0.30", server="uvicorn 0.30",
+            nse_json=[{"id": "http-server-header", "output": "uvicorn 0.30"}],
+        )
+        opened = ScanRun(name="staged open", status="running")
+        db.add_all([existing, opened])
+        db.commit()
+        open_dir = scans_api._settings.scans_dir / f"scan_{opened.id}"
+        open_dir.mkdir(parents=True, exist_ok=True)
+        (open_dir / "stage-tcp-b0.xml").write_text(sweep_xml, encoding="utf-8")
+
+        scans_api._commit_engine_ingest(db, opened, open_dir, {key}, False)
+        opened.status = "done"
+        db.commit()
+        opened_id = opened.id
+        expected_start = opened.started_at.replace(tzinfo=timezone.utc)
+        snapshot_path = Path(opened.raw_xml_path)
+    finally:
+        db.close()
+
+    assert int(scan_start(snapshot_path).timestamp()) == int(expected_start.timestamp())
+    first = client.get("/api/heatmap", headers=headers).json()
+    first_row = _row(first, 18443)
+    assert first["phases"][0]["scan_ids"] == [opened_id]
+    assert first_row["current_state"] == "신규열림"
+    assert first_row["display_identity"] == "uvicorn 0.30"
+    assert first_row["server"] == "uvicorn 0.30"
+    assert client.get("/api/heatmap/current", headers=headers).json()["total"] == 1
+
+    db = SessionLocal()
+    try:
+        unreachable = ScanRun(name="ordinary scan unreachable", status="running")
+        db.add(unreachable)
+        db.commit()
+        unreachable_dir = scans_api._settings.scans_dir / f"scan_{unreachable.id}"
+        unreachable_dir.mkdir(parents=True, exist_ok=True)
+
+        scans_api._commit_engine_ingest(db, unreachable, unreachable_dir, {key}, False)
+        unreachable.status = "done"
+        db.commit()
+    finally:
+        db.close()
+
+    closed_by_scope = client.get("/api/heatmap", headers=headers).json()
+    closed_by_scope_row = _row(closed_by_scope, 18443)
+    # A completed structured scan owns its explicit target/port scope even when discovery
+    # observes no live host, so its snapshot records the requested finding as closed.
+    assert [cell["state"] for cell in closed_by_scope_row["cells"]] == ["신규열림", "신규닫힘"]
+    assert closed_by_scope_row["current_state"] == "신규닫힘"
+    assert client.get("/api/heatmap/current", headers=headers).json()["total"] == 0
+
+    db = SessionLocal()
+    try:
+        closed = ScanRun(name="selected rescan close", status="running")
+        db.add(closed)
+        db.commit()
+        close_dir = scans_api._settings.scans_dir / f"scan_{closed.id}"
+        close_dir.mkdir(parents=True, exist_ok=True)
+        # A selected rescan must ignore an unrelated/stale full-scan sweep artifact. With no
+        # active stage3 row, the selected scope key is authoritatively closed.
+        (close_dir / "stage-tcp-b0.xml").write_text(sweep_xml, encoding="utf-8")
+
+        scans_api._commit_engine_ingest(db, closed, close_dir, {key}, True)
+        closed.status = "done"
+        db.commit()
+    finally:
+        db.close()
+
+    final = client.get("/api/heatmap", headers=headers).json()
+    final_row = _row(final, 18443)
+    assert [cell["state"] for cell in final_row["cells"]] == ["신규열림", "신규닫힘", "기존닫힘"]
+    assert final_row["current_state"] == "기존닫힘"
+    assert client.get("/api/heatmap/current", headers=headers).json()["total"] == 0
 
 
 def test_heatmap_report_xlsx_has_operational_sheets(client):

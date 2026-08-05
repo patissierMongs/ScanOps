@@ -1,0 +1,752 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/share/nmap/nmap.xsl" type="text/xsl"?>
+<nmaprun scanner="nmap" args="nmap -sS -sV -sU -oX scan_ot_network.xml 192.168.50.0/24" start="1753257600" startstr="Mon Jul 20 09:00:00 2026" version="7.94SVN" xmloutputversion="1.05">
+  <scaninfo type="syn" protocol="tcp" numservices="5" services="21,23,80,1883,5900"/>
+  <verbose level="0"/>
+  <debugging level="0"/>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.10" addrtype="ipv4"/>
+    <address addr="52:54:00:0a:03:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-001" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.11" addrtype="ipv4"/>
+    <address addr="52:54:00:0b:04:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-002" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.12" addrtype="ipv4"/>
+    <address addr="52:54:00:0c:05:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-003" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.13" addrtype="ipv4"/>
+    <address addr="52:54:00:0d:06:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-004" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.14" addrtype="ipv4"/>
+    <address addr="52:54:00:0e:00:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-005" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.15" addrtype="ipv4"/>
+    <address addr="52:54:00:0f:01:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-006" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.16" addrtype="ipv4"/>
+    <address addr="52:54:00:10:02:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-007" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.17" addrtype="ipv4"/>
+    <address addr="52:54:00:11:03:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-008" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+      <port protocol="udp" portid="123">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ntp" method="probed" conf="10" product="NTP v4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.18" addrtype="ipv4"/>
+    <address addr="52:54:00:12:04:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-009" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.24.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.19" addrtype="ipv4"/>
+    <address addr="52:54:00:13:05:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-010" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.20" addrtype="ipv4"/>
+    <address addr="52:54:00:14:06:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-011" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5900">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="vnc" method="probed" conf="10" product="VNC (protocol 3.8)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.21" addrtype="ipv4"/>
+    <address addr="52:54:00:15:00:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-012" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.22" addrtype="ipv4"/>
+    <address addr="52:54:00:16:01:09" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-013" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.23" addrtype="ipv4"/>
+    <address addr="52:54:00:17:02:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-014" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.24" addrtype="ipv4"/>
+    <address addr="52:54:00:18:03:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-015" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.25" addrtype="ipv4"/>
+    <address addr="52:54:00:19:04:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-016" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.26" addrtype="ipv4"/>
+    <address addr="52:54:00:1a:05:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-017" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+      <port protocol="udp" portid="123">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ntp" method="probed" conf="10" product="NTP v4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.27" addrtype="ipv4"/>
+    <address addr="52:54:00:1b:06:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-018" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+      <port protocol="udp" portid="123">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ntp" method="probed" conf="10" product="NTP v4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.28" addrtype="ipv4"/>
+    <address addr="52:54:00:1c:00:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-019" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+      <port protocol="udp" portid="123">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ntp" method="probed" conf="10" product="NTP v4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.29" addrtype="ipv4"/>
+    <address addr="52:54:00:1d:01:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-020" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.30" addrtype="ipv4"/>
+    <address addr="52:54:00:1e:02:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-021" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.31" addrtype="ipv4"/>
+    <address addr="52:54:00:1f:03:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-022" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5900">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="vnc" method="probed" conf="10" product="VNC (protocol 3.8)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.32" addrtype="ipv4"/>
+    <address addr="52:54:00:20:04:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-023" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.18.0">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.18.0</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.33" addrtype="ipv4"/>
+    <address addr="52:54:00:21:05:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-024" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+      <port protocol="udp" portid="123">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ntp" method="probed" conf="10" product="NTP v4"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.34" addrtype="ipv4"/>
+    <address addr="52:54:00:22:06:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-025" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.35" addrtype="ipv4"/>
+    <address addr="52:54:00:23:00:09" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-026" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.36" addrtype="ipv4"/>
+    <address addr="52:54:00:24:01:0a" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-027" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5900">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="vnc" method="probed" conf="10" product="VNC (protocol 3.8)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.37" addrtype="ipv4"/>
+    <address addr="52:54:00:25:02:0b" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-028" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="http" method="probed" conf="10" product="nginx" version="1.25.3">
+          <cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe>
+        </service>
+        <script id="http-title" output="사내 포털"/>
+        <script id="http-server-header" output="nginx"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.38" addrtype="ipv4"/>
+    <address addr="52:54:00:26:03:0c" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-029" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5900">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="vnc" method="probed" conf="10" product="VNC (protocol 3.8)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.39" addrtype="ipv4"/>
+    <address addr="52:54:00:27:04:00" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-030" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.40" addrtype="ipv4"/>
+    <address addr="52:54:00:28:05:01" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-031" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="3.0.3"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.41" addrtype="ipv4"/>
+    <address addr="52:54:00:29:06:02" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-032" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="udp" portid="161">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="snmp" method="probed" conf="10" product="SNMPv1 server"/>
+        <script id="snmp-info" output="community: public (read)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.42" addrtype="ipv4"/>
+    <address addr="52:54:00:2a:00:03" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-033" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="tcp" portid="5900">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="vnc" method="probed" conf="10" product="VNC (protocol 3.8)"/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.43" addrtype="ipv4"/>
+    <address addr="52:54:00:2b:01:04" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-034" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="1.6.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.44" addrtype="ipv4"/>
+    <address addr="52:54:00:2c:02:05" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-035" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5900">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="vnc" method="probed" conf="10" product="VNC (protocol 3.8)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.45" addrtype="ipv4"/>
+    <address addr="52:54:00:2d:03:06" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-036" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="23">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="telnet" method="probed" conf="10" product="Linux telnetd"/>
+        <script id="banner" output="Login: "/>
+      </port>
+      <port protocol="tcp" portid="21">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="ftp" method="probed" conf="10" product="vsftpd" version="2.0.8"/>
+        <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.46" addrtype="ipv4"/>
+    <address addr="52:54:00:2e:04:07" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-037" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="1883">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="mqtt" method="probed" conf="10" product="Mosquitto" version="2.0.15"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <host starttime="1753257600" endtime="1753257608">
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.168.50.47" addrtype="ipv4"/>
+    <address addr="52:54:00:2f:05:08" addrtype="mac"/>
+    <hostnames>
+      <hostname name="ot-node-038" type="PTR"/>
+    </hostnames>
+    <ports>
+      <port protocol="tcp" portid="5900">
+        <state state="open" reason="syn-ack" reason_ttl="63"/>
+        <service name="vnc" method="probed" conf="10" product="VNC (protocol 3.8)"/>
+      </port>
+    </ports>
+    <times srtt="42000" rttvar="8000" to="120000"/>
+  </host>
+  <runstats>
+    <finished time="1753257900" timestr="Mon Jul 20 09:05:00 2026" summary="Nmap done; 38 IP addresses scanned" elapsed="300.00" exit="success"/>
+    <hosts up="38" down="0" total="38"/>
+  </runstats>
+</nmaprun>

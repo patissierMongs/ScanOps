@@ -1,7 +1,7 @@
 """인증 프리미티브 — 에어갭 위해 stdlib 만 사용(네이티브 의존 0).
 
 - 비밀번호: PBKDF2-HMAC-SHA256 (반복 200k), 솔트 동봉 포맷.
-- 토큰: HMAC 서명된 stateless 토큰 (uid.exp.sig).
+- 토큰: HMAC 서명된 stateless 토큰 (uid.exp.auth_version.sig).
 """
 from __future__ import annotations
 
@@ -13,6 +13,12 @@ import time
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 
 _PBKDF2_ROUNDS = 200_000
+MIN_PASSWORD_LEN = 8
+
+
+def validate_password(password: str) -> None:
+    if len(password) < MIN_PASSWORD_LEN:
+        raise ValueError(f"비밀번호는 {MIN_PASSWORD_LEN}자 이상이어야 합니다.")
 
 
 def hash_password(password: str) -> str:
@@ -40,24 +46,24 @@ def _b64d(s: str) -> bytes:
     return urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def make_token(user_id: int, secret: bytes, ttl_hours: int) -> str:
+def make_token(user_id: int, secret: bytes, ttl_hours: int, auth_version: int = 0) -> str:
     exp = int(time.time()) + ttl_hours * 3600
-    payload = f"{user_id}.{exp}"
+    payload = f"{user_id}.{exp}.{auth_version}"
     sig = hmac.new(secret, payload.encode("ascii"), hashlib.sha256).digest()
     return f"{payload}.{_b64e(sig)}"
 
 
-def verify_token(token: str, secret: bytes) -> int | None:
-    """유효하면 user_id, 아니면 None."""
+def verify_token(token: str, secret: bytes) -> tuple[int, int] | None:
+    """유효하면 (user_id, auth_version), 아니면 None."""
     try:
-        uid_s, exp_s, sig_s = token.split(".")
-        payload = f"{uid_s}.{exp_s}"
+        uid_s, exp_s, version_s, sig_s = token.split(".")
+        payload = f"{uid_s}.{exp_s}.{version_s}"
         expected = hmac.new(secret, payload.encode("ascii"), hashlib.sha256).digest()
         if not hmac.compare_digest(expected, _b64d(sig_s)):
             return None
         if int(exp_s) < int(time.time()):
             return None
-        return int(uid_s)
+        return int(uid_s), int(version_s)
     except (ValueError, AttributeError):
         return None
 

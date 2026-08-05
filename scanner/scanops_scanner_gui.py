@@ -115,6 +115,7 @@ class ScannerGui:
         self.output_queue: queue.Queue[tuple[str, str | int]] = queue.Queue()
 
         self.target_file = StringVar()
+        self.exclude = StringVar()
         self.output_dir = StringVar(value=DEFAULT_OUTPUT)
         self.output_name = StringVar()
         self.nmap_path = StringVar()
@@ -163,6 +164,10 @@ class ScannerGui:
         ttk.Entry(target, textvariable=self.target_file).grid(row=2, column=0, sticky="ew", padx=(10, 6), pady=(0, 10))
         ttk.Button(target, text="대상 파일", command=self._browse_target_file).grid(row=2, column=1, padx=4, pady=(0, 10))
         ttk.Button(target, text="비우기", command=lambda: self.targets_text.delete("1.0", "end")).grid(row=2, column=2, padx=4, pady=(0, 10))
+        ttk.Label(target, text="제외 IPv4 IP/CIDR (선택 · 쉼표/공백 구분)").grid(
+            row=3, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
+        ttk.Entry(target, textvariable=self.exclude).grid(
+            row=4, column=0, columnspan=4, sticky="ew", padx=10, pady=(0, 10))
 
         basics = ttk.LabelFrame(outer, text="스캔 실행 방식")
         basics.grid(row=1, column=0, sticky="ew", pady=(0, 10))
@@ -390,6 +395,9 @@ class ScannerGui:
             if not batch.isdigit():
                 raise ValueError("배치 크기는 숫자여야 합니다.")
             cmd += ["--batch-size", batch]
+        exclude = self.exclude.get().strip()
+        if exclude:
+            cmd += ["--exclude", exclude]
         if target_file:
             cmd += ["--targets-file", target_file]
         if self.zip_outputs.get():

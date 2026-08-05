@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import ipaddress
 import json
 import os
@@ -23,10 +24,12 @@ import zipfile
 from pathlib import Path
 
 VERSION = "0.2.0"
+IMPORT_CONTRACT_SCHEMA = 1
+IMPORT_CONTRACT_MAX_HOSTS = 65536
 STATS_EVERY_DEFAULT = "10s"
-# 호스트당 상한. nmap 은 이 시간을 넘긴 호스트를 포기하고 다음으로 넘어가며 0으로 정상 종료(부분 결과 유지).
-# 한 호스트가 스캔 전체를 무한정 멈추는 사고(QA-007)를 막는다. 비우면("") 미적용.
-HOST_TIMEOUT_DEFAULT = "15m"
+# 기본 미적용. 전 포트 스캔은 필터링된 망에서 고정 시간 상한을 정상적으로 넘을 수 있고,
+# nmap 은 timeout 된 호스트의 결과를 버린 채 성공 종료할 수 있다. 필요한 환경만 명시적으로 opt-in.
+HOST_TIMEOUT_DEFAULT = "0"
 UDP_DEFAULT_PORTS = "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 용도 식별형 NSE만(취약점/노이즈/부작용 스크립트 제외) — 빠르고 부작용 적게 '무엇/왜' 파악.
@@ -101,7 +104,8 @@ PRESETS: dict[str, list[str]] = {
     ],
 }
 
-TARGET_RE = re.compile(r"^[A-Za-z0-9_.:/\-]+$")
+# 타겟은 argv 맨 뒤에 와도 '-' 시작 시 Nmap 옵션으로 재해석된다.
+TARGET_RE = re.compile(r"^(?!-)[A-Za-z0-9_.:/\-]+$")
 PORTS_RE = re.compile(r"^[0-9TUtu:,\-\s]+$")
 # 포트 본문(프로토콜 접두사 제거 후): 단일 포트·범위·열린 범위(1-, -1024) 허용.
 PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
@@ -109,6 +113,7 @@ SCRIPT_RE = re.compile(r"^[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*$")
 STATS_RE = re.compile(r"^\d+[smh]?$")
 NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 RANGE_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})-(\d{1,3})$")
+IPV4_RANGE_TOKEN_RE = re.compile(r"^[\d-]+(?:\.[\d-]+){3}$")
 VALUE_FLAGS = {"-p", "--top-ports"}
 SCAN_TYPE_FLAGS = {"-sS", "-sT"}
 
@@ -182,7 +187,7 @@ def collect_targets(args: argparse.Namespace) -> list[str]:
 
 
 def validate_targets(targets: list[str]) -> None:
-    bad = [t for t in targets if not TARGET_RE.match(t)]
+    bad = [t for t in targets if not isinstance(t, str) or not TARGET_RE.fullmatch(t)]
     if bad:
         raise ValueError(f"허용되지 않는 target 형식: {bad}")
     # IPv6 는 자동 워크플로 플래그(-6 없음)와 호환되지 않아 nmap 이 실패하고, 실패하면
@@ -190,6 +195,21 @@ def validate_targets(targets: list[str]) -> None:
     ipv6 = [t for t in targets if ":" in t]
     if ipv6:
         raise ValueError(f"IPv6 대상은 아직 지원하지 않습니다: {ipv6}. IPv4 주소/대역으로 지정하세요.")
+    composite_ranges = [t for t in targets if is_unsupported_composite_ipv4_range(t)]
+    if composite_ranges:
+        raise ValueError(
+            f"지원하지 않는 복합 IP 범위: {composite_ranges}. "
+            "마지막 옥텟 범위만 사용할 수 있습니다."
+        )
+
+
+def is_unsupported_composite_ipv4_range(target: str) -> bool:
+    """숫자 옥텟의 Nmap 복합 범위 중 마지막 옥텟 단순 범위가 아닌 형식인지 반환."""
+    return bool(
+        "-" in target
+        and IPV4_RANGE_TOKEN_RE.fullmatch(target)
+        and not RANGE_RE.fullmatch(target)
+    )
 
 
 def warn_ambiguous_ports(spec: str) -> None:
@@ -211,13 +231,13 @@ def warn_ambiguous_ports(spec: str) -> None:
 
 
 def parse_scope(spec: str) -> list:
-    """콤마/공백 구분 CIDR·IP 목록 → 네트워크 객체. 잘못된 토큰은 건너뛴다."""
+    """콤마/공백 구분 CIDR·IP 목록. 토큰 하나라도 잘못되면 전체 설정을 거절한다."""
     nets = []
     for raw in (spec or "").replace(",", " ").split():
         try:
             nets.append(ipaddress.ip_network(raw.strip(), strict=False))
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise ValueError(f"잘못된 스캔 대역(scope) 설정입니다: {raw.strip()!r}") from exc
     return nets
 
 
@@ -244,6 +264,114 @@ def check_scope(hosts: list[str], spec: str) -> None:
     if bad:
         shown = ", ".join(bad[:5]) + (f" 외 {len(bad) - 5}건" if len(bad) > 5 else "")
         raise ValueError(f"허용된 스캔 대역(scope) 밖의 대상입니다: {shown}")
+
+
+def parse_excludes(values: list[str] | tuple[str, ...] | str | None) -> tuple[list[str], list[ipaddress.IPv4Network]]:
+    """반복 --exclude 값을 IPv4 IP/CIDR 목록으로 검증·정규화한다.
+
+    각 옵션 값 안의 쉼표와 모든 공백(CRLF 포함)을 구분자로 쓴다. 잘못된 토큰 하나라도 있으면
+    전체 요청을 거절해 오타가 조용히 '제외 없음'으로 바뀌지 않게 한다.
+    """
+    if values is None:
+        raw_values: list[str] = []
+    elif isinstance(values, str):
+        raw_values = [values]
+    elif isinstance(values, (list, tuple)) and all(isinstance(v, str) for v in values):
+        raw_values = list(values)
+    else:
+        raise ValueError("--exclude 값은 IPv4 주소 또는 CIDR 문자열이어야 합니다.")
+
+    canonical: list[str] = []
+    networks: list[ipaddress.IPv4Network] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        tokens = raw.replace(",", " ").split()
+        if not tokens:
+            raise ValueError("--exclude 값이 비어 있습니다. 옵션을 빼거나 IPv4 IP/CIDR을 지정하세요.")
+        for token in tokens:
+            try:
+                network = ipaddress.ip_network(token, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"잘못된 제외 대상(--exclude)입니다: {token!r}. IPv4 IP/CIDR만 지원합니다.") from exc
+            if not isinstance(network, ipaddress.IPv4Network):
+                raise ValueError(f"잘못된 제외 대상(--exclude)입니다: {token!r}. IPv4 IP/CIDR만 지원합니다.")
+            key = network.with_prefixlen
+            if key in seen:
+                continue
+            seen.add(key)
+            # 단일 IP는 읽기 쉬운 IP로, CIDR은 host bits를 정리한 canonical network로 저장한다.
+            canonical.append(
+                str(network.network_address)
+                if network.prefixlen == network.max_prefixlen
+                else key
+            )
+            networks.append(network)
+    return canonical, networks
+
+
+def apply_excludes(hosts: list[str], networks: list[ipaddress.IPv4Network]) -> list[str]:
+    """확장된 대상 중 exclude 네트워크에 속한 IPv4 호스트만 제거한다."""
+    if not networks:
+        return list(hosts)
+    effective: list[str] = []
+    for host in hosts:
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            effective.append(host)  # hostname은 DNS로 추측하지 않는다.
+            continue
+        if not isinstance(ip, ipaddress.IPv4Address) or not any(ip in network for network in networks):
+            effective.append(host)
+    return effective
+
+
+def effective_targets_fingerprint(hosts: list[str]) -> str:
+    """순서까지 포함한 유효 대상 목록의 안정적인 SHA-256 지문을 만든다."""
+    digest = hashlib.sha256()
+    for host in hosts:
+        encoded = host.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def concrete_scan_targets(
+    plan: dict, batch_index: int, targets: list[str] | None = None,
+) -> tuple[list[str], bool]:
+    """Return the exact IPv4 hosts handed to one execution unit.
+
+    Non-batch plans retain compact CIDR/range tokens for Nmap, so expand them here only for
+    the import contract. Hostnames cannot prove an unobserved address and therefore make the
+    unit observation-only.
+    """
+    max_hosts = min(int(plan.get("max_hosts", IMPORT_CONTRACT_MAX_HOSTS)), IMPORT_CONTRACT_MAX_HOSTS)
+    if targets:
+        source = targets
+    elif int(plan.get("batch_size", 0)) > 0:
+        source = plan["batches"][batch_index]
+    else:
+        source = plan.get("raw_targets") or plan["batches"][batch_index]
+    try:
+        expanded = expand_targets(source, max_hosts)
+        _canonical_excludes, exclude_networks = parse_excludes(plan.get("exclude", []))
+        effective = apply_excludes(expanded, exclude_networks)
+    except (TypeError, ValueError):
+        return [], False
+
+    concrete: list[str] = []
+    seen: set[str] = set()
+    for host in effective:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return [], False
+        if not isinstance(address, ipaddress.IPv4Address):
+            return [], False
+        value = str(address)
+        if value not in seen:
+            seen.add(value)
+            concrete.append(value)
+    return concrete, bool(concrete)
 
 
 def validate_ports(ports: str) -> str:
@@ -330,6 +458,8 @@ def expand_targets(targets: list[str], cap: int) -> list[str]:
                 raise ValueError(f"잘못된 IP 범위: {t}")
             for i in range(lo, hi + 1):
                 hosts[f"{base}.{i}"] = None
+        elif is_unsupported_composite_ipv4_range(t):
+            raise ValueError(f"지원하지 않는 복합 IP 범위: {t}. 마지막 옥텟 범위만 사용할 수 있습니다.")
         else:
             hosts[t] = None
         if len(hosts) > cap:
@@ -379,6 +509,8 @@ def set_scan_type(flags: list[str], scan_type: str) -> list[str]:
         return flags
     mapped = {"connect": "-sT", "syn": "-sS"}[scan_type]
     flags = [f for f in flags if f not in SCAN_TYPE_FLAGS]
+    if scan_type == "connect":
+        flags = [f for f in flags if f != "--defeat-rst-ratelimit"]
     return [mapped, *flags]
 
 
@@ -564,10 +696,16 @@ def build_command(plan: dict, index: int, stage_id: str = "", tcp_ports: list[in
     host_timeout = plan.get("host_timeout", "")
     # --host-timeout: 한 호스트가 무한정 멈추는 걸 막는다(nmap 이 해당 호스트만 포기, 0으로 정상 종료).
     timeout_flags = ["--host-timeout", host_timeout] if host_timeout else []
+    excludes = plan.get("exclude") or []
+    # Nmap 7.99는 --exclude를 반복하면 누적하지 않고 마지막 값만 쓴다. CLI에서는 반복 입력을
+    # 받되 실제 Nmap에는 검증·정규화된 전체 값을 쉼표로 합쳐 정확히 한 번만 전달한다.
+    exclude_flags = ["--exclude", ",".join(excludes)] if excludes else []
     return [
         plan["nmap"],
+        "--unique",
         "--stats-every", plan["stats_every"],
         *timeout_flags,
+        *exclude_flags,
         *flags,
         "-oA", str(base),
         *scan_targets,
@@ -600,7 +738,7 @@ def open_ports_from_xml(path: Path, protocol: str = "tcp") -> list[int]:
         if (port.get("protocol") or "").lower() != protocol:
             continue
         state = port.find("state")
-        if state is None or (state.get("state") or "").lower() != "open":
+        if state is None or not (state.get("state") or "").lower().startswith("open"):
             continue
         try:
             ports.add(int(port.get("portid") or ""))
@@ -637,7 +775,7 @@ def open_host_ports_from_xml(path: Path, protocol: str = "tcp") -> list[tuple[st
             if (port.get("protocol") or "").lower() != protocol:
                 continue
             state = port.find("state")
-            if state is None or (state.get("state") or "").lower() != "open":
+            if state is None or not (state.get("state") or "").lower().startswith("open"):
                 continue
             try:
                 pid = int(port.get("portid") or "")
@@ -670,7 +808,7 @@ def live_hosts_from_xml(path: Path) -> list[str]:
                 continue
             ip = addr.get("addr") or ""
             # nmap 자체 출력이지만 argv 주입 전 한 번 더 검증.
-            if ip and ip not in seen and TARGET_RE.match(ip):
+            if ip and ip not in seen and TARGET_RE.fullmatch(ip):
                 seen.add(ip)
                 hosts.append(ip)
     return hosts
@@ -690,7 +828,8 @@ def hosts_with_open_ports_from_xml(path: Path) -> list[str]:
     seen: set[str] = set()
     for host in root.findall(".//host"):
         has_open = any(
-            (state := port.find("state")) is not None and (state.get("state") or "").lower() == "open"
+            (state := port.find("state")) is not None
+            and (state.get("state") or "").lower().startswith("open")
             for port in host.findall(".//port")
         )
         if not has_open:
@@ -699,7 +838,7 @@ def hosts_with_open_ports_from_xml(path: Path) -> list[str]:
             if (addr.get("addrtype") or "").lower() == "mac":
                 continue
             ip = addr.get("addr") or ""
-            if ip and ip not in seen and TARGET_RE.match(ip):
+            if ip and ip not in seen and TARGET_RE.fullmatch(ip):
                 seen.add(ip)
                 hosts.append(ip)
     return hosts
@@ -714,6 +853,32 @@ def xml_parse_ok(path: Path) -> bool:
     except ET.ParseError:
         return False
     return True
+
+
+def xml_run_completed(path: Path, target_count: int) -> bool:
+    """Validate the Nmap completion counters required for absent-result closure authority."""
+    if target_count < 1 or not path.exists():
+        return False
+    try:
+        root = ET.parse(path).getroot()
+        finished = root.findall("./runstats/finished")
+        hosts = root.findall("./runstats/hosts")
+        if len(finished) != 1 or len(hosts) != 1 or finished[0].get("exit") != "success":
+            return False
+        up = int(hosts[0].get("up", ""))
+        down = int(hosts[0].get("down", ""))
+        total = int(hosts[0].get("total", ""))
+    except (ET.ParseError, TypeError, ValueError):
+        return False
+    return up >= 0 and down >= 0 and up + down == total == target_count
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fp:
+        for block in iter(lambda: fp.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def xml_has_hosts(path: Path) -> bool:
@@ -802,8 +967,15 @@ def create_plan(args: argparse.Namespace) -> dict:
     # 비배치 모드는 원본 스펙(CIDR 등)을 그대로 nmap 에 넘기되, 캡 검사만 수행.
     expanded = expand_targets(raw_targets, args.max_hosts)
     # scope 게이트: 설정 시 전개된 모든 호스트가 허용 대역 안인지 검증(밖이면 시작 전 거절).
-    check_scope(expanded, getattr(args, "scan_scope", "") or os.environ.get("SCANOPS_SCAN_SCOPE", ""))
-    run_targets = expanded if args.batch_size > 0 else raw_targets
+    scope_spec = getattr(args, "scan_scope", "") or os.environ.get("SCANOPS_SCAN_SCOPE", "")
+    check_scope(expanded, scope_spec)
+    excludes, exclude_networks = parse_excludes(getattr(args, "exclude", []))
+    effective = apply_excludes(expanded, exclude_networks)
+    if not effective:
+        raise ValueError("제외 대상(--exclude)을 적용하니 스캔할 호스트가 남지 않았습니다.")
+    # 배치는 실제 스캔할 호스트만 저장한다. 비배치는 Windows argv 폭발을 피하려 CIDR/범위 원문을
+    # 유지하고, build_command가 모든 Nmap 단계에 canonical --exclude를 적용한다.
+    run_targets = effective if args.batch_size > 0 else raw_targets
     batches = make_batches(run_targets, args.batch_size)
     out_dir = Path(args.output_dir).resolve()
     name = safe_name(args.name)
@@ -839,6 +1011,12 @@ def create_plan(args: argparse.Namespace) -> dict:
         "open_only": args.open_only,
         "include_closed": args.include_closed,
         "raw_targets": raw_targets,
+        "exclude": excludes,
+        "scan_scope": scope_spec,
+        "max_hosts": args.max_hosts,
+        "requested_host_count": len(expanded),
+        "effective_host_count": len(effective),
+        "effective_targets_sha256": effective_targets_fingerprint(effective),
         "batch_size": args.batch_size,
         "batches": batches,
         "cursor": 0,
@@ -849,7 +1027,8 @@ def create_plan(args: argparse.Namespace) -> dict:
 REQUIRED_STATE_KEYS = ("workflow", "output_dir", "name", "manifest_path", "batches", "cursor", "runs")
 
 
-def load_plan(path: str, nmap_override: str = "", dry_run: bool = False) -> dict:
+def load_plan(path: str, nmap_override: str = "", dry_run: bool = False,
+              scan_scope_override: str = "") -> dict:
     p = Path(path)
     plan = json.loads(p.read_text(encoding="utf-8"))
     if not isinstance(plan, dict) or plan.get("tool") != "scanops_scanner":
@@ -858,6 +1037,60 @@ def load_plan(path: str, nmap_override: str = "", dry_run: bool = False) -> dict
     missing = [k for k in REQUIRED_STATE_KEYS if k not in plan]
     if missing:
         raise ValueError(f"state 파일에 필수 항목이 없습니다(손상되었거나 호환되지 않음): {missing}")
+
+    batches = plan.get("batches")
+    if not isinstance(batches, list) or not batches or any(not isinstance(batch, list) for batch in batches):
+        raise ValueError("state 파일의 batches가 올바른 목록이 아닙니다.")
+    saved_batch_targets = [host for batch in batches for host in batch]
+    if not all(isinstance(host, str) for host in saved_batch_targets):
+        raise ValueError("state 파일의 target 형식이 올바르지 않습니다.")
+    validate_targets(saved_batch_targets)
+
+    excludes, exclude_networks = parse_excludes(plan.get("exclude", []))
+    plan["exclude"] = excludes  # 구형 state는 빈 목록으로 호환, 새 state는 canonical 형태로 재검증.
+    raw_targets = plan.get("raw_targets")
+    if raw_targets is None:
+        raw_targets = saved_batch_targets
+    if not isinstance(raw_targets, list) or not all(isinstance(host, str) for host in raw_targets):
+        raise ValueError("state 파일의 raw_targets 형식이 올바르지 않습니다.")
+    validate_targets(raw_targets)
+    try:
+        max_hosts = int(plan.get("max_hosts", 65536))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("state 파일의 max_hosts가 올바른 정수가 아닙니다.") from exc
+    if max_hosts < 1:
+        raise ValueError("state 파일의 max_hosts는 1 이상이어야 합니다.")
+    expanded = expand_targets(raw_targets, max_hosts)
+    stored_scope = plan.get("scan_scope", "")
+    if not isinstance(stored_scope, str):
+        raise ValueError("state 파일의 scan_scope 형식이 올바르지 않습니다.")
+    # 저장 당시 경계는 resume에서 절대 완화하지 않는다. 현재 CLI/환경 scope가 있으면 그것도
+    # 추가로 통과해야 하므로 실제 허용 범위는 stored ∩ current가 된다.
+    if stored_scope:
+        check_scope(expanded, stored_scope)
+    current_scope = scan_scope_override or os.environ.get("SCANOPS_SCAN_SCOPE", "")
+    if current_scope:
+        check_scope(expanded, current_scope)
+    effective = apply_excludes(expanded, exclude_networks)
+    if not effective:
+        raise ValueError("저장된 제외 대상(--exclude)을 적용하니 재개할 호스트가 남지 않았습니다.")
+    if "requested_host_count" in plan and plan["requested_host_count"] != len(expanded):
+        raise ValueError("state 파일의 요청 호스트 수가 저장된 target과 일치하지 않습니다.")
+    if "effective_host_count" in plan and plan["effective_host_count"] != len(effective):
+        raise ValueError("state 파일의 유효 호스트 수가 저장된 exclude와 일치하지 않습니다.")
+    effective_fingerprint = effective_targets_fingerprint(effective)
+    if ("effective_targets_sha256" in plan
+            and plan["effective_targets_sha256"] != effective_fingerprint):
+        raise ValueError("state 파일의 유효 호스트 지문이 저장된 target/exclude 계획과 일치하지 않습니다.")
+    batch_size = int(plan.get("batch_size", 0))
+    expected_batches = make_batches(effective, batch_size) if batch_size > 0 else make_batches(raw_targets, 0)
+    if batches != expected_batches:
+        raise ValueError("state 파일의 batches가 저장된 target/exclude 계획과 일치하지 않습니다.")
+    plan["raw_targets"] = raw_targets
+    plan["max_hosts"] = max_hosts
+    plan["requested_host_count"] = len(expanded)
+    plan["effective_host_count"] = len(effective)
+    plan["effective_targets_sha256"] = effective_fingerprint
     if plan.get("status") == "running":
         print("warning: 이 state 는 'running' 상태입니다(중단되었거나 다른 스캔이 진행 중일 수 있음). "
               "동일 state 로 동시에 두 스캔을 돌리지 마세요.", file=sys.stderr)
@@ -907,6 +1140,84 @@ def manifest_xml_files(run: dict) -> list[str]:
     return [p for p in xmls if xml_has_hosts(Path(p))]
 
 
+def import_contract_unit(plan: dict, run: dict, xml_path: Path) -> dict:
+    stage_id = run.get("stage_id", "") or "single"
+    targets = run.get("scan_targets")
+    targets_complete = run.get("scan_targets_complete") is True
+    if not isinstance(targets, list) or not all(isinstance(host, str) for host in targets):
+        targets, targets_complete = [], False  # old state: preserve import, but never infer absence
+    authoritative = bool(
+        run.get("returncode") == 0
+        and not run.get("skipped")
+        and not plan.get("host_timeout")
+        and stage_id in {"single", "tcp_discovery", "udp_identify"}
+        and targets_complete
+        and xml_run_completed(xml_path, len(targets))
+    )
+    return {
+        "batch_index": run_batch(run),
+        "stage_id": stage_id,
+        "authoritative": authoritative,
+        "closure_targets": targets if authoritative else [],
+        "xml_basename": xml_path.name,
+        "xml_size": xml_path.stat().st_size,
+        "xml_sha256": file_sha256(xml_path),
+    }
+
+
+def build_import_contract(plan: dict, import_xml_files: list[str] | None = None) -> dict | None:
+    """Build the allowlisted, versioned sidecar contract consumed by ScanOps web import.
+
+    The surrounding manifest intentionally remains human-friendly and may contain absolute
+    paths/commands. Only this object is closure authority, and every unit is bound to the
+    original Nmap XML bytes.
+    """
+    max_hosts = min(int(plan.get("max_hosts", IMPORT_CONTRACT_MAX_HOSTS)), IMPORT_CONTRACT_MAX_HOSTS)
+    raw_targets = list(plan.get("raw_targets") or [host for batch in plan["batches"] for host in batch])
+    try:
+        expanded = expand_targets(raw_targets, max_hosts)
+    except ValueError:
+        # The standalone scanner can intentionally raise --max-hosts above the web import
+        # authority cap. Keep producing its legacy manifest instead of failing after Nmap;
+        # such oversized runs remain observation-only when imported.
+        return None
+    excludes, exclude_networks = parse_excludes(plan.get("exclude", []))
+    effective = apply_excludes(expanded, exclude_networks)
+    # A hostname is resolved by Nmap only at execution time, so the sidecar cannot prove
+    # which IPv4 address produced the XML. Preserve that valid workflow with legacy
+    # observed-host semantics instead of emitting a strong contract the web importer must
+    # (and should) reject as unbound.
+    for host in effective:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return None
+        if not isinstance(address, ipaddress.IPv4Address) or str(address) != host:
+            return None
+    selected_xml = set(
+        import_xml_files
+        if import_xml_files is not None
+        else importable_xml(plan, include_discovery_fallback=True)
+    )
+    units = []
+    for run in latest_runs(plan):
+        for value in manifest_xml_files(run):
+            if value in selected_xml:
+                units.append(import_contract_unit(plan, run, Path(value)))
+    return {
+        "schema": IMPORT_CONTRACT_SCHEMA,
+        "raw_targets": raw_targets,
+        "exclude": excludes,
+        "max_hosts": max_hosts,
+        "requested_host_count": len(expanded),
+        "effective_host_count": len(effective),
+        "effective_targets_sha256": effective_targets_fingerprint(effective),
+        "batch_size": min(max(0, int(plan.get("batch_size", 0))), max_hosts),
+        "host_timeout": plan.get("host_timeout", ""),
+        "units": units,
+    }
+
+
 def write_manifest(plan: dict, zip_path: str = "") -> None:
     manifest = dict(plan)
     manifest["state_path"] = plan.get("state_path", "")
@@ -915,8 +1226,21 @@ def write_manifest(plan: dict, zip_path: str = "") -> None:
     manifest["all_xml_files"] = list(dict.fromkeys(
         p for run in runs for p in manifest_xml_files(run)
     ))
+    # The strong contract and the recommended upload list are one exact set. Diagnostic or
+    # unusable XML may remain in all_xml_files/on disk, but cannot invalidate completed units.
+    import_xml_files = importable_xml(plan, include_discovery_fallback=True)
+    # Very old/minimal state files can still be summarized, but they cannot prove the original
+    # requested target plan. Keep them on observed-host import semantics instead of inventing it.
+    if isinstance(plan.get("batches"), list) and plan.get("batches"):
+        contract = build_import_contract(plan, import_xml_files)
+        if contract is not None:
+            manifest["import_contract"] = contract
+        else:
+            manifest.pop("import_contract", None)
+    else:
+        manifest.pop("import_contract", None)
     # identify 산출물이 하나도 없으면 성공한 discovery XML 을 구제 fallback 으로 추천한다(QA-038).
-    manifest["import_xml_files"] = importable_xml(plan, include_discovery_fallback=True)
+    manifest["import_xml_files"] = import_xml_files
     write_json(Path(plan["manifest_path"]), manifest)
 
 
@@ -952,18 +1276,30 @@ def failed_runs(plan: dict) -> list[dict]:
 
 
 def importable_xml(plan: dict, include_discovery_fallback: bool = False) -> list[str]:
-    """import 가능한 XML(파싱+host, discovery 제외). 부분 실패 단계의 XML 도 쓸만하면 포함.
-    include_discovery_fallback=True 면, identify 산출물이 하나도 없을 때 성공한 discovery XML 을 구제
-    fallback 으로 포함한다(QA-038: discovery 만 성공한 스캔이 'failed' 로 버려지지 않게)."""
+    """Importable XML, including completed authoritative units with zero observed hosts.
+
+    Observation-only identify/partial output still needs a usable host. Completed discovery,
+    UDP, and single units are retained because their manifest contract can close an included
+    but unobserved target. Old states without unit target evidence keep the legacy fallback.
+    """
     seen: dict[str, None] = {}
     for run in latest_runs(plan):
-        if run.get("stage_id", "") == "tcp_discovery":
-            continue
         for p in manifest_xml_files(run):
+            path = Path(p)
+            if import_contract_unit(plan, run, path)["authoritative"]:
+                seen[p] = None
+                continue
+            if run.get("stage_id", "") == "tcp_discovery":
+                # New states know the concrete unit targets, so a usable failed/partial
+                # discovery can be imported safely as observation-only beside later stages.
+                # Old states retain the legacy discovery-only fallback below.
+                if run.get("scan_targets_complete") is True and xml_has_usable_host(path):
+                    seen[p] = None
+                continue
             # '쓸만한 host'(status=up 또는 열린 포트)가 든 식별 XML 만 importable 로 센다. host 없는 빈 XML
             # (QA-049)이나 MAC-only/유령·down-전부필터 host(QA-056)가 seen 을 차지하면 discovery 구제
             # fallback 이 막혀 실데이터가 든 discovery XML 이 누락된다.
-            if xml_has_usable_host(Path(p)):
+            if xml_has_usable_host(path):
                 seen[p] = None
     if seen or not include_discovery_fallback:
         return list(seen)
@@ -1060,7 +1396,19 @@ def print_scan_summary(plan: dict, failed: list[dict], status: str) -> None:
             f"실패(rc={run.get('returncode')}) — 부분 결과만 반영됩니다.",
             file=sys.stderr,
         )
-    if f["importable"] == 0 and not failed:
+    if not failed and f["live_hosts"] == 0 and f["open_tcp"] == 0 and f["open_udp"] == 0:
+        if f["importable"]:
+            print(
+                "warning: 살아있는 호스트/열린 포트 관측은 없습니다. "
+                "성공한 완료 범위 XML+manifest는 가져오기 시 미관측 닫힘 판정에 사용됩니다.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "warning: 가져올 결과가 없습니다(열린 포트/살아있는 호스트 0). 대상·네트워크 도달성을 확인하세요.",
+                file=sys.stderr,
+            )
+    elif f["importable"] == 0 and not failed:
         print(
             "warning: 가져올 결과가 없습니다(열린 포트/살아있는 호스트 0). 대상·네트워크 도달성을 확인하세요.",
             file=sys.stderr,
@@ -1072,6 +1420,7 @@ def print_scan_summary(plan: dict, failed: list[dict], status: str) -> None:
 def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", tcp_ports: list[int] | None = None,
                    targets: list[str] | None = None) -> int:
     cmd = build_command(plan, idx, stage_id, tcp_ports, targets)
+    scan_targets, targets_complete = concrete_scan_targets(plan, idx, targets)
     base = output_base(plan, idx, stage_id)
     started = now_iso()
     stage_label = f" {run_stage_name(stage_id)}" if stage_id else ""
@@ -1086,6 +1435,8 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
         "finished_at": now_iso(),
         "returncode": rc,
         "command": cmd,
+        "scan_targets": scan_targets,
+        "scan_targets_complete": targets_complete,
         "output_base": str(base),
         "files": existing_outputs(base),
     }
@@ -1284,10 +1635,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--include-closed", action="store_true", help="Remove --open so closed/filtered ports remain in XML.")
     p.add_argument("--stats-every", default=STATS_EVERY_DEFAULT, help="nmap --stats-every value.")
     p.add_argument("--host-timeout", default=HOST_TIMEOUT_DEFAULT,
-                   help="Per-host nmap --host-timeout so one host cannot hang the whole scan. 0 disables.")
+                   help="Per-host nmap --host-timeout. Off by default (0); set e.g. 30m to opt in.")
     p.add_argument("--scan-scope", default="",
                    help="Allowed scan range(s): comma/space CIDR or IP. Targets outside are rejected before scanning. "
                         "Falls back to the SCANOPS_SCAN_SCOPE env var. Empty means unrestricted.")
+    p.add_argument("--exclude", action="append", default=[], metavar="IP_OR_CIDR",
+                   help="Exclude IPv4 IP/CIDR values. Repeatable; each value may use comma/space/newline separators.")
     p.add_argument("--batch-size", type=int, default=0, help="Expand targets and run batches of this size. 0 means one nmap run.")
     p.add_argument("--max-hosts", type=int, default=65536, help="Safety cap when expanding CIDR/ranges for batching.")
     p.add_argument("--resume", help="Resume from a previous *.state.json.")
@@ -1299,7 +1652,10 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        plan = load_plan(args.resume, args.nmap, args.dry_run) if args.resume else create_plan(args)
+        if args.resume and args.exclude:
+            raise ValueError("--resume에서는 --exclude를 변경할 수 없습니다. state에 저장된 제외 대상을 사용합니다.")
+        plan = (load_plan(args.resume, args.nmap, args.dry_run, args.scan_scope)
+                if args.resume else create_plan(args))
         return execute(plan, dry_run=args.dry_run, zip_outputs=args.zip)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

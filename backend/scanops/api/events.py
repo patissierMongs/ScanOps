@@ -1,7 +1,8 @@
 """전역 이력 피드 라우터 — 모든 발견의 변화 이력을 한 화면 타임라인용으로.
 
 발견별 드로어(/findings/{id}/events)와 달리, 전체 FindingEvent 를 Finding 과 조인해
-host/port/service 를 동반한 평탄한 피드로 돌려준다. 타입/호스트/기간 필터 + 페이지네이션.
+host/port와 사용자 표시 식별자·taxonomy service를 동반한 평탄한 피드로 돌려준다.
+타입/호스트/기간 필터 + 페이지네이션.
 """
 from __future__ import annotations
 
@@ -49,7 +50,8 @@ def event_feed(
     items = [
         EventFeedItem(
             id=ev.id, finding_id=ev.finding_id, type=ev.type, detail=ev.detail,
-            host_ip=f.host_ip, port=f.port, service=f.service,
+            host_ip=f.host_ip, port=f.port, server=f.server,
+            display_identity=f.display_identity, service=f.service,
             actor_user_id=ev.actor_user_id, scan_id=ev.scan_id, created_at=ev.created_at,
         )
         for ev, f in rows

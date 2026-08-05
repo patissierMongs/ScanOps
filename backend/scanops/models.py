@@ -33,6 +33,7 @@ FINDING_STATUSES = ("미조치", "처리중", "정상처리")
 RISK_LEVELS = ("banned", "high", "medium", "low", "info")
 RISK_LABELS_KO = {"banned": "금지", "high": "상", "medium": "중", "low": "하", "info": "정보"}
 IDENTIFICATIONS = ("확인", "추측", "tcpwrapped", "미확인")
+ACTIVE_FINDING_STATES = ("open", "open|filtered")
 
 
 class User(Base):
@@ -43,6 +44,8 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(16), default="viewer")
     display_name: Mapped[str] = mapped_column(String(64), default="")
     is_active: Mapped[int] = mapped_column(Integer, default=1)
+    # Incremented on every password change/reset so already issued tokens become invalid.
+    auth_version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
@@ -79,6 +82,9 @@ class ScanRun(Base):
     port_count: Mapped[int] = mapped_column(Integer, default=0)
     # 단계분리 엔진 스캔의 단계별 요약(상태/소요/카운트/에러) — 진행 타임라인·이력용. 청킹 스캔은 빈 값.
     stages_json: Mapped[list | None] = mapped_column(JSON, default=list)
+    # 사용자에게 노출 가능한 안정적 실패 분류/메시지. 원시 경로·명령·traceback은 로그에만 남긴다.
+    failure_code: Mapped[str] = mapped_column(String(64), default="")
+    failure_message: Mapped[str] = mapped_column(String(256), default="")
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
@@ -98,6 +104,8 @@ class Finding(Base):
     service: Mapped[str] = mapped_column(String(64), default="")
     product: Mapped[str] = mapped_column(String(128), default="")
     version: Mapped[str] = mapped_column(String(128), default="")
+    # HTTP/NSE가 관측한 Server 응답. Nmap service는 taxonomy 키이므로 덮어쓰지 않는다.
+    server: Mapped[str] = mapped_column(String(256), default="")
     banner: Mapped[str] = mapped_column(Text, default="")
     cpe: Mapped[str] = mapped_column(Text, default="")
     rtt: Mapped[str] = mapped_column(String(32), default="")
@@ -147,6 +155,15 @@ class Finding(Base):
                 return s.get("output") or ""
         return ""
 
+    @property
+    def display_identity(self) -> str:
+        """User-facing identity; the normalized service remains the taxonomy key."""
+        from .identity import display_identity
+
+        return display_identity(
+            server=self.server, product=self.product, version=self.version, service=self.service,
+        )
+
 
 class FindingEvent(Base):
     """이력 타임라인 + 감사 추적 (누가·언제·무엇을)."""
@@ -154,7 +171,7 @@ class FindingEvent(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     finding_id: Mapped[int] = mapped_column(ForeignKey("findings.id", ondelete="CASCADE"), index=True)
     scan_id: Mapped[int | None] = mapped_column(ForeignKey("scan_runs.id"), nullable=True)
-    # NEW_OPEN/CLOSED/REOPENED/SERVICE_CHANGED/VERSION_CHANGED/STATUS_CHANGE/ASSIGN/DEADLINE/NOTE/EXCEPTION
+    # NEW_OPEN/CLOSED/REOPENED/SERVICE_CHANGED/VERSION_CHANGED/SERVER_CHANGED/STATUS_CHANGE/ASSIGN/DEADLINE/NOTE/EXCEPTION
     type: Mapped[str] = mapped_column(String(24), index=True)
     detail: Mapped[str] = mapped_column(Text, default="")
     actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)

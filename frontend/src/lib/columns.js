@@ -6,6 +6,20 @@ const fmtDate = (v) => (v ? String(v).slice(0, 10) : "");
 const joinCompliance = (list) =>
   (list || []).map((c) => `${c.std}:${c.ref}`).join("; ");
 
+export function primaryServiceIdentity(finding) {
+  const productVersion = [finding?.product, finding?.version].filter(Boolean).join(" ");
+  return finding?.display_identity || finding?.server || productVersion || finding?.service || "—";
+}
+
+export function secondaryServiceIdentity(finding) {
+  const primary = primaryServiceIdentity(finding);
+  const values = [
+    [finding?.product, finding?.version].filter(Boolean).join(" "),
+    finding?.service,
+  ].filter((value, index, all) => value && value !== primary && all.indexOf(value) === index);
+  return values.join(" · ");
+}
+
 // fingerprint-strings 원시 응답을 사람이 읽기 좋게: probe 그룹별로 들여쓰기 정리 + 동일 응답 합치기.
 // 백엔드 nmap_parse.pretty_fingerprint 와 동일 로직(표=내보내기 동일하게).
 export function prettyFingerprint(raw) {
@@ -38,6 +52,8 @@ export const ALL_COLUMNS = [
   { key: "port", label: "포트", get: (f) => f.port, mono: true, num: true },
   { key: "proto", label: "프로토콜", get: (f) => f.proto },
   { key: "state", label: "상태", get: (f) => f.state },
+  { key: "display_identity", label: "주 식별", get: (f) => primaryServiceIdentity(f) },
+  { key: "server", label: "Server", get: (f) => f.server },
   { key: "service", label: "서비스", get: (f) => f.service },
   { key: "product", label: "제품", get: (f) => f.product },
   { key: "version", label: "버전", get: (f) => f.version },
@@ -60,7 +76,7 @@ export const ALL_COLUMNS = [
   { key: "first_seen", label: "등록 날짜", get: (f) => fmtDate(f.first_seen), mono: true },
   { key: "last_seen", label: "스캔 날짜", get: (f) => fmtDate(f.last_seen), mono: true },
   // 용도근거: 표에선 가용 필드로 근사 표시, 내보내기(CSV/XLSX)는 서버가 NSE 추출까지 포함한 전체를 채운다.
-  { key: "purpose", label: "용도근거", get: (f) => [f.hostname, [f.service, f.product, f.version].filter(Boolean).join(" "), f.usage].filter(Boolean).join(" · ") },
+  { key: "purpose", label: "용도근거", get: (f) => [f.hostname, primaryServiceIdentity(f), secondaryServiceIdentity(f), f.usage].filter((v) => v && v !== "—").join(" · ") },
   { key: "manual_note", label: "메모", get: (f) => f.manual_note },
 ];
 
@@ -73,11 +89,11 @@ export const cellValue = (finding, key) => {
 
 // 프리셋 5종 (백엔드 finding 실제 컬럼에 맞춤) + 직접구성(커스텀 저장).
 export const PRESETS = [
-  { id: "p_report", name: "표준 보고서", cols: ["host_ip", "hostname", "port", "proto", "service", "version", "risk_level", "status", "dept", "first_seen", "last_seen"] },
-  { id: "p_ports", name: "포트 인벤토리", cols: ["host_ip", "port", "proto", "state", "service"] },
-  { id: "p_finger", name: "서비스 핑거프린트", cols: ["host_ip", "port", "service", "product", "version", "banner", "cpe", "fingerprint"] },
-  { id: "p_risk", name: "위험·컴플라이언스", cols: ["host_ip", "port", "service", "risk_level", "category", "compliance", "status", "deadline"] },
-  { id: "p_min", name: "최소 (CSV)", cols: ["host_ip", "port", "service"] },
+  { id: "p_report", name: "표준 보고서", cols: ["host_ip", "hostname", "port", "proto", "display_identity", "service", "risk_level", "status", "dept", "first_seen", "last_seen"] },
+  { id: "p_ports", name: "포트 인벤토리", cols: ["host_ip", "port", "proto", "state", "display_identity", "service"] },
+  { id: "p_finger", name: "서비스 핑거프린트", cols: ["host_ip", "port", "display_identity", "server", "service", "product", "version", "banner", "cpe", "fingerprint"] },
+  { id: "p_risk", name: "위험·컴플라이언스", cols: ["host_ip", "port", "display_identity", "service", "risk_level", "category", "compliance", "status", "deadline"] },
+  { id: "p_min", name: "최소 (CSV)", cols: ["host_ip", "port", "display_identity"] },
 ];
 
 export const DEFAULT_PRESET_ID = "p_report";

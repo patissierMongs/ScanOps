@@ -80,8 +80,8 @@ SCAN_OPTIONS = [
      "note": "누락 위험", "desc": "최대 속도(Insane). 혼잡하거나 느린 망에서는 결과가 누락될 수 있다."},
 
     # ── 성능·안정 ──
-    {"key": "max_retries", "label": "재시도 제한 (--max-retries 1)", "flags": ["--max-retries", "1"], "group": "성능·안정", "default": True,
-     "desc": "프로브 재전송을 1회로 제한해 느린 호스트에서 시간을 절약한다. 신뢰성 높은 내부망에 적합."},
+    {"key": "max_retries", "label": "재시도 제한 (--max-retries 2)", "flags": ["--max-retries", "2"], "group": "성능·안정", "default": True,
+     "desc": "프로브 재전송을 2회로 제한해 누락과 지연의 균형을 맞춘다. 자동·단계·단독 스캐너가 같은 기본값을 사용한다."},
     {"key": "min_hostgroup", "label": "호스트 그룹 64 (--min-hostgroup 64)", "flags": ["--min-hostgroup", "64"], "group": "성능·안정", "default": True,
      "desc": "한 번에 64대씩 병렬 처리해 넓은 대역 스캔을 가속한다."},
     {"key": "max_parallel", "label": "병렬 100 (--max-parallelism 100)", "flags": ["--max-parallelism", "100"], "group": "성능·안정", "default": True,
@@ -150,6 +150,7 @@ DEFAULT_KEYS = [o["key"] for o in SCAN_OPTIONS if o["default"]]
 
 # 포트 스펙: 숫자/범위/콤마 + T:/U: 프로토콜 접두만 허용
 _PORTS_RE = re.compile(r"^[0-9TUtu:,\-\s]+$")
+_PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
 
 
 def validate_keys(keys: list[str]) -> list[str]:
@@ -169,7 +170,9 @@ def flags_for(keys: list[str]) -> list[str]:
     return out
 
 
-def validate_nse(keys: list[str]) -> list[str]:
+def validate_nse(keys: list[str] | None) -> list[str] | None:
+    if keys is None:
+        return None
     bad = [k for k in keys if k not in _NSE_KEYS]
     if bad:
         raise ValueError(f"알 수 없는 NSE 스크립트: {bad}")
@@ -197,6 +200,22 @@ def validate_ports(ports: str) -> str:
     ports = (ports or "").strip()
     if not ports:
         return ""
-    if not _PORTS_RE.match(ports):
+    if not _PORTS_RE.fullmatch(ports):
         raise ValueError("허용되지 않는 포트 형식입니다. (예: 22,80,443 또는 1-1024)")
-    return ports.replace(" ", "")
+    ports = ports.replace(" ", "")
+    for segment in ports.split(","):
+        if not segment:
+            raise ValueError("포트 목록에 빈 항목이 있습니다(콤마 위치 확인).")
+        body = segment
+        if ":" in segment:
+            prefix, body = segment.split(":", 1)
+            if prefix.upper() not in ("T", "U"):
+                raise ValueError(f"알 수 없는 프로토콜 접두사: {segment!r}")
+        if not body or not _PORT_BODY_RE.fullmatch(body):
+            raise ValueError(f"잘못된 포트/범위: {segment!r}")
+        numbers = [int(value) for value in re.findall(r"\d+", body)]
+        if any(not 1 <= value <= 65535 for value in numbers):
+            raise ValueError(f"포트는 1-65535 범위여야 합니다: {segment!r}")
+        if "-" in body and len(numbers) == 2 and numbers[0] > numbers[1]:
+            raise ValueError(f"포트 범위가 거꾸로입니다(시작>끝): {segment!r}")
+    return ports

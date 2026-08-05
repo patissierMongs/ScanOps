@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..identity import display_identity
 from ..models import RISK_LABELS_KO, Finding, User
 from ..spreadsheet import safe_cell
 from .deps import current_user
@@ -15,7 +16,8 @@ from .deps import current_user
 router = APIRouter()
 
 _HEADERS = [
-    "발견키", "IP", "호스트명", "포트", "프로토콜", "상태", "서비스", "제품", "버전",
+    "발견키", "IP", "호스트명", "포트", "프로토콜", "상태", "표시 식별", "Server",
+    "서비스", "제품", "버전",
     "식별", "분류", "용도", "위험등급", "운영상태", "부서", "마감", "등록 날짜", "스캔 날짜",
     "비고", "컴플라이언스근거",
 ]
@@ -24,8 +26,9 @@ _HEADERS = [
 def _row(f: Finding) -> list:
     comp = "; ".join(f"{c.get('std')}:{c.get('ref')}" for c in (f.compliance_json or []))
     return [
-        f.finding_key, f.host_ip, f.hostname, f.port, f.proto, f.state, f.service,
-        f.product, f.version, f.identification, f.category, f.usage,
+        f.finding_key, f.host_ip, f.hostname, f.port, f.proto, f.state,
+        display_identity(server=f.server, product=f.product, version=f.version, service=f.service),
+        f.server, f.service, f.product, f.version, f.identification, f.category, f.usage,
         RISK_LABELS_KO.get(f.risk_level, f.risk_level),
         f.status, f.dept,
         f.deadline.strftime("%Y-%m-%d") if f.deadline else "",

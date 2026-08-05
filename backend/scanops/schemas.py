@@ -50,9 +50,12 @@ class ScanRunIn(BaseModel):
     preset: str = "quick"          # 옵션 미지정 시 사용(하위호환)
     options: list[str] = []        # 스캔 옵션 키(화이트리스트) — 지정 시 우선
     ports: str = ""                # 포트 스펙(예: 22,80,443 또는 1-1024)
-    nse: list[str] = []            # NSE 스크립트 키(화이트리스트) — 선택 시 --script 조립
+    # 생략(None)=각 워크플로 기본, 빈 목록=[]=명시적으로 끄기, 목록=선택값.
+    nse: list[str] | None = None
     targets: list[str]
+    exclude: list[str] = []        # 제외할 IPv4 주소/CIDR 토큰(서버에서 fail-closed 검증)
     batch_size: int = 256          # 청킹 배치당 호스트 수(중지/이어가기 단위)
+    staged: bool = False           # estimate가 단계 엔진의 프로토콜 조합을 검증할 때만 사용
     discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
     udp_all_targets: bool = False  # auto: UDP 식별을 discovery live host 가 아닌 원본 타깃 전체로(-Pn)
 
@@ -73,6 +76,9 @@ class ScanOut(BaseModel):
     finished_at: datetime | None
     host_count: int
     port_count: int
+    stages_json: list | None = None
+    failure_code: str = ""
+    failure_message: str = ""
 
 
 class IngestSummary(BaseModel):
@@ -105,6 +111,8 @@ class FindingOut(BaseModel):
     service: str
     product: str
     version: str
+    server: str
+    display_identity: str
     banner: str
     cpe: str
     fingerprint: str = ""      # -sV 미식별 서비스 원시 응답(nse_json 의 fingerprint-strings)
@@ -146,13 +154,15 @@ class EventOut(BaseModel):
 
 
 class EventFeedItem(BaseModel):
-    """전역 이력 피드 항목 — FindingEvent + Finding(host/port/service) 조인."""
+    """전역 이력 피드 항목 — FindingEvent + 현재 Finding 식별 문맥 조인."""
     id: int
     finding_id: int
     type: str
     detail: str
     host_ip: str
     port: int
+    display_identity: str
+    server: str
     service: str
     actor_user_id: int | None
     scan_id: int | None
@@ -202,7 +212,9 @@ class RescanOut(BaseModel):
 class RescanRunIn(BaseModel):
     finding_ids: list[int]
     options: list[str] = []
-    ports: str = ""  # 빈값이면 선택 발견의 포트 자동
+    nse: list[str] | None = None
+    # 구버전 클라이언트의 빈 값만 허용. non-empty는 API가 선택 IP:port 고정 계약으로 명시 거절한다.
+    ports: str = ""
 
 
 class RescanRunOut(BaseModel):

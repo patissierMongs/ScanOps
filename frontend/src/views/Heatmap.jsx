@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 import { downloadFile } from "../lib/download.js";
 import { RISK_LABEL, riskClass } from "../lib/format.js";
+import { primaryServiceIdentity, secondaryServiceIdentity } from "../lib/columns.js";
 import { useToast } from "../ui/Toast.jsx";
 
 const STATE_OPTIONS = ["", "신규열림", "기존열림", "신규닫힘", "기존닫힘", "대상 외"];
@@ -39,7 +40,8 @@ export default function Heatmap() {
       if (state && row.current_state !== state && !row.cells.some((c) => c.state === state)) return false;
       if (openOnly && !OPEN_STATES.has(row.current_state)) return false;
       if (!q) return true;
-      return [row.host_ip, row.hostname, row.port, row.proto, row.service, row.version, row.risk_label, row.status, row.dept]
+      return [row.host_ip, row.hostname, row.port, row.proto, row.display_identity, row.server,
+        row.service, row.product, row.version, row.risk_label, row.status, row.dept]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q));
     });
@@ -50,7 +52,8 @@ export default function Heatmap() {
     return (data.current_ports || []).filter((row) => {
       if (state && row.current_state !== state) return false;
       if (!q) return true;
-      return [row.host_ip, row.hostname, row.port, row.proto, row.service, row.version, row.risk_label, row.status, row.dept]
+      return [row.host_ip, row.hostname, row.port, row.proto, row.display_identity, row.server,
+        row.service, row.product, row.version, row.risk_label, row.status, row.dept]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q));
     });
@@ -73,7 +76,7 @@ export default function Heatmap() {
           <button className={tab === "current" ? "primary sm" : "sm"} onClick={() => setTab("current")}>현재 포트</button>
           <input
             style={{ flex: 1, minWidth: 180 }}
-            placeholder="IP, 포트, 서비스, 부서 검색"
+            placeholder="IP, 포트, Server/서비스, 부서 검색"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -118,7 +121,7 @@ function HeatmapTable({ phases, rows }) {
             <tr>
               <th className="sticky-col">IP</th>
               <th>포트</th>
-              <th>서비스</th>
+              <th>주 식별 / 서비스</th>
               <th>위험</th>
               <th>현재</th>
               <th>마지막</th>
@@ -137,8 +140,7 @@ function HeatmapTable({ phases, rows }) {
                 <td className="sticky-col mono">{row.host_ip}</td>
                 <td className="mono">{row.port}/{row.proto}</td>
                 <td>
-                  <div>{row.service || "—"}</div>
-                  {row.version ? <div className="muted">{row.version}</div> : null}
+                  <ServiceIdentity finding={row} />
                 </td>
                 <td>{row.risk_level ? <span className={"pill " + riskClass(row.risk_level)}>{RISK_LABEL[row.risk_level] || row.risk_label}</span> : <span className="muted">—</span>}</td>
                 <td><span className={"heat-token " + stateClass(row.current_state)}>{row.current_state || "—"}</span></td>
@@ -175,7 +177,7 @@ function CurrentTable({ rows }) {
         <table className="tbl">
           <thead>
             <tr>
-              <th>IP</th><th>포트</th><th>서비스</th><th>위험</th><th>현재</th><th>운영상태</th><th>부서</th><th>마지막</th>
+              <th>IP</th><th>포트</th><th>주 식별 / 서비스</th><th>위험</th><th>현재</th><th>운영상태</th><th>부서</th><th>마지막</th>
             </tr>
           </thead>
           <tbody>
@@ -186,8 +188,7 @@ function CurrentTable({ rows }) {
                 <td className="mono">{row.host_ip}</td>
                 <td className="mono">{row.port}/{row.proto}</td>
                 <td>
-                  <div>{row.service || "—"}</div>
-                  {row.version ? <div className="muted">{row.version}</div> : null}
+                  <ServiceIdentity finding={row} />
                 </td>
                 <td>{row.risk_level ? <span className={"pill " + riskClass(row.risk_level)}>{RISK_LABEL[row.risk_level] || row.risk_label}</span> : <span className="muted">—</span>}</td>
                 <td><span className={"heat-token " + stateClass(row.current_state)}>{row.current_state || "—"}</span></td>
@@ -205,6 +206,16 @@ function CurrentTable({ rows }) {
 
 function stateClass(state) {
   return STATE_CLASS[state] || "none";
+}
+
+function ServiceIdentity({ finding }) {
+  const secondary = secondaryServiceIdentity(finding);
+  return (
+    <>
+      <div>{primaryServiceIdentity(finding)}</div>
+      {secondary ? <div className="muted">{secondary}</div> : null}
+    </>
+  );
 }
 
 function shortState(state) {

@@ -2,12 +2,17 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useToast } from "../ui/Toast.jsx";
 import {
-  readWorkbook, unmergeFillWs, detectHeaderRow, assetColumnsFrom,
+  detectHeaderRow, assetColumnsFrom,
   computeAutoMap, buildAssetRecords, normalizeSpec, normHeader,
-  ASSET_KNOWN_FIELDS, defaultMapFields,
+  ASSET_KNOWN_FIELDS, defaultMapFields, diffAssetRecords,
 } from "../lib/assetImport.js";
+import {
+  createAssetWorkbookParser,
+  isCurrentAssetWorkbookSession,
+} from "../lib/assetWorkbookWorkerClient.js";
 
 const MAP_PRESET_KEY = "scanops_asset_map_presets";
+const MAX_ASSET_FILE_BYTES = 25 * 1024 * 1024;
 const loadPresets = () => { try { return JSON.parse(localStorage.getItem(MAP_PRESET_KEY)) || []; } catch { return []; } };
 
 export default function Assets({ user }) {
@@ -16,7 +21,10 @@ export default function Assets({ user }) {
   const [imp, setImp] = useState(null);
   const [mapPresets, setMapPresets] = useState(loadPresets);
   const [presetId, setPresetId] = useState("");
+  const [parsingFile, setParsingFile] = useState(false);
   const fileRef = useRef(null);
+  const parserRef = useRef(null);
+  const parseRequestRef = useRef(0);
   const toast = useToast();
   const canEdit = user.role === "admin" || user.role === "auditor";
 
@@ -24,31 +32,86 @@ export default function Assets({ user }) {
     api("/assets").then(setAssets).catch((e) => toast(e.message, { type: "err" }));
   }
   useEffect(() => { load(); }, []);
+  useEffect(() => () => {
+    parseRequestRef.current += 1;
+    parserRef.current?.terminate();
+    parserRef.current = null;
+  }, []);
 
-  function selectSheet(wb, sheetNames, sheet) {
-    const { aoa, mergeCount } = unmergeFillWs(wb.Sheets[sheet]);
+  function applyParsedSheet({ sheetNames, sheet, aoa, mergeCount }) {
     const headerRow = detectHeaderRow(aoa);
     const cols = assetColumnsFrom(aoa, headerRow);
-    setImp({ wb, sheetNames, sheet, aoa, headerRow, mergeCount, cols, mapping: computeAutoMap(cols), extraCols: [], fields: defaultMapFields() });
+    setImp({ sheetNames, sheet, aoa, headerRow, mergeCount, cols, mapping: computeAutoMap(cols), extraCols: [], fields: defaultMapFields() });
     setPresetId("");
     const dataN = cols.length ? cols[0].values.length : 0;
     toast(`불러옴 · 헤더 ${headerRow + 1}행 · 데이터 ${dataN}행` + (mergeCount ? ` · 병합 ${mergeCount}개 해제` : ""));
+  }
+
+  async function selectSheet(sheet) {
+    const parser = parserRef.current;
+    if (!parser || parsingFile) return;
+    const requestId = ++parseRequestRef.current;
+    setParsingFile(true);
+    try {
+      const parsed = await parser.selectSheet(sheet);
+      if (parserRef.current === parser && parseRequestRef.current === requestId) applyParsedSheet(parsed);
+    } catch (error) {
+      if (parserRef.current === parser && parseRequestRef.current === requestId) {
+        toast(error.message || "엑셀 파싱 실패 — .xlsx/.xls/.csv 확인", { type: "err" });
+      }
+    } finally {
+      if (parserRef.current === parser && parseRequestRef.current === requestId) setParsingFile(false);
+    }
+  }
+
+  function cancelImport() {
+    parseRequestRef.current += 1;
+    parserRef.current?.terminate();
+    parserRef.current = null;
+    setParsingFile(false);
+    setImp(null);
+    setPresetId("");
   }
 
   function onFile(e) {
     const file = e.target.files && e.target.files[0];
     e.target.value = "";
     if (!file) return;
+    const requestId = ++parseRequestRef.current;
+    parserRef.current?.terminate();
+    parserRef.current = null;
+    setParsingFile(false);
+    setImp(null);
+    setPresetId("");
+    if (file.size > MAX_ASSET_FILE_BYTES) {
+      toast("자산 파일은 25MB 이하만 가져올 수 있습니다", { type: "err" });
+      return;
+    }
+    setParsingFile(true);
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
+      if (parseRequestRef.current !== requestId) return;
+      let parser;
       try {
-        const { wb, sheetNames } = readWorkbook(reader.result);
-        selectSheet(wb, sheetNames, sheetNames[0]);
-      } catch {
-        toast("엑셀 파싱 실패 — .xlsx/.xls/.csv 확인", { type: "err" });
+        parser = createAssetWorkbookParser();
+        parserRef.current = parser;
+        const parsed = await parser.open(reader.result);
+        if (parserRef.current === parser && parseRequestRef.current === requestId) applyParsedSheet(parsed);
+      } catch (error) {
+        if (parseRequestRef.current === requestId && (!parser || parserRef.current === parser)) {
+          parser?.terminate();
+          parserRef.current = null;
+          toast(error.message || "엑셀 파싱 실패 — .xlsx/.xls/.csv 확인", { type: "err" });
+        }
+      } finally {
+        if (parseRequestRef.current === requestId) setParsingFile(false);
       }
     };
-    reader.onerror = () => toast("파일을 읽지 못했습니다", { type: "err" });
+    reader.onerror = () => {
+      if (parseRequestRef.current !== requestId) return;
+      setParsingFile(false);
+      toast("파일을 읽지 못했습니다", { type: "err" });
+    };
     reader.readAsArrayBuffer(file);
   }
 
@@ -144,10 +207,15 @@ export default function Assets({ user }) {
   }
 
   function doImport() {
+    const importSession = { requestId: parseRequestRef.current, parser: parserRef.current };
     const recs = buildAssetRecords(imp.cols, imp.mapping, imp.extraCols, imp.fields);
     if (!recs.length) { toast("IP 컬럼을 매핑하세요", { type: "err" }); return; }
     api("/assets/bulk", { method: "POST", json: recs })
-      .then((r) => { toast(`자산 가져옴 · 신규 ${r.added} / 갱신 ${r.updated} · 발견매칭 ${r.findings_matched}`); setImp(null); load(); })
+      .then((r) => {
+        toast(`자산 가져옴 · 신규 ${r.added} / 갱신 ${r.updated} · 발견매칭 ${r.findings_matched}`);
+        if (isCurrentAssetWorkbookSession(importSession, parseRequestRef.current, parserRef.current)) cancelImport();
+        load();
+      })
       .catch((e) => toast(e.message, { type: "err" }));
   }
 
@@ -165,35 +233,8 @@ export default function Assets({ user }) {
   const records = imp ? buildAssetRecords(imp.cols, imp.mapping, imp.extraCols, imp.fields) : [];
   const preview = records[0] || null;
 
-  // ---- 커밋 전 변경 미리보기(diff) — 현재 대장과 비교(신규/수정/동일/대장에만). 업서트 의미와 동일하게
-  //      '비어있지 않고 값이 다른' 입력만 변경으로 센다. 기존 가져오기 동작은 그대로(여기선 표시만). ----
-  const CMP = [["hostname", "호스트명"], ["dept", "부서"], ["owner", "담당자"], ["contact", "연락처"], ["asset_no", "자산번호"], ["note", "비고"]];
-  const existingByIp = useMemo(() => { const m = {}; assets.forEach((a) => { m[a.ip] = a; }); return m; }, [assets]);
-  const diff = useMemo(() => {
-    const res = { neu: [], changed: [], same: 0, missing: 0 };
-    const seen = new Set();
-    records.forEach((r) => {
-      const ip = (r.ip || "").trim();
-      if (!ip) return;
-      seen.add(ip);
-      const cur = existingByIp[ip];
-      if (!cur) { res.neu.push(r); return; }
-      const changes = [];
-      CMP.forEach(([f, label]) => {
-        const nv = (r[f] ?? "").toString().trim();
-        const ov = (cur[f] ?? "").toString().trim();   // 기존값도 trim — 공백차만으로 오탐 방지
-        if (nv && nv !== ov) changes.push({ label, old: cur[f] || "", neu: nv });
-      });
-      Object.entries(r.extra || {}).forEach(([k, v]) => {
-        const nv = String(v).trim();
-        const ov = String(cur.extra ? (cur.extra[k] ?? "") : "").trim();
-        if (nv && nv !== ov) changes.push({ label: k, old: ov, neu: nv });
-      });
-      if (changes.length) res.changed.push({ ip: r.ip, changes }); else res.same += 1;
-    });
-    res.missing = assets.filter((a) => !seen.has(a.ip)).length;
-    return res;
-  }, [records, existingByIp, assets]);
+  // ---- 커밋 전 변경 미리보기(diff) — 실제 bulk 업서트와 같은 merge/clear 규칙. ----
+  const diff = useMemo(() => diffAssetRecords(records, assets), [records, assets]);
   const dataRows = imp ? (imp.cols[0]?.values.length || 0) : 0;
   const skipped = imp ? Math.max(0, dataRows - records.length) : 0;
 
@@ -208,10 +249,13 @@ export default function Assets({ user }) {
         <div className="panel">
           <h3>엑셀 가져오기 — 병합해제 · 헤더감지 · 자동매핑 · 결합셀 분리 · 커스텀 필드 · 매핑 프리셋</h3>
           <div className="row">
-            <button onClick={() => fileRef.current?.click()}>파일 선택 (.xlsx/.xls/.csv)</button>
+            <button disabled={parsingFile} onClick={() => fileRef.current?.click()}>
+              {parsingFile ? "파일 분석 중…" : "파일 선택 (.xlsx/.xls/.csv)"}
+            </button>
+            {parsingFile && <button onClick={cancelImport}>분석 취소</button>}
             <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={onFile} />
             {imp && imp.sheetNames.length > 1 && (
-              <select value={imp.sheet} onChange={(e) => selectSheet(imp.wb, imp.sheetNames, e.target.value)}>
+              <select value={imp.sheet} disabled={parsingFile} onChange={(e) => selectSheet(e.target.value)}>
                 {imp.sheetNames.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             )}
@@ -305,7 +349,9 @@ export default function Assets({ user }) {
                     `ip       : ${preview.ip}`,
                     ...imp.fields
                       .filter((f) => f.key !== "ip" && !f.custom)
-                      .map((f) => `${f.key.padEnd(9)}: ${preview[f.key] || "—"}`),
+                      .map((f) => Object.prototype.hasOwnProperty.call(preview, f.key)
+                        ? `${f.key.padEnd(9)}: ${preview[f.key] || "— (초기화)"}`
+                        : `${f.key.padEnd(9)}: 미매핑 (기존값 유지)`),
                     `extra    : ${Object.keys(preview.extra).length ? JSON.stringify(preview.extra) : "{}"}`,
                   ].join("\n")}
                 </div>
@@ -336,7 +382,7 @@ export default function Assets({ user }) {
                           {c.changes.map((ch, i) => (
                             <span key={i} style={{ marginRight: 8 }}>
                               {ch.label}: <span style={{ color: "var(--high)", textDecoration: "line-through", opacity: 0.7 }}>{ch.old || "—"}</span>
-                              {" → "}<span style={{ color: "var(--low)", fontWeight: 600 }}>{ch.neu}</span>
+                              {" → "}<span style={{ color: "var(--low)", fontWeight: 600 }}>{ch.neu || "— (초기화)"}</span>
                             </span>
                           ))}
                         </div>
@@ -373,8 +419,8 @@ export default function Assets({ user }) {
               </div>
 
               <div className="row" style={{ marginTop: 12 }}>
-                <button className="primary" disabled={imp.mapping.ip == null} onClick={doImport}>가져오기 ({records.length}건)</button>
-                <button onClick={() => setImp(null)}>취소</button>
+                <button className="primary" disabled={parsingFile || imp.mapping.ip == null} onClick={doImport}>가져오기 ({records.length}건)</button>
+                <button onClick={cancelImport}>취소</button>
               </div>
             </div>
           )}

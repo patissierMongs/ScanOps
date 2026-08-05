@@ -10,7 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import RISK_LEVELS, Finding, RiskRule, User
+from ..models import ACTIVE_FINDING_STATES, RISK_LEVELS, Finding, RiskRule, User
 from ..schemas import RuleIn, RuleOut
 from ..scanning import taxonomy
 from .audit import record
@@ -23,7 +23,7 @@ _KINDS = ("service_rule", "banned_service", "port_rule")
 
 def _match_count(db: Session, rule: RiskRule) -> int:
     """규칙이 잡는 현재 열린 발견 수."""
-    q = db.query(func.count(Finding.id)).filter(Finding.state == "open")
+    q = db.query(func.count(Finding.id)).filter(Finding.state.in_(ACTIVE_FINDING_STATES))
     if rule.kind in ("service_rule", "banned_service"):
         if not rule.service:
             return 0

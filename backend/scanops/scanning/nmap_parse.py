@@ -19,10 +19,65 @@ _REMARK_PATTERNS = [
     ("nbstat", "host", re.compile(r"Computer name:\s*([^\n]+)")),
     ("http-title", "title", re.compile(r"\A\s*([^\n]+)")),
     # http-server-header 출력은 Server 값 그 자체(예: "uvicorn")
-    ("http-server-header", "server", re.compile(r"\A\s*([^\r\n]+)")),
+    ("http-server-header", "server", re.compile(r"(?i)\A\s*(?:server:[ \t]*)?([^\r\n]+)")),
+    ("http-headers", "server", re.compile(r"(?im)^\s*server:[ \t]*([^\r\n]+)")),
     # -sV 가 식별 못 한 포트: fingerprint-strings 원시 응답에서 Server 헤더를 건진다(소문자 server: 포함).
-    ("fingerprint-strings", "server", re.compile(r"(?i)server:[ \t]*([^\r\n]+)")),
+    ("fingerprint-strings", "server", re.compile(r"(?im)^[ \t]*server:[ \t]*([^\r\n]+)")),
 ]
+
+_SERVER_SOURCES = (
+    ("http-server-header", re.compile(r"(?im)^[ \t]*(?:server:[ \t]*)?([^\r\n]+)")),
+    ("http-headers", re.compile(r"(?im)^\s*server:[ \t]*([^\r\n]+)")),
+    ("fingerprint-strings", re.compile(r"(?im)^[ \t]*server:[ \t]*([^\r\n]+)")),
+)
+
+_NSE_FAILURE_RE = re.compile(r"(?i)^\s*ERROR:\s*(?:Script execution failed|Header request failed)\b")
+
+
+def _nse_failed(output: object) -> bool:
+    """Nmap이 NSE 실패로 표준화한 출력은 관측값으로 취급하지 않는다."""
+    return bool(_NSE_FAILURE_RE.match(str(output or "")))
+
+
+def extract_server(nse: list[dict] | None) -> str:
+    """NSE 원문에서 HTTP Server 자기신고 값을 우선순위대로 구조화한다.
+
+    정규화된 Nmap ``service``는 taxonomy 키로 유지하고 이 값은 별도 관측 근거로 쓴다.
+    """
+    scripts = [s for s in (nse or []) if isinstance(s, dict)]
+    for wanted, regex in _SERVER_SOURCES:
+        for script in scripts:
+            if wanted not in str(script.get("id") or "").lower():
+                continue
+            output = script.get("output")
+            if _nse_failed(output):
+                continue
+            for match in regex.finditer(str(output or "")):
+                value = " ".join(match.group(1).strip(" \t,").split())
+                if value.lower() == "<empty>":
+                    continue
+                if value and "doesn't have" not in value.lower():
+                    return value[:256]
+    return ""
+
+
+def server_observed(nse: list[dict] | None) -> bool:
+    """Server 값을 확인할 수 있는 NSE 출처가 이번 스캔 결과에 있었는지."""
+    fingerprint_scripts: list[dict] = []
+    for script in nse or []:
+        if not isinstance(script, dict):
+            continue
+        script_id = str(script.get("id") or "").lower()
+        if _nse_failed(script.get("output")):
+            continue
+        if "http-server-header" in script_id or "http-headers" in script_id:
+            # A successful direct header probe is authoritative even when the header is absent.
+            return True
+        if "fingerprint-strings" in script_id:
+            # Fingerprints contain many unrelated successful responses. They only establish a
+            # Server observation when an actual header line can be extracted.
+            fingerprint_scripts.append(script)
+    return bool(extract_server(fingerprint_scripts))
 
 
 def _identification(svc) -> str:
@@ -76,7 +131,7 @@ def pretty_fingerprint(raw: str) -> str:
 
 
 def _extract_key_line(script_id: str, output: str) -> str:
-    if not output:
+    if not output or _nse_failed(output):
         return ""
     sid = (script_id or "").lower()
     for sid_match, label, regex in _REMARK_PATTERNS:
@@ -84,6 +139,8 @@ def _extract_key_line(script_id: str, output: str) -> str:
             m = regex.search(output)
             if m:
                 val = m.group(1).strip(" \t,")
+                if label == "server" and val.lower() == "<empty>":
+                    continue
                 if not val or "doesn't have a title" in val.lower():
                     continue
                 if len(val) > 80:
@@ -94,6 +151,9 @@ def _extract_key_line(script_id: str, output: str) -> str:
 
 def _remarks(detail: str, nse: list[dict]) -> str:
     parts = [detail] if detail else []
+    server = extract_server(nse)
+    if server:
+        parts.append(f"server={server}")
     for s in nse:
         key = _extract_key_line(s["id"], s["output"])
         if key and key not in parts:
@@ -192,6 +252,9 @@ def parse_xml(source) -> list[dict]:
                 "service": (svc.get("name") if svc is not None else "") or "",
                 "product": (svc.get("product") if svc is not None else "") or "",
                 "version": (svc.get("version") if svc is not None else "") or "",
+                "server": extract_server(nse),
+                # 세 상태 계약: 미관측(False) / 관측했으나 없음(True+"") / 값 있음(True+value).
+                "server_observed": server_observed(nse),
                 "banner": detail,
                 "cpe": cpe,
                 "rtt": rtt or "",

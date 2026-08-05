@@ -9,11 +9,24 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from ..models import Finding, FindingEvent
+from ..identity import display_identity
+from ..models import ACTIVE_FINDING_STATES, Finding, FindingEvent
+from .nmap_parse import server_observed
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """SQLite DateTime may return naive values; ScanOps stores those as UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _is_older(candidate: datetime, reference: datetime | None) -> bool:
+    return reference is not None and _as_utc(candidate) < _as_utc(reference)
 
 
 def _key(f: dict) -> str:
@@ -21,7 +34,8 @@ def _key(f: dict) -> str:
 
 
 def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[str],
-           scope_keys: set[str] | None = None, scan_date: datetime | None = None) -> dict:
+           scope_keys: set[str] | None = None, scan_date: datetime | None = None,
+           *, commit: bool = True) -> dict:
     """findings(이번 스캔의 열린 포트들)와 scanned_hosts(up 호스트)로 DB 갱신.
 
     scope_keys 가 주어지면(타겟 포트 재스캔) 닫힘 판정을 그 키(host|port|proto)로만
@@ -31,7 +45,7 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
     """
     when = scan_date or _now()
     counts = {"new": 0, "reopened": 0, "service_changed": 0,
-              "version_changed": 0, "unchanged": 0, "closed": 0}
+              "version_changed": 0, "server_changed": 0, "unchanged": 0, "closed": 0}
     seen: set[str] = set()
 
     for f in findings:
@@ -44,14 +58,46 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
             row.last_seen = when
             db.add(row)
             db.flush()
-            _event(db, row.id, scan_id, "NEW_OPEN", f"{f['service']} {f['port']}/{f['proto']} 신규 발견", when=when)
+            identity = display_identity(
+                server=f.get("server", ""),
+                product=f.get("product", ""),
+                version=f.get("version", ""),
+                service=f.get("service", ""),
+            )
+            prefix = f"{identity} " if identity else ""
+            _event(
+                db,
+                row.id,
+                scan_id,
+                "NEW_OPEN",
+                f"{prefix}{f['port']}/{f['proto']} 신규 발견",
+                when=when,
+            )
             counts["new"] += 1
             continue
 
+        # Imports can arrive out of chronological order. Older evidence belongs in history,
+        # but must never replace the current observation or manufacture change/reopen events.
+        if _is_older(when, row.last_seen):
+            if _is_older(when, row.first_seen):
+                row.first_seen = when
+                row.first_scan_id = scan_id
+            continue
+
         # 기존 발견 갱신
-        reopened = row.state != "open"
-        old_service, old_version = row.service, row.version
-        for k, v in _observed(f).items():
+        reopened = row.state not in ACTIVE_FINDING_STATES
+        old_service, old_version, old_server = row.service, row.version, row.server
+        observed = _observed(f)
+        identity_observed = f.get("identity_observed") is not False
+        if not identity_observed:
+            # A successful sweep is authoritative for openness, not identity. Service/NSE
+            # probing may transiently miss or filter this port, so preserve all prior identity,
+            # classification, and evidence fields while advancing the observation timestamp.
+            observed = {key: observed[key] for key in ("state", "rtt")}
+        elif not _server_was_observed(f):
+            # Server NSE를 실행하지 않은 스캔은 기존 증거를 '없음'으로 덮지 않는다.
+            observed.pop("server", None)
+        for k, v in observed.items():
             setattr(row, k, v)
         row.last_scan_id = scan_id
         row.last_seen = when
@@ -64,37 +110,66 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
             if row.status == "정상처리":
                 row.status = "미조치"
             counts["reopened"] += 1
-        elif old_service != f["service"]:
-            _event(db, row.id, scan_id, "SERVICE_CHANGED", f"{old_service} → {f['service']}", when=when)
+
+        # Reopening and identity changes are independent facts. A reopened endpoint may also
+        # return a different service/version/Server and both transitions must remain auditable.
+        identity_changed = False
+        if identity_observed and old_service != f["service"]:
+            _event(db, row.id, scan_id, "SERVICE_CHANGED",
+                   f"{old_service} → {f['service']}", when=when)
             counts["service_changed"] += 1
-        elif old_version != f["version"]:
-            _event(db, row.id, scan_id, "VERSION_CHANGED", f"{old_version} → {f['version']}", when=when)
+            identity_changed = True
+        if identity_observed and old_version != f["version"]:
+            _event(db, row.id, scan_id, "VERSION_CHANGED",
+                   f"{old_version} → {f['version']}", when=when)
             counts["version_changed"] += 1
-        else:
+            identity_changed = True
+        if identity_observed and old_server != row.server:
+            _event(db, row.id, scan_id, "SERVER_CHANGED",
+                   f"{old_server or '—'} → {row.server or '—'}", when=when)
+            counts["server_changed"] += 1
+            identity_changed = True
+        if not reopened and not identity_changed:
             counts["unchanged"] += 1
 
-    # 닫힘 판정: 이번에 스캔된 호스트에서, 이전엔 열렸는데 이번에 안 보인 포트.
-    if scanned_hosts:
-        open_rows = db.query(Finding).filter(
-            Finding.state == "open", Finding.host_ip.in_(scanned_hosts)
-        ).all()
-        for row in open_rows:
-            if row.finding_key in seen:
-                continue
-            if scope_keys is not None and row.finding_key not in scope_keys:
-                continue  # 타겟 재스캔 범위 밖 포트는 손대지 않음
-            row.state = "closed"
-            row.last_scan_id = scan_id
-            row.last_seen = when
-            row.reopened = 0   # 다시 닫혔으므로 재발 태그 해제
-            # 마감/배정이 걸려 있던 항목이 닫힘 → 조치 완료 자동 검증
-            verified = row.status == "처리중" or row.deadline is not None
-            row.status = "정상처리"
-            detail = "포트 닫힘 — 조치 완료 자동 확인" if verified else "포트 닫힘"
-            _event(db, row.id, scan_id, "CLOSED", detail, when=when)
-            counts["closed"] += 1
+    # 명시적 scope_keys는 완료된 structured scan의 권한이다. discovery에서 호스트가
+    # 관측되지 않았더라도 그 effective target/port/protocol 범위에서 사라진 finding은 닫는다.
+    # None인 구형/import 경로만 기존처럼 실제 관측 host 범위를 사용한다.
+    open_rows = []
+    if scope_keys is not None:
+        keys = sorted(scope_keys)
+        for start in range(0, len(keys), 500):
+            open_rows.extend(db.query(Finding).filter(
+                Finding.state.in_(ACTIVE_FINDING_STATES),
+                Finding.finding_key.in_(keys[start:start + 500]),
+            ).all())
+    elif scanned_hosts:
+        hosts = sorted(scanned_hosts)
+        for start in range(0, len(hosts), 500):
+            open_rows.extend(db.query(Finding).filter(
+                Finding.state.in_(ACTIVE_FINDING_STATES),
+                Finding.host_ip.in_(hosts[start:start + 500]),
+            ).all())
+    for row in open_rows:
+        if _is_older(when, row.last_seen):
+            continue
+        if row.finding_key in seen:
+            continue
+        row.state = "closed"
+        row.last_scan_id = scan_id
+        row.last_seen = when
+        row.reopened = 0   # 다시 닫혔으므로 재발 태그 해제
+        # 마감/배정이 걸려 있던 항목이 닫힘 → 조치 완료 자동 검증
+        verified = row.status == "처리중" or row.deadline is not None
+        row.status = "정상처리"
+        detail = "포트 닫힘 — 조치 완료 자동 확인" if verified else "포트 닫힘"
+        _event(db, row.id, scan_id, "CLOSED", detail, when=when)
+        counts["closed"] += 1
 
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return counts
 
 
@@ -103,13 +178,22 @@ def _observed(f: dict) -> dict:
     return {
         "host_ip": f["host_ip"], "hostname": f["hostname"], "port": f["port"],
         "proto": f["proto"], "state": f["state"], "service": f["service"],
-        "product": f["product"], "version": f["version"], "banner": f["banner"],
+        "product": f["product"], "version": f["version"],
+        "server": f.get("server", ""), "banner": f["banner"],
         "cpe": f["cpe"], "rtt": f["rtt"], "identification": f["identification"],
         "nse_json": f["nse_json"], "remarks": f["remarks"],
         "category": f.get("category", ""), "usage": f.get("usage", ""),
         "risk_level": f.get("risk_level", "info"),
         "compliance_json": f.get("compliance_json", []),
     }
+
+
+def _server_was_observed(f: dict) -> bool:
+    """Parser 삼상태 플래그를 우선하고, 구형 내부 호출은 NSE/비어있지 않은 값으로 호환."""
+    observed = f.get("server_observed")
+    if isinstance(observed, bool):
+        return observed
+    return bool(f.get("server")) or server_observed(f.get("nse_json"))
 
 
 def _event(db: Session, finding_id: int, scan_id: int, type_: str, detail: str,

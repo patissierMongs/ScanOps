@@ -8,17 +8,19 @@ import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from . import scan_options
+from . import chunker, process_control, scan_options
 from .presets import PRESETS
 
 # 타겟 화이트리스트: IPv4/CIDR/호스트명/범위. shell 미사용이라도 입력은 검증.
-_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:/\-]+$")
+# Nmap 인자 끝에 붙이더라도 '-' 로 시작하면 타겟이 아니라 옵션으로 재해석된다.
+_TARGET_RE = re.compile(r"^(?!-)[A-Za-z0-9_.:/\-]+$")
 
 # 직접 명령 입력에서 거절할 셸 메타문자 — shell=False 라 해석은 안 되지만, 의도치 않은
 # 토큰이 nmap 인자로 새는 걸 막고 명확히 거절한다.
 _SHELL_META = set(";|&`$<>\n\r")
 # 사용자가 준 출력 플래그는 무시(경로 traversal·형식 충돌 방지) — ScanOps 가 -oA 를 강제 주입.
 _OUT_FLAGS = {"-oX", "-oN", "-oG", "-oS", "-oA"}
+_RAW_FORBIDDEN_FLAGS = {"--resume"}
 
 # 주기적 진행 보고 — nmap 이 stdout 에 "About X% done; ETC ..." 를 10초마다 출력.
 # --resume 은 원본 명령을 그대로 이어받으므로 이 플래그도 자동 승계된다(가시성 유지).
@@ -62,9 +64,18 @@ def find_nmap(explicit: str = "") -> str | None:
 
 
 def validate_targets(targets: list[str]) -> list[str]:
-    bad = [t for t in targets if not _TARGET_RE.match(t)]
+    bad = [t for t in targets if not isinstance(t, str) or not _TARGET_RE.fullmatch(t)]
     if bad:
         raise ValueError(f"허용되지 않는 타겟 형식: {bad}")
+    ipv6 = [t for t in targets if ":" in t]
+    if ipv6:
+        raise ValueError(f"IPv6 대상은 아직 지원하지 않습니다: {ipv6}. IPv4 주소/대역으로 지정하세요.")
+    composite_ranges = [t for t in targets if chunker.is_unsupported_composite_ipv4_range(t)]
+    if composite_ranges:
+        raise ValueError(
+            f"지원하지 않는 복합 IP 범위: {composite_ranges}. "
+            "마지막 옥텟 범위만 사용할 수 있습니다."
+        )
     return targets
 
 
@@ -119,13 +130,47 @@ def normal_log_of(basename: Path) -> Path:
     return Path(str(basename) + ".nmap")
 
 
-def build_command(nmap: str, preset: str, targets: list[str], out_basename: Path) -> list[str]:
+def build_command(nmap: str, preset: str, targets: list[str], out_basename: Path,
+                  ports: str = "", nse: list[str] | None = None) -> list[str]:
     if preset not in PRESETS:
         raise ValueError(f"알 수 없는 프리셋: {preset}")
     validate_targets(targets)
+    port_spec = scan_options.validate_ports(ports)
+    flags = list(PRESETS[preset])
+    if port_spec:
+        # 명시 포트가 프리셋의 -p/--top-ports 와 함께 나가면 Nmap 해석이 모호해진다.
+        # 프리셋의 포트 선택만 제거하고 나머지 스캔 의미는 그대로 유지한다.
+        filtered: list[str] = []
+        skip_value = False
+        for flag in flags:
+            if skip_value:
+                skip_value = False
+                continue
+            if flag in {"-p", "--top-ports"}:
+                skip_value = True
+                continue
+            if flag == "-F" or flag.startswith("--top-ports="):
+                continue
+            filtered.append(flag)
+        flags = [*filtered, "-p", port_spec]
+    if nse is not None:
+        scan_options.validate_nse(nse)
+        filtered = []
+        skip_value = False
+        for flag in flags:
+            if skip_value:
+                skip_value = False
+                continue
+            if flag == "--script":
+                skip_value = True
+                continue
+            if flag.startswith("--script="):
+                continue
+            filtered.append(flag)
+        flags = [*filtered, *scan_options.script_flag(nse)]
     # -oA : .nmap(normal)/.xml/.gnmap 동시 출력. .nmap 이 있어야 --resume 가능,
     # .xml 은 ScanOps 파싱용. 중단 후 --resume 시 nmap 이 세 파일을 모두 이어 쓴다.
-    return [nmap, *STATS_FLAGS, *PRESETS[preset], "-oA", str(out_basename), *targets]
+    return [nmap, *STATS_FLAGS, *flags, "-oA", str(out_basename), *targets]
 
 
 def build_command_opts(nmap: str, option_keys: list[str], ports: str,
@@ -134,8 +179,13 @@ def build_command_opts(nmap: str, option_keys: list[str], ports: str,
     """옵션 키 화이트리스트 + 포트 + (선택)NSE 스크립트 + 타겟 → 검증된 nmap argv (-oA 강제)."""
     scan_options.validate_keys(option_keys)
     flags = scan_options.flags_for(option_keys)
+    if "connect" in option_keys:
+        # Nmap rejects this SYN-only acceleration flag with -sT. Keep API callers safe even
+        # if an older UI/preset submits the stale combination.
+        flags = [flag for flag in flags if flag != "--defeat-rst-ratelimit"]
     port_spec = scan_options.validate_ports(ports)
-    script_flags = scan_options.script_flag(nse or [])
+    scripts = scan_options.NSE_DEFAULT_KEYS if nse is None else nse
+    script_flags = scan_options.script_flag(scripts)
     validate_targets(targets)
     argv = [nmap, *STATS_FLAGS, *flags]
     if port_spec:
@@ -221,6 +271,9 @@ def parse_raw_command(command: str) -> list[str]:
         toks = toks[1:]
     if not toks:
         raise ValueError("스캔 인자가 없습니다.")
+    if any(t in _RAW_FORBIDDEN_FLAGS or any(t.startswith(f"{flag}=") for flag in _RAW_FORBIDDEN_FLAGS)
+           for t in toks):
+        raise ValueError("직접 명령에서 --resume 옵션은 사용할 수 없습니다.")
     return toks
 
 
@@ -238,13 +291,19 @@ def build_command_raw(nmap: str, command: str, out_basename: Path) -> tuple[list
         if t in _OUT_FLAGS:
             skip = True
             continue
+        if any(t.startswith(flag) and len(t) > len(flag) for flag in _OUT_FLAGS):
+            # -oX/tmp/out.xml, -oA=base 같은 붙임 형태도 사용자 경로와 함께 제거.
+            continue
+        if t == "--append-output":
+            continue
         cleaned.append(t)
     argv = [nmap]
     if not any(t == "--stats-every" for t in cleaned):
         argv += STATS_FLAGS
     argv += cleaned
     argv += ["-oA", str(out_basename)]
-    ip_tokens = [t for t in cleaned if _is_ip_like(t)]
+    from .scope import raw_target_tokens
+    ip_tokens = [t for t in raw_target_tokens(cleaned) if _is_ip_like(t)]
     return argv, ip_tokens
 
 
@@ -255,17 +314,26 @@ def build_resume_command(nmap: str, out_basename: Path) -> list[str]:
 
 def _spawn(cmd: list[str], log_path: Path | None, timeout: int) -> int:
     with open(log_path, "wb") if log_path else open(os.devnull, "wb") as logf:
-        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, shell=False)
-        return proc.wait(timeout=timeout)
+        proc = process_control.popen_owned(
+            cmd, stdout=logf, stderr=subprocess.STDOUT, shell=False,
+        )
+        return wait_owned(proc, timeout=timeout)
 
 
 def popen(cmd: list[str], log_path: Path) -> subprocess.Popen:
-    """비차단 실행 — Popen 을 즉시 반환(백그라운드 워커가 wait/terminate). 로그는 파일로.
+    """비차단 실행 — backend-owned process tree를 즉시 반환한다."""
+    with open(log_path, "wb") as logf:
+        return process_control.popen_owned(
+            cmd, stdout=logf, stderr=subprocess.STDOUT, shell=False,
+        )
 
-    로그 파일 핸들은 프로세스가 쥐고 있어야 하므로 닫지 않는다(프로세스 종료 시 OS 가 회수).
-    """
-    logf = open(log_path, "wb")
-    return subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, shell=False)
+
+def wait_owned(process: subprocess.Popen, timeout: float | None = None) -> int:
+    """Preserve Popen.wait semantics while always releasing tree ownership."""
+    try:
+        return process.wait(timeout=timeout)
+    finally:
+        process_control.close_owned(process)
 
 
 # nmap stats 라인 파서 (예):
@@ -279,14 +347,12 @@ _ELAPSED_RE = re.compile(r"Stats:\s*([\d:]+)\s+elapsed;\s*(\d+)\s+hosts complete
 def parse_progress(log_path: Path) -> dict:
     """진행 로그 tail 에서 최신 진행률/ETC/경과를 추출. 없으면 None 값."""
     out: dict = {"percent": None, "etc": None, "remaining": None,
-                 "elapsed": None, "hosts_up": None, "last_line": ""}
+                 "elapsed": None, "hosts_up": None}
     try:
         data = log_path.read_bytes()[-8192:].decode("utf-8", "replace")
     except OSError:
         return out
     lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
-    if lines:
-        out["last_line"] = lines[-1]
     for ln in reversed(lines):
         if out["percent"] is None and (m := _PCT_RE.search(ln)):
             out["percent"] = float(m.group(1))

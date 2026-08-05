@@ -17,6 +17,7 @@
 | nmap | 서버에 설치됨, 관리자 권한(-sS/-O 가능) |
 | 컴플라이언스 | **KISA + 국정원(NIS)** 근거 매핑 |
 | 재사용 | nmapParser의 **taxonomy + 식별 로직 + NSE 추출** 전부 포팅 (원본 불변, 복제) |
+| 서비스 식별 | `service`는 taxonomy 키로 유지, `server`는 별도 관측값, 표시만 `server → product/version → service` |
 | 완성 범위(v1) | **풀세트** — 핵심 루프 + 부서통보 + 자산대장 + 감사리포트 + 대시보드 |
 | UI 언어 | 한국어 |
 
@@ -39,15 +40,15 @@
 
 **안정 finding 키 = `host_ip|port|proto`** — 서비스/버전이 바뀌어도 같은 포트면 같은 발견. 이 키가 상태·담당·마감·이력을 스캔 간에 이어주는 등뼈.
 
-- **User**(id, username, password_hash, role[admin/auditor/viewer], display_name, is_active, created_at)
+- **User**(id, username, password_hash, auth_version, role[admin/auditor/viewer], display_name, is_active, created_at)
 - **Asset**(id, ip, hostname, dept, owner, asset_no, note) — 자산대장. finding.dept/owner 자동 매칭 소스.
-- **ScanRun**(id, name, targets, command, status[running/done/failed/canceled], started_at, finished_at, raw_xml_path, host_count, port_count, created_by)
-- **Finding**(id, **finding_key**(uniq), host_ip, hostname, port, proto, state[open/closed/filtered], service, product, version, banner, cpe, rtt,
+- **ScanRun**(id, name, targets, command, status[running/done/failed/canceled/interrupted], failure_code, failure_message, stages_json, started_at, finished_at, raw_xml_path, host_count, port_count, created_by)
+- **Finding**(id, **finding_key**(uniq), host_ip, hostname, port, proto, state[open/open|filtered/closed], service, product, version, server, banner, cpe, rtt,
   identification[확인/추측/tcpwrapped/미확인], category, usage, risk_level[high/medium/low/info], remarks, nse_json, compliance_json,
   first_scan_id, last_scan_id, first_seen, last_seen,
   status[미조치/처리중/정상처리], reopened(재발 태그 — 정상처리 후 다시 열리면 1, 상태는 미조치로 복귀), owner_user_id, deadline, dept,
   created_at, updated_at)
-- **FindingEvent**(id, finding_id, scan_id, type[NEW_OPEN/CLOSED/REOPENED/SERVICE_CHANGED/VERSION_CHANGED/STATUS_CHANGE/ASSIGN/DEADLINE/NOTE/EXCEPTION], detail, actor_user_id, created_at) — 이력 타임라인 + 감사 추적.
+- **FindingEvent**(id, finding_id, scan_id, type[NEW_OPEN/CLOSED/REOPENED/SERVICE_CHANGED/VERSION_CHANGED/SERVER_CHANGED/STATUS_CHANGE/ASSIGN/DEADLINE/NOTE/EXCEPTION], detail, actor_user_id, created_at) — 이력 타임라인 + 감사 추적.
 - **RiskRule**(id, kind[banned_service/port_rule], service, port, risk_level, note, created_by) — taxonomy 위에 얹는 조직 커스텀 규칙.
 - **Category**(id, service_name(lower, uniq), category, usage, risk_level, encryption, auth, exposure, compliance_json, desc) — 포팅한 taxonomy(시드).
 - **Notification**(id, dept, finding_ids_json, body, channel[clipboard/file/log], sent_at, sent_by) — 부서통보 기록.
@@ -70,6 +71,26 @@
 7) 감사 리포트(누가·언제·무엇을·어느 근거로) 산출
 ```
 **이게 핵심 차별점:** diff가 *기한·배정·상태와 묶여* 조치 완료를 자동 검증한다. (기존 두 도구엔 없음)
+
+### 식별값과 닫힘 판정 계약
+
+- `service`는 Nmap의 정규화된 프로토콜 이름이라 분류와 위험 규칙에 사용한다. HTTP `Server`는 더
+  구체적일 수 있지만 프록시·위조 가능성이 있는 자기신고 값이므로 `server`에 증거로 분리한다.
+- 초기 포팅은 원본 `nmapParser`처럼 Nmap `service`와 taxonomy를 식별의 중심으로 삼았다.
+  HTTP NSE는 실행했지만 Server 값을 별도 컬럼·관측 상태로 모델링하지 않아 원문(이후에는 비고)에만
+  머물렀다. Server를 의도적으로 낮게 평가한 결정이 아니라 서비스 중심 데이터 모델의 구현 누락이었다.
+- 표시·검색·통보·내보내기는 `server → product+version → service`를 공통으로 사용하되, taxonomy는
+  항상 `service`를 사용한다.
+- 정상 완료된 구조화 실행 단위(단계 스캔 전체 또는 레거시의 완료 배치)는 제외 후 유효 타깃과 요청
+  port/proto의 교집합을 닫힘 후보로 삼는다. 따라서 그 범위의 무응답·미관측 finding도 닫되, 명시적으로
+  제외한 타깃은 관측 범위 밖이므로 열린 상태를 유지한다. 선택 재스캔은 선택 키의 0건 결과만 닫힘
+  증거로 취급한다. 실패·중지된 실행 단위의 결과는 인입·닫힘에 쓰지 않으며, 이미 완료된 레거시 배치의
+  판정은 유지한다.
+- 단독 스캐너는 원본 Nmap XML을 증거로 보존하고, versioned manifest에서 XML basename·크기·SHA-256과
+  실제 실행 target을 결박한다. 서버는 target cap/scope/exclude/count/fingerprint, Nmap runstats와
+  scaninfo를 첫 DB/파일 부작용 전에 다시 검증한다. 성공한 single/TCP discovery와 실제 UDP 대상만
+  미관측 닫힘 권한을 가지며 TCP identify·실패·중지·host-timeout unit은 관측 전용이다. manifest가 없는
+  기존 XML은 하위 호환을 위해 관측 host 범위만 사용한다.
 
 ## 4. 모듈 (백엔드)
 
@@ -108,6 +129,7 @@ backend/scanops/
 - nmap 호출은 **`subprocess.Popen(list, shell=False)`** 만 — 명령 주입 차단(nmapParser 원칙 계승).
 - 타겟·옵션 화이트리스트 검증, 출력 인자(-oX 등) 서버가 강제.
 - 비밀번호 해시 저장, 역할 기반 접근(스캔 실행=auditor↑, 사용자 관리=admin).
+- 토큰은 사용자 `auth_version`을 포함하며 비밀번호 변경·재설정 시 기존 토큰을 전부 무효화한다.
 - 스캔 결과는 민감정보(IP/배너) → 접근 인증 필수, 감사 로그 보존.
 
 ## 7. 로드맵 (빌드 순서 — 루프가 이 순서로 진행)
@@ -120,10 +142,10 @@ backend/scanops/
 - [x] **F. 자산대장 + 부서통보**: IP→부서 매칭·xlsx 가져오기·부서별 통보문 — 3 테스트 통과
 - [x] **G. 감사 리포트 + 대시보드**: 위험/상태/부서 지표·마감초과·xlsx 감사리포트 — 3 테스트 통과
 - [x] **H. 프론트엔드**(React+Vite): 로그인·대시보드·발견관리(이력 드로어·상태/마감 편집)·스캔(실행/가져오기)·자산대장·부서통보 — vite 빌드 성공, **전체 HTTP E2E 통과**(SPA 서빙·로그인·가져오기·대시보드·리포트)
-- [x] **I. 에어갭 패키징**: wheelhouse(18 wheel)·dist·install/run 스크립트·README — **신규 venv `--no-index` 오프라인 설치 실증**(네트워크 0, 28라우트 임포트)
-- [x] **J. 최종 검증**: 백엔드 25 테스트 통과·HTTP E2E·에어갭 설치 검증 완료 + 이전 프로젝트 비교/평가
+- [x] **I. 에어갭 패키징**: wheelhouse·dist·install/run 스크립트·README — `--no-index` 해석과 패키지 런타임 검증 자동화
+- [x] **J. 최종 검증**: 백엔드·프론트 회귀, 실제 Nmap 런타임, 에어갭 패키지 검증
 
-> 백엔드 누적 **25 테스트 통과** + 프론트 **E2E 검증 완료**. API 전부 구현(auth/scans/findings/assets/notifications/dashboard/reports/users), React SPA 를 FastAPI 가 한 포트로 서빙.
+> 정확한 테스트 수는 계속 증가하므로 CI 결과를 기준으로 한다. API와 React SPA는 FastAPI 한 포트에서 제공한다.
 
 ## 8. 완료 정의 (Definition of Done)
 

@@ -33,9 +33,23 @@ def test_overdue_counts_after_deadline(client):
     fid = client.get("/api/findings", headers=h).json()[0]["id"]
     # 과거 마감 → 초과로 집계
     client.patch(f"/api/findings/{fid}", headers=h,
-                 json={"status": "처리중", "deadline": "2020-01-01T00:00:00"})
+                 json={"status": "처리중", "deadline": "2020-01-01T00:00:00", "dept": "마감팀"})
     d = client.get("/api/dashboard", headers=h).json()
     assert d["overdue"] == 1
+    before = client.get(
+        "/api/notifications/preview", headers=h, params={"dept": "마감팀"},
+    ).json()
+    assert "마감 2020-01-01" in before["body"]
+
+    cleared = client.patch(f"/api/findings/{fid}", headers=h, json={"deadline": None})
+
+    assert cleared.status_code == 200 and cleared.json()["deadline"] is None
+    assert client.get("/api/dashboard", headers=h).json()["overdue"] == 0
+    after = client.get(
+        "/api/notifications/preview", headers=h, params={"dept": "마감팀"},
+    ).json()
+    assert after["finding_count"] == 1
+    assert "2020-01-01" not in after["body"]
 
 
 def test_audit_report_xlsx(client):

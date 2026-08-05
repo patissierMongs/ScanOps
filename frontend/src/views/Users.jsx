@@ -34,11 +34,11 @@ export default function Users() {
         <form className="row" onSubmit={create}>
           <input placeholder="아이디" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
           <input placeholder="이름" value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} />
-          <input type="password" placeholder="비밀번호" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+          <input type="password" minLength={8} placeholder="비밀번호 (8자 이상)" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
           <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
             {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
           </select>
-          <button className="primary" disabled={!form.username || !form.password}>생성</button>
+          <button className="primary" disabled={!form.username || form.password.length < 8}>생성</button>
         </form>
       </div>
 

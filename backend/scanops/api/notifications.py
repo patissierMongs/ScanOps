@@ -8,7 +8,8 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import RISK_LABELS_KO, Finding, Notification, User
+from ..identity import display_identity
+from ..models import ACTIVE_FINDING_STATES, RISK_LABELS_KO, Finding, Notification, User
 from ..schemas import NotifyOut, NotifyPreview, NotifySend
 from .deps import current_user, require_role
 
@@ -18,7 +19,8 @@ router = APIRouter()
 def _open_findings_for_dept(db: Session, dept: str) -> list[Finding]:
     return (
         db.query(Finding)
-        .filter(Finding.dept == dept, Finding.state == "open", Finding.status != "정상처리")
+        .filter(Finding.dept == dept, Finding.state.in_(ACTIVE_FINDING_STATES),
+                Finding.status != "정상처리")
         .order_by(Finding.risk_level.desc(), Finding.host_ip, Finding.port)
         .all()
     )
@@ -38,7 +40,12 @@ def _build_body(dept: str, rows: list[Finding]) -> str:
         dl = f" · 마감 {r.deadline:%Y-%m-%d}" if r.deadline else ""
         who = f" ({r.owner})" if r.owner else ""
         risk = RISK_LABELS_KO.get(r.risk_level, r.risk_level)
-        lines.append(f"- {r.host_ip}:{r.port}/{r.proto} {r.service}{who} "
+        identity = display_identity(
+            server=r.server, product=r.product, version=r.version, service=r.service,
+        )
+        if r.service and identity != r.service:
+            identity += f" (서비스: {r.service})"
+        lines.append(f"- {r.host_ip}:{r.port}/{r.proto} {identity}{who} "
                      f"[{risk}] {r.status}{dl}")
     return "\n".join(lines)
 
