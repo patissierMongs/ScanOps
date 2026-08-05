@@ -21,11 +21,19 @@ def test_build_job_spec_maps_options_to_stages():
     assert spec["batch_size"] == 128
     st = spec["stages"]
     assert st["discovery"]["mode"] == "pn"
+    assert st["discovery"]["timing"] == "-T3"
+    assert st["discovery"]["max_retries"] == 2
     assert st["tcp"]["ports"] == "1-1000"
     assert st["tcp"]["timing"] == "-T3"
+    assert st["tcp"]["scan_type"] == "syn"
+    assert st["tcp"]["min_rate"] == 0
     assert st["udp"]["enabled"] is True
     assert st["udp"]["ports"] == "53"
+    assert st["udp"]["timing"] == "-T3"
+    assert st["udp"]["max_retries"] == 2
     assert st["service"]["version_all"] is True
+    assert st["service"]["timing"] == "-T3"
+    assert st["service"]["max_retries"] == 2
     assert st["service"]["nse"] == ["http-headers", "ssl-cert"]
     assert "targets_ports" not in spec
 
@@ -46,13 +54,15 @@ def test_build_job_spec_enables_only_protocols_with_explicit_ports(
         "enabled": tcp,
         "ports": tcp_ports,
         "timing": "-T4",
-        "min_rate": 1000,
+        "scan_type": "syn",
+        "min_rate": 0,
         "max_retries": 2,
     }
     assert spec["stages"]["udp"] == {
         "enabled": udp,
         "ports": udp_ports,
-        "timing": "-T3",
+        "timing": "-T4",
+        "max_retries": 2,
     }
 
 
@@ -64,8 +74,13 @@ def test_build_job_spec_defaults_and_rescan():
     st = spec["stages"]
     assert st["tcp"]["ports"] == "1-65535"      # 기본 전포트
     assert st["tcp"]["timing"] == "-T4"          # 기본 T4
+    assert st["discovery"]["timing"] == "-T4"
+    assert st["discovery"]["max_retries"] == 2
     assert st["udp"]["enabled"] is False
-    assert "nse" not in st["service"]            # 생략하면 엔진 기본 NSE 사용
+    assert st["service"]["nse"] == engine_runner.scan_options.NSE_DEFAULT_KEYS
+    assert st["service"]["version_all"] is True
+    assert st["service"]["timing"] == "-T4"
+    assert st["service"]["max_retries"] == 2
     assert len(spec["rescan_units"]) == 2 and spec["rescan_units"][0]["port"] == 6379
 
 
@@ -76,6 +91,42 @@ def test_build_job_spec_preserves_explicit_empty_nse():
     )
 
     assert spec["stages"]["service"]["nse"] == []
+
+
+@pytest.mark.parametrize(("options", "version_all", "version_light"), [
+    ([], True, False),
+    (["syn"], False, False),
+    (["syn", "version_all"], True, False),
+    (["syn", "version_all", "version_light"], False, True),
+])
+def test_build_job_spec_preserves_default_and_explicit_version_choices(
+    options, version_all, version_light,
+):
+    spec = engine_runner.build_job_spec(
+        1, ["127.0.0.1"], [], options=options, ports="T:443", nse=None,
+        out_dir="/tmp/x", batch_size=256,
+    )
+    service = spec["stages"]["service"]
+    assert service["version_all"] is version_all
+    assert service["version_light"] is version_light
+
+
+def test_build_job_spec_maps_connect_and_rejects_incompatible_scan_types():
+    spec = engine_runner.build_job_spec(
+        1, ["127.0.0.1"], [], options=["connect"], ports="T:443", nse=[],
+        out_dir="/tmp/x", batch_size=256,
+    )
+    assert spec["stages"]["tcp"]["scan_type"] == "connect"
+    with pytest.raises(ValueError, match="SYN.*Connect"):
+        engine_runner.build_job_spec(
+            1, ["127.0.0.1"], [], options=["syn", "connect"], ports="T:443", nse=[],
+            out_dir="/tmp/x", batch_size=256,
+        )
+    with pytest.raises(ValueError, match="Connect.*UDP"):
+        engine_runner.build_job_spec(
+            1, ["127.0.0.1"], [], options=["connect", "udp"], ports="T:443,U:53", nse=[],
+            out_dir="/tmp/x", batch_size=256,
+        )
 
 
 def test_rescan_targets_units_per_finding():
@@ -407,8 +458,8 @@ def test_rescan_ingest_does_not_use_full_scan_sweep_fallback(client, tmp_path):
         db.close()
 
 
-def test_ingest_results_full_scan_does_not_close_unresponsive_scoped_host(client, tmp_path):
-    """Full staged scans only close findings for hosts observed live by discovery/sweep."""
+def test_ingest_results_full_scan_closes_unobserved_host_in_explicit_effective_scope(client, tmp_path):
+    """Completed structured scans treat explicit scope as authority, not discovery evidence."""
     db = SessionLocal()
     try:
         scan1 = ScanRun(name="initial", status="done")
@@ -427,8 +478,8 @@ def test_ingest_results_full_scan_does_not_close_unresponsive_scoped_host(client
             db, scan2, tmp_path, scope_keys={"127.0.0.1|443|tcp"},
         )
 
-        assert counts["closed"] == 0
-        assert row.state == "open"
+        assert counts["closed"] == 1
+        assert row.state == "closed"
     finally:
         db.close()
 

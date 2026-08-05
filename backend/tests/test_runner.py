@@ -24,6 +24,21 @@ def test_build_command_includes_stats_every():
     assert "--stats-every" in cmd2 and cmd2[-1] == "127.0.0.1"
 
 
+def test_connect_command_drops_syn_only_rst_ratelimit_flag():
+    base = Path("/s/scan_connect")
+    connect = r.build_command_opts(
+        "nmap", ["connect", "defeat_rst"], "80", ["127.0.0.1"], base,
+    )
+    syn = r.build_command_opts(
+        "nmap", ["syn", "defeat_rst"], "80", ["127.0.0.1"], base,
+    )
+
+    assert "-sT" in connect
+    assert "--defeat-rst-ratelimit" not in connect
+    assert "-sS" in syn
+    assert "--defeat-rst-ratelimit" in syn
+
+
 @pytest.mark.parametrize("preset", ["quick", "phase1"])
 def test_explicit_ports_override_preset_port_selection(preset):
     cmd = r.build_command(
@@ -194,6 +209,7 @@ def test_options_endpoint_exposes_nse(client=None):
     keys = {o["key"] for o in s.SCAN_OPTIONS}
     for k in ["t0", "t1", "t2", "max_retries", "min_hostgroup", "max_parallel", "defeat_rst"]:
         assert k in keys
+    assert s.flags_for(["max_retries"]) == ["--max-retries", "2"]
 
 
 def test_popen_uses_backend_owned_tree_and_closes_parent_log(monkeypatch, tmp_path):

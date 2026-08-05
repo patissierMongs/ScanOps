@@ -75,8 +75,10 @@ python scanner\scanops_scanner.py --resume scanops_scans\weekly.state.json
 - HTTP/NSE의 자기신고 `Server`는 별도 관측 증거로 저장한다. 화면·검색·내보내기·감사 리포트의
   표시 식별자는 **Server → product+version → service** 순서지만, Server가 taxonomy를 덮어쓰지는 않는다.
 - `open`과 UDP의 `open|filtered`는 활성 finding이다. `closed`/`filtered` 행 자체는 새 finding으로
-  인입하지 않고, 실제로 검사한 host/port/proto 범위에서 활성 finding이 사라졌을 때만 닫힘 처리한다.
-  전체 단계 스캔은 실제 생존 확인 호스트만, 선택 재스캔은 선택한 키만 닫힘 후보로 삼는다.
+  인입하지 않는다. 정상 완료된 구조화 실행 단위(단계 스캔 전체 또는 레거시의 완료 배치)는
+  **제외 후 유효 타깃 × 요청한 port/proto 범위**에서 미관측된 기존 finding도 닫는다. 제외한 타깃은
+  판정 범위 밖이라 열린 상태를 유지하고, 선택 재스캔은 선택한 키만 닫힘 후보로 삼는다. 실패·중지된
+  실행 단위의 결과는 닫힘에 쓰지 않으며, 그 전에 완료·인입된 레거시 배치의 판정은 유지된다.
 
 ## 테스트
 ```powershell

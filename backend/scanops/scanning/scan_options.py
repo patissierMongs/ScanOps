@@ -80,8 +80,8 @@ SCAN_OPTIONS = [
      "note": "누락 위험", "desc": "최대 속도(Insane). 혼잡하거나 느린 망에서는 결과가 누락될 수 있다."},
 
     # ── 성능·안정 ──
-    {"key": "max_retries", "label": "재시도 제한 (--max-retries 1)", "flags": ["--max-retries", "1"], "group": "성능·안정", "default": True,
-     "desc": "프로브 재전송을 1회로 제한해 느린 호스트에서 시간을 절약한다. 신뢰성 높은 내부망에 적합."},
+    {"key": "max_retries", "label": "재시도 제한 (--max-retries 2)", "flags": ["--max-retries", "2"], "group": "성능·안정", "default": True,
+     "desc": "프로브 재전송을 2회로 제한해 누락과 지연의 균형을 맞춘다. 자동·단계·단독 스캐너가 같은 기본값을 사용한다."},
     {"key": "min_hostgroup", "label": "호스트 그룹 64 (--min-hostgroup 64)", "flags": ["--min-hostgroup", "64"], "group": "성능·안정", "default": True,
      "desc": "한 번에 64대씩 병렬 처리해 넓은 대역 스캔을 가속한다."},
     {"key": "max_parallel", "label": "병렬 100 (--max-parallelism 100)", "flags": ["--max-parallelism", "100"], "group": "성능·안정", "default": True,

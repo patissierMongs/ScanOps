@@ -26,7 +26,11 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 from scanops_engine import cli, nmaprun, process_control  # noqa: E402
 from scanops_engine.pipeline import Pipeline  # noqa: E402
-from scanops_engine.spec import JobSpec  # noqa: E402
+from scanops_engine.spec import (  # noqa: E402
+    DISCOVERY_PA,
+    DISCOVERY_PS,
+    JobSpec,
+)
 from scanops_engine.state import RunState  # noqa: E402
 from scanops.scanning import engine_runner, nmap_runner  # noqa: E402
 import package_runtime_smoke  # noqa: E402
@@ -459,7 +463,7 @@ def test_engine_runner_spawn_uses_owned_tree_and_closes_parent_log(monkeypatch, 
     {"rescan_units": [{"ip": "-oG/tmp/rescan.gnmap", "port": 80, "proto": "tcp"}]},
 ])
 def test_job_spec_rejects_leading_dash_in_every_target_shape(payload):
-    with pytest.raises(ValueError, match="타겟|재스캔"):
+    with pytest.raises(ValueError, match="타겟|재스캔|제외"):
         JobSpec.from_dict(payload).validate()
 
 
@@ -489,6 +493,50 @@ def test_job_spec_rejects_enabled_protocol_with_empty_ports(stage):
         JobSpec.from_dict({
             "targets": ["127.0.0.1"],
             "stages": {stage: {"enabled": True, "ports": ""}},
+        }).validate()
+
+
+@pytest.mark.parametrize("exclude", [
+    [""],
+    ["   "],
+    ["scanner.internal"],
+    ["2001:db8::1"],
+    ["10.0.0.0/33"],
+    ["10.0.0.1-10"],
+    ["10.0.0.1,10.0.0.2"],
+    [None],
+])
+def test_job_spec_rejects_non_ipv4_ip_or_cidr_exclude(exclude):
+    with pytest.raises(ValueError, match="제외|IPv6"):
+        JobSpec.from_dict({
+            "targets": ["127.0.0.1"],
+            "exclude": exclude,
+        }).validate()
+
+
+def test_job_spec_accepts_ipv4_ip_and_cidr_exclude():
+    spec = JobSpec.from_dict({
+        "targets": ["127.0.0.1"],
+        "exclude": ["127.0.0.2", "10.0.0.7/24"],
+    }).validate()
+    assert spec.exclude == ["127.0.0.2", "10.0.0.7/24"]
+
+
+@pytest.mark.parametrize("stage", ["discovery", "service"])
+def test_job_spec_rejects_invalid_discovery_or_service_timing(stage):
+    with pytest.raises(ValueError, match="타이밍"):
+        JobSpec.from_dict({
+            "targets": ["127.0.0.1"],
+            "stages": {stage: {"timing": "-T9"}},
+        }).validate()
+
+
+@pytest.mark.parametrize("scan_type", ["", "udp", "-sS", "SYN", None])
+def test_job_spec_rejects_unknown_tcp_scan_type(scan_type):
+    with pytest.raises(ValueError, match=r"tcp\.scan_type"):
+        JobSpec.from_dict({
+            "targets": ["127.0.0.1"],
+            "stages": {"tcp": {"scan_type": scan_type}},
         }).validate()
 
 
@@ -602,6 +650,191 @@ def test_pn_discovery_reports_final_live_count(tmp_path):
     assert next(e for e in sink.events if e["event"] == "job_done")["counts"]["live"] == 1
 
 
+def test_default_discovery_and_tcp_sweep_argv_match_standalone_policy(
+    monkeypatch, tmp_path,
+):
+    target = "127.0.0.1"
+    excluded = ["127.0.0.2", "127.0.0.3"]
+    spec = JobSpec.from_dict({
+        "targets": [target],
+        "exclude": excluded,
+        "out_dir": str(tmp_path),
+        "stages": {"service": {"enabled": False}},
+    }).validate()
+    calls = []
+
+    def fake_run(nmap, args, out_base, **_kwargs):
+        calls.append(list(args))
+        if "-sn" in args:
+            xml = (
+                '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                f'<address addr="{target}" addrtype="ipv4"/></host></nmaprun>'
+            )
+        else:
+            xml = "<nmaprun/>"
+        Path(f"{out_base}.xml").write_text(xml, encoding="utf-8")
+        return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args]}
+
+    monkeypatch.setattr(nmaprun, "run", fake_run)
+    counts = Pipeline(spec, _Sink(), "nmap").run()
+
+    assert counts["errors"] == 0
+    assert calls == [
+        ["-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4", "--reason",
+         "--min-hostgroup", "64", "--max-retries", "2",
+         "--max-parallelism", "100",
+         "--exclude", ",".join(excluded), target],
+        ["-sS", "-Pn", "-n", "--open", "-T4", "--reason",
+         "--max-retries", "2", "--min-hostgroup", "64",
+         "--defeat-rst-ratelimit", "--max-parallelism", "100",
+         "-p", "1-65535", "--exclude", ",".join(excluded), target],
+    ]
+    assert all(args.count("--exclude") == 1 for args in calls)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Npcap-backed loopback contract")
+def test_real_nmap_multi_exclude_omits_every_excluded_loopback(tmp_path):
+    nmap = nmaprun.find_nmap()
+    if not nmap:
+        pytest.skip("Nmap is not installed")
+    spec = JobSpec.from_dict({
+        "targets": ["127.0.0.1-3"],
+        "exclude": ["127.0.0.2", "127.0.0.3"],
+        "out_dir": str(tmp_path),
+        "sudo": "never",
+        "stages": {
+            "tcp": {"enabled": False},
+            "service": {"enabled": False},
+        },
+    }).validate()
+
+    counts = Pipeline(spec, _Sink(), nmap).run()
+
+    assert counts["errors"] == 0 and counts["live"] == 1
+    assert nmaprun.hosts_up(tmp_path / "stage0-discovery.xml") == ["127.0.0.1"]
+
+
+def test_pn_udp_sweep_argv_keeps_exclude_and_standalone_defaults(monkeypatch, tmp_path):
+    target = "127.0.0.0/30"
+    excluded = "127.0.0.2"
+    spec = JobSpec.from_dict({
+        "targets": [target],
+        "exclude": [excluded],
+        "out_dir": str(tmp_path),
+        "stages": {
+            "discovery": {"mode": "pn"},
+            "tcp": {"enabled": False},
+            "udp": {"enabled": True},
+            "service": {"enabled": False},
+        },
+    }).validate()
+    calls = []
+
+    def fake_run(nmap, args, out_base, **_kwargs):
+        calls.append(list(args))
+        Path(f"{out_base}.xml").write_text("<nmaprun/>", encoding="utf-8")
+        return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args]}
+
+    monkeypatch.setattr(nmaprun, "run", fake_run)
+    counts = Pipeline(spec, _Sink(), "nmap").run()
+
+    assert counts["errors"] == 0
+    assert calls == [[
+        "-sU", "-Pn", "-n", "--open", "-T4", "--reason",
+        "--max-retries", "2", "-p",
+        "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,"
+        "514,520,623,1900,2049,4500,5060,5353,5355,11211",
+        "--exclude", excluded, target,
+    ]]
+    assert "-sS" not in calls[0] and "-sT" not in calls[0]
+
+
+def test_custom_timing_is_used_by_discovery_sweeps_and_service(monkeypatch, tmp_path):
+    ip = "127.0.0.1"
+    spec = JobSpec.from_dict({
+        "targets": [ip],
+        "out_dir": str(tmp_path),
+        "stages": {
+            "discovery": {"timing": "-T2", "max_retries": 3},
+            "tcp": {"ports": "80", "timing": "-T2"},
+            "udp": {"enabled": True, "ports": "53", "timing": "-T2"},
+            "service": {"timing": "-T2", "max_retries": 4, "nse": []},
+        },
+    }).validate()
+    calls = []
+
+    def fake_run(nmap, args, out_base, **_kwargs):
+        calls.append(list(args))
+        if "-sn" in args:
+            port_xml = ""
+        else:
+            proto, port = ("udp", 53) if "-sU" in args else ("tcp", 80)
+            service = '<service name="test" method="probed"/>' if "-sV" in args else ""
+            port_xml = (
+                f'<ports><port protocol="{proto}" portid="{port}">'
+                f'<state state="open"/>{service}</port></ports>'
+            )
+        Path(f"{out_base}.xml").write_text(
+            '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+            f'<address addr="{ip}" addrtype="ipv4"/>{port_xml}</host></nmaprun>',
+            encoding="utf-8",
+        )
+        return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args]}
+
+    monkeypatch.setattr(nmaprun, "run", fake_run)
+    counts = Pipeline(spec, _Sink(), "nmap").run()
+
+    assert counts["errors"] == 0 and len(calls) == 5
+    assert all("-T2" in args and "-T4" not in args for args in calls)
+    assert calls[0][calls[0].index("--max-retries") + 1] == "3"
+    assert all(args[args.index("--max-retries") + 1] == "4" for args in calls[-2:])
+
+
+@pytest.mark.parametrize(("scan_type", "scan_flag"), [
+    ("syn", "-sS"),
+    ("connect", "-sT"),
+])
+def test_tcp_scan_type_controls_sweep_and_service_golden_argv(
+    monkeypatch, tmp_path, scan_type, scan_flag,
+):
+    ip = "127.0.0.1"
+    spec = JobSpec.from_dict({
+        "targets": [ip],
+        "out_dir": str(tmp_path),
+        "stages": {
+            "discovery": {"mode": "pn"},
+            "tcp": {"scan_type": scan_type, "ports": "80"},
+            "service": {"nse": []},
+        },
+    }).validate()
+    calls = []
+
+    def fake_run(nmap, args, out_base, **_kwargs):
+        calls.append(list(args))
+        service = '<service name="http" method="probed"/>' if "-sV" in args else ""
+        Path(f"{out_base}.xml").write_text(
+            '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+            f'<address addr="{ip}" addrtype="ipv4"/><ports>'
+            f'<port protocol="tcp" portid="80"><state state="open"/>{service}</port>'
+            '</ports></host></nmaprun>',
+            encoding="utf-8",
+        )
+        return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args]}
+
+    monkeypatch.setattr(nmaprun, "run", fake_run)
+    counts = Pipeline(spec, _Sink(), "nmap").run()
+    defeat_rst = ["--defeat-rst-ratelimit"] if scan_type == "syn" else []
+
+    assert counts["errors"] == 0
+    assert calls == [
+        [scan_flag, "-Pn", "-n", "--open", "-T4", "--reason",
+         "--max-retries", "2", "--min-hostgroup", "64",
+         *defeat_rst, "--max-parallelism", "100", "-p", "80", ip],
+        [scan_flag, "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
+         "--max-retries", "2", "-p", "T:80", ip],
+    ]
+
+
 @pytest.mark.parametrize(("ports", "expected"), [
     ("T:80", [("tcp", "80")]),
     ("U:53", [("udp", "53")]),
@@ -663,6 +896,7 @@ def test_cached_discovery_resume_reports_same_final_live_count(tmp_path):
 
 def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
     ip = "127.0.0.1"
+    excluded = "127.0.0.2"
     (tmp_path / "run-state.json").write_text(json.dumps({
         "stages_done": ["discovery"],
         "open_map": {ip: {"tcp": [54842, 54844], "udp": [63848]}},
@@ -672,11 +906,12 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
     }), encoding="utf-8")
     spec = JobSpec.from_dict({
         "targets": [ip],
+        "exclude": [excluded],
         "out_dir": str(tmp_path),
         "stages": {
             "tcp": {"enabled": False},
             "udp": {"enabled": False},
-            "service": {"version_all": True, "nse": []},
+            "service": {"nse": ["banner"]},
         },
     })
     calls = []
@@ -713,6 +948,16 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
     assert "-sS" in tcp["args"] and "-sU" not in tcp["args"]
     assert "-sU" in udp["args"] and "-sS" not in udp["args"]
     assert "--version-all" in tcp["args"] and "--version-all" not in udp["args"]
+    assert tcp["args"] == [
+        "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
+        "--max-retries", "2", "-p", "T:54842,54844", "--script", "banner",
+        "--script-timeout", "10s", "--exclude", excluded, ip,
+    ]
+    assert udp["args"] == [
+        "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
+        "--max-retries", "2", "-p", "U:63848", "--script", "banner",
+        "--script-timeout", "10s", "--exclude", excluded, ip,
+    ]
     state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
     assert ip in state["service_done"] and "job" in state["stages_done"]
 

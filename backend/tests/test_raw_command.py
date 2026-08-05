@@ -20,6 +20,16 @@ def test_build_injects_stats_and_oa():
     assert ips == ["10.0.0.0/24"]
 
 
+def test_build_records_only_scan_targets_not_inline_exclude_values():
+    _argv, ips = build_command_raw(
+        "nmap",
+        "nmap -sV --exclude 203.0.113.9 10.0.0.1",
+        Path("/s/scan_exclude"),
+    )
+
+    assert ips == ["10.0.0.1"]
+
+
 def test_build_strips_user_output_flags():
     # 사용자가 준 -oX/-oN 등은 제거(경로 traversal·형식 충돌 방지)되고 -oA 만 남는다.
     argv, _ = build_command_raw("nmap", "-sS -oX /etc/passwd -oN out.txt 10.0.0.1", Path("/s/scan_2"))

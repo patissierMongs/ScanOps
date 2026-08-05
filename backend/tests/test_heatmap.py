@@ -146,13 +146,13 @@ def test_staged_heatmap_uses_sweep_fallback_then_selected_rescan_force_close(
     finally:
         db.close()
 
-    unchanged = client.get("/api/heatmap", headers=headers).json()
-    unchanged_row = _row(unchanged, 18443)
-    # A snapshot with no reachable hosts contributes no heatmap phase, but must not synthesize
-    # a close for the requested host.
-    assert [cell["state"] for cell in unchanged_row["cells"]] == ["신규열림"]
-    assert unchanged_row["current_state"] == "신규열림"
-    assert client.get("/api/heatmap/current", headers=headers).json()["total"] == 1
+    closed_by_scope = client.get("/api/heatmap", headers=headers).json()
+    closed_by_scope_row = _row(closed_by_scope, 18443)
+    # A completed structured scan owns its explicit target/port scope even when discovery
+    # observes no live host, so its snapshot records the requested finding as closed.
+    assert [cell["state"] for cell in closed_by_scope_row["cells"]] == ["신규열림", "신규닫힘"]
+    assert closed_by_scope_row["current_state"] == "신규닫힘"
+    assert client.get("/api/heatmap/current", headers=headers).json()["total"] == 0
 
     db = SessionLocal()
     try:
@@ -173,8 +173,8 @@ def test_staged_heatmap_uses_sweep_fallback_then_selected_rescan_force_close(
 
     final = client.get("/api/heatmap", headers=headers).json()
     final_row = _row(final, 18443)
-    assert [cell["state"] for cell in final_row["cells"]] == ["신규열림", "신규닫힘"]
-    assert final_row["current_state"] == "신규닫힘"
+    assert [cell["state"] for cell in final_row["cells"]] == ["신규열림", "신규닫힘", "기존닫힘"]
+    assert final_row["current_state"] == "기존닫힘"
     assert client.get("/api/heatmap/current", headers=headers).json()["total"] == 0
 
 

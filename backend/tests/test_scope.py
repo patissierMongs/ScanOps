@@ -1,7 +1,7 @@
 """스캔 허용 대역(scope) 게이트 — 범위 밖 타겟은 시작 전에 거절, 미설정 시 무제한."""
 import pytest
 
-from scanops.scanning.scope import check_scope, parse_scope
+from scanops.scanning.scope import apply_excludes, check_scope, parse_excludes, parse_scope
 from tests.conftest import make_user, token_for
 
 
@@ -38,6 +38,28 @@ def test_invalid_nonempty_scope_never_becomes_unrestricted():
 
 def test_multiple_scope_ranges():
     check_scope(["10.0.0.1", "192.168.1.1"], spec="10.0.0.0/8 192.168.0.0/16")
+
+
+def test_excludes_are_ipv4_only_canonical_compact_and_fail_closed():
+    assert parse_excludes([
+        "10.0.0.1", "10.0.2.7/24", "10.0.0.1",
+    ]) == ["10.0.0.1", "10.0.2.0/24"]
+    assert apply_excludes(
+        ["10.0.0.1", "10.0.1.1", "10.0.2.9", "host.internal"],
+        ["10.0.0.1", "10.0.2.0/24"],
+    ) == ["10.0.1.1", "host.internal"]
+
+
+@pytest.mark.parametrize("tokens", [
+    ["10.0.0.1", "not-an-ip"],
+    ["10.0.0.0/99"],
+    ["-iR10"],
+    ["2001:db8::1"],
+    [""],
+])
+def test_excludes_reject_the_entire_list_when_any_token_is_invalid(tokens):
+    with pytest.raises(ValueError, match="제외|IPv6"):
+        parse_excludes(tokens)
 
 
 def test_is_ip_token():
@@ -89,6 +111,57 @@ def test_check_raw_scope_blocks_compact_unscoped_target_sources(source):
     from scanops.scanning.scope import check_raw_scope
     with pytest.raises(ValueError, match="scope"):
         check_raw_scope(["-sV", source, "10.0.0.1"], spec="10.0.0.0/8")
+
+
+@pytest.mark.parametrize("tokens", [
+    ["-sV", "--exclude", "203.0.113.9,198.51.100.0/24", "10.0.0.1"],
+    ["-sV", "--exclude=203.0.113.9,198.51.100.0/24", "10.0.0.1"],
+])
+def test_check_raw_scope_allows_valid_inline_excludes_outside_inclusion_scope(tokens):
+    from scanops.scanning.scope import check_raw_scope
+
+    check_raw_scope(tokens, spec="10.0.0.0/8")
+
+
+def test_run_command_audit_target_omits_separate_inline_exclude_value(client, monkeypatch):
+    from scanops.api import scans as scans_api
+    from scanops.scanning import scope as scope_module
+
+    headers = _auditor_headers(client)
+    monkeypatch.setattr(scope_module.get_settings(), "scan_scope", "10.0.0.0/8")
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    response = client.post("/api/scans/run-command", headers=headers, json={
+        "command": "nmap -sV --exclude 203.0.113.9 10.0.0.1",
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.json()["targets"] == "10.0.0.1"
+
+
+@pytest.mark.parametrize("tokens", [
+    ["-sV", "--exclude", "host.example", "10.0.0.1"],
+    ["-sV", "--exclude=2001:db8::1", "10.0.0.1"],
+    ["-sV", "--exclude=10.0.0.0/99", "10.0.0.1"],
+    ["-sV", "--exclude=10.0.0.1,,10.0.0.2", "10.0.0.1"],
+    ["-sV", "--exclude", "10.0.0.2", "--exclude=10.0.0.3", "10.0.0.1"],
+    ["-sV", "--excl=10.0.0.2", "10.0.0.1"],
+    ["-sV", "--excludef=hosts.txt", "10.0.0.1"],
+    ["-sV", "--excludefi=hosts.txt", "10.0.0.1"],
+])
+def test_check_raw_scope_rejects_invalid_or_repeated_inline_excludes(tokens):
+    from scanops.scanning.scope import check_raw_scope
+
+    with pytest.raises(ValueError, match="exclude|제외|IPv6"):
+        check_raw_scope(tokens, spec="10.0.0.0/8")
 
 
 def test_check_raw_scope_distinguishes_known_option_values_from_targets():
@@ -232,6 +305,7 @@ def test_engine_chunk_and_raw_resume_revalidate_current_scope(client, monkeypatc
     finally:
         db.close()
 
+
     engine_dir = get_settings().scans_dir / f"scan_{ids[0]}"
     engine_dir.mkdir(parents=True, exist_ok=True)
     (engine_dir / "spec.json").write_text(json.dumps({
@@ -253,6 +327,247 @@ def test_engine_chunk_and_raw_resume_revalidate_current_scope(client, monkeypatc
         "scope" in response.json()["detail"] and "127.0.0.1" in response.json()["detail"]
         for response in responses
     )
+
+
+@pytest.mark.parametrize("scope_key", [
+    "broken-key",
+    "127.0.0.4|443|tcp",   # requested target 밖
+    "127.0.0.2|443|tcp",   # exclude 안
+    "127.0.0.1|80|tcp",    # TCP stage 포트 밖
+    "127.0.0.1|53|udp",    # 비활성 UDP stage
+])
+def test_engine_resume_rejects_scope_keys_outside_saved_scan_contract(
+    client, monkeypatch, tmp_path, scope_key,
+):
+    import json
+
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    headers = _auditor_headers(client)
+    db = SessionLocal()
+    try:
+        scan = ScanRun(name="engine-scope-key", targets="127.0.0.0/30", status="canceled")
+        db.add(scan)
+        db.commit()
+        scan_id = scan.id
+    finally:
+        db.close()
+
+    engine_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    engine_dir.mkdir(parents=True, exist_ok=True)
+    (engine_dir / "spec.json").write_text(json.dumps({
+        "targets": ["127.0.0.0/30"],
+        "exclude": ["127.0.0.2"],
+        "out_dir": str(engine_dir),
+        "stages": {
+            "tcp": {"enabled": True, "ports": "443"},
+            "udp": {"enabled": False, "ports": "53"},
+        },
+        "scanops": {"scope_keys": [scope_key]},
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        scans_api.nmap_runner, "find_nmap",
+        lambda explicit="": (_ for _ in ()).throw(AssertionError("invalid scope key checked nmap")),
+    )
+    monkeypatch.setattr(
+        scans_api.threading, "Thread",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("invalid scope key started worker")),
+    )
+
+    response = client.post(f"/api/scans/{scan_id}/resume", headers=headers)
+
+    assert response.status_code == 400, response.text
+    assert "닫힘 범위" in response.json()["detail"]
+    db = SessionLocal()
+    try:
+        assert db.get(ScanRun, scan_id).status == "canceled"
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("scope_key", [
+    "broken-key",
+    "127.0.0.4|443|tcp",
+    "127.0.0.2|443|tcp",
+    "127.0.0.1|80|tcp",
+    "127.0.0.1|53|udp",
+])
+def test_engine_worker_rejects_scope_keys_outside_saved_scan_contract(
+    monkeypatch, tmp_path, scope_key,
+):
+    import json
+
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    db = SessionLocal()
+    try:
+        scan = ScanRun(name="engine-scope-key", targets="127.0.0.0/30", status="running")
+        db.add(scan)
+        db.commit()
+        scan_id = scan.id
+    finally:
+        db.close()
+
+    engine_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    engine_dir.mkdir(parents=True, exist_ok=True)
+    (engine_dir / "spec.json").write_text(json.dumps({
+        "targets": ["127.0.0.0/30"],
+        "exclude": ["127.0.0.2"],
+        "out_dir": str(engine_dir),
+        "stages": {
+            "tcp": {"enabled": True, "ports": "443"},
+            "udp": {"enabled": False, "ports": "53"},
+        },
+        "scanops": {"scope_keys": [scope_key]},
+    }), encoding="utf-8")
+    spawned = []
+    monkeypatch.setattr(
+        scans_api.engine_runner, "spawn",
+        lambda *_args: spawned.append(True),
+    )
+
+    scans_api._engine_worker(scan_id)
+
+    assert spawned == []
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        assert scan.status == "failed"
+        assert scan.failure_code == "engine_spec_invalid"
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(("selection", "scope_key"), [
+    (
+        {"rescan_units": [{"ip": "127.0.0.1", "port": 443, "proto": "tcp"}]},
+        "127.0.0.1|80|tcp",
+    ),
+    (
+        {"targets_ports": {"127.0.0.1": [443]}},
+        "127.0.0.1|443|udp",
+    ),
+])
+def test_engine_resume_rejects_scope_keys_outside_exact_rescan_selection(
+    client, monkeypatch, tmp_path, selection, scope_key,
+):
+    import json
+
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    headers = _auditor_headers(client)
+    db = SessionLocal()
+    try:
+        scan = ScanRun(name="engine-rescan-scope", targets="127.0.0.1", status="canceled")
+        db.add(scan)
+        db.commit()
+        scan_id = scan.id
+    finally:
+        db.close()
+
+    engine_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    engine_dir.mkdir(parents=True, exist_ok=True)
+    spec = {
+        "targets": [],
+        "exclude": [],
+        "out_dir": str(engine_dir),
+        "scanops": {"scope_keys": [scope_key]},
+        **selection,
+    }
+    (engine_dir / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(
+        scans_api.nmap_runner, "find_nmap",
+        lambda explicit="": (_ for _ in ()).throw(AssertionError("invalid scope key checked nmap")),
+    )
+
+    response = client.post(f"/api/scans/{scan_id}/resume", headers=headers)
+
+    assert response.status_code == 400, response.text
+    assert "닫힘 범위" in response.json()["detail"]
+
+
+def test_engine_resume_accepts_full_scan_and_exact_rescan_scope_keys(
+    client, monkeypatch, tmp_path,
+):
+    import json
+
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    headers = _auditor_headers(client)
+    db = SessionLocal()
+    try:
+        scans = [
+            ScanRun(name="full", targets="127.0.0.0/30", status="canceled"),
+            ScanRun(name="rescan", targets="127.0.0.3", status="canceled"),
+            ScanRun(name="legacy-rescan", targets="127.0.0.4", status="canceled"),
+        ]
+        db.add_all(scans)
+        db.commit()
+        ids = [scan.id for scan in scans]
+    finally:
+        db.close()
+
+    specs = [
+        {
+            "targets": ["127.0.0.0/30"],
+            "exclude": ["127.0.0.2"],
+            "stages": {
+                "tcp": {"enabled": True, "ports": "443"},
+                "udp": {"enabled": False, "ports": "53"},
+            },
+            "scanops": {"scope_keys": ["127.0.0.1|443|tcp"]},
+        },
+        {
+            "targets": [],
+            "exclude": [],
+            "rescan_units": [{"ip": "127.0.0.3", "port": 53, "proto": "udp"}],
+            "stages": {"tcp": {"ports": "1-65535"}, "udp": {"ports": "53"}},
+            "scanops": {"scope_keys": ["127.0.0.3|53|udp"]},
+        },
+        {
+            "targets": [],
+            "exclude": [],
+            "targets_ports": {"127.0.0.4": [8443]},
+            "scanops": {"scope_keys": ["127.0.0.4|8443|tcp"]},
+        },
+    ]
+    for scan_id, spec in zip(ids, specs):
+        engine_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+        engine_dir.mkdir(parents=True, exist_ok=True)
+        spec["out_dir"] = str(engine_dir)
+        (engine_dir / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+
+    responses = [client.post(f"/api/scans/{scan_id}/resume", headers=headers) for scan_id in ids]
+
+    assert [response.status_code for response in responses] == [200, 200, 200]
 
 
 @pytest.mark.parametrize(("bad_target", "detail"), [

@@ -53,6 +53,12 @@ def test_expand_invalid_cidr_fails_closed():
         ch.expand_targets(["10.0.0.0/999"])
 
 
+def test_expand_targets_applies_cap_to_unique_hosts():
+    assert ch.expand_targets(
+        ["10.0.0.0/30", "10.0.0.0/30", "10.0.0.1"], cap=4,
+    ) == ["10.0.0.0", "10.0.0.1", "10.0.0.2", "10.0.0.3"]
+
+
 def test_make_batches():
     hosts = [f"10.0.0.{i}" for i in range(5)]
     assert ch.make_batches(hosts, 2) == [["10.0.0.0", "10.0.0.1"], ["10.0.0.2", "10.0.0.3"], ["10.0.0.4"]]

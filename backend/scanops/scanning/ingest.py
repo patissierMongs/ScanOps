@@ -115,28 +115,39 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
             if not identity_changed:
                 counts["unchanged"] += 1
 
-    # 닫힘 판정: 이번에 스캔된 호스트에서, 이전엔 열렸는데 이번에 안 보인 포트.
-    if scanned_hosts:
-        open_rows = db.query(Finding).filter(
-            Finding.state.in_(ACTIVE_FINDING_STATES), Finding.host_ip.in_(scanned_hosts)
-        ).all()
-        for row in open_rows:
-            if _is_older(when, row.last_seen):
-                continue
-            if row.finding_key in seen:
-                continue
-            if scope_keys is not None and row.finding_key not in scope_keys:
-                continue  # 타겟 재스캔 범위 밖 포트는 손대지 않음
-            row.state = "closed"
-            row.last_scan_id = scan_id
-            row.last_seen = when
-            row.reopened = 0   # 다시 닫혔으므로 재발 태그 해제
-            # 마감/배정이 걸려 있던 항목이 닫힘 → 조치 완료 자동 검증
-            verified = row.status == "처리중" or row.deadline is not None
-            row.status = "정상처리"
-            detail = "포트 닫힘 — 조치 완료 자동 확인" if verified else "포트 닫힘"
-            _event(db, row.id, scan_id, "CLOSED", detail, when=when)
-            counts["closed"] += 1
+    # 명시적 scope_keys는 완료된 structured scan의 권한이다. discovery에서 호스트가
+    # 관측되지 않았더라도 그 effective target/port/protocol 범위에서 사라진 finding은 닫는다.
+    # None인 구형/import 경로만 기존처럼 실제 관측 host 범위를 사용한다.
+    open_rows = []
+    if scope_keys is not None:
+        keys = sorted(scope_keys)
+        for start in range(0, len(keys), 500):
+            open_rows.extend(db.query(Finding).filter(
+                Finding.state.in_(ACTIVE_FINDING_STATES),
+                Finding.finding_key.in_(keys[start:start + 500]),
+            ).all())
+    elif scanned_hosts:
+        hosts = sorted(scanned_hosts)
+        for start in range(0, len(hosts), 500):
+            open_rows.extend(db.query(Finding).filter(
+                Finding.state.in_(ACTIVE_FINDING_STATES),
+                Finding.host_ip.in_(hosts[start:start + 500]),
+            ).all())
+    for row in open_rows:
+        if _is_older(when, row.last_seen):
+            continue
+        if row.finding_key in seen:
+            continue
+        row.state = "closed"
+        row.last_scan_id = scan_id
+        row.last_seen = when
+        row.reopened = 0   # 다시 닫혔으므로 재발 태그 해제
+        # 마감/배정이 걸려 있던 항목이 닫힘 → 조치 완료 자동 검증
+        verified = row.status == "처리중" or row.deadline is not None
+        row.status = "정상처리"
+        detail = "포트 닫힘 — 조치 완료 자동 확인" if verified else "포트 닫힘"
+        _event(db, row.id, scan_id, "CLOSED", detail, when=when)
+        counts["closed"] += 1
 
     if commit:
         db.commit()

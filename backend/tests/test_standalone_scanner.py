@@ -24,6 +24,14 @@ def _load_scanner():
     return mod
 
 
+def _load_gui():
+    spec = importlib.util.spec_from_file_location("scanops_standalone_scanner_gui", GUI_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _args(**kw):
     base = {
         "profile": "basic",
@@ -616,6 +624,291 @@ def test_gui_script_compiles_without_extra_dependencies():
     py_compile.compile(str(GUI_SCRIPT), doraise=True)
 
 
+def test_exclude_values_split_canonical_and_fail_closed():
+    import pytest
+    scanner = _load_scanner()
+
+    canonical, networks = scanner.parse_excludes([
+        "192.0.2.9, 192.0.2.10/31\r\n192.0.2.12/32",
+        "192.0.2.9 198.51.100.129/25",
+    ])
+
+    assert canonical == ["192.0.2.9", "192.0.2.10/31", "192.0.2.12", "198.51.100.128/25"]
+    assert scanner.apply_excludes(
+        ["192.0.2.8", "192.0.2.9", "192.0.2.10", "192.0.2.11", "192.0.2.12", "node.local"],
+        networks,
+    ) == ["192.0.2.8", "node.local"]
+    for bad in ("node.local", "192.0.2.1-3", "2001:db8::1", "192.0.2.0/33", "192.0.2.1,broken"):
+        with pytest.raises(ValueError, match="IPv4 IP/CIDR"):
+            scanner.parse_excludes([bad])
+
+
+def test_explicit_empty_exclude_is_fail_closed(tmp_path):
+    import pytest
+    scanner = _load_scanner()
+
+    assert scanner.parse_excludes([]) == ([], [])  # 옵션 자체를 생략한 경우만 제외 없음
+    for empty in ("", " \t\r\n ", ", ,"):
+        args = scanner.parser().parse_args([
+            "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+            "--exclude", empty, "127.0.0.1",
+        ])
+        with pytest.raises(ValueError, match="비어 있습니다"):
+            scanner.create_plan(args)
+
+    state = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1",
+    ]))
+    state["exclude"] = [" "]
+    state_path = tmp_path / "empty-exclude.state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(ValueError, match="비어 있습니다"):
+        scanner.load_plan(str(state_path), "nmap", dry_run=True)
+
+
+def test_exclude_cannot_bypass_scope_or_host_cap(tmp_path):
+    import pytest
+    scanner = _load_scanner()
+
+    outside = scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--scan-scope", "10.0.0.0/8", "--exclude", "192.0.2.1", "192.0.2.1",
+    ])
+    with pytest.raises(ValueError, match="scope"):
+        scanner.create_plan(outside)
+
+    oversized = scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--max-hosts", "16", "--exclude", "10.0.0.0/24", "10.0.0.0/24",
+    ])
+    with pytest.raises(ValueError, match="너무 많습니다"):
+        scanner.create_plan(oversized)
+
+
+def test_exclude_filters_batches_and_rejects_empty_plan(tmp_path):
+    import pytest
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "--batch-size", "2",
+        "--exclude", "10.0.0.1,10.0.0.4/31", "10.0.0.0/29",
+    ])
+
+    plan = scanner.create_plan(args)
+
+    assert plan["requested_host_count"] == 8
+    assert plan["effective_host_count"] == 5
+    assert plan["batches"] == [
+        ["10.0.0.0", "10.0.0.2"],
+        ["10.0.0.3", "10.0.0.6"],
+        ["10.0.0.7"],
+    ]
+
+    empty = scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--exclude", "10.0.0.0/29", "10.0.0.0/29",
+    ])
+    with pytest.raises(ValueError, match="남지 않았습니다"):
+        scanner.create_plan(empty)
+
+
+def test_nonbatch_exclude_is_compact_and_joined_once_in_every_command(tmp_path, capsys):
+    scanner = _load_scanner()
+    common = [
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--exclude", "10.0.0.1", "--exclude", "10.0.0.2\r\n10.0.0.3/32",
+    ]
+    auto = scanner.create_plan(scanner.parser().parse_args([*common, "10.0.0.0/29"]))
+    single = scanner.create_plan(scanner.parser().parse_args([
+        *common, "--workflow", "single", "10.0.0.0/29",
+    ]))
+    udp_only = scanner.create_plan(scanner.parser().parse_args([
+        *common, "--ports", "U:53", "10.0.0.0/29",
+    ]))
+    joined = "10.0.0.1,10.0.0.2,10.0.0.3"
+
+    assert auto["batches"] == [["10.0.0.0/29"]]  # Windows argv를 폭발시키지 않는 compact target
+    commands = [
+        scanner.build_command(auto, 0, "tcp_discovery"),
+        scanner.build_command(auto, 0, "tcp_identify", [22], targets=["10.0.0.4"]),
+        scanner.build_command(auto, 0, "udp_identify", targets=["10.0.0.4"]),
+        scanner.build_command(single, 0),
+        scanner.build_command(udp_only, 0, "udp_identify"),
+    ]
+    for command in commands:
+        assert command.count("--exclude") == 1
+        assert command[command.index("--exclude") + 1] == joined
+
+    scanner.print_plan(auto)
+    preview = capsys.readouterr().out
+    assert joined in preview
+
+
+def test_multi_exclude_persists_through_real_resume_as_one_nmap_option(tmp_path):
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    log = tmp_path / "exclude-log.jsonl"
+    args = [
+        "--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "exclude-resume",
+        "--workflow", "single", "--exclude", "127.0.0.2", "--exclude", "127.0.0.3\r\n127.0.0.4",
+        "127.0.0.1",
+    ]
+
+    failed = _run_scanner(args, env={"FAKE_NMAP_FAIL_ALL": "1", "FAKE_NMAP_LOG": str(log)})
+    assert failed.returncode == 1, failed.stderr + failed.stdout
+    state_path = out / "exclude-resume.state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["exclude"] == ["127.0.0.2", "127.0.0.3", "127.0.0.4"]
+
+    override = _run_scanner([
+        "--resume", str(state_path), "--nmap", str(fake_nmap), "--dry-run", "--exclude", "127.0.0.9",
+    ])
+    assert override.returncode == 2 and "변경할 수 없습니다" in override.stderr
+
+    resumed = _run_scanner(
+        ["--resume", str(state_path), "--nmap", str(fake_nmap)],
+        env={"FAKE_NMAP_LOG": str(log)},
+    )
+    assert resumed.returncode == 0, resumed.stderr + resumed.stdout
+    for entry in _read_jsonl(log):
+        command = entry["args"]
+        assert command.count("--exclude") == 1
+        assert command[command.index("--exclude") + 1] == "127.0.0.2,127.0.0.3,127.0.0.4"
+
+
+def test_resume_revalidates_exclude_and_effective_batches(tmp_path):
+    import pytest
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "--batch-size", "2",
+        "--exclude", "10.0.0.1", "10.0.0.0/30",
+    ])
+    original = scanner.create_plan(args)
+    state_path = tmp_path / "resume.state.json"
+    state_path.write_text(json.dumps(original), encoding="utf-8")
+    assert scanner.load_plan(str(state_path), "nmap", dry_run=True)["exclude"] == ["10.0.0.1"]
+
+    invalid = json.loads(json.dumps(original))
+    invalid["exclude"] = ["10.0.0.1,broken"]
+    state_path.write_text(json.dumps(invalid), encoding="utf-8")
+    with pytest.raises(ValueError, match="IPv4 IP/CIDR"):
+        scanner.load_plan(str(state_path), "nmap", dry_run=True)
+
+    reintroduced = json.loads(json.dumps(original))
+    reintroduced["batches"][0].append("10.0.0.1")
+    state_path.write_text(json.dumps(reintroduced), encoding="utf-8")
+    with pytest.raises(ValueError, match="계획과 일치하지 않습니다"):
+        scanner.load_plan(str(state_path), "nmap", dry_run=True)
+
+    compact_args = scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--exclude", "10.0.0.1", "10.0.0.0/30",
+    ])
+    compact = scanner.create_plan(compact_args)
+    compact["batches"] = [["10.0.0.1"]]  # raw CIDR 대신 제외 호스트를 직접 넣은 변조 state
+    state_path.write_text(json.dumps(compact), encoding="utf-8")
+    with pytest.raises(ValueError, match="계획과 일치하지 않습니다"):
+        scanner.load_plan(str(state_path), "nmap", dry_run=True)
+
+
+def test_nonbatch_resume_rejects_same_count_exclude_tampering(tmp_path):
+    import pytest
+    scanner = _load_scanner()
+    original = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--exclude", "10.0.0.1", "10.0.0.0/30",
+    ]))
+    assert original["effective_targets_sha256"] == scanner.effective_targets_fingerprint([
+        "10.0.0.0", "10.0.0.2", "10.0.0.3",
+    ])
+    state_path = tmp_path / "same-count-exclude.state.json"
+
+    tampered = json.loads(json.dumps(original))
+    tampered["exclude"] = ["10.0.0.2"]
+    state_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="유효 호스트 지문"):
+        scanner.load_plan(str(state_path), "nmap", dry_run=True)
+
+    legacy = json.loads(json.dumps(original))
+    legacy.pop("effective_targets_sha256", None)
+    state_path.write_text(json.dumps(legacy), encoding="utf-8")
+    assert scanner.load_plan(str(state_path), "nmap", dry_run=True)["exclude"] == ["10.0.0.1"]
+
+
+def test_resume_scope_is_intersection_of_stored_and_current(tmp_path, monkeypatch):
+    import pytest
+    scanner = _load_scanner()
+    state_path = tmp_path / "scope-resume.state.json"
+
+    # 더 넓은 현재 override가 저장 당시 /24 경계를 약화시키면 안 된다.
+    stored_narrow = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--scan-scope", "10.0.0.0/24", "10.0.0.1",
+    ]))
+    stored_narrow["raw_targets"] = ["10.1.0.1"]
+    stored_narrow["batches"] = [["10.1.0.1"]]
+    state_path.write_text(json.dumps(stored_narrow), encoding="utf-8")
+    with pytest.raises(ValueError, match="scope"):
+        scanner.load_plan(
+            str(state_path), "nmap", dry_run=True, scan_scope_override="10.0.0.0/8",
+        )
+
+    # 저장 경계가 넓어도 현재 환경이 더 좁아졌으면 현재 경계도 추가로 통과해야 한다.
+    stored_wide = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--scan-scope", "10.0.0.0/8", "10.1.0.1",
+    ]))
+    state_path.write_text(json.dumps(stored_wide), encoding="utf-8")
+    monkeypatch.setenv("SCANOPS_SCAN_SCOPE", "10.0.0.0/24")
+    with pytest.raises(ValueError, match="scope"):
+        scanner.load_plan(str(state_path), "nmap", dry_run=True)
+
+    # 두 경계의 교집합 안 대상은 정상 재개된다.
+    valid = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--scan-scope", "10.0.0.0/8", "10.0.0.1",
+    ]))
+    state_path.write_text(json.dumps(valid), encoding="utf-8")
+    assert scanner.load_plan(str(state_path), "nmap", dry_run=True)["raw_targets"] == ["10.0.0.1"]
+
+
+def test_gui_forwards_exclude_only_for_new_scan():
+    gui_module = _load_gui()
+
+    class Value:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+    gui = object.__new__(gui_module.ScannerGui)
+    gui._base_command = lambda: ["python", "scanops_scanner.py"]
+    gui._targets = lambda: ["10.0.0.0/24"]
+    gui._mode = lambda: "auto"
+    gui.nmap_path = Value("")
+    gui.output_dir = Value("out")
+    gui.output_name = Value("")
+    gui.ports = Value("")
+    gui.scan_type_label = Value("프로필 기본")
+    gui.tcp_only = Value(False)
+    gui.udp = Value(False)
+    gui.udp_all_targets = Value(False)
+    gui.nse_default = Value(False)
+    gui.no_scripts = Value(False)
+    gui.open_only = Value(False)
+    gui.include_closed = Value(False)
+    gui.batch_size = Value("0")
+    gui.exclude = Value("10.0.0.1, 10.0.0.2\r\n10.0.0.3")
+    gui.target_file = Value("")
+    gui.zip_outputs = Value(False)
+    gui.resume_path = Value("saved.state.json")
+
+    command = gui._command(dry_run=True)
+    assert command[command.index("--exclude") + 1] == "10.0.0.1, 10.0.0.2\r\n10.0.0.3"
+    assert "--exclude" not in gui._command(dry_run=False, resume=True)
+
+
 def test_max_hosts_cap_enforced_without_batching(tmp_path):
     """--max-hosts 캡은 비배치 모드에서도 적용된다(이전엔 batch-size>0 일 때만 동작하던 버그)."""
     import pytest
@@ -786,8 +1079,8 @@ def test_empty_scan_reports_done_with_warning(tmp_path):
     assert "가져올 결과가 없습니다" in r.stderr
 
 
-def test_host_timeout_in_all_auto_commands(tmp_path):
-    """QA-007: 모든 자동 단계 명령에 --host-timeout 주입(끄기는 --host-timeout 0)."""
+def test_host_timeout_off_by_default_and_opt_in_for_all_auto_commands(tmp_path):
+    """고정 timeout은 정상적인 전 포트 결과를 버릴 수 있어 기본 끔, 명시값만 전 단계에 적용."""
     scanner = _load_scanner()
     args = scanner.parser().parse_args(["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
     plan = scanner.create_plan(args)
@@ -796,10 +1089,17 @@ def test_host_timeout_in_all_auto_commands(tmp_path):
         scanner.build_command(plan, 0, "tcp_identify", [22]),
         scanner.build_command(plan, 0, "udp_identify"),
     ):
-        assert "--host-timeout" in cmd and cmd[cmd.index("--host-timeout") + 1] == "15m"
-    off = scanner.parser().parse_args(
-        ["--dry-run", "--nmap", "nmap", "--host-timeout", "0", "--output-dir", str(tmp_path), "127.0.0.1"])
-    assert "--host-timeout" not in scanner.build_command(scanner.create_plan(off), 0, "tcp_discovery")
+        assert "--host-timeout" not in cmd
+
+    on = scanner.parser().parse_args(
+        ["--dry-run", "--nmap", "nmap", "--host-timeout", "30m", "--output-dir", str(tmp_path), "127.0.0.1"])
+    plan_on = scanner.create_plan(on)
+    for cmd in (
+        scanner.build_command(plan_on, 0, "tcp_discovery"),
+        scanner.build_command(plan_on, 0, "tcp_identify", [22]),
+        scanner.build_command(plan_on, 0, "udp_identify"),
+    ):
+        assert cmd[cmd.index("--host-timeout") + 1] == "30m"
 
 
 def test_ipv6_target_rejected(tmp_path):
@@ -848,10 +1148,11 @@ def test_standalone_scope_rejects_invalid_and_mixed_configuration(tmp_path):
 
 
 def test_connect_scan_strips_udp_everywhere(tmp_path):
-    """QA-010: connect(권한 불필요)는 단일 프로필에서 -sU 제거, 자동에서 UDP 단계 건너뜀."""
+    """Connect는 UDP와 SYN 전용 defeat-rst를 제거하고 자동에서도 UDP를 건너뛴다."""
     scanner = _load_scanner()
     flags = scanner.build_base_flags(_args(profile="phase1", scan_type="connect"))
-    assert "-sU" not in flags
+    assert "-sT" in flags and "-sU" not in flags
+    assert "--defeat-rst-ratelimit" not in flags
     fake_nmap = _fake_nmap(tmp_path)
     out = tmp_path / "out"
     r = _run_scanner(
@@ -860,6 +1161,12 @@ def test_connect_scan_strips_udp_everywhere(tmp_path):
     state = json.loads((out / "cn.state.json").read_text(encoding="utf-8"))
     udp = next(rn for rn in state["runs"] if rn["stage_id"] == "udp_identify")
     assert udp.get("skipped") is True
+    tcp_commands = [
+        rn["command"] for rn in state["runs"]
+        if rn.get("stage_id") in {"tcp_discovery", "tcp_identify"} and not rn.get("skipped")
+    ]
+    assert tcp_commands and all("-sT" in command for command in tcp_commands)
+    assert all("--defeat-rst-ratelimit" not in command for command in tcp_commands)
 
 
 def test_large_cidr_rejected_before_materialization(tmp_path):

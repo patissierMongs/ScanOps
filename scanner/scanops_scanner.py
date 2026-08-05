@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import ipaddress
 import json
 import os
@@ -24,9 +25,9 @@ from pathlib import Path
 
 VERSION = "0.2.0"
 STATS_EVERY_DEFAULT = "10s"
-# 호스트당 상한. nmap 은 이 시간을 넘긴 호스트를 포기하고 다음으로 넘어가며 0으로 정상 종료(부분 결과 유지).
-# 한 호스트가 스캔 전체를 무한정 멈추는 사고(QA-007)를 막는다. 비우면("") 미적용.
-HOST_TIMEOUT_DEFAULT = "15m"
+# 기본 미적용. 전 포트 스캔은 필터링된 망에서 고정 시간 상한을 정상적으로 넘을 수 있고,
+# nmap 은 timeout 된 호스트의 결과를 버린 채 성공 종료할 수 있다. 필요한 환경만 명시적으로 opt-in.
+HOST_TIMEOUT_DEFAULT = "0"
 UDP_DEFAULT_PORTS = "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 용도 식별형 NSE만(취약점/노이즈/부작용 스크립트 제외) — 빠르고 부작용 적게 '무엇/왜' 파악.
@@ -263,6 +264,75 @@ def check_scope(hosts: list[str], spec: str) -> None:
         raise ValueError(f"허용된 스캔 대역(scope) 밖의 대상입니다: {shown}")
 
 
+def parse_excludes(values: list[str] | tuple[str, ...] | str | None) -> tuple[list[str], list[ipaddress.IPv4Network]]:
+    """반복 --exclude 값을 IPv4 IP/CIDR 목록으로 검증·정규화한다.
+
+    각 옵션 값 안의 쉼표와 모든 공백(CRLF 포함)을 구분자로 쓴다. 잘못된 토큰 하나라도 있으면
+    전체 요청을 거절해 오타가 조용히 '제외 없음'으로 바뀌지 않게 한다.
+    """
+    if values is None:
+        raw_values: list[str] = []
+    elif isinstance(values, str):
+        raw_values = [values]
+    elif isinstance(values, (list, tuple)) and all(isinstance(v, str) for v in values):
+        raw_values = list(values)
+    else:
+        raise ValueError("--exclude 값은 IPv4 주소 또는 CIDR 문자열이어야 합니다.")
+
+    canonical: list[str] = []
+    networks: list[ipaddress.IPv4Network] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        tokens = raw.replace(",", " ").split()
+        if not tokens:
+            raise ValueError("--exclude 값이 비어 있습니다. 옵션을 빼거나 IPv4 IP/CIDR을 지정하세요.")
+        for token in tokens:
+            try:
+                network = ipaddress.ip_network(token, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"잘못된 제외 대상(--exclude)입니다: {token!r}. IPv4 IP/CIDR만 지원합니다.") from exc
+            if not isinstance(network, ipaddress.IPv4Network):
+                raise ValueError(f"잘못된 제외 대상(--exclude)입니다: {token!r}. IPv4 IP/CIDR만 지원합니다.")
+            key = network.with_prefixlen
+            if key in seen:
+                continue
+            seen.add(key)
+            # 단일 IP는 읽기 쉬운 IP로, CIDR은 host bits를 정리한 canonical network로 저장한다.
+            canonical.append(
+                str(network.network_address)
+                if network.prefixlen == network.max_prefixlen
+                else key
+            )
+            networks.append(network)
+    return canonical, networks
+
+
+def apply_excludes(hosts: list[str], networks: list[ipaddress.IPv4Network]) -> list[str]:
+    """확장된 대상 중 exclude 네트워크에 속한 IPv4 호스트만 제거한다."""
+    if not networks:
+        return list(hosts)
+    effective: list[str] = []
+    for host in hosts:
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            effective.append(host)  # hostname은 DNS로 추측하지 않는다.
+            continue
+        if not isinstance(ip, ipaddress.IPv4Address) or not any(ip in network for network in networks):
+            effective.append(host)
+    return effective
+
+
+def effective_targets_fingerprint(hosts: list[str]) -> str:
+    """순서까지 포함한 유효 대상 목록의 안정적인 SHA-256 지문을 만든다."""
+    digest = hashlib.sha256()
+    for host in hosts:
+        encoded = host.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
 def validate_ports(ports: str) -> str:
     ports = (ports or "").strip()
     if not ports:
@@ -398,6 +468,8 @@ def set_scan_type(flags: list[str], scan_type: str) -> list[str]:
         return flags
     mapped = {"connect": "-sT", "syn": "-sS"}[scan_type]
     flags = [f for f in flags if f not in SCAN_TYPE_FLAGS]
+    if scan_type == "connect":
+        flags = [f for f in flags if f != "--defeat-rst-ratelimit"]
     return [mapped, *flags]
 
 
@@ -583,10 +655,15 @@ def build_command(plan: dict, index: int, stage_id: str = "", tcp_ports: list[in
     host_timeout = plan.get("host_timeout", "")
     # --host-timeout: 한 호스트가 무한정 멈추는 걸 막는다(nmap 이 해당 호스트만 포기, 0으로 정상 종료).
     timeout_flags = ["--host-timeout", host_timeout] if host_timeout else []
+    excludes = plan.get("exclude") or []
+    # Nmap 7.99는 --exclude를 반복하면 누적하지 않고 마지막 값만 쓴다. CLI에서는 반복 입력을
+    # 받되 실제 Nmap에는 검증·정규화된 전체 값을 쉼표로 합쳐 정확히 한 번만 전달한다.
+    exclude_flags = ["--exclude", ",".join(excludes)] if excludes else []
     return [
         plan["nmap"],
         "--stats-every", plan["stats_every"],
         *timeout_flags,
+        *exclude_flags,
         *flags,
         "-oA", str(base),
         *scan_targets,
@@ -822,8 +899,15 @@ def create_plan(args: argparse.Namespace) -> dict:
     # 비배치 모드는 원본 스펙(CIDR 등)을 그대로 nmap 에 넘기되, 캡 검사만 수행.
     expanded = expand_targets(raw_targets, args.max_hosts)
     # scope 게이트: 설정 시 전개된 모든 호스트가 허용 대역 안인지 검증(밖이면 시작 전 거절).
-    check_scope(expanded, getattr(args, "scan_scope", "") or os.environ.get("SCANOPS_SCAN_SCOPE", ""))
-    run_targets = expanded if args.batch_size > 0 else raw_targets
+    scope_spec = getattr(args, "scan_scope", "") or os.environ.get("SCANOPS_SCAN_SCOPE", "")
+    check_scope(expanded, scope_spec)
+    excludes, exclude_networks = parse_excludes(getattr(args, "exclude", []))
+    effective = apply_excludes(expanded, exclude_networks)
+    if not effective:
+        raise ValueError("제외 대상(--exclude)을 적용하니 스캔할 호스트가 남지 않았습니다.")
+    # 배치는 실제 스캔할 호스트만 저장한다. 비배치는 Windows argv 폭발을 피하려 CIDR/범위 원문을
+    # 유지하고, build_command가 모든 Nmap 단계에 canonical --exclude를 적용한다.
+    run_targets = effective if args.batch_size > 0 else raw_targets
     batches = make_batches(run_targets, args.batch_size)
     out_dir = Path(args.output_dir).resolve()
     name = safe_name(args.name)
@@ -859,6 +943,12 @@ def create_plan(args: argparse.Namespace) -> dict:
         "open_only": args.open_only,
         "include_closed": args.include_closed,
         "raw_targets": raw_targets,
+        "exclude": excludes,
+        "scan_scope": scope_spec,
+        "max_hosts": args.max_hosts,
+        "requested_host_count": len(expanded),
+        "effective_host_count": len(effective),
+        "effective_targets_sha256": effective_targets_fingerprint(effective),
         "batch_size": args.batch_size,
         "batches": batches,
         "cursor": 0,
@@ -869,7 +959,8 @@ def create_plan(args: argparse.Namespace) -> dict:
 REQUIRED_STATE_KEYS = ("workflow", "output_dir", "name", "manifest_path", "batches", "cursor", "runs")
 
 
-def load_plan(path: str, nmap_override: str = "", dry_run: bool = False) -> dict:
+def load_plan(path: str, nmap_override: str = "", dry_run: bool = False,
+              scan_scope_override: str = "") -> dict:
     p = Path(path)
     plan = json.loads(p.read_text(encoding="utf-8"))
     if not isinstance(plan, dict) or plan.get("tool") != "scanops_scanner":
@@ -878,6 +969,60 @@ def load_plan(path: str, nmap_override: str = "", dry_run: bool = False) -> dict
     missing = [k for k in REQUIRED_STATE_KEYS if k not in plan]
     if missing:
         raise ValueError(f"state 파일에 필수 항목이 없습니다(손상되었거나 호환되지 않음): {missing}")
+
+    batches = plan.get("batches")
+    if not isinstance(batches, list) or not batches or any(not isinstance(batch, list) for batch in batches):
+        raise ValueError("state 파일의 batches가 올바른 목록이 아닙니다.")
+    saved_batch_targets = [host for batch in batches for host in batch]
+    if not all(isinstance(host, str) for host in saved_batch_targets):
+        raise ValueError("state 파일의 target 형식이 올바르지 않습니다.")
+    validate_targets(saved_batch_targets)
+
+    excludes, exclude_networks = parse_excludes(plan.get("exclude", []))
+    plan["exclude"] = excludes  # 구형 state는 빈 목록으로 호환, 새 state는 canonical 형태로 재검증.
+    raw_targets = plan.get("raw_targets")
+    if raw_targets is None:
+        raw_targets = saved_batch_targets
+    if not isinstance(raw_targets, list) or not all(isinstance(host, str) for host in raw_targets):
+        raise ValueError("state 파일의 raw_targets 형식이 올바르지 않습니다.")
+    validate_targets(raw_targets)
+    try:
+        max_hosts = int(plan.get("max_hosts", 65536))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("state 파일의 max_hosts가 올바른 정수가 아닙니다.") from exc
+    if max_hosts < 1:
+        raise ValueError("state 파일의 max_hosts는 1 이상이어야 합니다.")
+    expanded = expand_targets(raw_targets, max_hosts)
+    stored_scope = plan.get("scan_scope", "")
+    if not isinstance(stored_scope, str):
+        raise ValueError("state 파일의 scan_scope 형식이 올바르지 않습니다.")
+    # 저장 당시 경계는 resume에서 절대 완화하지 않는다. 현재 CLI/환경 scope가 있으면 그것도
+    # 추가로 통과해야 하므로 실제 허용 범위는 stored ∩ current가 된다.
+    if stored_scope:
+        check_scope(expanded, stored_scope)
+    current_scope = scan_scope_override or os.environ.get("SCANOPS_SCAN_SCOPE", "")
+    if current_scope:
+        check_scope(expanded, current_scope)
+    effective = apply_excludes(expanded, exclude_networks)
+    if not effective:
+        raise ValueError("저장된 제외 대상(--exclude)을 적용하니 재개할 호스트가 남지 않았습니다.")
+    if "requested_host_count" in plan and plan["requested_host_count"] != len(expanded):
+        raise ValueError("state 파일의 요청 호스트 수가 저장된 target과 일치하지 않습니다.")
+    if "effective_host_count" in plan and plan["effective_host_count"] != len(effective):
+        raise ValueError("state 파일의 유효 호스트 수가 저장된 exclude와 일치하지 않습니다.")
+    effective_fingerprint = effective_targets_fingerprint(effective)
+    if ("effective_targets_sha256" in plan
+            and plan["effective_targets_sha256"] != effective_fingerprint):
+        raise ValueError("state 파일의 유효 호스트 지문이 저장된 target/exclude 계획과 일치하지 않습니다.")
+    batch_size = int(plan.get("batch_size", 0))
+    expected_batches = make_batches(effective, batch_size) if batch_size > 0 else make_batches(raw_targets, 0)
+    if batches != expected_batches:
+        raise ValueError("state 파일의 batches가 저장된 target/exclude 계획과 일치하지 않습니다.")
+    plan["raw_targets"] = raw_targets
+    plan["max_hosts"] = max_hosts
+    plan["requested_host_count"] = len(expanded)
+    plan["effective_host_count"] = len(effective)
+    plan["effective_targets_sha256"] = effective_fingerprint
     if plan.get("status") == "running":
         print("warning: 이 state 는 'running' 상태입니다(중단되었거나 다른 스캔이 진행 중일 수 있음). "
               "동일 state 로 동시에 두 스캔을 돌리지 마세요.", file=sys.stderr)
@@ -1304,10 +1449,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--include-closed", action="store_true", help="Remove --open so closed/filtered ports remain in XML.")
     p.add_argument("--stats-every", default=STATS_EVERY_DEFAULT, help="nmap --stats-every value.")
     p.add_argument("--host-timeout", default=HOST_TIMEOUT_DEFAULT,
-                   help="Per-host nmap --host-timeout so one host cannot hang the whole scan. 0 disables.")
+                   help="Per-host nmap --host-timeout. Off by default (0); set e.g. 30m to opt in.")
     p.add_argument("--scan-scope", default="",
                    help="Allowed scan range(s): comma/space CIDR or IP. Targets outside are rejected before scanning. "
                         "Falls back to the SCANOPS_SCAN_SCOPE env var. Empty means unrestricted.")
+    p.add_argument("--exclude", action="append", default=[], metavar="IP_OR_CIDR",
+                   help="Exclude IPv4 IP/CIDR values. Repeatable; each value may use comma/space/newline separators.")
     p.add_argument("--batch-size", type=int, default=0, help="Expand targets and run batches of this size. 0 means one nmap run.")
     p.add_argument("--max-hosts", type=int, default=65536, help="Safety cap when expanding CIDR/ranges for batching.")
     p.add_argument("--resume", help="Resume from a previous *.state.json.")
@@ -1319,7 +1466,10 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        plan = load_plan(args.resume, args.nmap, args.dry_run) if args.resume else create_plan(args)
+        if args.resume and args.exclude:
+            raise ValueError("--resume에서는 --exclude를 변경할 수 없습니다. state에 저장된 제외 대상을 사용합니다.")
+        plan = (load_plan(args.resume, args.nmap, args.dry_run, args.scan_scope)
+                if args.resume else create_plan(args))
         return execute(plan, dry_run=args.dry_run, zip_outputs=args.zip)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

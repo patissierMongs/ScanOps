@@ -27,6 +27,59 @@ def parse_scope(spec: str) -> list[ipaddress._BaseNetwork]:
     return nets
 
 
+def parse_excludes(tokens: list[str] | None) -> list[str]:
+    """제외 IPv4/IP-CIDR 토큰을 검증·정규화하고 입력 순서로 중복 제거한다.
+
+    제외는 안전 경계이므로 토큰 하나라도 잘못되면 전체 요청을 거절한다. 단일 IP는
+    IP 표기를 유지하고, CIDR은 host bit를 정규화하되 개별 주소로 확장하지 않는다.
+    """
+    if tokens is None:
+        return []
+    if not isinstance(tokens, list):
+        raise ValueError("제외 대상은 IPv4 주소/CIDR 목록이어야 합니다.")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in tokens:
+        if not isinstance(raw, str) or not (token := raw.strip()):
+            raise ValueError("제외 대상에 빈 토큰을 사용할 수 없습니다.")
+        try:
+            address = ipaddress.ip_address(token)
+            if address.version != 4:
+                raise ValueError
+            value = str(address)
+        except ValueError:
+            try:
+                network = ipaddress.ip_network(token, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"잘못된 제외 대상 IPv4/CIDR입니다: {token!r}") from exc
+            if network.version != 4:
+                raise ValueError(f"IPv6 제외 대상은 아직 지원하지 않습니다: {token!r}")
+            value = (str(network.network_address)
+                     if network.prefixlen == network.max_prefixlen else str(network))
+        if value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    return normalized
+
+
+def apply_excludes(hosts: list[str], tokens: list[str] | None) -> list[str]:
+    """확장·중복 제거된 host 목록에서 검증된 IPv4/IP-CIDR 제외 범위를 뺀다."""
+    normalized = parse_excludes(tokens)
+    if not normalized:
+        return list(hosts)
+    networks = [ipaddress.ip_network(token, strict=False) for token in normalized]
+    kept: list[str] = []
+    for host in hosts:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            kept.append(host)  # hostname은 IPv4/CIDR 제외와 일치할 수 없다.
+            continue
+        if address.version != 4 or not any(address in network for network in networks):
+            kept.append(host)
+    return kept
+
+
 def is_ip_token(token: str) -> bool:
     """토큰이 IP 또는 CIDR 인지. 호스트명/복합 nmap 문법은 False."""
     try:
@@ -72,7 +125,7 @@ def check_scope(hosts: list[str], spec: str | None = None) -> None:
 
 # 직접 명령에서 타겟이 아닌 파일/랜덤 입력 — scope 검증을 우회하므로 scope 설정 시 차단.
 # 붙여 쓴 형태(-iR10, -iL=hosts.txt)도 같은 옵션이다.
-_UNSCOPED_TARGET_OPTIONS = ("-iL", "-iR", "--exclude", "--excludefile", "--exclude-file", "--resume")
+_UNSCOPED_TARGET_OPTIONS = ("-iL", "-iR", "--excludefile", "--exclude-file", "--resume")
 
 # nmap 옵션 중 다음 토큰을 값으로 소비하는 항목. 이 값을 타겟으로 오인하면
 # `-p 22`, `--script http-title` 같은 정상 명령을 막게 된다. 알 수 없는 옵션의
@@ -80,7 +133,7 @@ _UNSCOPED_TARGET_OPTIONS = ("-iL", "-iR", "--exclude", "--excludefile", "--exclu
 _RAW_OPTIONS_WITH_VALUE = frozenset({
     "-b", "-D", "-e", "-g", "-oA", "-oG", "-oN", "-oS", "-oX", "-p", "-S", "-sI",
     "--data", "--data-length", "--data-string", "--datadir", "--dns-servers",
-    "--exclude-ports", "--host-timeout", "--initial-rtt-timeout", "--ip-options",
+    "--exclude", "--exclude-ports", "--host-timeout", "--initial-rtt-timeout", "--ip-options",
     "--max-hostgroup", "--max-os-tries", "--max-parallelism", "--max-rate",
     "--max-retries", "--max-rtt-timeout", "--max-scan-delay", "--min-hostgroup",
     "--min-parallelism", "--min-rate", "--min-rtt-timeout", "--mtu", "--port-ratio",
@@ -133,6 +186,11 @@ def _raw_target_tokens(tokens: list[str]) -> list[str]:
     return targets
 
 
+def raw_target_tokens(tokens: list[str]) -> list[str]:
+    """Return positional raw-command targets, excluding all recognized option values."""
+    return _raw_target_tokens(tokens)
+
+
 def _validate_scoped_nse(tokens: list[str]) -> None:
     """Keep scoped raw NSE execution inside ScanOps' managed, non-expanding contract."""
     for index, token in enumerate(tokens):
@@ -163,6 +221,31 @@ def _validate_scoped_nse(tokens: list[str]) -> None:
             raise ValueError(
                 "스캔 대역(scope)이 설정된 환경에서는 관리되는 NSE 스크립트만 사용할 수 있습니다."
             )
+
+
+def _validate_scoped_excludes(tokens: list[str]) -> None:
+    """Allow one inline IPv4/CIDR comma-list while keeping file/dynamic forms blocked."""
+    values: list[str] = []
+    for index, token in enumerate(tokens):
+        option_name = token.split("=", 1)[0]
+        if len(option_name) > 2 and option_name.startswith("--") \
+                and option_name != "--exclude" \
+                and any(option.startswith(option_name) for option in (
+                    "--exclude", "--excludefile", "--exclude-file",
+                )):
+            raise ValueError(
+                "스캔 대역(scope)이 설정된 환경에서는 --exclude 옵션 축약형을 사용할 수 없습니다."
+            )
+        if token == "--exclude":
+            if index + 1 >= len(tokens):
+                raise ValueError("--exclude 뒤에 IPv4 주소/CIDR 목록을 지정해야 합니다.")
+            values.append(tokens[index + 1])
+        elif token.startswith("--exclude="):
+            values.append(token.split("=", 1)[1])
+    if len(values) > 1:
+        raise ValueError("--exclude 옵션은 한 번만 사용하고 값을 쉼표로 구분해야 합니다.")
+    if values:
+        parse_excludes(values[0].split(","))
 
 
 def _uses_scoped_unsafe_network_option(token: str) -> bool:
@@ -196,6 +279,7 @@ def check_raw_scope(tokens: list[str], spec: str | None = None) -> None:
         raise ValueError(
             "스캔 대역(scope)이 설정된 환경에서는 외부 릴레이/프록시/DNS 대상을 지정할 수 없습니다."
         )
+    _validate_scoped_excludes(tokens)
     _validate_scoped_nse(tokens)
     targets = _raw_target_tokens(tokens)
     if not targets:

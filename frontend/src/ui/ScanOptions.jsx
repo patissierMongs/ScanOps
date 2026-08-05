@@ -8,6 +8,27 @@ const loadPresets = () => { try { return JSON.parse(localStorage.getItem(PRESET_
 const PRECISION_OPTS = ["noping", "dns_no", "syn", "fast", "version", "version_all",
   "max_retries", "open_only", "reason", "defeat_rst", "min_hostgroup", "max_parallel", "udp"];
 
+const TIMING_KEYS = [
+  ["t0", "-T0"], ["t1", "-T1"], ["t2", "-T2"], ["t3", "-T3"],
+  ["fast", "-T4"], ["t5", "-T5"],
+];
+
+function normalizeSelections(keys) {
+  const next = new Set(keys || []);
+  if (next.has("connect")) {
+    next.delete("syn");
+    next.delete("udp");
+    next.delete("defeat_rst");
+  } else {
+    // 단계 엔진은 TCP 방식 미지정도 SYN으로 해석하므로 UI도 같은 상태를 보여준다.
+    next.add("syn");
+  }
+  const selectedTiming = TIMING_KEYS.find(([key]) => next.has(key))?.[0];
+  TIMING_KEYS.forEach(([key]) => next.delete(key));
+  if (selectedTiming) next.add(selectedTiming);
+  return next;
+}
+
 function protocolPorts(spec, proto) {
   let current = "";
   const out = [];
@@ -34,6 +55,15 @@ function autoPortSpecs(ports, udpPorts) {
   return { tcp, udp: udp ? `U:${udp}` : "" };
 }
 
+function tcpOnlyPortSpec(spec) {
+  const tcp = protocolPorts(spec, "T");
+  return `T:${tcp || "1-65535"}`;
+}
+
+function hasExplicitUdpPorts(spec) {
+  return Boolean(protocolPorts(spec, "U"));
+}
+
 function commandText(parts) {
   return parts.filter(Boolean).join(" ");
 }
@@ -43,7 +73,7 @@ const DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,33
 const DISCOVERY_PA = "-PA80,443,3389";
 
 export default function ScanOptions({
-  targets = [], portsAuto = "", staged = false, fixedTargetPorts = false, onState,
+  targets = [], excludes = [], portsAuto = "", staged = false, discovery = "sn", fixedTargetPorts = false, onState,
 }) {
   const [workflow, setWorkflow] = useState("auto");
   const [registry, setRegistry] = useState([]);
@@ -65,7 +95,7 @@ export default function ScanOptions({
       .then((r) => {
         if (!live) return;
         setRegistry(r.options || []);
-        setSel(new Set(r.default || []));
+        setSel(normalizeSelections(r.default || []));
         setNseReg(r.nse || []);
         setNseDefault(r.nse_default || []);
         setNseSel(new Set(r.nse_default || []));
@@ -80,30 +110,101 @@ export default function ScanOptions({
     () => nseReg.filter((s) => nseSel.has(s.key)).map((s) => s.key),
     [nseReg, nseSel]
   );
+  // Nmap 7.99는 반복 --exclude를 누적하지 않으므로 항상 단일 comma-list로 표시한다.
+  const excludeArgs = useMemo(
+    () => excludes.length ? ["--exclude", excludes.join(",")] : [],
+    [excludes]
+  );
 
   // 단계 분리(staged) 또는 자동 스캔이면 한 번에 안 돌고 단계별로 나눠 순차 실행된다.
   const stepped = staged || workflow === "auto";
 
-  // 분산 실행되는 각 단계 명령 — 백엔드 nmap_runner.build_auto_command 의 플래그와 동기화.
+  // 분산 실행되는 각 단계 명령 — staged 엔진과 legacy 자동 워크플로를 각각 그대로 설명한다.
   const steps = useMemo(() => {
     const p = (ports || portsAuto).trim();
     const { tcp, udp } = autoPortSpecs(p, udpPorts);
-    const scripts = selectedScripts.length ? selectedScripts.join(",") : "";
+    const scriptsFor = (proto) => nseReg
+      .filter((script) => nseSel.has(script.key) && [proto, "both"].includes(script.proto || "both"))
+      .map((script) => script.key)
+      .join(",");
+    const tcpScripts = scriptsFor("tcp");
+    const udpScripts = scriptsFor("udp");
+    const stagedScripts = selectedScripts.join(",");
     const out = [];
+
+    if (staged) {
+      const scanFlag = sel.has("connect") ? "-sT" : "-sS";
+      const defeatRst = scanFlag === "-sS" ? "--defeat-rst-ratelimit" : "";
+      const timing = TIMING_KEYS.find(([key]) => sel.has(key))?.[1] || "-T4";
+      const versionFlag = sel.has("version_light")
+        ? "--version-light"
+        : sel.has("version_all") ? "--version-all" : "";
+      const sweepTargets = discovery === "pn" ? targets : ["<발견된 호스트>"];
+
+      if (discovery !== "pn") {
+        out.push({
+          title: "호스트 발견",
+          desc: "포트 스캔 전에 ICMP Echo와 TCP SYN/ACK probe로 응답 호스트만 추립니다.",
+          cmd: commandText(["nmap", "--stats-every", "5s", "-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n",
+            timing, "--reason", "--max-retries", "2", "--min-hostgroup", "64", "--max-parallelism", "100",
+            ...excludeArgs, "-oA", "scan_<id>.discovery", ...targets]),
+        });
+      }
+      if (tcp) {
+        out.push({
+          title: "TCP 포트 탐색",
+          desc: "발견된 호스트를 배치로 나눠 열린 TCP 포트를 찾습니다.",
+          cmd: commandText(["nmap", "--stats-every", "5s", scanFlag, "-Pn", "-n", "--open", timing,
+            "--reason", "--max-retries", "2", "--min-hostgroup", "64", defeatRst,
+            "--max-parallelism", "100", "-p", tcp, ...excludeArgs,
+            "-oA", "scan_<id>.tcp_<batch>", ...sweepTargets]),
+        });
+        out.push({
+          title: "TCP 서비스 식별",
+          desc: "호스트별 열린 TCP에만 서비스·제품·버전·NSE 단서를 확인합니다.",
+          cmd: commandText(["nmap", "--stats-every", "5s", scanFlag, "-Pn", "-sV", versionFlag, "--open",
+            "--reason", timing, "--max-retries", "2", "-p", "T:<TCP 탐색에서 열린 포트>",
+            stagedScripts && "--script", stagedScripts, stagedScripts && "--script-timeout", stagedScripts && "10s", ...excludeArgs,
+            "-oA", "scan_<id>.tcp_service_<host>", "<호스트 1대>"]),
+        });
+      }
+      if (sel.has("udp") && udp) {
+        out.push({
+          title: "UDP 포트 탐색",
+          desc: "발견된 호스트의 주요/지정 UDP 포트에서 응답 후보를 찾습니다.",
+          cmd: commandText(["nmap", "--stats-every", "5s", "-sU", "-Pn", "-n", "--open", timing,
+            "--reason", "--max-retries", "2", "-p", udp, ...excludeArgs,
+            "-oA", "scan_<id>.udp_<batch>", ...sweepTargets]),
+        });
+        out.push({
+          title: "UDP 서비스 식별",
+          desc: "호스트별 열린 UDP에 -sV와 UDP용 NSE 단서를 적용합니다(--version-all 제외).",
+          cmd: commandText(["nmap", "--stats-every", "5s", "-sU", "-Pn", "-n", "-sV",
+            versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing, "--max-retries", "2",
+            "-p", "U:<UDP 탐색에서 열린 포트>", stagedScripts && "--script", stagedScripts,
+            stagedScripts && "--script-timeout", stagedScripts && "10s", ...excludeArgs,
+            "-oA", "scan_<id>.udp_service_<host>", "<호스트 1대>"]),
+        });
+      }
+      return out;
+    }
+
     if (tcp) {
       out.push({
         title: "TCP 발견",
         desc: "전체/지정 TCP에서 지금 열려 있는 포트만 먼저 추려냅니다.",
         cmd: commandText(["nmap", "--stats-every", "10s", "-sS", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4",
           "--reason", "--min-hostgroup", "64", "--max-retries", "2", "--defeat-rst-ratelimit",
-          "--max-parallelism", "100", "-p", tcp, "-oA", "scan_<id>.tcp_discovery", ...targets]),
+          "--max-parallelism", "100", "-p", tcp, ...excludeArgs,
+          "-oA", "scan_<id>.tcp_discovery", ...targets]),
       });
       out.push({
         title: "TCP 식별",
         desc: "앞 단계에서 살아있던 호스트의 열린 TCP에만 서비스·제품·버전·NSE 단서를 확인합니다.",
         cmd: commandText(["nmap", "--stats-every", "10s", "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
-          "-T4", "--max-retries", "2", scripts && "--script", scripts, "--script-timeout", "10s",
-          "-p", "T:<1단계에서 발견된 TCP 포트>", "-oA", "scan_<id>.tcp_identify", ...targets]),
+          "-T4", "--max-retries", "2", tcpScripts && "--script", tcpScripts, "--script-timeout", "10s",
+          "-p", "T:<1단계에서 발견된 TCP 포트>", ...excludeArgs,
+          "-oA", "scan_<id>.tcp_identify", ...targets]),
       });
     }
     if (udp) {
@@ -111,12 +212,12 @@ export default function ScanOptions({
         title: "UDP 식별",
         desc: "주요/지정 UDP에서 DNS·SNMP·NTP 같은 용도 단서를 확인합니다(강도 7 -sV — UDP는 version-all 미적용).",
         cmd: commandText(["nmap", "--stats-every", "10s", "-sU", "-Pn", "-n", "-sV", "--open",
-          "--reason", "-T4", "--max-retries", "2", scripts && "--script", scripts, "--script-timeout", "10s",
-          "-p", udp, "-oA", "scan_<id>.udp_identify", ...targets]),
+          "--reason", "-T4", "--max-retries", "2", udpScripts && "--script", udpScripts, "--script-timeout", "10s",
+          "-p", udp, ...excludeArgs, "-oA", "scan_<id>.udp_identify", ...targets]),
       });
     }
     return out;
-  }, [ports, portsAuto, udpPorts, targets, selectedScripts]);
+  }, [ports, portsAuto, udpPorts, targets, staged, discovery, sel, nseReg, nseSel, selectedScripts, excludeArgs]);
 
   // 단일 실행(manual) 명령 — raw 모드 '채우기' 및 하위호환용.
   const singleCommand = useMemo(() => {
@@ -125,10 +226,11 @@ export default function ScanOptions({
     const parts = ["nmap", ...flags];
     if (p) parts.push("-p", p);
     if (selectedScripts.length) parts.push("--script", selectedScripts.join(","));
+    parts.push(...excludeArgs);
     parts.push("-oA", "scan_<id>");
     if (targets.length) parts.push(...targets);
     return parts.join(" ");
-  }, [sel, ports, portsAuto, targets, registry, selectedScripts]);
+  }, [sel, ports, portsAuto, targets, registry, selectedScripts, excludeArgs]);
 
   // onState.command: manual 은 항상 단일 명령(raw 모드 '채우기'용), 그 외엔 분산 단계 명령.
   const command = workflow === "manual" ? singleCommand : steps.map((s) => s.cmd).join("\n");
@@ -160,7 +262,31 @@ export default function ScanOptions({
   }, [nseReg]);
 
   function toggle(k) {
-    setSel((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
+    if (k === "connect" || (k === "udp" && sel.has("udp"))) {
+      setPorts((current) => tcpOnlyPortSpec(current));
+    }
+    setSel((s) => {
+      const n = new Set(s);
+      if (k === "syn") {
+        n.add("syn");
+        n.delete("connect");
+      } else if (k === "connect") {
+        n.add("connect");
+        n.delete("syn");
+        n.delete("udp");
+        n.delete("defeat_rst");
+      } else if (k === "udp" && !n.has("udp")) {
+        n.add("udp");
+        n.add("syn");
+        n.delete("connect");
+      } else if (TIMING_KEYS.some(([key]) => key === k)) {
+        TIMING_KEYS.forEach(([key]) => n.delete(key));
+        n.add(k);
+      } else {
+        n.has(k) ? n.delete(k) : n.add(k);
+      }
+      return n;
+    });
     setPresetId("");
   }
   function toggleNse(k) {
@@ -168,7 +294,19 @@ export default function ScanOptions({
     setPresetId("");
   }
   const setNseAll = (keys) => { setNseSel(new Set(keys)); setPresetId(""); };
-  const setPortPreset = (spec) => { setPorts(spec); setPresetId(""); };
+  const setPortPreset = (spec) => {
+    setPorts(spec);
+    if (hasExplicitUdpPorts(spec)) {
+      setSel((s) => {
+        const n = new Set(s);
+        n.add("syn");
+        n.add("udp");
+        n.delete("connect");
+        return n;
+      });
+    }
+    setPresetId("");
+  };
 
   function applyPrecision() {
     setWorkflow("manual");
@@ -183,9 +321,16 @@ export default function ScanOptions({
   function applyPreset(id) {
     const p = presets.find((x) => x.id === id);
     if (p) {
+      const nextSel = normalizeSelections(p.keys || []);
+      let nextPorts = p.ports || "";
+      if (nextSel.has("connect")) {
+        nextPorts = tcpOnlyPortSpec(nextPorts);
+      } else if (hasExplicitUdpPorts(nextPorts)) {
+        nextSel.add("udp");
+      }
       setWorkflow(p.workflow || "manual");
-      setSel(new Set(p.keys || []));
-      setPorts(p.ports || "");
+      setSel(nextSel);
+      setPorts(nextPorts);
       setNseSel(new Set(p.nse || []));
     }
     setPresetId(id);
@@ -215,6 +360,7 @@ export default function ScanOptions({
   }
 
   const { tcp, udp } = autoPortSpecs((ports || portsAuto).trim(), udpPorts);
+  const udpActive = staged ? sel.has("udp") && Boolean(udp) : Boolean(udp);
 
   return (
     <div className="scan-builder">
@@ -238,9 +384,24 @@ export default function ScanOptions({
       ) : workflow === "auto" ? (
         <div className="scan-auto">
           <div className="scan-flow">
-            <div className={tcp ? "" : "muted-step"}><b>TCP 발견</b><span>전체 또는 지정 TCP에서 현재 열린 포트를 먼저 줄입니다.</span></div>
-            <div className={tcp ? "" : "muted-step"}><b>TCP 식별</b><span>발견된 TCP만 서비스·제품·버전·NSE 단서로 다시 확인합니다.</span></div>
-            <div className={udp ? "" : "muted-step"}><b>UDP 식별</b><span>주요 또는 지정 UDP에서 DNS·SNMP·NTP 같은 용도 단서를 확인합니다.</span></div>
+            {staged ? (
+              <>
+                <div className={discovery === "pn" ? "muted-step" : ""}>
+                  <b>{discovery === "pn" ? "호스트 발견 생략" : "호스트 발견"}</b>
+                  <span>{discovery === "pn" ? "입력 대상을 바로 포트 탐색에 넘깁니다." : "ICMP·TCP probe로 응답 호스트만 추립니다."}</span>
+                </div>
+                <div className={tcp ? "" : "muted-step"}><b>TCP 포트 탐색</b><span>응답 호스트의 열린 TCP를 찾습니다.</span></div>
+                <div className={tcp ? "" : "muted-step"}><b>TCP 서비스 식별</b><span>열린 TCP만 제품·버전·NSE로 확인합니다.</span></div>
+                <div className={udpActive ? "" : "muted-step"}><b>UDP 포트 탐색</b><span>주요/지정 UDP의 응답 후보를 찾습니다.</span></div>
+                <div className={udpActive ? "" : "muted-step"}><b>UDP 서비스 식별</b><span>열린 UDP만 용도 단서로 확인합니다.</span></div>
+              </>
+            ) : (
+              <>
+                <div className={tcp ? "" : "muted-step"}><b>TCP 발견</b><span>전체 또는 지정 TCP에서 현재 열린 포트를 먼저 줄입니다.</span></div>
+                <div className={tcp ? "" : "muted-step"}><b>TCP 식별</b><span>발견된 TCP만 서비스·제품·버전·NSE 단서로 다시 확인합니다.</span></div>
+                <div className={udpActive ? "" : "muted-step"}><b>UDP 식별</b><span>주요 또는 지정 UDP에서 DNS·SNMP·NTP 같은 용도 단서를 확인합니다.</span></div>
+              </>
+            )}
           </div>
           <div className="scan-result-note">
             결과에는 열린 포트, 서비스명, 제품/버전, 웹 제목, 서버 헤더, TLS 인증서, SSH 키, NetBIOS/RDP/NTP/RPC 단서가 남습니다.
@@ -348,9 +509,19 @@ export default function ScanOptions({
           {stepped ? (
             <>
               <div className="scan-result-note" style={{ marginBottom: 8 }}>
-                아래 {steps.length}개 명령은 <b>한 번에 실행되지 않습니다.</b> {staged ? "단계 분리 엔진이 " : "자동 스캔이 "}
-                각 단계를 <b>나눠서(분산) 순차 실행</b>하며, 앞 단계의 결과가 다음 단계의 입력이 됩니다
-                (예: TCP 발견에서 열린 포트만 골라 식별 단계로 넘김). 각 단계는 별도 명령·별도 산출물(<span className="mono">-oA</span>)로 남습니다.
+                {staged ? (
+                  <>
+                    아래 {steps.length}개는 <b>단계별 명령 템플릿</b>입니다. 발견은 한 번, TCP·UDP 탐색은 배치별,
+                    서비스 식별은 호스트·프로토콜별로 반복 실행됩니다. 앞 단계에서 찾은 호스트와 열린 포트만 다음 단계로 넘기며,
+                    각 실행은 별도 산출물(<span className="mono">-oA</span>)로 남습니다.
+                  </>
+                ) : (
+                  <>
+                    아래 {steps.length}개 명령은 <b>한 번에 실행되지 않습니다.</b> 자동 스캔이 각 단계를
+                    <b> 나눠서 순차 실행</b>하며 TCP 발견에서 열린 포트만 골라 식별 단계로 넘깁니다.
+                    각 단계는 별도 산출물(<span className="mono">-oA</span>)로 남습니다.
+                  </>
+                )}
               </div>
               {steps.map((s, i) => (
                 <div key={i} style={{ marginTop: i ? 10 : 0 }}>

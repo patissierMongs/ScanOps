@@ -6,6 +6,7 @@ POST /{id}/resume 로 이어가기를 호출한다. (status: running/done/failed
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import re
@@ -82,7 +83,9 @@ def _estimate_profile(body: ScanRunIn) -> tuple:
     return _profile(body.options, body.ports, body.preset)
 
 
-def _validate_structured_scan(body: ScanRunIn, *, uses_manual_preset: bool) -> list[str]:
+def _validate_structured_scan(
+    body: ScanRunIn, *, uses_manual_preset: bool,
+) -> tuple[list[str], list[str]]:
     """Validate request fields shared by run, staged run, and estimate.
 
     Scope and executable availability are intentionally endpoint-specific.  The estimate
@@ -100,9 +103,14 @@ def _validate_structured_scan(body: ScanRunIn, *, uses_manual_preset: bool) -> l
     if not 1 <= body.batch_size <= 1024:
         raise ValueError("batch_size 는 1-1024 범위여야 합니다.")
 
-    hosts = chunker.expand_targets(body.targets)
+    # Overlapping CIDRs/hosts must not inflate batches, estimates, or closure scope.
+    hosts = list(dict.fromkeys(chunker.expand_targets(body.targets)))
     if not hosts:
         raise ValueError("유효한 타겟이 없습니다.")
+    # Keep Nmap's target-injection/IPv6 contract aligned with saved engine specs, then
+    # require the narrower IPv4 address/CIDR grammar used by exclusions.
+    nmap_runner.validate_targets(body.exclude)
+    excludes = scope.parse_excludes(body.exclude)
     if body.workflow == "auto":
         tcp_spec = nmap_runner.auto_tcp_port_spec(body.ports)
         udp_spec = nmap_runner.auto_udp_port_spec(body.ports)
@@ -110,11 +118,31 @@ def _validate_structured_scan(body: ScanRunIn, *, uses_manual_preset: bool) -> l
             raise ValueError("자동 스캔에 사용할 TCP 또는 UDP 포트가 없습니다.")
     elif uses_manual_preset and not body.options and body.preset not in PRESETS:
         raise ValueError(f"알 수 없는 프리셋: {body.preset}")
-    return hosts
+    return hosts, excludes
+
+
+def _effective_hosts(hosts: list[str], excludes: list[str]) -> list[str]:
+    effective = scope.apply_excludes(hosts, excludes)
+    if not effective:
+        raise ValueError("제외 대상을 적용하니 스캔할 호스트가 남지 않았습니다.")
+    return effective
+
+
+def _with_nmap_excludes(argv: list[str], excludes: list[str] | None) -> list[str]:
+    """Apply canonical exclusions as one Nmap option (repeated --exclude keeps only the last)."""
+    canonical = scope.parse_excludes(excludes)
+    if not canonical:
+        return argv
+    return [argv[0], "--exclude", ",".join(canonical), *argv[1:]]
 
 
 def _validate_staged_protocol_selection(body: ScanRunIn) -> None:
     """Reject an explicit UDP port request when the staged UDP phase is disabled."""
+    selected = set(body.options or [])
+    if "connect" in selected and "syn" in selected:
+        raise ValueError("단계 스캔에서는 TCP SYN과 Connect 방식을 동시에 선택할 수 없습니다.")
+    if "connect" in selected and "udp" in selected:
+        raise ValueError("TCP Connect 단계 스캔은 UDP 스캔과 함께 실행할 수 없습니다.")
     if body.ports and nmap_runner.auto_udp_port_spec(body.ports) and "udp" not in body.options:
         raise ValueError("UDP 포트를 지정하려면 udp 스캔 옵션을 활성화해야 합니다.")
 
@@ -482,9 +510,14 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
     return counts
 
 
-def _ingest_batch(scan_id: int, xml_bytes: bytes, no_close: bool = False) -> None:
+def _ingest_batch(
+    scan_id: int,
+    xml_bytes: bytes,
+    no_close: bool = False,
+    closure_hosts: set[str] | None = None,
+) -> None:
     """배치 XML 1개 인입 — job scan_id 에 귀속, host/port 카운트 누적(상태는 안 바꿈).
-    닫힘 판정은 ingest 내부에서 '이번 배치가 스캔한 호스트'로만 한정되므로 다른 배치 안전.
+    완료된 structured 배치는 closure_hosts 범위에 권한을 가지므로 다른 배치에는 영향이 없다.
     no_close=True 면 닫힘 판정을 끈다(직접 명령처럼 스캔한 포트 범위를 알 수 없을 때 — 가산만)."""
     db = SessionLocal()
     try:
@@ -496,7 +529,7 @@ def _ingest_batch(scan_id: int, xml_bytes: bytes, no_close: bool = False) -> Non
         else:
             scope_keys = _auto_scope_keys(
                 db,
-                scanned_hosts,
+                scanned_hosts if closure_hosts is None else closure_hosts,
                 findings,
                 _scaninfo_scope(xml_bytes, "tcp"),
                 _scaninfo_scope(xml_bytes, "udp"),
@@ -511,15 +544,27 @@ def _ingest_batch(scan_id: int, xml_bytes: bytes, no_close: bool = False) -> Non
         db.close()
 
 
-def _ingest_auto_findings(scan_id: int, findings: list[dict], scanned_hosts: set[str],
-                          tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set) -> None:
+def _ingest_auto_findings(
+    scan_id: int,
+    findings: list[dict],
+    scanned_hosts: set[str],
+    tcp_scope: set[int] | None | set,
+    udp_scope: set[int] | None | set,
+    closure_hosts: set[str] | None = None,
+) -> None:
     db = SessionLocal()
     try:
         scan = db.get(ScanRun, scan_id)
         if scan is None:
             return
         enriched = taxonomy.enrich_all(db, findings)
-        scope_keys = _auto_scope_keys(db, scanned_hosts, enriched, tcp_scope, udp_scope)
+        scope_keys = _auto_scope_keys(
+            db,
+            scanned_hosts if closure_hosts is None else closure_hosts,
+            enriched,
+            tcp_scope,
+            udp_scope,
+        )
         ingest(db, scan_id, enriched, scanned_hosts, scope_keys=scope_keys, commit=False)
         from .assets import match_assets
         match_assets(db, commit=False)
@@ -588,7 +633,12 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             return False
         discovery_base = Path(str(b_base) + ".tcp_discovery")
         discovery_log = Path(str(discovery_base) + ".log")
-        argv = nmap_runner.build_auto_command(nmap, "tcp_discovery", batch, discovery_base, ports=ports, nse=nse)
+        argv = _with_nmap_excludes(
+            nmap_runner.build_auto_command(
+                nmap, "tcp_discovery", batch, discovery_base, ports=ports, nse=nse,
+            ),
+            state.get("exclude"),
+        )
         _checked_stage(scan_id, argv, discovery_log)
         discovery_xml = nmap_runner.xml_of(discovery_base)
         if not discovery_xml.exists():
@@ -602,7 +652,13 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
                 return False
             identify_base = Path(str(b_base) + ".tcp_identify")
             identify_log = Path(str(identify_base) + ".log")
-            argv = nmap_runner.build_auto_command(nmap, "tcp_identify", discovery_live or batch, identify_base, ports=ports, tcp_ports=tcp_ports, nse=nse)
+            argv = _with_nmap_excludes(
+                nmap_runner.build_auto_command(
+                    nmap, "tcp_identify", discovery_live or batch, identify_base,
+                    ports=ports, tcp_ports=tcp_ports, nse=nse,
+                ),
+                state.get("exclude"),
+            )
             _checked_stage(scan_id, argv, identify_log)
             identify_xml = nmap_runner.xml_of(identify_base)
             if not identify_xml.exists():
@@ -622,7 +678,12 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
         udp_base = Path(str(b_base) + ".udp_identify")
         udp_log = Path(str(udp_base) + ".log")
         udp_targets = batch if udp_all_targets else (discovery_live or batch)
-        argv = nmap_runner.build_auto_command(nmap, "udp_identify", udp_targets, udp_base, ports=ports, nse=nse)
+        argv = _with_nmap_excludes(
+            nmap_runner.build_auto_command(
+                nmap, "udp_identify", udp_targets, udp_base, ports=ports, nse=nse,
+            ),
+            state.get("exclude"),
+        )
         _checked_stage(scan_id, argv, udp_log)
         udp_xml = nmap_runner.xml_of(udp_base)
         if not udp_xml.exists():
@@ -633,7 +694,10 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
     if not tcp_port_spec and not udp_port_spec:
         raise _WorkerFailure("invalid_scan_state")
     try:
-        _ingest_auto_findings(scan_id, findings, scanned_hosts, tcp_scope, udp_scope)
+        _ingest_auto_findings(
+            scan_id, findings, scanned_hosts, tcp_scope, udp_scope,
+            closure_hosts=set(batch),
+        )
     except Exception as exc:
         raise _WorkerFailure("result_ingest_failed") from exc
     return True
@@ -701,6 +765,7 @@ def _chunk_worker(scan_id: int) -> None:
                     nmap, st.get("preset", "quick"), batch, b_base,
                     ports=st.get("ports", ""), nse=st.get("nse"),
                 )
+            argv = _with_nmap_excludes(argv, st.get("exclude"))
         except ValueError:
             logger.exception("invalid stored scan settings for scan %s", scan_id)
             _fail(scan_id, "invalid_scan_state")
@@ -726,7 +791,7 @@ def _chunk_worker(scan_id: int) -> None:
             _fail(scan_id, "result_missing")
             return
         try:
-            _ingest_batch(scan_id, xml_path.read_bytes())
+            _ingest_batch(scan_id, xml_path.read_bytes(), closure_hosts=set(batch))
         except Exception:
             logger.exception("failed to ingest scan %s result", scan_id)
             _fail(scan_id, "result_ingest_failed")
@@ -805,6 +870,110 @@ def _load_engine_spec(spec_path: Path) -> dict:
     return data
 
 
+def _parse_engine_scope_key(key: str) -> tuple[str, int, str]:
+    parts = key.split("|")
+    if len(parts) != 3:
+        raise ValueError("저장된 단계 스캔 닫힘 범위(scope_keys) 형식이 잘못되었습니다.")
+    host, port_text, proto = parts
+    try:
+        address = ipaddress.ip_address(host)
+        port = int(port_text)
+    except ValueError:
+        raise ValueError(
+            "저장된 단계 스캔 닫힘 범위(scope_keys) 형식이 잘못되었습니다."
+        ) from None
+    if (address.version != 4 or str(address) != host
+            or str(port) != port_text or not 1 <= port <= 65535
+            or proto not in {"tcp", "udp"}):
+        raise ValueError("저장된 단계 스캔 닫힘 범위(scope_keys) 형식이 잘못되었습니다.")
+    return host, port, proto
+
+
+def _engine_stage_port_scope(saved_spec: dict, proto: str) -> set[int] | None:
+    stages = saved_spec.get("stages") or {}
+    if not isinstance(stages, dict):
+        raise ValueError("저장된 단계 스캔 닫힘 범위(scope_keys) 설정이 잘못되었습니다.")
+    stage = stages.get(proto) or {}
+    if not isinstance(stage, dict):
+        raise ValueError("저장된 단계 스캔 닫힘 범위(scope_keys) 설정이 잘못되었습니다.")
+    default_enabled = proto == "tcp"
+    default_ports = "1-65535" if proto == "tcp" else scan_options.UDP_DEFAULT_PORTS
+    enabled = stage.get("enabled", default_enabled)
+    ports = stage.get("ports", default_ports)
+    if not isinstance(enabled, bool) or not isinstance(ports, str):
+        raise ValueError("저장된 단계 스캔 닫힘 범위(scope_keys) 설정이 잘못되었습니다.")
+    scan_options.validate_ports(ports)
+    if not enabled:
+        return set()
+    if not ports.strip():
+        raise ValueError("저장된 단계 스캔 닫힘 범위(scope_keys) 설정이 잘못되었습니다.")
+    prefix = "T" if proto == "tcp" else "U"
+    scoped_ports = ports if ":" in ports else f"{prefix}:{ports}"
+    return _port_scope(scoped_ports, prefix)
+
+
+def _validate_engine_scope_keys(saved_spec: dict) -> None:
+    """Keep explicit closure authority inside the immutable saved scan contract."""
+    scanops_spec = saved_spec.get("scanops") or {}
+    if "scope_keys" not in scanops_spec:
+        return
+    parsed_keys = {_parse_engine_scope_key(key) for key in scanops_spec["scope_keys"]}
+    excludes = scope.parse_excludes(saved_spec.get("exclude") or [])
+
+    rescan_units = saved_spec.get("rescan_units")
+    targets_ports = saved_spec.get("targets_ports")
+    expected: set[tuple[str, int, str]] | None = None
+    if rescan_units:
+        if not isinstance(rescan_units, list) or not all(
+            isinstance(unit, dict) for unit in rescan_units
+        ):
+            raise ValueError("저장된 단계 스캔 닫힘 범위(scope_keys) 설정이 잘못되었습니다.")
+        expected = {
+            _parse_engine_scope_key(
+                f"{unit.get('ip', '')}|{unit.get('port', '')}|{unit.get('proto', 'tcp')}"
+            )
+            for unit in rescan_units
+        }
+    elif targets_ports:
+        if not isinstance(targets_ports, dict):
+            raise ValueError("저장된 단계 스캔 닫힘 범위(scope_keys) 설정이 잘못되었습니다.")
+        expected = set()
+        for host, ports in targets_ports.items():
+            if not isinstance(ports, list):
+                raise ValueError(
+                    "저장된 단계 스캔 닫힘 범위(scope_keys) 설정이 잘못되었습니다."
+                )
+            expected.update(
+                _parse_engine_scope_key(f"{host}|{port}|tcp") for port in ports
+            )
+
+    if expected is not None:
+        selected_hosts = [host for host, _port, _proto in expected]
+        if scope.apply_excludes(selected_hosts, excludes) != selected_hosts:
+            raise ValueError(
+                "저장된 단계 스캔 닫힘 범위(scope_keys)에 제외 대상이 포함되어 있습니다."
+            )
+        if parsed_keys != expected:
+            raise ValueError(
+                "저장된 단계 스캔 닫힘 범위(scope_keys)가 재스캔 선택 범위와 다릅니다."
+            )
+        return
+
+    targets = saved_spec.get("targets") or []
+    if not isinstance(targets, list) or not all(isinstance(target, str) for target in targets):
+        raise ValueError("저장된 단계 스캔 닫힘 범위(scope_keys) 설정이 잘못되었습니다.")
+    nmap_runner.validate_targets(targets)
+    effective_hosts = set(scope.apply_excludes(chunker.expand_targets(targets), excludes))
+    tcp_ports = _engine_stage_port_scope(saved_spec, "tcp")
+    udp_ports = _engine_stage_port_scope(saved_spec, "udp")
+    for host, port, proto in parsed_keys:
+        port_scope = tcp_ports if proto == "tcp" else udp_ports
+        if host not in effective_hosts or (port_scope is not None and port not in port_scope):
+            raise ValueError(
+                "저장된 단계 스캔 닫힘 범위(scope_keys)가 유효 스캔 범위를 벗어났습니다."
+            )
+
+
 def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
                           scope_keys: set[str] | None,
                           force_scanned_hosts: bool) -> dict:
@@ -817,12 +986,9 @@ def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
         # before ingest mutates them so the synthetic XML records every resulting close.
         snapshot_scope = _auto_scope_keys(db, scanned_hosts, findings, None, None)
     else:
-        # Match ingest(): an ordinary staged scan may only close keys on hosts that discovery
-        # actually reached. Selected-port rescans add their requested hosts to scanned_hosts in
-        # collect_results(), so their explicit close semantics are preserved here as well.
-        snapshot_scope = {
-            key for key in scope_keys if key.split("|", 1)[0] in scanned_hosts
-        }
+        # Explicit scope_keys are the completed scan's authority, independent of discovery.
+        # They were built from effective targets, so excluded hosts are absent by construction.
+        snapshot_scope = set(scope_keys)
     merged_path = _settings.scans_dir / f"scan_{scan.id}.xml"
     snapshot_date = scan.started_at
     if snapshot_date is not None and snapshot_date.tzinfo is None:
@@ -855,6 +1021,7 @@ def _engine_worker(scan_id: int) -> None:
     force_scanned_hosts = False
     try:
         saved_spec = _load_engine_spec(spec_path)
+        _validate_engine_scope_keys(saved_spec)
         scanops_spec = saved_spec.get("scanops") or {}
         if "scope_keys" in scanops_spec:
             scope_keys = set(scanops_spec.get("scope_keys") or [])
@@ -1211,15 +1378,21 @@ def run_scan(
     배치 단위라 진행 중 [중지]→다음날 [이어하기]가 native --resume 없이 견고하게 동작한다.
     """
     try:
-        hosts = _validate_structured_scan(body, uses_manual_preset=True)
+        requested_hosts, excludes = _validate_structured_scan(body, uses_manual_preset=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        # Authorization applies to the original requested expansion. Exclusions must not turn
+        # an out-of-scope request into an allowed one.
+        scope.check_scope(requested_hosts)
+        hosts = _effective_hosts(requested_hosts, excludes)
+        batches = chunker.make_batches(hosts, body.batch_size)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     nmap = nmap_runner.find_nmap(_settings.nmap_path)
     if not nmap:
         raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
     try:
-        scope.check_scope(hosts)   # 허용 대역(scope) 밖이면 시작 전에 거절
-        batches = chunker.make_batches(hosts, body.batch_size)
         # 옵션/프리셋·포트·NSE 사전 검증(첫 배치로) — 잘못된 입력은 시작 전에 거절.
         if body.workflow == "auto":
             tcp_spec = nmap_runner.auto_tcp_port_spec(body.ports)
@@ -1236,6 +1409,7 @@ def run_scan(
             argv0 = nmap_runner.build_command(
                 nmap, body.preset, batches[0], _basename(0), ports=body.ports, nse=body.nse,
             )
+        argv0 = _with_nmap_excludes(argv0, excludes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1251,6 +1425,7 @@ def run_scan(
             "batches": batches, "cursor": 0, "stop": False, "active_seconds": 0,
             "workflow": body.workflow, "options": body.options, "ports": body.ports,
             "preset": body.preset, "nse": body.nse,
+            "exclude": excludes,
             "udp_all_targets": body.udp_all_targets,
         })
         # 명령 표기는 대표(타겟·-oA 제외) — 호스트 수/배치 수를 덧붙여 가독.
@@ -1277,6 +1452,8 @@ def run_scan(
                     continue
                 parts.append(t)
             scan.command = f"{' '.join(parts)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
+        if excludes:
+            scan.command += f"  ·  제외 {', '.join(excludes)}"
         db.commit()
         db.refresh(scan)
         threading.Thread(target=_chunk_worker, args=(scan.id,), daemon=True).start()
@@ -1303,8 +1480,7 @@ def run_command(
         # scope 설정 시: 파일/랜덤 타겟(-iL/-iR) 차단, IP/CIDR 타겟 필수·전부 in-scope.
         # (호스트명만 있는 명령은 검증 불가라 거절 — /run 과 동일한 엄격성)
         scope.check_raw_scope(toks)
-        ip_tokens = [t for t in toks if scope.is_ip_token(t)]
-        argv, _ = nmap_runner.build_command_raw(nmap, body.command, _basename(0))
+        argv, ip_tokens = nmap_runner.build_command_raw(nmap, body.command, _basename(0))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1339,9 +1515,10 @@ def run_staged(
     중지/이어가기는 기존 /stop·/resume 이 run-state 플래그로 처리한다.
     """
     try:
-        hosts = _validate_structured_scan(body, uses_manual_preset=False)
+        requested_hosts, excludes = _validate_structured_scan(body, uses_manual_preset=False)
         _validate_staged_protocol_selection(body)
-        scope.check_scope(hosts)
+        scope.check_scope(requested_hosts)
+        hosts = _effective_hosts(requested_hosts, excludes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:
@@ -1362,7 +1539,8 @@ def run_staged(
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         spec = engine_runner.build_job_spec(
-            scan.id, body.targets, [], body.options, body.ports,
+            scan.id, hosts if body.discovery == "pn" else body.targets,
+            excludes, body.options, body.ports,
             body.nse, out_dir, body.batch_size, discovery=body.discovery,
         )
         tcp_scope = _port_scope(nmap_runner.auto_tcp_port_spec(body.ports), "T")
@@ -1374,6 +1552,8 @@ def run_staged(
         }
         (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
         scan.command = f"{engine_runner.describe(spec)}  ·  {len(hosts)}호스트"
+        if excludes:
+            scan.command += f"  ·  제외 {', '.join(excludes)}"
         db.commit()
         db.refresh(scan)
         threading.Thread(target=_engine_worker, args=(scan.id,), daemon=True).start()
@@ -1438,7 +1618,7 @@ def resume_scan(
         try:
             saved_spec = _load_engine_spec(out_dir / "spec.json")
             saved_targets = list(saved_spec.get("targets") or [])
-            saved_targets.extend(saved_spec.get("exclude") or [])
+            saved_excludes = saved_spec.get("exclude") or []
             saved_targets.extend((saved_spec.get("targets_ports") or {}).keys())
             saved_targets.extend(str(unit.get("ip") or "")
                                  for unit in (saved_spec.get("rescan_units") or []))
@@ -1451,6 +1631,8 @@ def resume_scan(
             saved_targets = [target for target in saved_targets if target]
             nmap_runner.validate_targets(saved_targets)
             scope.check_scope(saved_targets)
+            nmap_runner.validate_targets(saved_excludes)
+            scope.parse_excludes(saved_excludes)
             stages = saved_spec.get("stages") or {}
             if not isinstance(stages, dict):
                 raise ValueError("저장된 단계 스캔 설정이 잘못되었습니다.")
@@ -1459,6 +1641,7 @@ def resume_scan(
                 if not isinstance(stage, dict):
                     raise ValueError("저장된 단계 스캔 설정이 잘못되었습니다.")
                 scan_options.validate_ports(str(stage.get("ports") or ""))
+            _validate_engine_scope_keys(saved_spec)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         if not nmap_runner.find_nmap(_settings.nmap_path):
@@ -1491,6 +1674,13 @@ def resume_scan(
             saved_targets = [host for batch in state.get("batches", []) for host in batch]
             nmap_runner.validate_targets(saved_targets)
             scope.check_scope(saved_targets)
+            saved_excludes = state.get("exclude") or []
+            nmap_runner.validate_targets(saved_excludes)
+            saved_excludes = scope.parse_excludes(saved_excludes)
+            if scope.apply_excludes(saved_targets, saved_excludes) != saved_targets:
+                raise ValueError(
+                    "저장된 스캔 상태에 제외 대상이 배치로 다시 포함되어 있습니다."
+                )
             scan_options.validate_keys(state.get("options") or [])
             scan_options.validate_nse(state.get("nse"))
             scan_options.validate_ports(state.get("ports") or "")
@@ -1619,8 +1809,10 @@ def estimate_scan(body: ScanRunIn, _: User = Depends(current_user), db: Session 
     # 예상치는 정보 제공용(실제 nmap 미실행)이라 scope 를 강제하지 않는다 — 입력 중 호스트명에
     # 매 키 입력마다 400 이 뜨던 회귀 방지. scope 차단은 실제 실행(run/run-command)에서만.
     try:
-        hosts = _validate_structured_scan(body, uses_manual_preset=True)
-        _validate_staged_protocol_selection(body)
+        requested_hosts, excludes = _validate_structured_scan(body, uses_manual_preset=True)
+        if body.staged:
+            _validate_staged_protocol_selection(body)
+        hosts = _effective_hosts(requested_hosts, excludes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     host_count = len(hosts)
@@ -1646,6 +1838,7 @@ def estimate_scan(body: ScanRunIn, _: User = Depends(current_user), db: Session 
     return {
         "host_count": host_count,
         "batch_count": batch_count,
+        "exclude": excludes,
         "basis": "history" if rates else "none",
         "sample_count": len(rates),
         "sec_per_host": sec_per_host,

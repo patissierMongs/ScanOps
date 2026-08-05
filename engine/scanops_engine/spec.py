@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import asdict, dataclass, field
 
@@ -15,8 +16,15 @@ _PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
 _NSE_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 _TIMINGS = {"-T0", "-T1", "-T2", "-T3", "-T4", "-T5"}
 
+# standalone auto 스캔과 공유하는 기본 발견/동시성 정책.
+DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"
+DISCOVERY_PA = "-PA80,443,3389"
+DEFAULT_MIN_HOSTGROUP = 64
+DEFAULT_MAX_PARALLELISM = 100
+DEFAULT_NSE_SCRIPT_TIMEOUT = "10s"
+
 # nmapParser 기본 UDP 포트 집합(원본 one-liner 계승)
-DEFAULT_UDP_PORTS = ("7,53,67,68,69,88,123,135,137,138,139,161,162,389,400,500,"
+DEFAULT_UDP_PORTS = ("7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,"
                      "514,520,623,1900,2049,4500,5060,5353,5355,11211")
 # 서비스 probe 기본 NSE — 타겟형(portrule 안 맞으면 자동 skip). 원본의 20종 전수 대신 핵심만.
 # DB 찌르는 스크립트(redis-info·oracle-tns-version·ms-sql-info 등)는 장애 위험으로 기본 제외.
@@ -29,14 +37,17 @@ DEFAULT_NSE = ["banner", "http-headers", "http-title", "http-server-header",
 class DiscoveryStage:
     enabled: bool = True
     mode: str = "sn"          # sn=핑 스윕 / pn=발견 생략(타겟 전체 live 취급)
+    timing: str = "-T4"
+    max_retries: int = 2
 
 
 @dataclass
 class TcpStage:
     enabled: bool = True
+    scan_type: str = "syn"    # syn=-sS / connect=-sT
     ports: str = "1-65535"
     timing: str = "-T4"
-    min_rate: int = 1000      # 찾기: 빠르고 느슨
+    min_rate: int = 0         # 0=강제 하한 없음; 명시된 경우에만 --min-rate 적용
     max_retries: int = 2
 
 
@@ -44,16 +55,18 @@ class TcpStage:
 class UdpStage:
     enabled: bool = False
     ports: str = DEFAULT_UDP_PORTS
-    timing: str = "-T3"
+    timing: str = "-T4"
+    max_retries: int = 2
 
 
 @dataclass
 class ServiceStage:
     enabled: bool = True
-    version_all: bool = False
+    timing: str = "-T4"
+    version_all: bool = True
     version_light: bool = False
     nse: list = field(default_factory=lambda: list(DEFAULT_NSE))
-    max_retries: int = 4      # 확인: 좁혀서 정밀
+    max_retries: int = 2
     confirm: bool = False      # 2-pass — 1차에 안 잡히면 retries↑ 재확인(재스캔용)
 
 
@@ -65,6 +78,17 @@ def _validate_target(value, label: str) -> None:
         raise ValueError(f"허용되지 않는 {label}: {value!r}")
     if ":" in value:
         raise ValueError(f"IPv6 {label}은 아직 지원하지 않습니다: {value!r}")
+
+
+def _validate_exclude(value) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"제외 대상은 IPv4 주소/CIDR이어야 합니다: {value!r}")
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise ValueError(f"잘못된 제외 대상 IPv4/CIDR입니다: {value!r}") from exc
+    if network.version != 4:
+        raise ValueError(f"IPv6 제외 대상은 아직 지원하지 않습니다: {value!r}")
 
 
 def _validate_ports(value: str, label: str) -> None:
@@ -143,15 +167,21 @@ class JobSpec:
         }
 
     def validate(self) -> "JobSpec":
-        for t in self.targets + self.exclude:
+        for t in self.targets:
             _validate_target(t, "타겟 형식")
+        for t in self.exclude:
+            _validate_exclude(t)
         for label, p in (("tcp", self.tcp.ports), ("udp", self.udp.ports)):
             _validate_ports(p, label)
         if self.tcp.enabled and not self.tcp.ports.strip():
             raise ValueError("TCP 단계가 활성화되었지만 포트가 비어 있습니다.")
         if self.udp.enabled and not self.udp.ports.strip():
             raise ValueError("UDP 단계가 활성화되었지만 포트가 비어 있습니다.")
-        for label, tm in (("tcp", self.tcp.timing), ("udp", self.udp.timing)):
+        if self.tcp.scan_type not in ("syn", "connect"):
+            raise ValueError(f"tcp.scan_type 은 syn/connect: {self.tcp.scan_type!r}")
+        for label, tm in (("discovery", self.discovery.timing),
+                          ("tcp", self.tcp.timing), ("udp", self.udp.timing),
+                          ("service", self.service.timing)):
             if tm not in _TIMINGS:
                 raise ValueError(f"허용되지 않는 {label} 타이밍: {tm!r}")
         for n in self.service.nse:

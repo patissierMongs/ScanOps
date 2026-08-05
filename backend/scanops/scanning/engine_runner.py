@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from ..config import get_settings
-from . import nmap_runner, process_control, taxonomy
+from . import nmap_runner, process_control, scan_options, taxonomy
 from .ingest import ingest
 from .nmap_parse import parse_xml
 
@@ -50,7 +50,12 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
     one-liner 옵션(노핑·기법)은 엔진이 단계별로 알아서 처리하므로 그대로 옮기지 않는다.
     """
     opt = set(options or [])
+    if "connect" in opt and "syn" in opt:
+        raise ValueError("단계 스캔에서는 TCP SYN과 Connect 방식을 동시에 선택할 수 없습니다.")
+    if "connect" in opt and "udp" in opt:
+        raise ValueError("TCP Connect 단계 스캔은 UDP 스캔과 함께 실행할 수 없습니다.")
     timing = next((_TIMING[k] for k in ("t0", "t1", "t2", "t3", "fast", "t5") if k in opt), "-T4")
+    max_retries = 2
     # The engine has protocol-specific stages, so its ``-p`` value does not need Nmap's
     # T:/U: selector used by the legacy combined workflow.
     tcp_spec = nmap_runner.auto_tcp_port_spec(ports)
@@ -59,12 +64,12 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
     udp_ports = udp_spec.removeprefix("U:")
     service = {
         "enabled": True,
-        "version_all": "version_all" in opt,
+        "version_all": not options or ("version_all" in opt and "version_light" not in opt),
         "version_light": "version_light" in opt,
-        "max_retries": 4,
+        "timing": timing,
+        "max_retries": max_retries,
+        "nse": list(scan_options.NSE_DEFAULT_KEYS if nse is None else nse),
     }
-    if nse is not None:
-        service["nse"] = list(nse)
     spec: dict = {
         "job_id": f"scan_{scan_id}",
         "targets": list(targets),
@@ -73,10 +78,17 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
         "batch_size": int(batch_size),
         "sudo": "auto",
         "stages": {
-            "discovery": {"enabled": True, "mode": discovery if discovery in ("sn", "pn") else "sn"},
+            "discovery": {
+                "enabled": True,
+                "mode": discovery if discovery in ("sn", "pn") else "sn",
+                "timing": timing,
+                "max_retries": max_retries,
+            },
             "tcp": {"enabled": bool(tcp_spec), "ports": tcp_ports, "timing": timing,
-                    "min_rate": 1000, "max_retries": 2},
-            "udp": {"enabled": "udp" in opt and bool(udp_spec), "ports": udp_ports, "timing": "-T3"},
+                    "scan_type": "connect" if "connect" in opt else "syn",
+                    "min_rate": 0, "max_retries": max_retries},
+            "udp": {"enabled": "udp" in opt and bool(udp_spec), "ports": udp_ports,
+                    "timing": timing, "max_retries": max_retries},
             "service": service,
         },
     }
@@ -288,9 +300,10 @@ def collect_results(out_dir, scope_keys: set | None = None,
     """Return the exact staged observations and hosts used by Finding ingest.
 
     scope_keys면 그 키만 닫힘 후보 — 다른 포트 거짓 닫힘 방지(기존 ingest 계승).
-    force_scanned_hosts는 개별 포트 재스캔에서만 사용한다. 전체 단계 스캔은 discovery에서
-    실제로 살아 있음을 확인한 호스트만 닫힘 판정해야 한다. 전체 스캔에서는 성공한
-    TCP/UDP sweep을 open 상태의 근거로 보존하고, 같은 키의 stage3 식별값만 덮어쓴다.
+    force_scanned_hosts는 개별 포트 재스캔의 결과 집계용이다. 명시적 scope_keys가 있으면
+    closure 권한은 ingest가 그 키 집합으로 판단하며 discovery 관측 여부와 분리된다. 전체
+    스캔에서는 성공한 TCP/UDP sweep을 open 상태의 근거로 보존하고, 같은 키의 stage3
+    식별값만 덮어쓴다.
     """
     out = Path(out_dir)
     state = _read_state(out)
@@ -327,7 +340,7 @@ def collect_results(out_dir, scope_keys: set | None = None,
 
 def ingest_results(db, scan, out_dir, scope_keys: set | None = None,
                    force_scanned_hosts: bool = False, *, commit: bool = True) -> dict:
-    """단계별 XML → finding 인입. 닫힘 판정은 실제 스캔한 호스트로 한정."""
+    """단계별 XML → finding 인입. 명시적 scope_keys는 완료 스캔의 closure 권한."""
     findings, scanned = collect_results(
         out_dir, scope_keys=scope_keys, force_scanned_hosts=force_scanned_hosts,
     )

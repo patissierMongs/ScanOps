@@ -179,6 +179,10 @@ def build_command_opts(nmap: str, option_keys: list[str], ports: str,
     """옵션 키 화이트리스트 + 포트 + (선택)NSE 스크립트 + 타겟 → 검증된 nmap argv (-oA 강제)."""
     scan_options.validate_keys(option_keys)
     flags = scan_options.flags_for(option_keys)
+    if "connect" in option_keys:
+        # Nmap rejects this SYN-only acceleration flag with -sT. Keep API callers safe even
+        # if an older UI/preset submits the stale combination.
+        flags = [flag for flag in flags if flag != "--defeat-rst-ratelimit"]
     port_spec = scan_options.validate_ports(ports)
     scripts = scan_options.NSE_DEFAULT_KEYS if nse is None else nse
     script_flags = scan_options.script_flag(scripts)
@@ -298,7 +302,8 @@ def build_command_raw(nmap: str, command: str, out_basename: Path) -> tuple[list
         argv += STATS_FLAGS
     argv += cleaned
     argv += ["-oA", str(out_basename)]
-    ip_tokens = [t for t in cleaned if _is_ip_like(t)]
+    from .scope import raw_target_tokens
+    ip_tokens = [t for t in raw_target_tokens(cleaned) if _is_ip_like(t)]
     return argv, ip_tokens
 
 

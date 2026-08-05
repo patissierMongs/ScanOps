@@ -32,6 +32,16 @@ def expand_targets(targets: list[str], cap: int = 65536) -> list[str]:
     """타겟 스펙을 개별 호스트 문자열로 확장. CIDR·단순 옥텟범위는 펼치고,
     호스트명은 그대로 한 토큰으로 둔다(배치 1개). 복합 IPv4 범위와 cap 초과는 거부한다."""
     hosts: list[str] = []
+    seen: set[str] = set()
+
+    def append_unique(host: str) -> None:
+        if host in seen:
+            return
+        seen.add(host)
+        hosts.append(host)
+        if len(hosts) > cap:
+            raise ValueError(f"대상 호스트가 너무 많습니다(>{cap}). 대역을 줄여 주세요.")
+
     for raw in targets:
         t = raw.strip()
         if not t:
@@ -41,23 +51,19 @@ def expand_targets(targets: list[str], cap: int = 65536) -> list[str]:
                 net = ipaddress.ip_network(t, strict=False)
             except ValueError as exc:
                 raise ValueError(f"잘못된 CIDR: {t}") from exc
-            if len(hosts) + net.num_addresses > cap:
-                raise ValueError(f"대상 호스트가 너무 많습니다(>{cap}). 대역을 줄여 주세요.")
-            hosts.extend(str(ip) for ip in net)   # 네트워크/브로드캐스트 포함(대역 전수)
+            for ip in net:   # 네트워크/브로드캐스트 포함(대역 전수)
+                append_unique(str(ip))
         elif (m := _RANGE_RE.match(t)):
             base, lo, hi = m.group(1), int(m.group(2)), int(m.group(3))
             base_octets = [int(part) for part in base.split(".")]
             if any(part > 255 for part in base_octets) or lo > hi or hi > 255:
                 raise ValueError(f"잘못된 IP 범위: {t}")
-            if len(hosts) + (hi - lo + 1) > cap:
-                raise ValueError(f"대상 호스트가 너무 많습니다(>{cap}). 대역을 줄여 주세요.")
-            hosts.extend(f"{base}.{i}" for i in range(lo, hi + 1))
+            for i in range(lo, hi + 1):
+                append_unique(f"{base}.{i}")
         elif is_unsupported_composite_ipv4_range(t):
             raise ValueError(f"지원하지 않는 복합 IP 범위: {t}. 마지막 옥텟 범위만 사용할 수 있습니다.")
         else:
-            hosts.append(t)
-        if len(hosts) > cap:
-            raise ValueError(f"대상 호스트가 너무 많습니다(>{cap}). 대역을 줄여 주세요.")
+            append_unique(t)
     return hosts
 
 

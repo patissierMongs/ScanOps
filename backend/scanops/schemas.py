@@ -53,7 +53,9 @@ class ScanRunIn(BaseModel):
     # 생략(None)=각 워크플로 기본, 빈 목록=[]=명시적으로 끄기, 목록=선택값.
     nse: list[str] | None = None
     targets: list[str]
+    exclude: list[str] = []        # 제외할 IPv4 주소/CIDR 토큰(서버에서 fail-closed 검증)
     batch_size: int = 256          # 청킹 배치당 호스트 수(중지/이어가기 단위)
+    staged: bool = False           # estimate가 단계 엔진의 프로토콜 조합을 검증할 때만 사용
     discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
     udp_all_targets: bool = False  # auto: UDP 식별을 discovery live host 가 아닌 원본 타깃 전체로(-Pn)
 

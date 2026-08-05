@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 
 from . import nmaprun
+from .spec import (DEFAULT_MAX_PARALLELISM, DEFAULT_MIN_HOSTGROUP,
+                   DEFAULT_NSE_SCRIPT_TIMEOUT, DISCOVERY_PA, DISCOVERY_PS)
 from .state import RunState
 
 
@@ -45,6 +47,14 @@ class Pipeline:
     def _save(self):
         self.state.set("open_map", self.open_map)
         self.state.save()
+
+    def _exclude_args(self) -> list:
+        # Nmap 7.99는 반복 --exclude 를 누적하지 않고 마지막 값만 적용한다.
+        # 검증된 토큰을 단일 comma-list로 전달해야 모든 제외가 보장된다.
+        return ["--exclude", ",".join(self.spec.exclude)] if self.spec.exclude else []
+
+    def _tcp_scan_flag(self) -> str:
+        return {"syn": "-sS", "connect": "-sT"}[self.spec.tcp.scan_type]
 
     # ── 진입 ──
     def run(self) -> dict:
@@ -103,9 +113,11 @@ class Pipeline:
                            counts={"live": len(live), "cached": True})
             return live
         self.sink.emit("stage_start", stage="discovery", targets=self.spec.targets)
-        args = ["-sn", "-n"]
-        for ex in self.spec.exclude:
-            args += ["--exclude", ex]
+        args = ["-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", sp.timing,
+                "--reason", "--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP),
+                "--max-retries", str(sp.max_retries),
+                "--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
+        args += self._exclude_args()
         args += list(self.spec.targets)
         base = self.out / "stage0-discovery"
         r = self._nmap("discovery", args, base)
@@ -129,9 +141,18 @@ class Pipeline:
             if self.state.stopped():
                 self.sink.emit("stage_done", stage=proto, seconds=round(secs, 2), counts={"stopped": True})
                 return
-            args = [("-sU" if proto == "udp" else "-sS"), "-Pn", "-n", "--open", sp.timing, "-p", sp.ports]
+            args = [("-sU" if proto == "udp" else self._tcp_scan_flag()),
+                    "-Pn", "-n", "--open",
+                    sp.timing, "--reason", "--max-retries", str(sp.max_retries)]
             if proto == "tcp":
-                args += ["--min-rate", str(sp.min_rate), "--max-retries", str(sp.max_retries)]
+                args += ["--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP)]
+                if self.spec.tcp.scan_type == "syn":
+                    args.append("--defeat-rst-ratelimit")
+                args += ["--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
+                if sp.min_rate > 0:
+                    args += ["--min-rate", str(sp.min_rate)]
+            args += ["-p", sp.ports]
+            args += self._exclude_args()
             args += batch
             base = self.out / f"stage-{proto}-b{bi}"
             r = self._nmap(proto, args, base)
@@ -159,20 +180,23 @@ class Pipeline:
         retain ``--version-all`` without applying that noisy intensity to UDP.
         """
         pspec = ("T:" if proto == "tcp" else "U:") + ",".join(map(str, ports))
-        args = ["-sV", "-Pn", "-n", "--reason"]
         if proto == "tcp":
-            args.append("-sS")
+            # standalone 과 같이 TCP identify 에서는 역방향 DNS를 허용한다.
+            args = [self._tcp_scan_flag(), "-Pn", "-sV"]
         else:
-            args.append("-sU")
+            args = ["-sU", "-Pn", "-n", "-sV"]
         # --version-all(강도 9)은 TCP 에만 — 수다스러운/증폭형 UDP 서비스에서
         # 거대·비정상 응답으로 nmap 이 fatal 종료될 위험이 크고 식별 이득은 미미하다.
         if sp.version_all and proto == "tcp":
             args.append("--version-all")
         elif sp.version_light:
             args.append("--version-light")
-        args += ["--max-retries", str(retries if retries is not None else sp.max_retries), "-p", pspec]
+        args += ["--open", "--reason", sp.timing, "--max-retries",
+                 str(retries if retries is not None else sp.max_retries), "-p", pspec]
         if sp.nse:
-            args += ["--script", ",".join(sp.nse)]
+            args += ["--script", ",".join(sp.nse),
+                     "--script-timeout", DEFAULT_NSE_SCRIPT_TIMEOUT]
+        args += self._exclude_args()
         args.append(ip)
         suffix = tag or proto
         base = self.out / f"stage3-{ip.replace('.', '_')}-{suffix}{'-confirm' if confirm else ''}"

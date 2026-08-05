@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { cellValue, PRESETS, primaryServiceIdentity } from "../src/lib/columns.js";
 import { deadlinePatchValue } from "../src/lib/findingPatch.js";
 import { scanKind, shouldLoadStages } from "../src/lib/scanStatus.js";
+import { splitScanTokens } from "../src/lib/scanTargets.js";
 import { toastAnnouncement, toastDuration } from "../src/lib/toast.js";
 
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
@@ -148,4 +149,120 @@ test("staged scan submits the options used by its UDP preview", () => {
     scanOptions,
     /: staged \|\| workflow === "manual" \? \[\.\.\.sel\] : \[\]/,
   );
+});
+
+test("scan exclusions share one deduplicated token contract across estimate and run modes", () => {
+  assert.deepEqual(
+    splitScanTokens("10.0.0.1, 10.0.1.0/24\r\n10.0.0.1"),
+    ["10.0.0.1", "10.0.1.0/24"],
+  );
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /const excludeList = splitScanTokens\(exclude\)/);
+  assert.match(scans, /\/scans\/estimate[\s\S]*?exclude: excludeList/);
+  assert.match(scans, /const estKey = JSON\.stringify\(\{[^}]*s: staged \}\)/);
+  assert.match(scans, /\/scans\/estimate[\s\S]*?batch_size: batchSize, staged/);
+  assert.equal((scans.match(/exclude: excludeList/g) || []).length, 3);
+  assert.match(scans, /const previewExcludes = est\?\.exclude \?\? excludeList/);
+  assert.match(scans, /targets=\{targetList\} excludes=\{previewExcludes\} staged=\{staged\}/);
+  assert.match(scans, /setTargets\(""\); setExclude\(""\); setName\(""\)/);
+  assert.match(scans, /htmlFor="scan-exclude"/);
+  assert.match(scans, /aria-describedby="scan-exclude-help"/);
+  assert.match(scans, /<textarea id="scan-exclude"[^>]*rows=\{2\}/);
+
+  const scanOptions = source("../src/ui/ScanOptions.jsx");
+  assert.match(scanOptions, /excludes\.length \? \["--exclude", excludes\.join\(","\)\] : \[\]/);
+  assert.equal((scanOptions.match(/\.\.\.excludeArgs/g) || []).length, 9);
+  assert.match(scanOptions, /if \(selectedScripts\.length\)[^\n]+\n\s*parts\.push\(\.\.\.excludeArgs\)/);
+});
+
+test("scan type controls cannot submit connect with SYN or UDP", () => {
+  const scanOptions = source("../src/ui/ScanOptions.jsx");
+  const toggle = scanOptions.slice(
+    scanOptions.indexOf("function toggle(k)"),
+    scanOptions.indexOf("function toggleNse(k)"),
+  );
+  const selectionToggle = toggle.slice(toggle.indexOf("const n = new Set(s)"));
+  const connect = selectionToggle.slice(
+    selectionToggle.indexOf('k === "connect"'),
+    selectionToggle.indexOf('k === "udp"'),
+  );
+  assert.match(connect, /n\.add\("connect"\)/);
+  assert.match(connect, /n\.delete\("syn"\)/);
+  assert.match(connect, /n\.delete\("udp"\)/);
+  assert.match(connect, /n\.delete\("defeat_rst"\)/);
+  const udp = selectionToggle.slice(selectionToggle.indexOf('k === "udp"'));
+  assert.match(udp, /n\.add\("udp"\)/);
+  assert.match(udp, /n\.add\("syn"\)/);
+  assert.match(udp, /n\.delete\("connect"\)/);
+  assert.match(scanOptions, /const nextSel = normalizeSelections\(p\.keys \|\| \[\]\)/);
+  assert.match(scanOptions, /next\.has\("connect"\)[\s\S]*?next\.delete\("defeat_rst"\)/);
+});
+
+test("port presets and protocol toggles keep staged request combinations valid", () => {
+  const scanOptions = source("../src/ui/ScanOptions.jsx");
+  assert.match(scanOptions, /function tcpOnlyPortSpec\(spec\)[\s\S]*?`T:\$\{tcp \|\| "1-65535"\}`/);
+
+  const toggle = scanOptions.slice(
+    scanOptions.indexOf("function toggle(k)"),
+    scanOptions.indexOf("function toggleNse(k)"),
+  );
+  assert.match(toggle, /k === "connect" \|\| \(k === "udp" && sel\.has\("udp"\)\)/);
+  assert.match(toggle, /setPorts\(\(current\) => tcpOnlyPortSpec\(current\)\)/);
+
+  const portInput = scanOptions.slice(
+    scanOptions.indexOf("const setPortPreset"),
+    scanOptions.indexOf("function applyPrecision"),
+  );
+  assert.match(portInput, /hasExplicitUdpPorts\(spec\)/);
+  assert.match(portInput, /n\.add\("syn"\)[\s\S]*?n\.add\("udp"\)[\s\S]*?n\.delete\("connect"\)/);
+
+  const preset = scanOptions.slice(
+    scanOptions.indexOf("function applyPreset"),
+    scanOptions.indexOf("function savePreset"),
+  );
+  assert.match(preset, /nextSel\.has\("connect"\)[\s\S]*?nextPorts = tcpOnlyPortSpec\(nextPorts\)/);
+  assert.match(preset, /hasExplicitUdpPorts\(nextPorts\)[\s\S]*?nextSel\.add\("udp"\)/);
+});
+
+test("timing controls and presets resolve to one backend-visible timing", () => {
+  const scanOptions = source("../src/ui/ScanOptions.jsx");
+  const normalize = scanOptions.slice(
+    scanOptions.indexOf("function normalizeSelections"),
+    scanOptions.indexOf("function protocolPorts"),
+  );
+  assert.match(normalize, /const selectedTiming = TIMING_KEYS\.find/);
+  assert.match(normalize, /TIMING_KEYS\.forEach\(\(\[key\]\) => next\.delete\(key\)\)/);
+  assert.match(normalize, /if \(selectedTiming\) next\.add\(selectedTiming\)/);
+
+  const toggle = scanOptions.slice(
+    scanOptions.indexOf("function toggle(k)"),
+    scanOptions.indexOf("function toggleNse(k)"),
+  );
+  assert.match(toggle, /TIMING_KEYS\.some\(\(\[key\]\) => key === k\)/);
+  assert.match(toggle, /TIMING_KEYS\.forEach\(\(\[key\]\) => n\.delete\(key\)\)/);
+  assert.match(toggle, /n\.add\(k\)/);
+});
+
+test("staged preview mirrors discovery, protocol sweeps, and per-host service probes", () => {
+  const scanOptions = source("../src/ui/ScanOptions.jsx");
+  const staged = scanOptions.slice(
+    scanOptions.indexOf("if (staged) {"),
+    scanOptions.indexOf("return out;\n    }", scanOptions.indexOf("if (staged) {")) + 16,
+  );
+  for (const title of ["호스트 발견", "TCP 포트 탐색", "TCP 서비스 식별", "UDP 포트 탐색", "UDP 서비스 식별"]) {
+    assert.match(staged, new RegExp(`title: "${title}"`));
+  }
+  assert.match(staged, /"-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n"/);
+  assert.match(staged, /"-n",\s*timing, "--reason", "--max-retries", "2"/);
+  assert.match(staged, /"--reason", timing, "--max-retries", "2", "-p", "T:/);
+  assert.match(staged, /versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing/);
+  assert.match(staged, /const defeatRst = scanFlag === "-sS" \? "--defeat-rst-ratelimit" : ""/);
+  assert.match(staged, /"--min-hostgroup", "64", defeatRst/);
+  assert.match(staged, /"--max-parallelism", "100"/);
+  assert.match(staged, /"T:<TCP 탐색에서 열린 포트>"/);
+  assert.match(staged, /"U:<UDP 탐색에서 열린 포트>"/);
+  assert.match(staged, /versionFlag === "--version-light" && versionFlag/);
+  assert.match(staged, /"<호스트 1대>"/);
+  assert.match(source("../src/views/Scans.jsx"), /targets=\{targetList\} excludes=\{previewExcludes\} staged=\{staged\}/);
+  assert.match(scanOptions, /단계별 명령 템플릿/);
 });

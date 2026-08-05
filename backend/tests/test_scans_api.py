@@ -336,7 +336,389 @@ def test_run_scan_auto_records_workflow_state(client, monkeypatch):
     assert state["batches"] == [["127.0.0.1"]]
 
 
-@pytest.mark.parametrize(("extra", "expected"), [({}, None), ({"nse": []}, [])])
+@pytest.mark.parametrize("endpoint", ["/api/scans/run", "/api/scans/run-staged", "/api/scans/estimate"])
+@pytest.mark.parametrize("exclude", [
+    ["127.0.0.1", "not-an-ip"],
+    ["127.0.0.0/99"],
+    ["2001:db8::1"],
+    ["127.0.0.0/30"],
+])
+def test_structured_scan_endpoints_reject_invalid_or_all_excluded_before_side_effects(
+    client, monkeypatch, endpoint, exclude,
+):
+    from scanops.api import scans as scans_api
+
+    h = _auth(client)
+    monkeypatch.setattr(
+        scans_api.nmap_runner, "find_nmap",
+        lambda explicit="": (_ for _ in ()).throw(AssertionError("rejected request checked nmap")),
+    )
+    monkeypatch.setattr(
+        scans_api.engine_runner, "ensure_available",
+        lambda: (_ for _ in ()).throw(AssertionError("rejected request checked engine")),
+    )
+    monkeypatch.setattr(
+        scans_api.threading, "Thread",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rejected request started worker")),
+    )
+
+    response = client.post(endpoint, headers=h, json={
+        "targets": ["127.0.0.0/30"],
+        "exclude": exclude,
+        "workflow": "manual",
+        "ports": "T:443",
+    })
+
+    assert response.status_code == 400, response.text
+    assert client.get("/api/scans", headers=h).json() == []
+
+
+@pytest.mark.parametrize(("options", "detail"), [
+    (["syn", "connect"], "SYN"),
+    (["connect", "udp"], "UDP"),
+])
+def test_staged_incompatible_scan_types_are_rejected_before_side_effects(
+    client, monkeypatch, options, detail,
+):
+    from scanops.api import scans as scans_api
+
+    h = _auth(client)
+    monkeypatch.setattr(
+        scans_api.engine_runner, "ensure_available",
+        lambda: (_ for _ in ()).throw(AssertionError("invalid options checked engine")),
+    )
+    monkeypatch.setattr(
+        scans_api.nmap_runner, "find_nmap",
+        lambda explicit="": (_ for _ in ()).throw(AssertionError("invalid options checked nmap")),
+    )
+    monkeypatch.setattr(
+        scans_api.threading, "Thread",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("invalid options started worker")),
+    )
+
+    response = client.post("/api/scans/run-staged", headers=h, json={
+        "targets": ["127.0.0.1"],
+        "options": options,
+        "ports": "T:443,U:53",
+    })
+
+    assert response.status_code == 400, response.text
+    assert detail in response.json()["detail"]
+    assert client.get("/api/scans", headers=h).json() == []
+
+
+def test_excludes_are_deduplicated_and_persisted_compact_for_estimate_legacy_and_staged(
+    client, monkeypatch,
+):
+    from scanops.api import scans as scans_api
+    from scanops.scanning import chunker
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    body = {
+        "targets": ["127.0.0.0/30", "127.0.0.2"],
+        "exclude": ["127.0.0.1", "127.0.0.3/32", "127.0.0.1"],
+        "workflow": "manual",
+        "ports": "T:443",
+        "options": ["syn"],
+        "batch_size": 256,
+    }
+
+    estimate = client.post("/api/scans/estimate", headers=h, json=body)
+    assert estimate.status_code == 200, estimate.text
+    assert estimate.json()["host_count"] == 2
+    assert estimate.json()["exclude"] == ["127.0.0.1", "127.0.0.3"]
+
+    legacy = client.post("/api/scans/run", headers=h, json=body)
+    assert legacy.status_code == 200, legacy.text
+    state = chunker.read_state(scans_api._basename(legacy.json()["id"]))
+    assert state["batches"] == [["127.0.0.0", "127.0.0.2"]]
+    assert state["exclude"] == ["127.0.0.1", "127.0.0.3"]
+
+    staged = client.post("/api/scans/run-staged", headers=h, json={**body, "discovery": "pn"})
+    assert staged.status_code == 200, staged.text
+    spec_path = scans_api._settings.scans_dir / f"scan_{staged.json()['id']}" / "spec.json"
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    assert spec["targets"] == ["127.0.0.0", "127.0.0.2"]
+    assert spec["exclude"] == ["127.0.0.1", "127.0.0.3"]
+
+
+def test_staged_pn_spec_uses_expanded_effective_hosts_for_engine_batching(
+    client, monkeypatch,
+):
+    from scanops.api import scans as scans_api
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    response = client.post("/api/scans/run-staged", headers=h, json={
+        "targets": ["198.51.100.0/23"],
+        "exclude": ["198.51.100.0/24"],
+        "options": ["syn"],
+        "ports": "T:443",
+        "batch_size": 64,
+        "discovery": "pn",
+    })
+
+    assert response.status_code == 200, response.text
+    spec_path = scans_api._settings.scans_dir / f"scan_{response.json()['id']}" / "spec.json"
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    assert len(spec["targets"]) == 256
+    assert spec["targets"][0] == "198.51.101.0"
+    assert spec["targets"][-1] == "198.51.101.255"
+    assert spec["exclude"] == ["198.51.100.0/24"]
+    assert spec["batch_size"] == 64
+
+
+@pytest.mark.parametrize("mode", ["legacy", "staged"])
+def test_resume_checks_saved_targets_against_scope_but_exclusions_for_syntax_only(
+    client, monkeypatch, mode,
+):
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    endpoint = "/api/scans/run" if mode == "legacy" else "/api/scans/run-staged"
+    body = {
+        "targets": ["127.0.0.1"],
+        "exclude": ["203.0.113.9"],
+        "workflow": "manual",
+        "options": ["connect"],
+        "ports": "T:443",
+        "discovery": "pn",
+    }
+    created = client.post(endpoint, headers=h, json=body)
+    assert created.status_code == 200, created.text
+    scan_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scan.status = "canceled"
+        db.commit()
+    finally:
+        db.close()
+
+    real_check_scope = scans_api.scope.check_scope
+    checked = []
+
+    def check_saved_targets(hosts):
+        checked.append(list(hosts))
+        real_check_scope(hosts, spec="127.0.0.0/24")
+
+    monkeypatch.setattr(scans_api.scope, "check_scope", check_saved_targets)
+    monkeypatch.setattr(
+        scans_api.engine_runner, "is_engine_scan",
+        lambda out_dir: mode == "staged",
+    )
+    resumed = client.post(f"/api/scans/{scan_id}/resume", headers=h)
+
+    assert resumed.status_code == 200, resumed.text
+    assert checked == [["127.0.0.1"]]
+
+
+def test_legacy_resume_rejects_excluded_host_reinserted_into_saved_batches(
+    client, monkeypatch,
+):
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+    from scanops.scanning import chunker
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    created = client.post("/api/scans/run", headers=h, json={
+        "targets": ["127.0.0.0/30"],
+        "exclude": ["127.0.0.1"],
+        "workflow": "manual",
+        "options": ["connect"],
+        "ports": "T:443",
+    })
+    assert created.status_code == 200, created.text
+    scan_id = created.json()["id"]
+
+    base = scans_api._basename(scan_id)
+    state = chunker.read_state(base)
+    state["batches"][0].append("127.0.0.1")
+    chunker.write_state(base, state)
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scan.status = "canceled"
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(
+        scans_api.nmap_runner, "find_nmap",
+        lambda explicit="": (_ for _ in ()).throw(AssertionError("invalid state checked nmap")),
+    )
+    monkeypatch.setattr(scans_api.engine_runner, "is_engine_scan", lambda out_dir: False)
+    resumed = client.post(f"/api/scans/{scan_id}/resume", headers=h)
+
+    assert resumed.status_code == 400, resumed.text
+    assert "제외 대상" in resumed.json()["detail"]
+
+
+def test_staged_effective_scope_closes_unobserved_included_finding_but_keeps_excluded(
+    client, monkeypatch,
+):
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import Finding, ScanRun
+
+    h = _auth(client)
+    included, excluded = "127.0.0.2", "127.0.0.1"
+    db = SessionLocal()
+    try:
+        initial = ScanRun(name="initial", status="done")
+        db.add(initial)
+        db.commit()
+        db.add_all([
+            Finding(
+                finding_key=f"{included}|443|tcp", host_ip=included, port=443,
+                proto="tcp", state="open", first_scan_id=initial.id, last_scan_id=initial.id,
+            ),
+            Finding(
+                finding_key=f"{excluded}|443|tcp", host_ip=excluded, port=443,
+                proto="tcp", state="open", first_scan_id=initial.id, last_scan_id=initial.id,
+            ),
+        ])
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    response = client.post("/api/scans/run-staged", headers=h, json={
+        "targets": ["127.0.0.0/30"],
+        "exclude": [excluded, "127.0.0.3/32"],
+        "ports": "T:443",
+        "options": ["syn"],
+        "discovery": "pn",
+    })
+    assert response.status_code == 200, response.text
+    scan_id = response.json()["id"]
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    spec = json.loads((out_dir / "spec.json").read_text(encoding="utf-8"))
+    assert set(spec["scanops"]["scope_keys"]) == {f"{included}|443|tcp"}
+    (out_dir / "run-state.json").write_text(
+        json.dumps({"live": [], "open_map": {}}), encoding="utf-8",
+    )
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        counts = scans_api.engine_runner.ingest_results(
+            db, scan, out_dir, scope_keys=set(spec["scanops"]["scope_keys"]),
+        )
+        assert counts["closed"] == 1
+        rows = {row.host_ip: row for row in db.query(Finding).filter_by(port=443).all()}
+        assert rows[included].state == "closed"
+        assert rows[excluded].state == "open"
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("workflow", ["manual", "auto"])
+def test_completed_legacy_batch_closes_unobserved_effective_host_only(client, workflow):
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import Finding, ScanRun
+
+    included, excluded = "127.0.0.2", "127.0.0.1"
+    db = SessionLocal()
+    try:
+        initial = ScanRun(name="initial", status="done")
+        current = ScanRun(name=f"legacy-{workflow}", status="running")
+        db.add_all([initial, current])
+        db.commit()
+        db.add_all([
+            Finding(
+                finding_key=f"{included}|443|tcp", host_ip=included, port=443,
+                proto="tcp", state="open", first_scan_id=initial.id, last_scan_id=initial.id,
+            ),
+            Finding(
+                finding_key=f"{excluded}|443|tcp", host_ip=excluded, port=443,
+                proto="tcp", state="open", first_scan_id=initial.id, last_scan_id=initial.id,
+            ),
+        ])
+        db.commit()
+        scan_id = current.id
+    finally:
+        db.close()
+
+    if workflow == "manual":
+        scans_api._ingest_batch(
+            scan_id,
+            b'<?xml version="1.0"?><nmaprun>'
+            b'<scaninfo type="syn" protocol="tcp" numservices="1" services="443"/>'
+            b'</nmaprun>',
+            closure_hosts={included},
+        )
+    else:
+        scans_api._ingest_auto_findings(
+            scan_id, [], set(), {443}, set(), closure_hosts={included},
+        )
+
+    db = SessionLocal()
+    try:
+        rows = {row.host_ip: row for row in db.query(Finding).filter_by(port=443).all()}
+        assert rows[included].state == "closed"
+        assert rows[excluded].state == "open"
+    finally:
+        db.close()
+
+@pytest.mark.parametrize(("extra", "expected"), [({}, "default"), ({"nse": []}, [])])
 def test_staged_scan_preserves_omitted_vs_explicit_empty_nse(
     client, monkeypatch, extra, expected,
 ):
@@ -362,8 +744,8 @@ def test_staged_scan_preserves_omitted_vs_explicit_empty_nse(
     assert response.status_code == 200, response.text
     spec_path = scans_api._settings.scans_dir / f"scan_{response.json()['id']}" / "spec.json"
     service = json.loads(spec_path.read_text(encoding="utf-8"))["stages"]["service"]
-    if expected is None:
-        assert "nse" not in service
+    if expected == "default":
+        assert service["nse"] == scans_api.scan_options.NSE_DEFAULT_KEYS
     else:
         assert service["nse"] == expected
 
@@ -400,6 +782,7 @@ def test_manual_preset_explicit_ports_match_display_state_and_worker_argv(client
         "ports": "443",
         "nse": [],
         "targets": ["127.0.0.1"],
+        "exclude": ["192.0.2.1", "198.51.100.0/24"],
     })
 
     assert response.status_code == 200, response.text
@@ -410,19 +793,26 @@ def test_manual_preset_explicit_ports_match_display_state_and_worker_argv(client
     assert "-p 443" in scan["command"]
     assert "--top-ports" not in scan["command"]
     assert "--script" not in scan["command"]
+    assert "--exclude 192.0.2.1,198.51.100.0/24" in scan["command"]
 
     class FinishedProc:
         def wait(self, timeout=None):
             return 0
 
+    spawned = []
+
     def fake_popen(argv, log_path):
+        spawned.append(argv)
         base = argv[argv.index("-oA") + 1]
         with open(f"{base}.xml", "w", encoding="utf-8") as stream:
             stream.write("<nmaprun/>")
         return FinishedProc()
 
     monkeypatch.setattr(scans_api.nmap_runner, "popen", fake_popen)
-    monkeypatch.setattr(scans_api, "_ingest_batch", lambda scan_id, xml: None)
+    monkeypatch.setattr(
+        scans_api, "_ingest_batch",
+        lambda scan_id, xml, closure_hosts=None: None,
+    )
 
     scans_api._chunk_worker(scan["id"])
     initial_worker_argv = captured[-1]
@@ -453,6 +843,50 @@ def test_manual_preset_explicit_ports_match_display_state_and_worker_argv(client
         assert argv[argv.index("-p") + 1] == "443"
         assert "--top-ports" not in argv
         assert "--script" not in argv
+    assert len(spawned) == 2
+    for argv in spawned:
+        assert argv.count("--exclude") == 1
+        assert argv[argv.index("--exclude") + 1] == "192.0.2.1,198.51.100.0/24"
+
+
+def test_legacy_auto_applies_one_canonical_exclude_to_all_nmap_stages(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from scanops.api import scans as scans_api
+
+    captured = []
+
+    def write_stage(_scan_id, argv, _log_path):
+        captured.append(argv)
+        base = Path(argv[argv.index("-oA") + 1])
+        if str(base).endswith(".udp_identify"):
+            scaninfo = '<scaninfo type="udp" protocol="udp" numservices="1" services="53"/>'
+            ports = _port("udp", 53)
+        else:
+            scaninfo = '<scaninfo type="syn" protocol="tcp" numservices="1" services="443"/>'
+            ports = _port("tcp", 443)
+        Path(f"{base}.xml").write_bytes(_scan_xml(1893456000, scaninfo, ports))
+
+    monkeypatch.setattr(scans_api, "_checked_stage", write_stage)
+    monkeypatch.setattr(scans_api, "_ingest_auto_findings", lambda *args, **kwargs: None)
+
+    assert scans_api._run_auto_batch(
+        1,
+        "nmap",
+        ["scanner.internal"],
+        tmp_path / "auto-b0",
+        {
+            "ports": "T:443,U:53",
+            "nse": [],
+            "udp_all_targets": True,
+            "exclude": ["192.0.2.1", "198.51.100.0/24"],
+        },
+    ) is True
+
+    assert len(captured) == 3
+    for argv in captured:
+        assert argv.count("--exclude") == 1
+        assert argv[argv.index("--exclude") + 1] == "192.0.2.1,198.51.100.0/24"
 
 
 @pytest.mark.parametrize(("bad", "detail"), [
@@ -641,6 +1075,7 @@ def test_run_staged_and_estimate_use_only_explicit_protocol_ports(
         "targets": ["127.0.0.1"],
         "ports": ports,
         "options": ["udp"],
+        "staged": True,
         "discovery": "pn",
     }
 
@@ -679,6 +1114,7 @@ def test_explicit_udp_ports_without_udp_option_are_rejected_before_side_effects(
         "targets": ["127.0.0.1"],
         "ports": "U:53",
         "options": [],
+        "staged": True,
         "discovery": "pn",
     }
 
@@ -690,6 +1126,22 @@ def test_explicit_udp_ports_without_udp_option_are_rejected_before_side_effects(
     assert [response.status_code for response in responses] == [400, 400]
     assert all("UDP 포트" in response.json()["detail"] for response in responses)
     assert client.get("/api/scans", headers=h).json() == []
+
+
+def test_legacy_auto_estimate_accepts_default_tcp_and_udp_ports_without_staged_options(client):
+    from scanops.scanning import scan_options
+
+    h = _auth(client)
+    response = client.post("/api/scans/estimate", headers=h, json={
+        "targets": ["127.0.0.1"],
+        "workflow": "auto",
+        "options": [],
+        "ports": scan_options.DEFAULT_PORTS,
+        "staged": False,
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.json()["host_count"] == 1
 
 
 def test_manual_unknown_preset_rejected_by_run_and_estimate_before_availability(
