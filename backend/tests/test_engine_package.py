@@ -1373,3 +1373,87 @@ def test_windows_stop_tree_kills_descendant_after_parent_exits(tmp_path):
                 ["taskkill", "/PID", str(child_pid), "/T", "/F"],
                 capture_output=True, check=False,
             )
+
+
+def _load_allinone():
+    import importlib.util
+
+    module_path = ROOT / "packaging" / "build_allinone.py"
+    spec = importlib.util.spec_from_file_location("scanops_allinone_versions", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_allinone_default_keeps_the_established_output_contract():
+    """인자 없이 부르는 기존 경로(package_runtime_smoke)가 이름/스테이지를 그대로 쓴다."""
+    module = _load_allinone()
+    assert module.PYTHON == "3.12" and module.ABI == "cp312"
+    assert module.OUT.name == "ScanOps_allinone.zip"
+    assert module.STAGE.name == "_allinone_stage"
+
+    module.configure("3.12")
+    assert module.OUT.name == "ScanOps_allinone.zip"
+    assert module.STAGE.name == "_allinone_stage"
+
+
+def test_allinone_configure_binds_runtime_abi_and_output_per_version():
+    module = _load_allinone()
+
+    module.configure("3.13")
+    assert module.ABI == "cp313"
+    assert module.PYVER.startswith("3.13.")
+    assert module.PYVER in module.EMBED_URL and "embed-amd64" in module.EMBED_URL
+    # 버전별 산출물/스테이지가 서로 덮어쓰지 않아야 한다.
+    assert module.OUT.name == "ScanOps_allinone_py313.zip"
+    assert module.STAGE.name == "_allinone_stage_py313"
+
+    module.configure("3.12")
+    assert module.ABI == "cp312" and module.OUT.name == "ScanOps_allinone.zip"
+
+    with pytest.raises(SystemExit):
+        module.configure("3.11")
+
+
+def test_allinone_wheelhouse_covers_every_supported_python():
+    """각 지원 버전의 win_amd64 바이너리 휠이 wheelhouse 에 있어야 완전 오프라인 빌드가 된다."""
+    module = _load_allinone()
+    wheels = {p.name for p in (ROOT / "packaging" / "wheelhouse").glob("*.whl")}
+    for python in module.PY_RELEASES:
+        abi = "cp" + python.replace(".", "")
+        for dist in ("SQLAlchemy", "greenlet", "pydantic_core"):
+            assert any(w.startswith(dist) and f"{abi}-{abi}-win_amd64" in w for w in wheels), (
+                f"{dist} 의 {abi} win_amd64 휠이 wheelhouse 에 없습니다")
+
+
+def test_allinone_ships_windows_conditional_dependencies():
+    """pip 크로스 설치는 'colorama; platform_system == \"Windows\"' 를 빌드 호스트 기준으로
+    평가해 빠뜨린다. click(uvicorn CLI)이 Windows 에서 import 하므로 명시 보강이 필요하다."""
+    module = _load_allinone()
+    assert "colorama" in module.WINDOWS_EXTRA_PACKAGES
+    wheels = {p.name for p in (ROOT / "packaging" / "wheelhouse").glob("*.whl")}
+    assert any(w.startswith("colorama-") for w in wheels)
+
+
+def test_allinone_verify_site_rejects_mismatched_abi(tmp_path):
+    module = _load_allinone()
+    module.configure("3.13")
+    site = tmp_path / "site"
+    for pkg in ("fastapi", "uvicorn", "sqlalchemy", "pydantic", "pydantic_core",
+                "pydantic_settings", "starlette", "openpyxl", "multipart",
+                "click", "colorama", "greenlet"):
+        (site / pkg).mkdir(parents=True)
+    (site / "pydantic_core" / "_pydantic_core.cp312-win_amd64.pyd").write_bytes(b"x")
+
+    with pytest.raises(SystemExit, match="cp313"):
+        module.verify_site(site)
+
+
+def test_allinone_verify_site_reports_missing_dependency(tmp_path):
+    module = _load_allinone()
+    module.configure("3.12")
+    site = tmp_path / "site"
+    (site / "fastapi").mkdir(parents=True)   # 나머지는 일부러 비워 둔다
+
+    with pytest.raises(SystemExit, match="빠진 패키지"):
+        module.verify_site(site)

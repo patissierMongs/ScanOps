@@ -25,8 +25,16 @@ cd frontend && npm install && npm run dev
 ```
 
 ## 에어갭(오프라인) 배포
-일반 오프라인 ZIP은 wheelhouse 계약에 맞는 **Python 3.12 (x64)** 와 **nmap**이 필요합니다.
-Python을 설치할 수 없는 Windows x64 서버는 Python 3.12 런타임이 포함된 all-in-one ZIP을 사용하세요.
+일반 오프라인 ZIP은 wheelhouse 계약에 맞는 **Python 3.12/3.13 (x64)** 와 **nmap**이 필요합니다.
+Python을 설치할 수 없는 Windows x64 서버는 Python 런타임이 포함된 all-in-one ZIP을 사용하세요.
+
+```powershell
+python packaging\build_allinone.py                  # 3.12 → ..\ScanOps_allinone.zip
+python packaging\build_allinone.py --python 3.13    # 3.13 → ..\ScanOps_allinone_py313.zip
+```
+두 번들 모두 압축만 풀고 `START.bat` 을 실행하면 됩니다(대상에 Python 설치 불필요). 앱 의존성
+버전은 두 번들이 동일하며, 런타임과 바이너리 휠(cp312/cp313)만 다릅니다. 스캔 실행에만 nmap이
+따로 필요하고, XML 가져오기는 nmap 없이도 동작합니다.
 ```powershell
 # 1) 프론트 빌드(Node.js 20.19+ 또는 22.12+, 인터넷 되는 PC에서 1회) → frontend/dist 생성
 cd frontend && npm install && npm run build
