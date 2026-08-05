@@ -641,6 +641,170 @@ def test_engine_process_cleanup_exception_is_terminal_and_sanitized(
     assert "private" not in stages_response.text.lower()
 
 
+@pytest.mark.parametrize(("status", "failure_code"), [
+    ("failed", "engine_wait_failed"),
+    ("failed", "engine_cleanup_failed"),
+    ("failed", "engine_timeline_failed"),
+    ("failed", "engine_ingest_failed"),
+    ("interrupted", "server_restarted"),
+])
+def test_resume_finalizes_completed_engine_output_without_rerunning_nmap(
+    client, monkeypatch, tmp_path, status, failure_code,
+):
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    headers = _headers(client)
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["127.0.0.1"],
+        "exclude": [],
+        "out_dir": str(tmp_path / "ignored"),
+        "stages": {
+            "tcp": {"enabled": False, "ports": ""},
+            "udp": {"enabled": False, "ports": ""},
+        },
+        "scanops": {"scope_keys": []},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["job"],
+        "live": ["127.0.0.1"],
+        "open_map": {},
+        "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        "\n".join(json.dumps(event) for event in [
+            {"event": "stage_start", "stage": "discovery"},
+            {"event": "stage_done", "stage": "discovery", "counts": {"live": 1}},
+            {"event": "job_done", "status": "done", "counts": {"live": 1}},
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scan.status = status
+        scan.failure_code = failure_code
+        scan.failure_message = scans_api._FAILURE_MESSAGES[failure_code]
+        db.commit()
+    finally:
+        db.close()
+
+    checked_scope = []
+    monkeypatch.setattr(
+        scans_api.scope, "check_scope", lambda hosts: checked_scope.append(list(hosts)),
+    )
+
+    def unexpected_execution(*_args, **_kwargs):
+        pytest.fail("completed-output recovery must not invoke the engine or Nmap")
+
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", unexpected_execution)
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", unexpected_execution)
+    monkeypatch.setattr(scans_api.engine_runner, "spawn", unexpected_execution)
+    finalized = []
+
+    def finalize_existing(db, scan, actual_out_dir, scope_keys, force_scanned_hosts):
+        finalized.append((actual_out_dir, scope_keys, force_scanned_hosts))
+        scan.host_count = 1
+        scan.port_count = 0
+        db.flush()
+        return {}
+
+    monkeypatch.setattr(scans_api, "_commit_engine_ingest", finalize_existing)
+
+    class ImmediateThread:
+        def __init__(self, target, args=(), **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(scans_api.threading, "Thread", ImmediateThread)
+
+    response = client.post(f"/api/scans/{scan_id}/resume", headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert checked_scope == [["127.0.0.1"]]
+    assert finalized == [(out_dir, set(), False)]
+    scan = _read_scan(scan_id)
+    assert scan.status == "done" and scan.finished_at is not None
+    assert scan.failure_code == "" and scan.failure_message == ""
+    assert scan.host_count == 1 and scan.port_count == 0
+    assert [stage["stage"] for stage in scan.stages_json] == ["discovery"]
+
+
+def test_resume_never_reingests_a_done_scan_with_a_stale_recoverable_failure_code(
+    client, monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    headers = _headers(client)
+    scan_id = _scan_with_spec(tmp_path, {})
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(
+        json.dumps({"stages_done": ["job"]}), encoding="utf-8",
+    )
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scan.status = "done"
+        scan.failure_code = "engine_wait_failed"
+        scan.failure_message = scans_api._FAILURE_MESSAGES["engine_wait_failed"]
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.post(f"/api/scans/{scan_id}/resume", headers=headers)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "이미 모든 단계가 완료되었습니다."
+
+
+def test_completed_engine_finalize_thread_failure_keeps_recovery_retryable(
+    client, monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    headers = _headers(client)
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["127.0.0.1"],
+        "exclude": [],
+        "stages": {"tcp": {"ports": ""}, "udp": {"ports": ""}},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(
+        json.dumps({"stages_done": ["job"], "stop": False}), encoding="utf-8",
+    )
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scan.status = "failed"
+        scan.failure_code = "engine_ingest_failed"
+        scan.failure_message = scans_api._FAILURE_MESSAGES["engine_ingest_failed"]
+        db.commit()
+    finally:
+        db.close()
+
+    class FailingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise OSError(r"C:\private\finalize-thread-start-failed")
+
+    monkeypatch.setattr(scans_api.threading, "Thread", FailingThread)
+    response = client.post(f"/api/scans/{scan_id}/resume", headers=headers)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "스캔 실행 준비에 실패했습니다."}
+    scan = _read_scan(scan_id)
+    assert scan.status == "failed"
+    assert scan.failure_code == "engine_ingest_failed"
+    assert scan.failure_message == scans_api._FAILURE_MESSAGES["engine_ingest_failed"]
+    assert (out_dir / "spec.json").exists()
+    assert scans_api.engine_runner.is_done(out_dir)
+
+
 def test_invalid_engine_spec_fails_before_spawn_and_resume_message_is_path_free(
     client, monkeypatch, tmp_path,
 ):

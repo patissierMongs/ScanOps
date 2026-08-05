@@ -56,6 +56,13 @@ _FAILURE_MESSAGES = {
     "launch_setup_failed": "스캔 실행 준비에 실패했습니다.",
     "server_restarted": "서버 재시작으로 실행이 중단되었습니다.",
 }
+_RECOVERABLE_COMPLETED_ENGINE_FAILURES = {
+    "engine_wait_failed",
+    "engine_cleanup_failed",
+    "engine_timeline_failed",
+    "engine_ingest_failed",
+    "server_restarted",
+}
 
 # 실행 중인(현재 배치) nmap 프로세스 레지스트리(scan_id -> Popen). 중지 버튼이 여기서 찾아 종료.
 # 서버 메모리에만 존재 — 재시작 시 비지만, 배치 진행상태는 사이드카 JSON 에 영속되므로
@@ -212,6 +219,7 @@ def _fail_launch_setup(
     artifact_paths: list[Path],
     artifact_dirs: list[Path] | None = None,
     audit_action: str = "SCAN_RUN",
+    failure_code: str = "launch_setup_failed",
 ) -> None:
     """Persist one safe terminal failure and remove exact pre-worker artifacts."""
     logger.exception("failed to prepare scan %s for launch", scan_id)
@@ -221,8 +229,8 @@ def _fail_launch_setup(
         if scan is not None:
             scan.status = "failed"
             scan.finished_at = datetime.now(timezone.utc)
-            scan.failure_code = "launch_setup_failed"
-            scan.failure_message = _FAILURE_MESSAGES["launch_setup_failed"]
+            scan.failure_code = failure_code
+            scan.failure_message = _FAILURE_MESSAGES[failure_code]
             db.commit()
     except Exception:
         db.rollback()
@@ -1023,7 +1031,7 @@ def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
     )
 
 
-def _engine_worker(scan_id: int) -> None:
+def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
     """단계분리 엔진 실행 — spec.json 으로 엔진 spawn → 대기 → 단계요약 영속 + 결과 인입.
 
     중지는 run-state.json 의 stop 플래그로(graceful, 단계/호스트 경계). 엔진 프로세스는
@@ -1048,33 +1056,34 @@ def _engine_worker(scan_id: int) -> None:
         logger.exception("failed to read staged engine spec for scan %s", scan_id)
         _fail(scan_id, "engine_spec_invalid")
         return
-    try:
-        proc = engine_runner.spawn(spec_path, out_dir, out_dir / "engine.log")
-    except (OSError, RuntimeError):
-        logger.exception("failed to launch staged engine for scan %s", scan_id)
-        _fail(scan_id, "engine_launch_failed")
-        return
-    wait_failed = False
-    cleanup_failed = False
-    try:
-        rc = proc.wait()
-    except Exception:
-        logger.exception("failed while waiting for staged engine scan %s", scan_id)
-        wait_failed = True
-        rc = None
-    finally:
-        # 정상 완료뿐 아니라 wait 예외에도 backend ownership을 닫아 engine/Nmap 잔존을 막는다.
+    rc = None
+    if not finalize_completed:
         try:
-            engine_runner.close_owned(proc)
+            proc = engine_runner.spawn(spec_path, out_dir, out_dir / "engine.log")
+        except (OSError, RuntimeError):
+            logger.exception("failed to launch staged engine for scan %s", scan_id)
+            _fail(scan_id, "engine_launch_failed")
+            return
+        wait_failed = False
+        cleanup_failed = False
+        try:
+            rc = proc.wait()
         except Exception:
-            logger.exception("failed to close staged engine scan %s process tree", scan_id)
-            cleanup_failed = True
-    if cleanup_failed:
-        _fail(scan_id, "engine_cleanup_failed")
-        return
-    if wait_failed:
-        _fail(scan_id, "engine_wait_failed")
-        return
+            logger.exception("failed while waiting for staged engine scan %s", scan_id)
+            wait_failed = True
+        finally:
+            # 정상 완료뿐 아니라 wait 예외에도 backend ownership을 닫아 engine/Nmap 잔존을 막는다.
+            try:
+                engine_runner.close_owned(proc)
+            except Exception:
+                logger.exception("failed to close staged engine scan %s process tree", scan_id)
+                cleanup_failed = True
+        if cleanup_failed:
+            _fail(scan_id, "engine_cleanup_failed")
+            return
+        if wait_failed:
+            _fail(scan_id, "engine_wait_failed")
+            return
     try:
         _persist_stages(scan_id, out_dir)
     except Exception:
@@ -1084,7 +1093,7 @@ def _engine_worker(scan_id: int) -> None:
     if engine_runner.stopped(out_dir):
         _mark(scan_id, "canceled")
         return
-    if rc != 0:
+    if not finalize_completed and rc != 0:
         _fail(scan_id, "engine_failed")
         return
     if not engine_runner.is_done(out_dir):
@@ -1114,6 +1123,11 @@ def _engine_worker(scan_id: int) -> None:
         _fail(scan_id, "engine_ingest_failed")
     finally:
         db.close()
+
+
+def _finalize_completed_engine_worker(scan_id: int) -> None:
+    """Ingest an already-complete engine run without spawning the engine or Nmap again."""
+    _engine_worker(scan_id, finalize_completed=True)
 
 
 class _InvalidImportXML(ValueError):
@@ -1981,8 +1995,15 @@ def resume_scan(
     # 엔진 스캔 이어가기 — run-state 의 완료 단계·호스트를 건너뛰고 재실행(엔진이 알아서 재개).
     out_dir = _settings.scans_dir / f"scan_{scan_id}"
     if engine_runner.is_engine_scan(out_dir):
-        if engine_runner.is_done(out_dir):
+        completed_output = engine_runner.is_done(out_dir)
+        finalize_completed = (
+            completed_output
+            and scan.status in {"failed", "interrupted"}
+            and scan.failure_code in _RECOVERABLE_COMPLETED_ENGINE_FAILURES
+        )
+        if completed_output and not finalize_completed:
             raise HTTPException(status_code=400, detail="이미 모든 단계가 완료되었습니다.")
+        recovery_failure_code = scan.failure_code if finalize_completed else "launch_setup_failed"
         try:
             saved_spec = _load_engine_spec(out_dir / "spec.json")
             saved_targets = list(saved_spec.get("targets") or [])
@@ -2012,12 +2033,13 @@ def resume_scan(
             _validate_engine_scope_keys(saved_spec)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        if not nmap_runner.find_nmap(_settings.nmap_path):
-            raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
-        try:
-            engine_runner.ensure_available()
-        except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+        if not finalize_completed:
+            if not nmap_runner.find_nmap(_settings.nmap_path):
+                raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
+            try:
+                engine_runner.ensure_available()
+            except RuntimeError as e:
+                raise HTTPException(status_code=503, detail=str(e))
         try:
             engine_runner.clear_stop(out_dir)
             scan.status = "running"
@@ -2026,10 +2048,12 @@ def resume_scan(
             scan.failure_message = ""
             db.commit()
             db.refresh(scan)
-            threading.Thread(target=_engine_worker, args=(scan_id,), daemon=True).start()
+            worker = _finalize_completed_engine_worker if finalize_completed else _engine_worker
+            threading.Thread(target=worker, args=(scan_id,), daemon=True).start()
         except Exception:
             _fail_launch_setup(
                 db, scan.id, user, scan.targets, [], audit_action="SCAN_RESUME",
+                failure_code=recovery_failure_code,
             )
         record(db, user, "SCAN_RESUME", target=scan.targets, detail=f"#{scan.id} 엔진 이어가기")
         return scan
