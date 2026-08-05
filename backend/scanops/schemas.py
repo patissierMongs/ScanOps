@@ -53,7 +53,8 @@ class ScanRunIn(BaseModel):
     # 생략(None)=각 워크플로 기본, 빈 목록=[]=명시적으로 끄기, 목록=선택값.
     nse: list[str] | None = None
     targets: list[str]
-    exclude: list[str] = []        # 제외할 IPv4 주소/CIDR 토큰(서버에서 fail-closed 검증)
+    exclude: list[str] = []        # 제외할 IPv4 주소/CIDR/범위 토큰(서버에서 fail-closed 검증)
+    exclude_ports: str = ""        # 모든 단계에서 뺄 포트(nmap --exclude-ports). -p 문법과 동일
     batch_size: int = 256          # 청킹 배치당 호스트 수(중지/이어가기 단위)
     staged: bool = False           # estimate가 단계 엔진의 프로토콜 조합을 검증할 때만 사용
     discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
@@ -63,6 +64,7 @@ class ScanRunIn(BaseModel):
 class RawCommandIn(BaseModel):
     name: str = ""
     command: str          # 사용자가 직접 입력한 nmap 명령(출력 플래그는 서버가 -oA 로 강제 교체)
+    exclude: list[str] = []  # 제외할 IPv4 주소/CIDR/범위 토큰. 명령 안의 --exclude 와 합쳐 하나로 전달
 
 
 class ScanOut(BaseModel):

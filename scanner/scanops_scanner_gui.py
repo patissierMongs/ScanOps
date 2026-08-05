@@ -71,12 +71,15 @@ def final_status_text(rc: int, partial: bool, warn_count: int, has_resume: bool,
 
 RUN_MODE_LABELS = {
     "auto": "자동 스캔 - 열린 포트와 용도 파악",
+    "auto_gentle": "자동 스캔 - 저강도(노후 장비 안전)",
     "single_basic": "단일 실행 - 빠른 서비스 확인",
     "single_precision": "단일 실행 - 전체 포트 정밀 확인",
     "single_quick": "단일 실행 - 주요 TCP 포트",
     "single_light": "단일 실행 - 최소 TCP 포트",
 }
 RUN_MODE_BY_LABEL = {v: k for k, v in RUN_MODE_LABELS.items()}
+# auto 계열은 --workflow auto 를 쓰는 실행 방식(강도만 다르다).
+AUTO_MODES = ("auto", "auto_gentle")
 RUN_MODE_TO_PROFILE = {
     "single_basic": "basic",
     "single_precision": "phase1",
@@ -85,6 +88,7 @@ RUN_MODE_TO_PROFILE = {
 }
 RUN_MODE_DESCRIPTIONS = {
     "auto": "한 번 실행하면 열린 TCP 발견, 발견된 TCP 식별, 주요 UDP 확인을 내부적으로 이어서 실행합니다.",
+    "auto_gentle": "자동 스캔과 같은 순서로 진행하되 장비 부하를 낮춥니다. 오래된 백본/방화벽처럼 대량 스캔에 약한 장비에 사용합니다. 대신 시간이 더 걸립니다.",
     "single_basic": "대상이 살아있다고 보고 서비스/버전 확인만 한 번 실행합니다. 빠른 재확인용입니다.",
     "single_precision": "전체 TCP와 주요 UDP 확인을 한 번에 실행합니다. 자동 스캔보다 중복 작업이 많을 수 있습니다.",
     "single_quick": "상위 1000 TCP 포트에서 서비스와 버전을 확인합니다.",
@@ -116,6 +120,7 @@ class ScannerGui:
 
         self.target_file = StringVar()
         self.exclude = StringVar()
+        self.exclude_ports = StringVar()
         self.output_dir = StringVar(value=DEFAULT_OUTPUT)
         self.output_name = StringVar()
         self.nmap_path = StringVar()
@@ -164,10 +169,14 @@ class ScannerGui:
         ttk.Entry(target, textvariable=self.target_file).grid(row=2, column=0, sticky="ew", padx=(10, 6), pady=(0, 10))
         ttk.Button(target, text="대상 파일", command=self._browse_target_file).grid(row=2, column=1, padx=4, pady=(0, 10))
         ttk.Button(target, text="비우기", command=lambda: self.targets_text.delete("1.0", "end")).grid(row=2, column=2, padx=4, pady=(0, 10))
-        ttk.Label(target, text="제외 IPv4 IP/CIDR (선택 · 쉼표/공백 구분)").grid(
+        ttk.Label(target, text="제외 IP (선택 · 쉼표/공백 구분 · IP, CIDR, 범위 예: 10.0.0.1-10)").grid(
             row=3, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
         ttk.Entry(target, textvariable=self.exclude).grid(
-            row=4, column=0, columnspan=4, sticky="ew", padx=10, pady=(0, 10))
+            row=4, column=0, columnspan=4, sticky="ew", padx=10, pady=(0, 6))
+        ttk.Label(target, text="제외 포트 (선택 · 예: 3030 또는 3030,3040 또는 T:1-1024)").grid(
+            row=5, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
+        ttk.Entry(target, textvariable=self.exclude_ports).grid(
+            row=6, column=0, columnspan=4, sticky="ew", padx=10, pady=(0, 10))
 
         basics = ttk.LabelFrame(outer, text="스캔 실행 방식")
         basics.grid(row=1, column=0, sticky="ew", pady=(0, 10))
@@ -267,6 +276,10 @@ class ScannerGui:
             self.expected_text.set(
                 "내부적으로 전체 TCP에서 현재 열린 포트를 먼저 찾고, 발견된 TCP 포트만 다시 확인해 서비스명/제품/버전/NSE 단서를 붙인 뒤, 주요 UDP 서비스도 확인합니다. 결과 XML에는 현재 열린 포트, 포트 용도 추정 단서, 웹 제목/서버 헤더/TLS 인증서/SSH 키/NetBIOS/RDP/NTP/RPC 같은 관리자 설명용 정보가 남습니다."
             )
+        elif mode == "auto_gentle":
+            self.expected_text.set(
+                "자동 스캔과 같은 정보를 얻지만 장비 보호를 위해 속도를 낮춰 실행합니다(-T3, 초당 패킷 상한, 재시도 축소, RST rate-limit 우회 안 함, 호스트당 30분 상한). 노후 백본·방화벽처럼 대량 스캔에 부하를 받는 장비에 권장하며, 같은 범위라도 기본 자동 스캔보다 시간이 훨씬 오래 걸릴 수 있습니다."
+            )
         elif mode == "single_basic":
             self.expected_text.set("기본 서비스/버전 확인(-Pn -sV -T4)을 한 번 실행합니다. 빠른 재확인에는 좋지만 전체 TCP 발견이나 UDP 용도 단서는 제한적입니다.")
         elif mode == "single_precision":
@@ -275,7 +288,7 @@ class ScannerGui:
             self.expected_text.set("흔한 TCP 포트 위주로 열린 서비스를 빠르게 확인합니다. 전체 포트 누락 가능성은 있습니다.")
         else:
             self.expected_text.set("가장 흔한 TCP 포트만 확인합니다. 대상이 많은 경우 사전 점검용입니다.")
-        if mode in {"auto", "single_precision"}:
+        if mode in {*AUTO_MODES, "single_precision"}:
             self.port_preset.set("프로필 기본")
             self.ports.set("")
 
@@ -366,8 +379,10 @@ class ScannerGui:
         if nmap:
             cmd += ["--nmap", nmap]
         mode = self._mode()
-        if mode == "auto":
+        if mode in AUTO_MODES:
             cmd += ["--workflow", "auto"]
+            if mode == "auto_gentle":
+                cmd += ["--intensity", "gentle"]
         else:
             cmd += ["--workflow", "single", "--profile", self._single_profile()]
         ports = self.ports.get().strip()
@@ -380,7 +395,7 @@ class ScannerGui:
             cmd.append("--tcp-only")
         if self.udp.get():
             cmd.append("--udp")
-        if self.udp_all_targets.get() and mode == "auto":
+        if self.udp_all_targets.get() and mode in AUTO_MODES:
             cmd.append("--udp-all-targets")
         if self.nse_default.get():
             cmd.append("--nse-default")
@@ -398,6 +413,9 @@ class ScannerGui:
         exclude = self.exclude.get().strip()
         if exclude:
             cmd += ["--exclude", exclude]
+        exclude_ports = self.exclude_ports.get().strip()
+        if exclude_ports:
+            cmd += ["--exclude-ports", exclude_ports]
         if target_file:
             cmd += ["--targets-file", target_file]
         if self.zip_outputs.get():

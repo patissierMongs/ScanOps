@@ -506,7 +506,8 @@ def test_job_spec_rejects_enabled_protocol_with_empty_ports(stage):
     ["scanner.internal"],
     ["2001:db8::1"],
     ["10.0.0.0/33"],
-    ["10.0.0.1-10"],
+    ["10.0.0.9-2"],      # 역순 범위는 여전히 거절
+    ["10.0.0.300-5"],    # 옥텟 범위 초과
     ["10.0.0.1,10.0.0.2"],
     [None],
 ])
@@ -524,6 +525,15 @@ def test_job_spec_accepts_ipv4_ip_and_cidr_exclude():
         "exclude": ["127.0.0.2", "10.0.0.7/24"],
     }).validate()
     assert spec.exclude == ["127.0.0.2", "10.0.0.7/24"]
+
+
+def test_job_spec_accepts_last_octet_range_exclude():
+    """타겟 입력이 받는 범위 문법을 제외에서도 받는다(nmap --exclude 가 그대로 해석)."""
+    spec = JobSpec.from_dict({
+        "targets": ["10.0.0.0/24"],
+        "exclude": ["10.0.0.1-10"],
+    }).validate()
+    assert spec.exclude == ["10.0.0.1-10"]
 
 
 @pytest.mark.parametrize("stage", ["discovery", "service"])
