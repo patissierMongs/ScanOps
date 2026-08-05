@@ -82,9 +82,14 @@ test("search Enter handlers ignore Korean IME composition", () => {
   }
 });
 
-test("mobile table panels expose overflowing columns inside the panel", () => {
+test("table panels contain overflowing columns at every shell breakpoint", () => {
   const css = source("../src/styles.css");
   const dashboard = source("../src/views/Dashboard.jsx");
+  const mobileMedia = css.indexOf("@media (max-width: 760px)");
+  const tableOverflow = css.indexOf(".panel:has(.tbl) { overflow-x: auto; }");
+  assert.match(css, /\.main\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*auto;/);
+  assert.ok(tableOverflow >= 0 && tableOverflow < mobileMedia,
+    "table overflow containment must apply before the mobile-only media query");
   assert.match(css, /\.panel:has\(\.tbl\)\s*\{\s*overflow-x:\s*auto;/);
   assert.match(css, /\.recent-scans-table\s*\{\s*min-width:\s*430px;/);
   assert.match(dashboard, /className="tbl recent-scans-table"/);
