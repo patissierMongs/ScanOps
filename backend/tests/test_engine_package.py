@@ -1273,6 +1273,14 @@ def test_offline_wheelhouse_resolves_only_for_documented_cp312_windows(tmp_path)
     assert "Python 3.12 (x64)" in readme
 
 
+def test_non_ascii_windows_powershell_installer_has_utf8_bom():
+    installer = ROOT / "packaging" / "install.ps1"
+    data = installer.read_bytes()
+
+    assert any(byte >= 0x80 for byte in data)
+    assert data.startswith(b"\xef\xbb\xbf")
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows exclusive-bind contract")
 @pytest.mark.parametrize("sock_type", [socket.SOCK_STREAM, socket.SOCK_DGRAM])
 def test_cleanup_port_probe_rejects_live_reusable_windows_listener(sock_type):

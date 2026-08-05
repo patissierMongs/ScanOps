@@ -1,4 +1,4 @@
-# ScanOps offline (air-gapped) install - installs deps from local wheelhouse, no internet.
+﻿# ScanOps offline (air-gapped) install - installs deps from local wheelhouse, no internet.
 # Prerequisite: Python 3.12 (x64) on the server (pre-installed). Wheelhouse ships cp312 wheels
 # only (matches the bundled all-in-one Python 3.12.8); pure-python deps are version-independent.
 $ErrorActionPreference = "Stop"
