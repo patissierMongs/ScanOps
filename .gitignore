@@ -39,3 +39,9 @@ scanner/scanops_scans/
 
 # Claude Code 로컬 설정(머신별)
 .claude/settings.local.json
+
+# 다버전 올인원 빌드 산출물/캐시 (에어갭 배포는 개별 zip 으로 전달, 리포엔 미포함)
+_allinone_out/
+packaging/_cache/*.zip
+packaging/_cache/wheelhouse_*/
+packaging/_cache/requirements-py314.txt
