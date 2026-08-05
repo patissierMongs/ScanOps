@@ -76,7 +76,7 @@ export default function Scans({ user }) {
   useEffect(() => { load(); }, []);
 
   // 폴더 선택 속성은 React 가 prop 으로 안정적으로 안 넘기므로 DOM 에 직접 설정.
-  // webkitdirectory 면 선택 폴더의 하위까지 재귀로 파일이 들어오고, .xml 만 importFiles 에서 거른다.
+  // webkitdirectory 면 하위까지 재귀로 들어오고, XML/standalone manifest만 importFiles에서 고른다.
   useEffect(() => {
     if (folderInputRef.current) {
       folderInputRef.current.setAttribute("webkitdirectory", "");
@@ -141,17 +141,22 @@ export default function Scans({ user }) {
     return () => { alive = false; clearTimeout(id); };
   }, [estKey]);
 
-  // 여러 .xml 또는 폴더째 가져오기 — 자동 스캔 단계 파일은 서버에서 한 실행 결과로 묶어 인입한다.
+  // 여러 XML 또는 폴더째 가져오기. standalone manifest가 함께 있으면 제외/미관측 범위도 검증한다.
   async function importFiles(fileList, restoreFocusTo = null) {
-    const xmls = [...fileList]
-      .filter((f) => f.name.toLowerCase().endsWith(".xml"))
+    const selected = [...fileList]
+      .filter((f) => {
+        const name = f.name.toLowerCase();
+        return name.endsWith(".xml") || name.endsWith(".manifest.json");
+      })
       .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
+    const xmls = selected.filter((f) => f.name.toLowerCase().endsWith(".xml"));
     if (!xmls.length) { toast("가져올 .xml 파일이 없습니다", { type: "err" }); return; }
     setBusy(true);
     try {
-      const r = await uploadMany("/scans/import-bundle", xmls.map((f) => ({ file: f, name: f.webkitRelativePath || f.name })));
+      const r = await uploadMany("/scans/import-bundle", selected.map((f) => ({ file: f, name: f.webkitRelativePath || f.name })));
       const c = r.counts || {};
-      toast(`가져옴 · 결과 ${r.imported}건 / 파일 ${r.file_count}개${r.failed ? ` (실패 ${r.failed})` : ""} · 신규 ${c.new || 0} / 닫힘 ${c.closed || 0}`,
+      const closure = r.closure_mode === "manifest" ? "완료 실행 범위" : "관측 호스트 기준";
+      toast(`가져옴 · 결과 ${r.imported}건 / 파일 ${r.file_count}개${r.failed ? ` (실패 ${r.failed})` : ""} · 신규 ${c.new || 0} / 닫힘 ${c.closed || 0} · ${closure}`,
             r.failed ? { type: "err" } : undefined);
       load();
     } catch (e) {
@@ -346,9 +351,9 @@ export default function Scans({ user }) {
             </button>
             <button ref={folderButtonRef} type="button" className="linkbtn inline-action" disabled={busy}
                     onClick={() => openImport(folderInputRef, folderButtonRef)}>
-              폴더째 가져오기(.xml만)
+              폴더째 가져오기(XML+manifest)
             </button>
-            <input ref={fileInputRef} type="file" accept=".xml" multiple hidden tabIndex={-1}
+            <input ref={fileInputRef} type="file" accept=".xml,.manifest.json" multiple hidden tabIndex={-1}
                    disabled={busy} onChange={onImport} onCancel={restoreImportFocus} />
             <input ref={folderInputRef} type="file" hidden tabIndex={-1}
                    disabled={busy} onChange={onImport} onCancel={restoreImportFocus} />

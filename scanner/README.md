@@ -118,9 +118,12 @@ python3 scanops_scanner.py --ports 22,80,443 10.0.3.10 --zip
 
 ## ScanOps로 가져오기
 
-생성된 `.xml` 파일을 ScanOps 웹의 `스캔 > XML 가져오기`에서 업로드하면 됩니다.
+생성 폴더를 ScanOps 웹의 `스캔 > 폴더째 가져오기(XML+manifest)`에서 선택합니다.
 자동 스캔은 `*.tcp_discovery.xml`, `*.tcp_identify.xml`, `*.udp_identify.xml`처럼 여러 XML이 생깁니다.
-`*.manifest.json`의 `import_xml_files` 목록을 기준으로 가져오면 됩니다. 기본 추천 목록은 결과 검토 노이즈를 줄이기 위해 `tcp_discovery`를 제외하고, 용도 단서가 붙은 `tcp_identify`와 `udp_identify` 결과를 우선합니다.
+웹은 XML과 같은 폴더의 `*.manifest.json`을 함께 보내 원본 XML의 크기·SHA-256, 제외 후 실제 target,
+성공 runstats와 port/protocol 범위를 검증합니다. `import_xml_files`에는 관측 결과뿐 아니라 host가 0이어도
+정상 완료된 TCP discovery/single/UDP XML이 포함됩니다. 이 파일이 미관측 닫힘의 증거이므로 discovery를
+빼지 마세요. manifest 없이 XML만 올리면 구형 호환 모드로 관측된 호스트만 닫힘 판정합니다.
 배치 실행을 사용한 경우 `*.b0000.tcp_discovery.xml`, `*.b0001.tcp_discovery.xml`처럼 배치 번호가 붙습니다.
 
 특정 UDP 포트만 확인하려면 `--ports U:53`처럼 지정하면 됩니다. 이 경우 TCP 단계는 건너뛰고 UDP 식별만 실행합니다.
@@ -138,7 +141,8 @@ python3 scanops_scanner.py --ports 22,80,443 10.0.3.10 --zip
   스캔은 고정 상한을 정상적으로 넘을 수 있고, nmap은 timeout 된 호스트 결과를 버린 채 성공 종료할 수
   있기 때문입니다. 운영상 필요할 때만 `--host-timeout 30m`처럼 명시합니다.
 - **결과 요약** — 스캔 끝에 `summary: live_hosts=.. open_tcp=.. open_udp=.. import_xml=..` 를 출력하고,
-  가져올 결과가 0이면(호스트 다운/도달 불가) 조용한 성공이 아니라 경고를 남깁니다.
+  관측 결과가 0이면(호스트 다운/도달 불가) 조용한 성공이 아니라 경고를 남깁니다. 정상 완료된 빈 XML은
+  manifest와 함께 미관측 닫힘 판정에 사용할 수 있으므로 import 목록에는 남습니다.
 - **안전한 중지** — GUI [중지] 또는 정지 신호(Windows CTRL_BREAK / POSIX SIGINT·SIGTERM)는 강제
   종료가 아니라 정상 종료로 처리되어 상태를 `interrupted` 로 저장하고 재개 경로를 안내합니다(좀비
   '실행 중' 상태 방지). GUI 는 중단/실패 후 재개 경로를 자동으로 채웁니다.
@@ -147,7 +151,14 @@ python3 scanops_scanner.py --ports 22,80,443 10.0.3.10 --zip
   설정도 전체가 입력 오류로 거절됩니다(오타가 제한 해제로 바뀌지 않음).
 - **제외 대역(exclude)** — 반복 가능한 `--exclude`에 IPv4 IP/CIDR을 지정하면 자동·단일·UDP-only의
   모든 실제 단계와 명령 확인, 중단 후 재개에 동일하게 적용됩니다. 제외된 호스트는 스캔 결과에 없으므로
-  ScanOps로 가져올 때 이번 스캔의 관측 범위로 취급되지 않습니다.
+  manifest 닫힘 범위에도 들어가지 않아 ScanOps의 기존 finding이 열린 상태를 유지합니다.
+- **가져오기 권한 분리** — 성공한 single/TCP discovery는 해당 유효 batch, UDP identify는 실제로 실행한
+  UDP target subset에만 미관측 닫힘 권한을 갖습니다. TCP identify와 실패·중단·`--host-timeout` 실행은
+  관측 추가만 하며 사라진 finding을 닫지 않습니다. SHA-256은 파일 혼입 방지용 무결성 지문이지 서명이
+  아니므로, 웹의 auditor 권한·서버 scope·감사 로그가 신뢰 경계입니다.
+- **웹 가져오기 상한** — 제외 후 유효 target이 65,536개를 넘으면 standalone 실행과 기존 manifest는
+  그대로 만들되 웹용 닫힘 계약은 생략합니다. 이 경우 XML은 관측 호스트 기준으로만 반영되므로, 정확한
+  미관측 닫힘 판정이 필요하면 스캔 범위를 65,536개 이하로 나눕니다.
 - **숨은 UDP 전용 호스트** — TCP/ICMP/ACK 발견에 침묵하는 호스트는 기본 UDP 식별에서 빠집니다.
   `--udp-all-targets`(GUI: `숨은 UDP 전용 호스트도 확인`)로 원본 대상 전체에 UDP 식별을 강제할 수 있습니다.
 

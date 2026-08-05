@@ -69,7 +69,7 @@ def stage_from_base(base: Path) -> str:
     return "single"
 
 
-def write_xml(base: Path, stage: str) -> None:
+def write_xml(base: Path, stage: str, total: int) -> None:
     base.parent.mkdir(parents=True, exist_ok=True)
     if stage == "tcp_discovery":
         ports = """
@@ -92,13 +92,24 @@ def write_xml(base: Path, stage: str) -> None:
         """
     # DOWN_DISCOVERY: discovery 가 열린 TCP 는 찾았지만 status=down(살아있는 호스트 0) 인 시나리오 재현(QA-052)
     status = "down" if (os.environ.get("FAKE_NMAP_DOWN_DISCOVERY") and stage == "tcp_discovery") else "up"
+    if stage == "tcp_discovery":
+        scaninfo = '<scaninfo type="syn" protocol="tcp" numservices="65535" services="1-65535"/>'
+    elif stage == "tcp_identify":
+        scaninfo = '<scaninfo type="syn" protocol="tcp" numservices="2" services="22,443"/>'
+    elif stage == "udp_identify":
+        scaninfo = '<scaninfo type="udp" protocol="udp" numservices="1" services="53"/>'
+    else:
+        scaninfo = '<scaninfo type="syn" protocol="tcp" numservices="1" services="80"/>'
+    down = max(0, total - 1)
     xml = f"""<?xml version="1.0"?>
 <nmaprun scanner="fake">
+  {scaninfo}
   <host>
     <status state="{status}"/>
     <address addr="127.0.0.1" addrtype="ipv4"/>
     <ports>{ports}</ports>
   </host>
+  <runstats><finished exit="success"/><hosts up="1" down="{down}" total="{total}"/></runstats>
 </nmaprun>
 """
     Path(str(base) + ".xml").write_text(xml, encoding="utf-8")
@@ -113,6 +124,7 @@ def main() -> int:
     base = Path(args[args.index("-oA") + 1])
     stage = stage_from_base(base)
     targets = args[args.index("-oA") + 2:]
+    total = int(os.environ.get("FAKE_NMAP_TOTAL", str(len(targets))))
     log = os.environ.get("FAKE_NMAP_LOG")
     if log:
         with open(log, "a", encoding="utf-8") as fp:
@@ -120,7 +132,7 @@ def main() -> int:
     fail_code = int(os.environ.get("FAKE_NMAP_FAIL_CODE", "7"))
     # partial: 유효한 XML 을 쓴 뒤 비정상 종료(QA-005: 부분 결과 살리기 검증용)
     if os.environ.get("FAKE_NMAP_PARTIAL_STAGE") == stage:
-        write_xml(base, stage)
+        write_xml(base, stage, total)
         return fail_code
     # corrupt: 망가진 XML 을 쓰고 rc=0 (QA-008: 손상 XML 을 '열린 포트 0' 과 구분하는지 검증용)
     if os.environ.get("FAKE_NMAP_CORRUPT_STAGE") == stage:
@@ -130,7 +142,14 @@ def main() -> int:
     # empty: host 없는 유효 XML, rc=0 (QA-012: 빈 결과를 정직하게 알리는지 검증용)
     if os.environ.get("FAKE_NMAP_EMPTY_STAGE") == stage:
         base.parent.mkdir(parents=True, exist_ok=True)
-        Path(str(base) + ".xml").write_text('<?xml version="1.0"?><nmaprun scanner="fake"></nmaprun>', encoding="utf-8")
+        proto = "udp" if stage == "udp_identify" else "tcp"
+        services = "53" if proto == "udp" else "1-65535"
+        num = "1" if proto == "udp" else "65535"
+        Path(str(base) + ".xml").write_text(
+            f'<?xml version="1.0"?><nmaprun scanner="fake"><scaninfo type="{stage}" '
+            f'protocol="{proto}" numservices="{num}" services="{services}"/>'
+            f'<runstats><finished exit="success"/><hosts up="0" down="{total}" total="{total}"/>'
+            '</runstats></nmaprun>', encoding="utf-8")
         return 0
     # FAIL_ALL: 모든 단계가 XML 없이 비정상 종료(QA-044: 진짜 failed/exit1 경로 검증용)
     if os.environ.get("FAKE_NMAP_FAIL_ALL"):
@@ -142,7 +161,7 @@ def main() -> int:
     fail_target = os.environ.get("FAKE_NMAP_FAIL_TARGET")
     if fail_target and fail_target in targets:
         return fail_code
-    write_xml(base, stage)
+    write_xml(base, stage, total)
     return 0
 
 
@@ -297,7 +316,7 @@ def test_open_filtered_udp_counts_as_open_for_followup_and_live_host(tmp_path):
     assert scanner.hosts_with_open_ports_from_xml(xml) == ["127.0.0.1"]
 
 
-def test_manifest_recommends_identification_xml_not_discovery_xml(tmp_path):
+def test_legacy_minimal_manifest_keeps_identification_only_recommendation(tmp_path):
     scanner = _load_scanner()
     manifest = tmp_path / "scan.manifest.json"
     # QA-041 이후 manifest 는 실제 존재하는 XML 만 광고하므로 파일을 만들어 둔다.
@@ -356,9 +375,13 @@ def test_default_auto_workflow_end_to_end_creates_manifest_import_list_and_zip(t
     assert (output_dir / "auto.127.0.0.1.tcp_discovery.xml").exists()
     assert (output_dir / "auto.127.0.0.1.tcp_identify.xml").exists()
     assert (output_dir / "auto.127.0.0.1.udp_identify.xml").exists()
-    assert str(output_dir / "auto.127.0.0.1.tcp_discovery.xml") not in manifest["import_xml_files"]
+    assert str(output_dir / "auto.127.0.0.1.tcp_discovery.xml") in manifest["import_xml_files"]
     assert str(output_dir / "auto.127.0.0.1.tcp_identify.xml") in manifest["import_xml_files"]
     assert str(output_dir / "auto.127.0.0.1.udp_identify.xml") in manifest["import_xml_files"]
+    assert manifest["import_contract"]["schema"] == 1
+    assert {
+        unit["stage_id"] for unit in manifest["import_contract"]["units"] if unit["authoritative"]
+    } == {"tcp_discovery", "udp_identify"}
     identify_run = next(run for run in state["runs"] if run["stage_id"] == "tcp_identify")
     assert identify_run["command"][identify_run["command"].index("-p") + 1] == "T:22,443"
     zip_path = output_dir / "auto.scanops.zip"
@@ -514,7 +537,9 @@ def test_targets_file_batching_end_to_end_creates_numbered_outputs(tmp_path):
     assert (output_dir / "batch.127.0.0.1.b0000.tcp_identify.xml").exists()
     assert (output_dir / "batch.127.0.0.2.b0001.tcp_identify.xml").exists()
     assert manifest["import_xml_files"] == [
+        str(output_dir / "batch.127.0.0.1.b0000.tcp_discovery.xml"),
         str(output_dir / "batch.127.0.0.1.b0000.tcp_identify.xml"),
+        str(output_dir / "batch.127.0.0.2.b0001.tcp_discovery.xml"),
         str(output_dir / "batch.127.0.0.2.b0001.tcp_identify.xml"),
     ]
 
@@ -1076,7 +1101,9 @@ def test_empty_scan_reports_done_with_warning(tmp_path):
     assert r.returncode == 0, r.stderr + r.stdout
     state = json.loads((out / "e.state.json").read_text(encoding="utf-8"))
     assert state["status"] == "done"
-    assert "가져올 결과가 없습니다" in r.stderr
+    assert "살아있는 호스트/열린 포트 관측은 없습니다" in r.stderr
+    manifest = json.loads((out / "e.manifest.json").read_text(encoding="utf-8"))
+    assert str(out / "e.127.0.0.1.tcp_discovery.xml") in manifest["import_xml_files"]
 
 
 def test_host_timeout_off_by_default_and_opt_in_for_all_auto_commands(tmp_path):
@@ -1799,3 +1826,103 @@ def test_connect_dry_run_preview_omits_udp_stage(tmp_path):
     assert "connect" in result.stdout  # UDP 건너뜀 안내가 표시된다
     # TCP 단계는 여전히 미리보기에 있다
     assert "TCP 전체 포트 발견" in result.stdout
+
+
+def test_manifest_contract_binds_effective_targets_excludes_and_original_xml(tmp_path):
+    """standalone 성공 unit은 원본 XML을 고치지 않고 manifest SHA로 effective 범위를 결박한다."""
+    scanner = _load_scanner()
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    response = _run_scanner(
+        [
+            "--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "contract",
+            "--workflow", "single", "--exclude", "127.0.0.2/32",
+            "127.0.0.1", "127.0.0.2",
+        ],
+        env={"FAKE_NMAP_TOTAL": "1"},
+    )
+    assert response.returncode == 0, response.stderr + response.stdout
+
+    xml_path = out / "contract.127.0.0.1_plus1.xml"
+    xml_bytes = xml_path.read_bytes()
+    assert b"scanops-closure" not in xml_bytes
+    manifest = json.loads((out / "contract.manifest.json").read_text(encoding="utf-8"))
+    contract = manifest["import_contract"]
+    assert contract["schema"] == 1
+    assert contract["exclude"] == ["127.0.0.2"]
+    assert contract["effective_host_count"] == 1
+    assert contract["effective_targets_sha256"] == scanner.effective_targets_fingerprint(["127.0.0.1"])
+    assert len(contract["units"]) == 1
+    unit = contract["units"][0]
+    assert unit["stage_id"] == "single" and unit["authoritative"] is True
+    assert unit["closure_targets"] == ["127.0.0.1"]
+    assert unit["xml_basename"] == xml_path.name
+    assert unit["xml_size"] == len(xml_bytes)
+    assert unit["xml_sha256"] == __import__("hashlib").sha256(xml_bytes).hexdigest()
+    assert str(xml_path) in manifest["import_xml_files"]
+
+
+def test_manifest_contract_marks_failed_and_host_timeout_units_observation_only(tmp_path):
+    """실패 partial 및 host-timeout 성공은 rc만 믿고 미관측 닫힘 권한을 얻지 않는다."""
+    fake_nmap = _fake_nmap(tmp_path)
+
+    partial_out = tmp_path / "partial"
+    partial = _run_scanner(
+        [
+            "--nmap", str(fake_nmap), "--output-dir", str(partial_out), "--name", "partial",
+            "--tcp-only", "127.0.0.1",
+        ],
+        env={"FAKE_NMAP_PARTIAL_STAGE": "tcp_discovery"},
+    )
+    assert partial.returncode in (0, 1), partial.stderr + partial.stdout
+    partial_manifest = json.loads((partial_out / "partial.manifest.json").read_text(encoding="utf-8"))
+    discovery = next(
+        unit for unit in partial_manifest["import_contract"]["units"]
+        if unit["stage_id"] == "tcp_discovery"
+    )
+    assert discovery["authoritative"] is False
+    assert discovery["closure_targets"] == []
+
+    timeout_out = tmp_path / "timeout"
+    timeout = _run_scanner([
+        "--nmap", str(fake_nmap), "--output-dir", str(timeout_out), "--name", "timeout",
+        "--workflow", "single", "--host-timeout", "30m", "127.0.0.1",
+    ])
+    assert timeout.returncode == 0, timeout.stderr + timeout.stdout
+    timeout_manifest = json.loads((timeout_out / "timeout.manifest.json").read_text(encoding="utf-8"))
+    unit = timeout_manifest["import_contract"]["units"][0]
+    assert unit["authoritative"] is False
+    assert unit["closure_targets"] == []
+
+
+def test_import_contract_preserves_large_scan_legacy_compatibility():
+    """웹 권한 상한을 넘는 기존 허용 실행은 종료 후 manifest 작성에 실패하지 않는다."""
+    scanner = _load_scanner()
+    oversized = {
+        "raw_targets": ["10.0.0.0/15"],
+        "exclude": [],
+        "max_hosts": 131072,
+        "batch_size": 131072,
+        "batches": [["10.0.0.0/15"]],
+        "runs": [],
+    }
+
+    assert scanner.build_import_contract(oversized) is None
+
+
+def test_import_contract_normalizes_large_batch_size_within_web_cap():
+    scanner = _load_scanner()
+    compatible = {
+        "raw_targets": ["127.0.0.1"],
+        "exclude": [],
+        "max_hosts": 131072,
+        "batch_size": 131072,
+        "batches": [["127.0.0.1"]],
+        "host_timeout": "",
+        "runs": [],
+    }
+
+    contract = scanner.build_import_contract(compatible)
+    assert contract is not None
+    assert contract["max_hosts"] == scanner.IMPORT_CONTRACT_MAX_HOSTS
+    assert contract["batch_size"] == scanner.IMPORT_CONTRACT_MAX_HOSTS

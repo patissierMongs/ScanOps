@@ -101,6 +101,15 @@ test("XML import is activated by visible buttons and restores their focus", () =
   assert.doesNotMatch(scans, /<label className="linkbtn"[\s\S]{0,160}type="file"/);
 });
 
+test("standalone folder import sends XML with its versioned manifest", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /name\.endsWith\("\.xml"\) \|\| name\.endsWith\("\.manifest\.json"\)/);
+  assert.match(scans, /uploadMany\("\/scans\/import-bundle", selected\.map/);
+  assert.match(scans, /accept="\.xml,\.manifest\.json"/);
+  assert.match(scans, /r\.closure_mode === "manifest" \? "완료 실행 범위" : "관측 호스트 기준"/);
+  assert.match(scans, /폴더째 가져오기\(XML\+manifest\)/);
+});
+
 test("scan details expose persisted timeline and safe failure fields", () => {
   const scans = source("../src/views/Scans.jsx");
   assert.match(scans, /withPersistedStages/);
@@ -123,6 +132,9 @@ test("Server changes have a localized history label and filter", () => {
   const history = source("../src/views/History.jsx");
   assert.match(history, /SERVER_CHANGED:\s*\{ label: "Server 변경", cls: "medium" \}/);
   assert.match(history, /"SERVER_CHANGED"/);
+  assert.match(history, /import \{ primaryServiceIdentity \} from "\.\.\/lib\/columns\.js"/);
+  assert.match(history, /const identity = primaryServiceIdentity\(ev\)/);
+  assert.match(history, /\(서비스: \$\{ev\.service\}\)/);
 });
 
 test("finding rescan pins execution to the selected IP and port pairs", () => {

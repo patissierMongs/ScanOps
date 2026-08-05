@@ -154,13 +154,15 @@ class EventOut(BaseModel):
 
 
 class EventFeedItem(BaseModel):
-    """전역 이력 피드 항목 — FindingEvent + Finding(host/port/service) 조인."""
+    """전역 이력 피드 항목 — FindingEvent + 현재 Finding 식별 문맥 조인."""
     id: int
     finding_id: int
     type: str
     detail: str
     host_ip: str
     port: int
+    display_identity: str
+    server: str
     service: str
     actor_user_id: int | None
     scan_id: int | None

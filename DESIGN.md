@@ -86,6 +86,11 @@
   제외한 타깃은 관측 범위 밖이므로 열린 상태를 유지한다. 선택 재스캔은 선택 키의 0건 결과만 닫힘
   증거로 취급한다. 실패·중지된 실행 단위의 결과는 인입·닫힘에 쓰지 않으며, 이미 완료된 레거시 배치의
   판정은 유지한다.
+- 단독 스캐너는 원본 Nmap XML을 증거로 보존하고, versioned manifest에서 XML basename·크기·SHA-256과
+  실제 실행 target을 결박한다. 서버는 target cap/scope/exclude/count/fingerprint, Nmap runstats와
+  scaninfo를 첫 DB/파일 부작용 전에 다시 검증한다. 성공한 single/TCP discovery와 실제 UDP 대상만
+  미관측 닫힘 권한을 가지며 TCP identify·실패·중지·host-timeout unit은 관측 전용이다. manifest가 없는
+  기존 XML은 하위 호환을 위해 관측 host 범위만 사용한다.
 
 ## 4. 모듈 (백엔드)
 

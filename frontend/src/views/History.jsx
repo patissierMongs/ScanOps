@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { primaryServiceIdentity } from "../lib/columns.js";
 import { useToast } from "../ui/Toast.jsx";
 
 // 이벤트 타입 표시 메타 (백엔드 FindingEvent.type 과 일치)
@@ -61,12 +62,16 @@ export default function History() {
             <div className="muted">이력 없음</div>
           ) : feed.items.map((ev) => {
             const m = TYPE_META[ev.type] || { label: ev.type, cls: "info" };
+            const identity = primaryServiceIdentity(ev);
+            const serviceContext = ev.service && ev.service !== identity
+              ? ` (서비스: ${ev.service})`
+              : "";
             return (
               <div className="ev" key={ev.id}>
                 <div className="t">
                   <span className={"pill " + m.cls} style={{ marginRight: 8 }}>{m.label}</span>
                   <span className="mono">{ev.host_ip}:{ev.port}</span>
-                  {ev.service && <span className="muted"> · {ev.service}</span>}
+                  <span className="muted"> · {identity}{serviceContext}</span>
                 </div>
                 <div className="d">{ev.detail}</div>
                 <div className="when">{String(ev.created_at).slice(0, 19).replace("T", " ")}</div>

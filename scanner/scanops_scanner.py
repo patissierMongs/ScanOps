@@ -24,6 +24,8 @@ import zipfile
 from pathlib import Path
 
 VERSION = "0.2.0"
+IMPORT_CONTRACT_SCHEMA = 1
+IMPORT_CONTRACT_MAX_HOSTS = 65536
 STATS_EVERY_DEFAULT = "10s"
 # 기본 미적용. 전 포트 스캔은 필터링된 망에서 고정 시간 상한을 정상적으로 넘을 수 있고,
 # nmap 은 timeout 된 호스트의 결과를 버린 채 성공 종료할 수 있다. 필요한 환경만 명시적으로 opt-in.
@@ -331,6 +333,45 @@ def effective_targets_fingerprint(hosts: list[str]) -> str:
         digest.update(len(encoded).to_bytes(4, "big"))
         digest.update(encoded)
     return digest.hexdigest()
+
+
+def concrete_scan_targets(
+    plan: dict, batch_index: int, targets: list[str] | None = None,
+) -> tuple[list[str], bool]:
+    """Return the exact IPv4 hosts handed to one execution unit.
+
+    Non-batch plans retain compact CIDR/range tokens for Nmap, so expand them here only for
+    the import contract. Hostnames cannot prove an unobserved address and therefore make the
+    unit observation-only.
+    """
+    max_hosts = min(int(plan.get("max_hosts", IMPORT_CONTRACT_MAX_HOSTS)), IMPORT_CONTRACT_MAX_HOSTS)
+    if targets:
+        source = targets
+    elif int(plan.get("batch_size", 0)) > 0:
+        source = plan["batches"][batch_index]
+    else:
+        source = plan.get("raw_targets") or plan["batches"][batch_index]
+    try:
+        expanded = expand_targets(source, max_hosts)
+        _canonical_excludes, exclude_networks = parse_excludes(plan.get("exclude", []))
+        effective = apply_excludes(expanded, exclude_networks)
+    except (TypeError, ValueError):
+        return [], False
+
+    concrete: list[str] = []
+    seen: set[str] = set()
+    for host in effective:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return [], False
+        if not isinstance(address, ipaddress.IPv4Address):
+            return [], False
+        value = str(address)
+        if value not in seen:
+            seen.add(value)
+            concrete.append(value)
+    return concrete, bool(concrete)
 
 
 def validate_ports(ports: str) -> str:
@@ -813,6 +854,32 @@ def xml_parse_ok(path: Path) -> bool:
     return True
 
 
+def xml_run_completed(path: Path, target_count: int) -> bool:
+    """Validate the Nmap completion counters required for absent-result closure authority."""
+    if target_count < 1 or not path.exists():
+        return False
+    try:
+        root = ET.parse(path).getroot()
+        finished = root.findall("./runstats/finished")
+        hosts = root.findall("./runstats/hosts")
+        if len(finished) != 1 or len(hosts) != 1 or finished[0].get("exit") != "success":
+            return False
+        up = int(hosts[0].get("up", ""))
+        down = int(hosts[0].get("down", ""))
+        total = int(hosts[0].get("total", ""))
+    except (ET.ParseError, TypeError, ValueError):
+        return False
+    return up >= 0 and down >= 0 and up + down == total == target_count
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fp:
+        for block in iter(lambda: fp.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def xml_has_hosts(path: Path) -> bool:
     """파싱 가능하고 host 항목이 하나라도 있는지. rc≠0 단계의 부분 XML 도 쓸만하면 manifest 에 포함하기 위함."""
     if not path.exists():
@@ -1072,6 +1139,67 @@ def manifest_xml_files(run: dict) -> list[str]:
     return [p for p in xmls if xml_has_hosts(Path(p))]
 
 
+def import_contract_unit(plan: dict, run: dict, xml_path: Path) -> dict:
+    stage_id = run.get("stage_id", "") or "single"
+    targets = run.get("scan_targets")
+    targets_complete = run.get("scan_targets_complete") is True
+    if not isinstance(targets, list) or not all(isinstance(host, str) for host in targets):
+        targets, targets_complete = [], False  # old state: preserve import, but never infer absence
+    authoritative = bool(
+        run.get("returncode") == 0
+        and not run.get("skipped")
+        and not plan.get("host_timeout")
+        and stage_id in {"single", "tcp_discovery", "udp_identify"}
+        and targets_complete
+        and xml_run_completed(xml_path, len(targets))
+    )
+    return {
+        "batch_index": run_batch(run),
+        "stage_id": stage_id,
+        "authoritative": authoritative,
+        "closure_targets": targets if authoritative else [],
+        "xml_basename": xml_path.name,
+        "xml_size": xml_path.stat().st_size,
+        "xml_sha256": file_sha256(xml_path),
+    }
+
+
+def build_import_contract(plan: dict) -> dict | None:
+    """Build the allowlisted, versioned sidecar contract consumed by ScanOps web import.
+
+    The surrounding manifest intentionally remains human-friendly and may contain absolute
+    paths/commands. Only this object is closure authority, and every unit is bound to the
+    original Nmap XML bytes.
+    """
+    max_hosts = min(int(plan.get("max_hosts", IMPORT_CONTRACT_MAX_HOSTS)), IMPORT_CONTRACT_MAX_HOSTS)
+    raw_targets = list(plan.get("raw_targets") or [host for batch in plan["batches"] for host in batch])
+    try:
+        expanded = expand_targets(raw_targets, max_hosts)
+    except ValueError:
+        # The standalone scanner can intentionally raise --max-hosts above the web import
+        # authority cap. Keep producing its legacy manifest instead of failing after Nmap;
+        # such oversized runs remain observation-only when imported.
+        return None
+    excludes, exclude_networks = parse_excludes(plan.get("exclude", []))
+    effective = apply_excludes(expanded, exclude_networks)
+    units = []
+    for run in latest_runs(plan):
+        for value in manifest_xml_files(run):
+            units.append(import_contract_unit(plan, run, Path(value)))
+    return {
+        "schema": IMPORT_CONTRACT_SCHEMA,
+        "raw_targets": raw_targets,
+        "exclude": excludes,
+        "max_hosts": max_hosts,
+        "requested_host_count": len(expanded),
+        "effective_host_count": len(effective),
+        "effective_targets_sha256": effective_targets_fingerprint(effective),
+        "batch_size": min(max(0, int(plan.get("batch_size", 0))), max_hosts),
+        "host_timeout": plan.get("host_timeout", ""),
+        "units": units,
+    }
+
+
 def write_manifest(plan: dict, zip_path: str = "") -> None:
     manifest = dict(plan)
     manifest["state_path"] = plan.get("state_path", "")
@@ -1080,6 +1208,16 @@ def write_manifest(plan: dict, zip_path: str = "") -> None:
     manifest["all_xml_files"] = list(dict.fromkeys(
         p for run in runs for p in manifest_xml_files(run)
     ))
+    # Very old/minimal state files can still be summarized, but they cannot prove the original
+    # requested target plan. Keep them on observed-host import semantics instead of inventing it.
+    if isinstance(plan.get("batches"), list) and plan.get("batches"):
+        contract = build_import_contract(plan)
+        if contract is not None:
+            manifest["import_contract"] = contract
+        else:
+            manifest.pop("import_contract", None)
+    else:
+        manifest.pop("import_contract", None)
     # identify 산출물이 하나도 없으면 성공한 discovery XML 을 구제 fallback 으로 추천한다(QA-038).
     manifest["import_xml_files"] = importable_xml(plan, include_discovery_fallback=True)
     write_json(Path(plan["manifest_path"]), manifest)
@@ -1117,18 +1255,25 @@ def failed_runs(plan: dict) -> list[dict]:
 
 
 def importable_xml(plan: dict, include_discovery_fallback: bool = False) -> list[str]:
-    """import 가능한 XML(파싱+host, discovery 제외). 부분 실패 단계의 XML 도 쓸만하면 포함.
-    include_discovery_fallback=True 면, identify 산출물이 하나도 없을 때 성공한 discovery XML 을 구제
-    fallback 으로 포함한다(QA-038: discovery 만 성공한 스캔이 'failed' 로 버려지지 않게)."""
+    """Importable XML, including completed authoritative units with zero observed hosts.
+
+    Observation-only identify/partial output still needs a usable host. Completed discovery,
+    UDP, and single units are retained because their manifest contract can close an included
+    but unobserved target. Old states without unit target evidence keep the legacy fallback.
+    """
     seen: dict[str, None] = {}
     for run in latest_runs(plan):
-        if run.get("stage_id", "") == "tcp_discovery":
-            continue
         for p in manifest_xml_files(run):
+            path = Path(p)
+            if import_contract_unit(plan, run, path)["authoritative"]:
+                seen[p] = None
+                continue
+            if run.get("stage_id", "") == "tcp_discovery":
+                continue
             # '쓸만한 host'(status=up 또는 열린 포트)가 든 식별 XML 만 importable 로 센다. host 없는 빈 XML
             # (QA-049)이나 MAC-only/유령·down-전부필터 host(QA-056)가 seen 을 차지하면 discovery 구제
             # fallback 이 막혀 실데이터가 든 discovery XML 이 누락된다.
-            if xml_has_usable_host(Path(p)):
+            if xml_has_usable_host(path):
                 seen[p] = None
     if seen or not include_discovery_fallback:
         return list(seen)
@@ -1225,7 +1370,19 @@ def print_scan_summary(plan: dict, failed: list[dict], status: str) -> None:
             f"실패(rc={run.get('returncode')}) — 부분 결과만 반영됩니다.",
             file=sys.stderr,
         )
-    if f["importable"] == 0 and not failed:
+    if not failed and f["live_hosts"] == 0 and f["open_tcp"] == 0 and f["open_udp"] == 0:
+        if f["importable"]:
+            print(
+                "warning: 살아있는 호스트/열린 포트 관측은 없습니다. "
+                "성공한 완료 범위 XML+manifest는 가져오기 시 미관측 닫힘 판정에 사용됩니다.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "warning: 가져올 결과가 없습니다(열린 포트/살아있는 호스트 0). 대상·네트워크 도달성을 확인하세요.",
+                file=sys.stderr,
+            )
+    elif f["importable"] == 0 and not failed:
         print(
             "warning: 가져올 결과가 없습니다(열린 포트/살아있는 호스트 0). 대상·네트워크 도달성을 확인하세요.",
             file=sys.stderr,
@@ -1237,6 +1394,7 @@ def print_scan_summary(plan: dict, failed: list[dict], status: str) -> None:
 def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", tcp_ports: list[int] | None = None,
                    targets: list[str] | None = None) -> int:
     cmd = build_command(plan, idx, stage_id, tcp_ports, targets)
+    scan_targets, targets_complete = concrete_scan_targets(plan, idx, targets)
     base = output_base(plan, idx, stage_id)
     started = now_iso()
     stage_label = f" {run_stage_name(stage_id)}" if stage_id else ""
@@ -1251,6 +1409,8 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
         "finished_at": now_iso(),
         "returncode": rc,
         "command": cmd,
+        "scan_targets": scan_targets,
+        "scan_targets_complete": targets_complete,
         "output_base": str(base),
         "files": existing_outputs(base),
     }

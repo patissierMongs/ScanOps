@@ -95,25 +95,27 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
             if row.status == "정상처리":
                 row.status = "미조치"
             counts["reopened"] += 1
-        else:
-            identity_changed = False
-            if identity_observed and old_service != f["service"]:
-                _event(db, row.id, scan_id, "SERVICE_CHANGED",
-                       f"{old_service} → {f['service']}", when=when)
-                counts["service_changed"] += 1
-                identity_changed = True
-            if identity_observed and old_version != f["version"]:
-                _event(db, row.id, scan_id, "VERSION_CHANGED",
-                       f"{old_version} → {f['version']}", when=when)
-                counts["version_changed"] += 1
-                identity_changed = True
-            if identity_observed and old_server != row.server:
-                _event(db, row.id, scan_id, "SERVER_CHANGED",
-                       f"{old_server or '—'} → {row.server or '—'}", when=when)
-                counts["server_changed"] += 1
-                identity_changed = True
-            if not identity_changed:
-                counts["unchanged"] += 1
+
+        # Reopening and identity changes are independent facts. A reopened endpoint may also
+        # return a different service/version/Server and both transitions must remain auditable.
+        identity_changed = False
+        if identity_observed and old_service != f["service"]:
+            _event(db, row.id, scan_id, "SERVICE_CHANGED",
+                   f"{old_service} → {f['service']}", when=when)
+            counts["service_changed"] += 1
+            identity_changed = True
+        if identity_observed and old_version != f["version"]:
+            _event(db, row.id, scan_id, "VERSION_CHANGED",
+                   f"{old_version} → {f['version']}", when=when)
+            counts["version_changed"] += 1
+            identity_changed = True
+        if identity_observed and old_server != row.server:
+            _event(db, row.id, scan_id, "SERVER_CHANGED",
+                   f"{old_server or '—'} → {row.server or '—'}", when=when)
+            counts["server_changed"] += 1
+            identity_changed = True
+        if not reopened and not identity_changed:
+            counts["unchanged"] += 1
 
     # 명시적 scope_keys는 완료된 structured scan의 권한이다. discovery에서 호스트가
     # 관측되지 않았더라도 그 effective target/port/protocol 범위에서 사라진 finding은 닫는다.

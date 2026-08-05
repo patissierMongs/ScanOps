@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -119,9 +119,12 @@ def _filtered(db: Session, status, risk, host, q, state, dept=None):
         query = query.filter(Finding.dept == dept)
     if q:
         like = f"%{q}%"
+        product_version = func.trim(
+            func.coalesce(Finding.product, "") + " " + func.coalesce(Finding.version, "")
+        )
         query = query.filter(or_(
             Finding.server.like(like), Finding.product.like(like), Finding.version.like(like),
-            Finding.service.like(like), Finding.hostname.like(like),
+            product_version.like(like), Finding.service.like(like), Finding.hostname.like(like),
         ))
     return query.order_by(Finding.host_ip, Finding.port)
 

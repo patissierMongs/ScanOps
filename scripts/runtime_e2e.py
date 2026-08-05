@@ -577,7 +577,7 @@ def _run_staged(
             "targets": [HOST],
             "options": options,
             "ports": ports,
-            "nse": ["banner"],
+            "nse": ["banner", "http-server-header"],
             "batch_size": 1,
             "discovery": "pn",
         },
@@ -633,6 +633,108 @@ def _stable_signature(finding: dict) -> dict:
             "state", "reopened", "status", "service", "product", "version", "server",
             "display_identity", "banner", "cpe", "fingerprint", "identification", "last_seen",
         )
+    }
+
+
+def _check_server_consumers(
+    api: ApiClient,
+    viewer_token: str,
+    auditor_token: str,
+    finding: dict,
+) -> dict:
+    """Prove one real Server observation reaches every user-facing consumer."""
+    finding_id = int(finding["id"])
+    port = int(finding["port"])
+    server = str(finding.get("server") or "")
+    service = str(finding.get("service") or "")
+    require("scanopsruntimee2e" in server.lower(),
+            f"real HTTP Server header was not captured: {server!r}")
+    require(finding.get("display_identity") == server,
+            f"display identity did not prefer Server: {finding}")
+
+    search_query = urllib.parse.urlencode({"q": server, "state": ""})
+    search_rows = api.request(
+        "GET", f"/api/findings?{search_query}", token=viewer_token,
+    )
+    require(any(int(row["id"]) == finding_id for row in search_rows),
+            f"Server search did not return finding #{finding_id}: {search_rows}")
+
+    dept = "Runtime Server Team"
+    api.request(
+        "PATCH", f"/api/findings/{finding_id}", token=auditor_token,
+        payload={"dept": dept},
+    )
+    preview_query = urllib.parse.urlencode({"dept": dept})
+    preview = api.request(
+        "GET", f"/api/notifications/preview?{preview_query}", token=viewer_token,
+    )
+    require(server in preview["body"],
+            f"notification preview omitted Server identity: {preview['body']!r}")
+    if service and service != server:
+        require(f"(서비스: {service})" in preview["body"],
+                f"notification preview omitted taxonomy service context: {preview['body']!r}")
+
+    feed = api.request("GET", "/api/events?limit=500", token=viewer_token)
+    event = next(
+        (item for item in feed["items"] if int(item["finding_id"]) == finding_id),
+        None,
+    )
+    require(event is not None, f"global event feed omitted finding #{finding_id}")
+    require(event.get("display_identity") == server and event.get("server") == server,
+            f"global event feed did not prefer Server identity: {event}")
+    require(event.get("service") == service,
+            f"global event feed lost taxonomy service context: {event}")
+
+    export_query = urllib.parse.urlencode({
+        "cols": "port,display_identity,server,service", "q": server, "state": "",
+    })
+    csv_bytes = api.request(
+        "GET", f"/api/findings/export?{export_query}&fmt=csv", token=viewer_token,
+    )
+    csv_rows = list(csv.DictReader(io.StringIO(csv_bytes.decode("utf-8-sig"))))
+    csv_row = next((row for row in csv_rows if row["포트"] == str(port)), None)
+    require(csv_row is not None, f"CSV export omitted Server finding on port {port}")
+    require(csv_row["표시 식별"] == server and csv_row["Server"] == server,
+            f"CSV export did not preserve Server identity: {csv_row}")
+    require(csv_row["서비스"] == service,
+            f"CSV export lost taxonomy service context: {csv_row}")
+
+    xlsx_bytes = api.request(
+        "GET", f"/api/findings/export?{export_query}&fmt=xlsx", token=viewer_token,
+    )
+    try:
+        import openpyxl
+
+        workbook = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), read_only=True)
+        try:
+            rows = list(workbook.active.iter_rows(values_only=True))
+        finally:
+            workbook.close()
+    except ImportError as exc:
+        raise RuntimeE2EError("openpyxl is required for Server XLSX verification") from exc
+    headers = {value: index for index, value in enumerate(rows[0])}
+    xlsx_row = next(
+        (row for row in rows[1:] if int(row[headers["포트"]]) == port),
+        None,
+    )
+    require(xlsx_row is not None, f"XLSX export omitted Server finding on port {port}")
+    require(
+        xlsx_row[headers["표시 식별"]] == server
+        and xlsx_row[headers["Server"]] == server,
+        f"XLSX export did not preserve Server identity: {xlsx_row}",
+    )
+    require(xlsx_row[headers["서비스"]] == service,
+            f"XLSX export lost taxonomy service context: {xlsx_row}")
+
+    return {
+        "server": server,
+        "display_identity": server,
+        "service": service,
+        "search": True,
+        "notification_preview": True,
+        "event_feed": True,
+        "csv": True,
+        "xlsx": True,
     }
 
 
@@ -899,8 +1001,9 @@ def _browser_admin_checks(
     _browser_scan_detail(page, fixtures["failed_scan"], "실패", expect)
 
     xml_button = page.get_by_role("button", name="XML 가져오기(여러 개)", exact=True)
+    xml_button.focus()
     with page.expect_file_chooser(timeout=5_000) as chooser_info:
-        xml_button.click()
+        xml_button.press("Enter")
     chooser_info.value.set_files({
         "name": "runtime-empty.xml",
         "mimeType": "application/xml",
@@ -916,11 +1019,21 @@ def _browser_admin_checks(
     expect(import_status).to_be_visible(timeout=10_000)
     expect(xml_button).to_be_focused(timeout=10_000)
 
-    folder_button = page.get_by_role("button", name="폴더째 가져오기(.xml만)", exact=True)
+    folder_button = page.get_by_role("button", name="폴더째 가져오기(XML+manifest)", exact=True)
+    folder_button.focus()
     with page.expect_file_chooser(timeout=5_000) as chooser_info:
-        folder_button.click()
+        folder_button.press("Space")
     chooser_info.value.element.dispatch_event("cancel", {"bubbles": True})
     expect(folder_button).to_be_focused()
+
+    _browser_go(page, "이력")
+    history_event = page.locator(".timeline .ev").filter(
+        has_text=str(finding_port),
+    ).filter(has_text=fixtures["server_identity"]).first
+    expect(history_event).to_be_visible()
+    expected_service = fixtures["server_service"]
+    if expected_service and expected_service != fixtures["server_identity"]:
+        expect(history_event).to_contain_text(f"(서비스: {expected_service})")
 
     _browser_go(page, "발견 관리")
     drawer = _browser_open_finding(
@@ -984,6 +1097,7 @@ def _browser_admin_checks(
             fixtures["completed_scan"]["id"], fixtures["failed_scan"]["id"],
         ],
         "asset_attribution_reentry": True,
+        "history_server_identity": fixtures["server_identity"],
         "responsive": responsive,
     }
 
@@ -1198,6 +1312,9 @@ def run(args: argparse.Namespace, report: dict) -> None:
         _assert_active(selected_finding, reopened=False)
         _assert_active(outside_finding, reopened=False)
         _assert_active(udp_finding, reopened=False)
+        report["server_consumers"] = _check_server_consumers(
+            api, viewer_token, auditor_token, selected_finding,
+        )
         api.request("GET", "/api/findings?state=open", token=viewer_token)
         api.request(
             "POST", "/api/findings/rescan-command", token=viewer_token,
@@ -1338,6 +1455,8 @@ def run(args: argparse.Namespace, report: dict) -> None:
             fixtures = {
                 "completed_scan": {"id": scan_id, "name": completed_scan["name"]},
                 "failed_scan": failed_scan,
+                "server_identity": selected_finding["server"],
+                "server_service": selected_finding["service"],
                 "asset": {
                     "old_id": int(old_asset["id"]),
                     "new_id": int(new_asset["id"]),

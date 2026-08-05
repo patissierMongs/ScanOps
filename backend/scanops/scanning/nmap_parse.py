@@ -63,14 +63,21 @@ def extract_server(nse: list[dict] | None) -> str:
 
 def server_observed(nse: list[dict] | None) -> bool:
     """Server 값을 확인할 수 있는 NSE 출처가 이번 스캔 결과에 있었는지."""
+    fingerprint_scripts: list[dict] = []
     for script in nse or []:
         if not isinstance(script, dict):
             continue
         script_id = str(script.get("id") or "").lower()
-        if (not _nse_failed(script.get("output"))
-                and any(source in script_id for source, _regex in _SERVER_SOURCES)):
+        if _nse_failed(script.get("output")):
+            continue
+        if "http-server-header" in script_id or "http-headers" in script_id:
+            # A successful direct header probe is authoritative even when the header is absent.
             return True
-    return False
+        if "fingerprint-strings" in script_id:
+            # Fingerprints contain many unrelated successful responses. They only establish a
+            # Server observation when an actual header line can be extracted.
+            fingerprint_scripts.append(script)
+    return bool(extract_server(fingerprint_scripts))
 
 
 def _identification(svc) -> str:

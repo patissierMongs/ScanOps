@@ -51,6 +51,59 @@ def test_display_identity_priority():
     assert display_identity(service="ssh") == "ssh"
 
 
+def test_findings_search_matches_full_product_version_display_identity(client):
+    headers = _auth(client)
+    _import_sample(client, headers)
+    _update_finding(
+        9000, server="", product="OpenSSL", version="3.0", service="ssl",
+    )
+
+    response = client.get(
+        "/api/findings", headers=headers, params={"q": "OpenSSL 3.0"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert [row["port"] for row in response.json()] == [9000]
+    assert response.json()[0]["display_identity"] == "OpenSSL 3.0"
+
+    csv_response = client.get(
+        "/api/findings/export", headers=headers,
+        params={"q": "OpenSSL 3.0", "fmt": "csv", "cols": "port,display_identity"},
+    )
+    assert csv_response.status_code == 200, csv_response.text
+    csv_rows = list(csv.DictReader(io.StringIO(csv_response.content.decode("utf-8-sig"))))
+    assert csv_rows == [{"포트": "9000", "표시 식별": "OpenSSL 3.0"}]
+
+    xlsx_response = client.get(
+        "/api/findings/export", headers=headers,
+        params={"q": "OpenSSL 3.0", "fmt": "xlsx", "cols": "port,display_identity"},
+    )
+    assert xlsx_response.status_code == 200, xlsx_response.text
+    ws = openpyxl.load_workbook(io.BytesIO(xlsx_response.content)).active
+    assert list(ws.values) == [("포트", "표시 식별"), (9000, "OpenSSL 3.0")]
+
+
+def test_global_event_feed_uses_display_identity_and_keeps_service_context(client):
+    headers = _auth(client)
+    _import_sample(client, headers)
+    _update_finding(9000, server="uvicorn", service="apple-iphoto", product="", version="")
+    finding = next(
+        row for row in client.get("/api/findings", headers=headers).json()
+        if row["port"] == 9000
+    )
+    changed = client.patch(
+        f"/api/findings/{finding['id']}", headers=headers, json={"status": "처리중"},
+    )
+    assert changed.status_code == 200, changed.text
+
+    feed = client.get("/api/events", headers=headers).json()
+    item = next(row for row in feed["items"] if row["finding_id"] == finding["id"])
+
+    assert item["display_identity"] == "uvicorn"
+    assert item["server"] == "uvicorn"
+    assert item["service"] == "apple-iphoto"
+
+
 def test_default_csv_and_selected_xlsx_export_server_identity(client):
     headers = _auth(client)
     _import_sample(client, headers)

@@ -6,6 +6,7 @@ POST /{id}/resume 로 이어가기를 호출한다. (status: running/done/failed
 """
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import logging
@@ -64,6 +65,8 @@ AUTO_STAGE_LABELS = {
     "udp_identify": "주요 UDP 서비스 식별",
 }
 STAGE_FILE_RE = re.compile(r"^(?P<base>.+)\.(?P<stage>tcp_discovery|tcp_identify|udp_identify)\.xml$", re.I)
+IMPORT_CONTRACT_SCHEMA = 1
+IMPORT_CONTRACT_MAX_HOSTS = 65536
 
 
 def _basename(scan_id: int) -> Path:
@@ -490,9 +493,21 @@ def _write_merged_xml(db: Session, xml_path: Path, findings: list[dict], scanned
 
 def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hosts: set[str],
                    tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set,
-                   scan_date: datetime | None = None, raw_xml_path: Path | None = None) -> dict:
+                   scan_date: datetime | None = None, raw_xml_path: Path | None = None,
+                   closure_hosts: set[str] | None = None,
+                   closure_scope_keys: set[str] | None = None) -> dict:
     enriched = taxonomy.enrich_all(db, findings)
-    scope_keys = _auto_scope_keys(db, scanned_hosts, enriched, tcp_scope, udp_scope)
+    scope_keys = (
+        closure_scope_keys
+        if closure_scope_keys is not None
+        else _auto_scope_keys(
+            db,
+            scanned_hosts if closure_hosts is None else closure_hosts,
+            enriched,
+            tcp_scope,
+            udp_scope,
+        )
+    )
     if raw_xml_path is not None:
         _write_merged_xml(db, raw_xml_path, enriched, scanned_hosts, scope_keys, scan_date)
         scan.raw_xml_path = str(raw_xml_path)
@@ -1081,6 +1096,239 @@ class _InvalidImportXML(ValueError):
     pass
 
 
+def _targets_fingerprint(hosts: list[str]) -> str:
+    digest = hashlib.sha256()
+    for host in hosts:
+        encoded = host.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _contract_int(obj: dict, key: str, minimum: int = 0, maximum: int | None = None) -> int:
+    value = obj.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise _InvalidImportXML(f"manifest import_contract.{key} 값이 올바르지 않습니다.")
+    if maximum is not None and value > maximum:
+        raise _InvalidImportXML(f"manifest import_contract.{key} 값이 너무 큽니다.")
+    return value
+
+
+def _strict_services(value: str) -> set[int]:
+    ports: set[int] = set()
+    if not isinstance(value, str) or not value.strip():
+        raise _InvalidImportXML("manifest에 연결된 XML scaninfo services가 비어 있습니다.")
+    for raw in value.split(","):
+        token = raw.strip()
+        if not token:
+            raise _InvalidImportXML("manifest에 연결된 XML scaninfo services가 올바르지 않습니다.")
+        if "-" in token:
+            parts = token.split("-")
+            if len(parts) != 2 or not all(part.isdigit() for part in parts):
+                raise _InvalidImportXML("manifest에 연결된 XML 포트 범위가 올바르지 않습니다.")
+            start, end = (int(part) for part in parts)
+            if not (1 <= start <= end <= 65535):
+                raise _InvalidImportXML("manifest에 연결된 XML 포트 범위가 올바르지 않습니다.")
+            ports.update(range(start, end + 1))
+        else:
+            if not token.isdigit() or not 1 <= int(token) <= 65535:
+                raise _InvalidImportXML("manifest에 연결된 XML 포트가 올바르지 않습니다.")
+            ports.add(int(token))
+    return ports
+
+
+def _validate_contract_xml(xml_bytes: bytes, stage_id: str, target_count: int) -> None:
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        raise _InvalidImportXML("manifest에 연결된 XML 형식이 올바르지 않습니다.") from None
+    if root.tag != "nmaprun":
+        raise _InvalidImportXML("manifest에 연결된 파일은 Nmap XML이 아닙니다.")
+    finished = root.findall("./runstats/finished")
+    hosts = root.findall("./runstats/hosts")
+    if len(finished) != 1 or len(hosts) != 1 or finished[0].get("exit") != "success":
+        raise _InvalidImportXML("manifest의 닫힘 권한에는 성공한 Nmap runstats가 필요합니다.")
+    try:
+        up = int(hosts[0].get("up", ""))
+        down = int(hosts[0].get("down", ""))
+        total = int(hosts[0].get("total", ""))
+    except (TypeError, ValueError):
+        raise _InvalidImportXML("manifest에 연결된 Nmap host 집계가 올바르지 않습니다.") from None
+    if up < 0 or down < 0 or up + down != total or total != target_count:
+        raise _InvalidImportXML("manifest target 수와 Nmap host 집계가 일치하지 않습니다.")
+
+    protocols: set[str] = set()
+    for info in root.findall("./scaninfo"):
+        proto = (info.get("protocol") or "").lower()
+        if proto not in {"tcp", "udp"}:
+            raise _InvalidImportXML("manifest에 연결된 XML protocol이 올바르지 않습니다.")
+        ports = _strict_services(info.get("services") or "")
+        try:
+            numservices = int(info.get("numservices", ""))
+        except (TypeError, ValueError):
+            raise _InvalidImportXML("manifest에 연결된 XML numservices가 올바르지 않습니다.") from None
+        if numservices != len(ports):
+            raise _InvalidImportXML("manifest에 연결된 XML 포트 수가 일치하지 않습니다.")
+        protocols.add(proto)
+    if not protocols:
+        raise _InvalidImportXML("manifest의 닫힘 권한에는 scaninfo 포트 범위가 필요합니다.")
+    if stage_id == "tcp_discovery" and protocols != {"tcp"}:
+        raise _InvalidImportXML("TCP 발견 manifest와 XML protocol이 일치하지 않습니다.")
+    if stage_id == "udp_identify" and protocols != {"udp"}:
+        raise _InvalidImportXML("UDP 식별 manifest와 XML protocol이 일치하지 않습니다.")
+
+
+def _canonical_contract_targets(value, field: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(host, str) for host in value):
+        raise _InvalidImportXML(f"manifest {field}가 IPv4 목록이 아닙니다.")
+    result: list[str] = []
+    seen: set[str] = set()
+    for host in value:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            raise _InvalidImportXML(f"manifest {field}에는 canonical IPv4만 사용할 수 있습니다.") from None
+        if not isinstance(address, ipaddress.IPv4Address) or str(address) != host or host in seen:
+            raise _InvalidImportXML(f"manifest {field}에는 중복 없는 canonical IPv4만 사용할 수 있습니다.")
+        seen.add(host)
+        result.append(host)
+    return result
+
+
+def _safe_contract_basename(value) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or ":" in value
+        or Path(value).name != value
+    ):
+        raise _InvalidImportXML("manifest XML 파일명은 안전한 basename이어야 합니다.")
+    return value
+
+
+def _validate_import_manifest(manifest_bytes: bytes, payloads: list[dict]) -> dict[str, set[str]] | None:
+    """Validate a standalone sidecar fully before the first DB or artifact side effect."""
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise _InvalidImportXML("manifest JSON 형식이 올바르지 않습니다.") from None
+    if not isinstance(manifest, dict):
+        raise _InvalidImportXML("manifest JSON 객체가 필요합니다.")
+    contract = manifest.get("import_contract")
+    if contract is None:
+        return None  # old standalone manifests retain observed-host import semantics
+    if manifest.get("tool") != "scanops_scanner" or not isinstance(contract, dict):
+        raise _InvalidImportXML("인식된 manifest import_contract 형식이 올바르지 않습니다.")
+    if contract.get("schema") != IMPORT_CONTRACT_SCHEMA:
+        raise _InvalidImportXML("지원하지 않는 manifest import_contract schema입니다.")
+
+    raw_targets = contract.get("raw_targets")
+    if not isinstance(raw_targets, list) or not raw_targets or not all(isinstance(t, str) for t in raw_targets):
+        raise _InvalidImportXML("manifest raw_targets가 올바르지 않습니다.")
+    try:
+        nmap_runner.validate_targets(raw_targets)
+        max_hosts = _contract_int(contract, "max_hosts", 1, IMPORT_CONTRACT_MAX_HOSTS)
+        expanded = list(dict.fromkeys(chunker.expand_targets(raw_targets, max_hosts)))
+        # Authorization is evaluated against the original requested expansion, before excludes.
+        scope.check_scope(expanded)
+        excludes = scope.parse_excludes(contract.get("exclude"))
+    except ValueError as exc:
+        raise _InvalidImportXML(f"manifest target/exclude 검증 실패: {exc}") from None
+    if excludes != contract.get("exclude"):
+        raise _InvalidImportXML("manifest exclude가 canonical 목록이 아닙니다.")
+    effective = scope.apply_excludes(expanded, excludes)
+    if not effective:
+        raise _InvalidImportXML("manifest exclude 적용 후 대상이 남지 않습니다.")
+    if _contract_int(contract, "requested_host_count") != len(expanded):
+        raise _InvalidImportXML("manifest 요청 host 수가 target과 일치하지 않습니다.")
+    if _contract_int(contract, "effective_host_count") != len(effective):
+        raise _InvalidImportXML("manifest 유효 host 수가 target/exclude와 일치하지 않습니다.")
+    if contract.get("effective_targets_sha256") != _targets_fingerprint(effective):
+        raise _InvalidImportXML("manifest 유효 target 지문이 일치하지 않습니다.")
+    batch_size = _contract_int(contract, "batch_size", 0, IMPORT_CONTRACT_MAX_HOSTS)
+    batches = chunker.make_batches(effective, batch_size) if batch_size > 0 else [effective]
+    host_timeout = contract.get("host_timeout")
+    if not isinstance(host_timeout, str):
+        raise _InvalidImportXML("manifest host_timeout 형식이 올바르지 않습니다.")
+
+    by_basename: dict[str, dict] = {}
+    for item in payloads:
+        basename = Path(item["name"].replace("\\", "/")).name
+        if basename in by_basename:
+            raise _InvalidImportXML("manifest import에 중복 XML basename이 있습니다.")
+        _prepare_import_xml(item["bytes"], item["name"])
+        by_basename[basename] = item
+
+    units = contract.get("units")
+    if not isinstance(units, list):
+        raise _InvalidImportXML("manifest units 목록이 올바르지 않습니다.")
+    authorities: dict[str, set[str]] = {}
+    for unit in units:
+        if not isinstance(unit, dict):
+            raise _InvalidImportXML("manifest unit 형식이 올바르지 않습니다.")
+        basename = _safe_contract_basename(unit.get("xml_basename"))
+        if basename in authorities:
+            raise _InvalidImportXML("manifest에 중복 XML unit이 있습니다.")
+        item = by_basename.get(basename)
+        if item is None:
+            raise _InvalidImportXML("manifest가 참조하는 XML 파일이 업로드되지 않았습니다.")
+        if _contract_int(unit, "xml_size") != len(item["bytes"]):
+            raise _InvalidImportXML("manifest XML 크기가 업로드와 일치하지 않습니다.")
+        digest = unit.get("xml_sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise _InvalidImportXML("manifest XML SHA-256 형식이 올바르지 않습니다.")
+        if hashlib.sha256(item["bytes"]).hexdigest() != digest:
+            raise _InvalidImportXML("manifest XML SHA-256이 업로드와 일치하지 않습니다.")
+        try:
+            root = ET.fromstring(item["bytes"])
+        except ET.ParseError:
+            raise _InvalidImportXML("manifest에 연결된 XML 형식이 올바르지 않습니다.") from None
+        if root.tag != "nmaprun":
+            raise _InvalidImportXML("manifest에 연결된 파일은 Nmap XML이 아닙니다.")
+
+        batch_index = _contract_int(unit, "batch_index", 0)
+        if batch_index >= len(batches):
+            raise _InvalidImportXML("manifest unit batch_index가 범위를 벗어났습니다.")
+        stage_id = unit.get("stage_id")
+        if stage_id not in {"single", "tcp_discovery", "tcp_identify", "udp_identify"}:
+            raise _InvalidImportXML("manifest unit stage_id가 올바르지 않습니다.")
+        file_stage = (_stage_file_info(basename) or ("", "single"))[1]
+        if file_stage != stage_id:
+            raise _InvalidImportXML("manifest unit stage와 XML 파일명이 일치하지 않습니다.")
+        authoritative = unit.get("authoritative")
+        if not isinstance(authoritative, bool):
+            raise _InvalidImportXML("manifest unit authoritative 값이 올바르지 않습니다.")
+        closure_targets = _canonical_contract_targets(unit.get("closure_targets"), "closure_targets")
+        if not authoritative:
+            if closure_targets:
+                raise _InvalidImportXML("관측 전용 manifest unit은 closure_targets를 가질 수 없습니다.")
+            authorities[basename] = set()
+            continue
+        if host_timeout:
+            raise _InvalidImportXML("host-timeout 실행은 미관측 닫힘 권한을 가질 수 없습니다.")
+        if stage_id not in {"single", "tcp_discovery", "udp_identify"}:
+            raise _InvalidImportXML("TCP 식별 unit은 미관측 닫힘 권한을 가질 수 없습니다.")
+        batch = batches[batch_index]
+        if stage_id in {"single", "tcp_discovery"}:
+            if closure_targets != batch:
+                raise _InvalidImportXML("manifest unit target이 유효 batch와 일치하지 않습니다.")
+        elif not closure_targets or not set(closure_targets).issubset(set(batch)):
+            raise _InvalidImportXML("UDP manifest unit target이 유효 batch의 subset이 아닙니다.")
+        try:
+            scope.check_scope(closure_targets)
+        except ValueError as exc:
+            raise _InvalidImportXML(f"manifest 닫힘 target이 서버 scope 밖입니다: {exc}") from None
+        _validate_contract_xml(item["bytes"], stage_id, len(closure_targets))
+        authorities[basename] = set(closure_targets)
+
+    if set(authorities) != set(by_basename):
+        raise _InvalidImportXML("업로드 XML 목록과 manifest unit 목록이 일치하지 않습니다.")
+    return authorities
+
+
 def _prepare_import_xml(xml_bytes: bytes, filename: str | None = None) -> tuple:
     """Parse every XML-derived value before creating a ScanRun or writing a file."""
     try:
@@ -1137,7 +1385,13 @@ def _fail_import(db: Session, scan_id: int, artifact_paths: list[Path]) -> None:
             )
 
 
-def _import_single_xml(db: Session, user: User, name: str, xml_bytes: bytes) -> dict:
+def _import_single_xml(
+    db: Session,
+    user: User,
+    name: str,
+    xml_bytes: bytes,
+    closure_hosts: set[str] | None = None,
+) -> dict:
     # Full parsing precedes every persistent side effect. A malformed upload therefore
     # cannot leave a ScanRun row, raw XML file, finding mutation, or success audit record.
     sdate, findings, scanned_hosts, tcp_scope, udp_scope = _prepare_import_xml(xml_bytes, name)
@@ -1168,6 +1422,7 @@ def _import_single_xml(db: Session, user: User, name: str, xml_bytes: bytes) -> 
             udp_scope,
             scan_date=sdate,
             raw_xml_path=xml_path if stage == "tcp_discovery" else None,
+            closure_hosts=closure_hosts,
         )
     except Exception:
         _fail_import(db, scan.id, artifact_paths)
@@ -1203,6 +1458,7 @@ def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, d
     ]
     try:
         scanned_hosts: set[str] = set()
+        closure_scope_keys: set[str] = set()
         tcp_scope: set[int] | None | set = set()
         udp_scope: set[int] | None | set = set()
         tcp_discovery_findings: list[dict] = []
@@ -1217,17 +1473,41 @@ def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, d
             scanned_hosts |= hosts
             tcp_scope = stage_tcp_scope
             tcp_discovery_findings = findings
+            item = stages["tcp_discovery"]
+            closure_scope_keys |= _auto_scope_keys(
+                db,
+                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
+                findings,
+                stage_tcp_scope,
+                set(),
+            )
         if values := prepared.get("tcp_identify"):
             _date, findings, hosts, stage_tcp_scope, _stage_udp_scope = values
             scanned_hosts |= hosts
             if tcp_scope == set():
                 tcp_scope = stage_tcp_scope
             tcp_identified_findings = findings
+            item = stages["tcp_identify"]
+            closure_scope_keys |= _auto_scope_keys(
+                db,
+                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
+                findings,
+                stage_tcp_scope,
+                set(),
+            )
         if values := prepared.get("udp_identify"):
             _date, findings, hosts, _stage_tcp_scope, stage_udp_scope = values
             scanned_hosts |= hosts
             udp_scope = stage_udp_scope
             udp_findings = findings
+            item = stages["udp_identify"]
+            closure_scope_keys |= _auto_scope_keys(
+                db,
+                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
+                findings,
+                set(),
+                stage_udp_scope,
+            )
 
         tcp_findings = _prefer_identified(tcp_identified_findings, tcp_discovery_findings)
         findings = [*tcp_findings, *udp_findings]
@@ -1243,6 +1523,7 @@ def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, d
             udp_scope,
             scan_date=sdate,
             raw_xml_path=merged_path,
+            closure_scope_keys=closure_scope_keys,
         )
     except Exception:
         _fail_import(db, scan.id, artifact_paths)
@@ -1304,10 +1585,12 @@ async def import_xml_bundle(
     db: Session = Depends(get_db),
 ):
     payloads = []
+    manifests = []
     total_bytes = 0
     for f in files:
         name = f.filename or "scan.xml"
-        if not name.lower().endswith(".xml"):
+        lower_name = name.lower()
+        if not (lower_name.endswith(".xml") or lower_name.endswith(".manifest.json")):
             continue
         data = await read_limited(f, _settings.upload_max_bytes)
         total_bytes += len(data)
@@ -1316,9 +1599,26 @@ async def import_xml_bundle(
                 status_code=413,
                 detail=f"업로드 묶음이 허용 크기({_settings.upload_bundle_max_bytes} bytes)를 초과했습니다.",
             )
-        payloads.append({"name": name, "bytes": data})
+        if lower_name.endswith(".manifest.json"):
+            manifests.append({"name": name, "bytes": data})
+        else:
+            payloads.append({"name": name, "bytes": data})
     if not payloads:
         raise HTTPException(status_code=400, detail="가져올 XML 파일이 없습니다.")
+    if len(manifests) > 1:
+        raise HTTPException(status_code=400, detail="standalone manifest는 한 번에 하나만 가져올 수 있습니다.")
+
+    authorities = None
+    if manifests:
+        try:
+            authorities = _validate_import_manifest(manifests[0]["bytes"], payloads)
+        except _InvalidImportXML as exc:
+            record(db, user, "SCAN_IMPORT", target=manifests[0]["name"], detail="실패", ok=False)
+            raise HTTPException(status_code=400, detail=f"가져오기 계약 오류: {exc}")
+    if authorities is not None:
+        for item in payloads:
+            basename = Path(item["name"].replace("\\", "/")).name
+            item["closure_hosts"] = authorities[basename]
 
     grouped: dict[str, dict[str, dict]] = {}
     units: list[dict] = []
@@ -1345,7 +1645,12 @@ async def import_xml_bundle(
                 result = _import_stage_bundle(db, user, unit["base"], unit["stages"])
             else:
                 item = unit["item"]
-                result = _import_single_xml(db, user, item["name"], item["bytes"])
+                if "closure_hosts" in item:
+                    result = _import_single_xml(
+                        db, user, item["name"], item["bytes"], item["closure_hosts"],
+                    )
+                else:
+                    result = _import_single_xml(db, user, item["name"], item["bytes"])
             imported.append(result)
             _add_counts(total, result["counts"])
         except _InvalidImportXML as e:
@@ -1364,6 +1669,7 @@ async def import_xml_bundle(
         "counts": total,
         "scans": imported,
         "errors": failed,
+        "closure_mode": "manifest" if authorities is not None else "observed-host",
     }
 
 

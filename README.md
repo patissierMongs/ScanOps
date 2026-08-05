@@ -39,8 +39,9 @@ packaging\start.bat                                             # 서버 실행 
 
 ## 단독 스캐너
 스캔 서버에서 ScanOps 전체를 실행할 필요가 없으면 `scanner/scanops_scanner.py`만 복사해서 사용한다.
-Python 3.8+ 와 nmap 만 있으면 Windows/Linux/macOS에서 동작하며, 생성된 `.xml`을 ScanOps의
-`스캔 > XML 가져오기`로 업로드하면 된다.
+Python 3.8+ 와 nmap 만 있으면 Windows/Linux/macOS에서 동작한다. 생성 폴더의 `.xml`과
+`*.manifest.json`을 ScanOps의 `스캔 > 폴더째 가져오기`로 함께 업로드하면 제외 대상과 성공한
+실행 단위의 미관측 범위까지 검증해 반영한다. XML만 올리는 구형 경로는 관측된 호스트만 닫힘 판정한다.
 ```powershell
 python scanner\scanops_scanner_gui.py
 python scanner\scanops_scanner.py 10.0.0.10 --ports 22,80,443 --name branch-a
@@ -78,7 +79,9 @@ python scanner\scanops_scanner.py --resume scanops_scans\weekly.state.json
   인입하지 않는다. 정상 완료된 구조화 실행 단위(단계 스캔 전체 또는 레거시의 완료 배치)는
   **제외 후 유효 타깃 × 요청한 port/proto 범위**에서 미관측된 기존 finding도 닫는다. 제외한 타깃은
   판정 범위 밖이라 열린 상태를 유지하고, 선택 재스캔은 선택한 키만 닫힘 후보로 삼는다. 실패·중지된
-  실행 단위의 결과는 닫힘에 쓰지 않으며, 그 전에 완료·인입된 레거시 배치의 판정은 유지된다.
+  실행 단위의 결과는 닫힘에 쓰지 않으며, 그 전에 완료·인입된 레거시 배치의 판정은 유지된다. 단독
+  스캐너는 원본 XML을 바꾸지 않고 versioned manifest의 파일 크기·SHA-256·실제 target을 검증해 같은
+  계약을 전달한다. TCP 식별 단계와 `--host-timeout` 실행은 관측 보강만 하며 미관측 닫힘 권한은 없다.
 
 ## 테스트
 ```powershell

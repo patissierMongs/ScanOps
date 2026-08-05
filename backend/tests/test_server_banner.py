@@ -75,6 +75,17 @@ def test_fingerprint_server_requires_a_real_header_line(output):
     assert extract_server([{"id": "fingerprint-strings", "output": output}]) == ""
 
 
+def test_unrelated_fingerprint_does_not_turn_failed_server_probe_into_observed_absence():
+    nse = [
+        {"id": "http-server-header", "output": "ERROR: Script execution failed"},
+        {"id": "http-headers", "output": "ERROR: Header request failed"},
+        {"id": "fingerprint-strings", "output": "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"},
+    ]
+
+    assert extract_server(nse) == ""
+    assert server_observed(nse) is False
+
+
 def _server_xml(server: str, service: str = "apple-iphoto") -> bytes:
     return f"""<?xml version="1.0"?>
 <nmaprun start="1893456000">
@@ -184,6 +195,31 @@ def test_ingest_records_service_version_and_server_changes_from_same_scan():
         db.close()
 
 
+def test_reopen_records_server_change_independently_from_reopen_event():
+    db = SessionLocal()
+    try:
+        first = parse_xml(_server_xml("uvicorn"))[0]
+        ingest(db, _scan(db, "server-before-close"), [first], {first["host_ip"]})
+        ingest(db, _scan(db, "server-closed"), [], {first["host_ip"]})
+
+        changed = dict(first, server="gunicorn")
+        reopen_scan_id = _scan(db, "server-reopened")
+        counts = ingest(db, reopen_scan_id, [changed], {first["host_ip"]})
+
+        row = db.query(Finding).filter_by(port=8770).one()
+        event_types = {
+            event.type for event in db.query(FindingEvent).filter_by(
+                finding_id=row.id, scan_id=reopen_scan_id,
+            )
+        }
+        assert row.reopened == 1
+        assert row.server == "gunicorn"
+        assert counts["reopened"] == counts["server_changed"] == 1
+        assert {"REOPENED", "SERVER_CHANGED"} <= event_types
+    finally:
+        db.close()
+
+
 def test_ingest_preserves_unobserved_server_but_clears_observed_absence():
     db = SessionLocal()
     try:
@@ -202,6 +238,26 @@ def test_ingest_preserves_unobserved_server_but_clears_observed_absence():
         assert failed_probe["server"] == ""
         assert failed_probe["server_observed"] is False
         counts = ingest(db, _scan(db, "server-probe-failed"), [failed_probe], {first["host_ip"]})
+        db.refresh(row)
+        assert row.server == "uvicorn"
+        assert counts["server_changed"] == 0
+
+        unrelated_fingerprint = dict(
+            first,
+            server="",
+            nse_json=[
+                {"id": "http-server-header", "output": "ERROR: Script execution failed"},
+                {"id": "fingerprint-strings", "output": "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"},
+            ],
+        )
+        unrelated_fingerprint["server_observed"] = server_observed(
+            unrelated_fingerprint["nse_json"]
+        )
+        assert unrelated_fingerprint["server_observed"] is False
+        counts = ingest(
+            db, _scan(db, "server-unrelated-fingerprint"),
+            [unrelated_fingerprint], {first["host_ip"]},
+        )
         db.refresh(row)
         assert row.server == "uvicorn"
         assert counts["server_changed"] == 0

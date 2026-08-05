@@ -1,4 +1,5 @@
 """Phase C(API) 검증 — XML 가져오기 → 발견 목록 → 운영상태 변경 + 이력."""
+import hashlib
 import json
 
 import pytest
@@ -1711,3 +1712,252 @@ def test_import_malformed_xml_returns_400_no_orphan_scan(client):
     good = _scan_xml(1700000000, '<scaninfo type="syn" protocol="tcp" services="22"/>', _port("tcp", 22))
     assert client.post("/api/scans/import", headers=h,
                        files={"file": ("good.xml", good, "text/xml")}).status_code == 200
+
+
+def _targets_fingerprint(hosts: list[str]) -> str:
+    digest = hashlib.sha256()
+    for host in hosts:
+        encoded = host.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _standalone_empty_xml(start: int, proto: str, services: str, total: int) -> bytes:
+    scan_type = "udp" if proto == "udp" else "syn"
+    return f"""<?xml version="1.0"?>
+<nmaprun start="{start}">
+  <scaninfo type="{scan_type}" protocol="{proto}" numservices="1" services="{services}"/>
+  <runstats>
+    <finished time="{start + 1}" exit="success"/>
+    <hosts up="0" down="{total}" total="{total}"/>
+  </runstats>
+</nmaprun>
+""".encode()
+
+
+def _standalone_manifest(
+    xml_name: str,
+    xml_bytes: bytes,
+    *,
+    raw_targets: list[str],
+    exclude: list[str],
+    closure_targets: list[str],
+    stage_id: str = "tcp_discovery",
+    authoritative: bool = True,
+) -> bytes:
+    effective = [host for host in raw_targets if host not in exclude]
+    contract = {
+        "schema": 1,
+        "raw_targets": raw_targets,
+        "exclude": exclude,
+        "max_hosts": 65536,
+        "requested_host_count": len(raw_targets),
+        "effective_host_count": len(effective),
+        "effective_targets_sha256": _targets_fingerprint(effective),
+        "batch_size": 0,
+        "host_timeout": "",
+        "units": [{
+            "batch_index": 0,
+            "stage_id": stage_id,
+            "authoritative": authoritative,
+            "closure_targets": closure_targets,
+            "xml_basename": xml_name,
+            "xml_size": len(xml_bytes),
+            "xml_sha256": hashlib.sha256(xml_bytes).hexdigest(),
+        }],
+    }
+    return json.dumps({"tool": "scanops_scanner", "import_contract": contract}).encode()
+
+
+def test_standalone_manifest_closes_included_unobserved_but_preserves_excluded(client):
+    """성공한 standalone 실행 범위는 host가 XML에 없어도 닫되 exclude는 범위 밖에 둔다."""
+    h = _auth(client)
+    port = 54443
+    included, excluded = "127.0.0.1", "127.0.0.2"
+    for index, host in enumerate((included, excluded)):
+        initial = _scan_xml(
+            1893456000 + index,
+            f'<scaninfo type="syn" protocol="tcp" numservices="1" services="{port}"/>',
+            _port("tcp", port, service="https"),
+            host=host,
+        )
+        response = client.post(
+            "/api/scans/import", headers=h,
+            files={"file": (f"initial-{index}.xml", initial, "text/xml")},
+        )
+        assert response.status_code == 200, response.text
+
+    name = "offline.tcp_discovery.xml"
+    empty = _standalone_empty_xml(1893456100, "tcp", str(port), total=1)
+    manifest = _standalone_manifest(
+        name,
+        empty,
+        raw_targets=[included, excluded],
+        exclude=[excluded],
+        closure_targets=[included],
+    )
+    response = client.post("/api/scans/import-bundle", headers=h, files=[
+        ("files", (name, empty, "text/xml")),
+        ("files", ("offline.manifest.json", manifest, "application/json")),
+    ])
+
+    assert response.status_code == 200, response.text
+    assert response.json()["counts"]["closed"] == 1
+    rows = {
+        row["host_ip"]: row
+        for row in client.get("/api/findings?state=", headers=h).json()
+        if row["port"] == port and row["proto"] == "tcp"
+    }
+    assert rows[included]["state"] == "closed"
+    assert rows[excluded]["state"] == "open"
+
+
+@pytest.mark.parametrize("break_contract", ["schema", "hash", "exclude", "count"])
+def test_invalid_standalone_manifest_is_atomic(client, break_contract):
+    """인식된 strong 계약은 손상 시 legacy로 강등하지 않고 어떤 부작용도 없이 거절한다."""
+    from scanops.db import SessionLocal
+    from scanops.models import Finding, ScanRun
+
+    h = _auth(client)
+    host, excluded, port = "127.0.0.1", "127.0.0.2", 54444
+    initial = _scan_xml(
+        1893456000,
+        f'<scaninfo type="syn" protocol="tcp" numservices="1" services="{port}"/>',
+        _port("tcp", port),
+        host=host,
+    )
+    assert client.post(
+        "/api/scans/import", headers=h,
+        files={"file": ("initial.xml", initial, "text/xml")},
+    ).status_code == 200
+    before_scans = len(client.get("/api/scans", headers=h).json())
+
+    name = "bad.tcp_discovery.xml"
+    empty = _standalone_empty_xml(1893456100, "tcp", str(port), total=1)
+    manifest = json.loads(_standalone_manifest(
+        name,
+        empty,
+        raw_targets=[host, excluded],
+        exclude=[excluded],
+        closure_targets=[host],
+    ))
+    contract = manifest["import_contract"]
+    if break_contract == "schema":
+        contract["schema"] = 99
+    elif break_contract == "hash":
+        contract["units"][0]["xml_sha256"] = "0" * 64
+    elif break_contract == "exclude":
+        contract["units"][0]["closure_targets"] = [excluded]
+    else:
+        contract["effective_host_count"] = 2
+
+    response = client.post("/api/scans/import-bundle", headers=h, files=[
+        ("files", (name, empty, "text/xml")),
+        ("files", ("bad.manifest.json", json.dumps(manifest).encode(), "application/json")),
+    ])
+    assert response.status_code == 400, response.text
+    assert len(client.get("/api/scans", headers=h).json()) == before_scans
+    db = SessionLocal()
+    try:
+        row = db.query(Finding).filter_by(finding_key=f"{host}|{port}|tcp").one()
+        assert row.state == "open"
+        assert db.query(ScanRun).count() == before_scans
+    finally:
+        db.close()
+
+
+def test_strong_bundle_uses_protocol_specific_closure_targets(client):
+    """TCP 전체 batch 권한이 실제 UDP subset까지 교차 확장되어서는 안 된다."""
+    h = _auth(client)
+    first, second = "127.0.0.1", "127.0.0.2"
+    tcp_port, udp_port = 54445, 54446
+    for index, host in enumerate((first, second)):
+        initial = _scan_xml(
+            1893456000 + index,
+            '<scaninfo type="syn" protocol="tcp" numservices="1" '
+            f'services="{tcp_port}"/><scaninfo type="udp" protocol="udp" '
+            f'numservices="1" services="{udp_port}"/>',
+            _port("tcp", tcp_port) + _port("udp", udp_port),
+            host=host,
+        )
+        assert client.post(
+            "/api/scans/import", headers=h,
+            files={"file": (f"seed-{index}.xml", initial, "text/xml")},
+        ).status_code == 200
+
+    tcp_name = "unit.tcp_discovery.xml"
+    udp_name = "unit.udp_identify.xml"
+    tcp_xml = _standalone_empty_xml(1893456100, "tcp", str(tcp_port), total=2)
+    udp_xml = _standalone_empty_xml(1893456101, "udp", str(udp_port), total=1)
+    manifest = json.loads(_standalone_manifest(
+        tcp_name,
+        tcp_xml,
+        raw_targets=[first, second],
+        exclude=[],
+        closure_targets=[first, second],
+    ))
+    manifest["import_contract"]["units"].append({
+        "batch_index": 0,
+        "stage_id": "udp_identify",
+        "authoritative": True,
+        "closure_targets": [first],
+        "xml_basename": udp_name,
+        "xml_size": len(udp_xml),
+        "xml_sha256": hashlib.sha256(udp_xml).hexdigest(),
+    })
+    response = client.post("/api/scans/import-bundle", headers=h, files=[
+        ("files", (tcp_name, tcp_xml, "text/xml")),
+        ("files", (udp_name, udp_xml, "text/xml")),
+        ("files", ("unit.manifest.json", json.dumps(manifest).encode(), "application/json")),
+    ])
+
+    assert response.status_code == 200, response.text
+    rows = {
+        (row["host_ip"], row["proto"], row["port"]): row["state"]
+        for row in client.get("/api/findings?state=", headers=h).json()
+    }
+    assert rows[(first, "tcp", tcp_port)] == "closed"
+    assert rows[(second, "tcp", tcp_port)] == "closed"
+    assert rows[(first, "udp", udp_port)] == "closed"
+    assert rows[(second, "udp", udp_port)] == "open"
+
+
+def test_observation_only_manifest_unit_cannot_close_missing_finding(client):
+    """TCP identify/실패 unit은 XML이 성공 형태여도 manifest 권한이 false면 가산만 한다."""
+    h = _auth(client)
+    host, port = "127.0.0.1", 54447
+    initial = _scan_xml(
+        1893456000,
+        f'<scaninfo type="syn" protocol="tcp" numservices="1" services="{port}"/>',
+        _port("tcp", port),
+        host=host,
+    )
+    assert client.post(
+        "/api/scans/import", headers=h,
+        files={"file": ("seed.xml", initial, "text/xml")},
+    ).status_code == 200
+
+    name = "observe.tcp_identify.xml"
+    empty = _standalone_empty_xml(1893456100, "tcp", str(port), total=1)
+    manifest = _standalone_manifest(
+        name,
+        empty,
+        raw_targets=[host],
+        exclude=[],
+        closure_targets=[],
+        stage_id="tcp_identify",
+        authoritative=False,
+    )
+    response = client.post("/api/scans/import-bundle", headers=h, files=[
+        ("files", (name, empty, "text/xml")),
+        ("files", ("observe.manifest.json", manifest, "application/json")),
+    ])
+
+    assert response.status_code == 200, response.text
+    assert response.json()["counts"]["closed"] == 0
+    row = next(
+        row for row in client.get("/api/findings?state=", headers=h).json()
+        if row["host_ip"] == host and row["port"] == port and row["proto"] == "tcp"
+    )
+    assert row["state"] == "open"
