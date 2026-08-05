@@ -190,3 +190,48 @@ def test_heatmap_report_xlsx_has_operational_sheets(client):
     wb = openpyxl.load_workbook(io.BytesIO(res.content))
     assert wb.sheetnames == ["00_보고요약", "01_시간축히트맵", "02_현재포트현황", "03_시점비교"]
     assert wb["01_시간축히트맵"].cell(1, 1).value == "IP"
+
+
+def test_heatmap_key_sort_mixes_ip_hostname_and_ipv6_without_crashing():
+    """호스트명 대상이 하나라도 있으면 히트맵 전체가 500 이 되던 회귀 방지.
+
+    예전 정렬키는 옥텟을 '되는 것만' int 로 바꿔 [10,0,0,5] 와 ['web01'] 같은 혼합 타입
+    리스트를 만들었고, sorted() 가 int 와 str 을 비교하다 TypeError 를 냈다."""
+    from scanops.api.heatmap import _key_sort
+
+    keys = [
+        "10.0.0.10|22|tcp", "web01.local|443|tcp", "10.0.0.2|22|tcp",
+        "fe80::1|22|tcp", "10.0.0.2|80|tcp", "srv|22|tcp",
+    ]
+
+    ordered = sorted(keys, key=_key_sort)   # TypeError 나면 여기서 실패
+
+    hosts = [key.split("|")[0] for key in ordered]
+    # IPv4 는 사전순이 아니라 수치순(10.0.0.2 가 10.0.0.10 보다 앞)
+    assert hosts.index("10.0.0.2") < hosts.index("10.0.0.10")
+    # IP 가 이름 기반 대상보다 앞
+    assert hosts.index("10.0.0.10") < hosts.index("web01.local")
+    assert set(hosts) == {"10.0.0.10", "web01.local", "10.0.0.2", "fe80::1", "srv"}
+
+
+def test_heatmap_endpoint_survives_hostname_targets(client):
+    """정렬 크래시가 API 레벨에서도 재현되지 않는지(사용자가 본 GET /api/heatmap 500)."""
+    from scanops.db import SessionLocal
+    from scanops.models import Finding
+
+    headers = _auth(client)
+    assert _import(client, headers, SAMPLES / "scanA.xml").status_code == 200
+    db = SessionLocal()
+    try:
+        db.add(Finding(
+            finding_key="web01.local|443|tcp", host_ip="web01.local", port=443,
+            proto="tcp", state="open", service="https", status="열림",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get("/api/heatmap", headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert any(row["host_ip"] == "web01.local" for row in response.json()["rows"])

@@ -204,3 +204,76 @@ def test_heatmap_reuses_server_extractor_and_report_escapes_formula(client):
     assert ws.cell(row_num, columns["표시 식별"]).value == "'=1+1"
     assert ws.cell(row_num, columns["Server"]).value == "'=1+1"
     assert ws.cell(row_num, columns["서비스"]).value == "http"
+
+
+def test_findings_search_covers_ip_port_and_every_displayed_field(client):
+    """발견 관리 검색은 '화면에 보이는 모든 요소'로 찾을 수 있어야 한다.
+
+    한때 이 폭넓은 검색이 있었는데 Server 우선표시 작업 때 6개 컬럼으로 좁아졌다.
+    IP·포트로 못 찾는 검색은 운영에서 사실상 쓸 수 없다."""
+    headers = _auth(client)
+    _import_sample(client, headers)
+    _update_finding(
+        9000, host_ip="10.9.9.9", hostname="wiki.corp", service="http",
+        product="nginx", version="1.24", server="nginx/1.24",
+        banner="Zimbra-Collab", cpe="cpe:/a:nginx:nginx", category="웹",
+        usage="사내 위키", remarks="NSE: TLS_CN=wiki.corp",
+        dept="정보보안팀", owner="김보안", contact="010-0000-0000",
+        manual_note="차기 점검 대상",
+    )
+
+    def found(term):
+        response = client.get("/api/findings", headers=headers, params={"q": term})
+        assert response.status_code == 200, response.text
+        return [row["port"] for row in response.json()]
+
+    # IP(부분일치 포함)와 포트 — 사용자가 가장 자주 쓰는 두 축
+    assert found("10.9.9.9") == [9000]
+    assert found("10.9.9") == [9000]
+    assert found("9000") == [9000]
+    # 나머지 표시 필드 전부. 'http' 처럼 다른 발견과도 겹치는 값이 있으므로 포함 여부로 본다.
+    for term in ("wiki.corp", "http", "nginx", "1.24", "nginx/1.24", "Zimbra-Collab",
+                 "cpe:/a:nginx", "웹", "사내 위키", "TLS_CN", "정보보안팀", "김보안",
+                 "010-0000-0000", "차기 점검"):
+        assert 9000 in found(term), f"'{term}' 로 검색되지 않음"
+    # 결합된 표시 식별자(product + version)도 유지
+    assert found("nginx 1.24") == [9000]
+    # 없는 값은 안 잡혀야 한다(전부 매칭되는 헛검색 방지)
+    assert found("존재하지않는값") == []
+
+
+def test_findings_search_ignores_surrounding_whitespace(client):
+    headers = _auth(client)
+    _import_sample(client, headers)
+    _update_finding(9000, host_ip="10.9.9.9")
+
+    response = client.get("/api/findings", headers=headers, params={"q": "  10.9.9.9  "})
+
+    assert response.status_code == 200, response.text
+    assert [row["port"] for row in response.json()] == [9000]
+
+
+def test_findings_search_rejects_non_ascii_digits_without_crashing(client):
+    """isdigit() 은 '②' 같은 유니코드 숫자에도 True 라 int() 에서 500 이 난다.
+    isdecimal() 이어야 포트 변환이 안전하다."""
+    headers = _auth(client)
+    _import_sample(client, headers)
+
+    response = client.get("/api/findings", headers=headers, params={"q": "９０００"})
+
+    assert response.status_code == 200, response.text
+
+
+def test_findings_export_honors_the_same_broad_search(client):
+    headers = _auth(client)
+    _import_sample(client, headers)
+    _update_finding(9000, host_ip="10.9.9.9", dept="정보보안팀")
+
+    response = client.get(
+        "/api/findings/export", headers=headers,
+        params={"q": "10.9.9.9", "fmt": "csv", "cols": "host_ip,port"},
+    )
+
+    assert response.status_code == 200, response.text
+    rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
+    assert rows == [{"IP": "10.9.9.9", "포트": "9000"}]

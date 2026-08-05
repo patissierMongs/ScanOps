@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import glob
 import io
+import ipaddress
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -263,14 +264,20 @@ def _last_scan_label(phases: list[dict], key: str, last_idx: int | None) -> str:
 
 
 def _key_sort(key: str):
+    """호스트를 IP 는 수치 순, 그 외(호스트명·IPv6)는 이름 순으로 정렬하는 키.
+
+    예전 구현은 옥텟을 '되는 것만' int 로 바꿔 [10,0,0,5] 와 ['web01','local'] 같은
+    혼합 타입 리스트를 만들었고, IP 와 호스트명이 같이 있으면 정렬 중 int 와 str 을
+    비교해 TypeError 로 히트맵 전체가 500 이 됐다. 타입이 절대 섞이지 않도록
+    (그룹, 정렬용 바이트, 이름) 형태의 동종 튜플로 만든다."""
     host, proto, port = _split_key(key)
-    parts = []
-    for p in host.split("."):
-        try:
-            parts.append(int(p))
-        except ValueError:
-            parts.append(p)
-    return (parts, proto, port)
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # 호스트명 등 IP 가 아닌 대상: IP 뒤에 이름순으로.
+        return (1, 0, b"", host.casefold(), proto, port)
+    # IPv4 를 IPv6 앞에 두고, 같은 버전 안에서는 실제 주소값 순서(packed 바이트 비교).
+    return (0, ip.version, ip.packed, "", proto, port)
 
 
 def build_heatmap(db: Session) -> dict:
