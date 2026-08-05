@@ -274,7 +274,7 @@ test("timing controls and presets resolve to one backend-visible timing", () => 
 });
 
 test("staged preview mirrors discovery, protocol sweeps, and per-host service probes", () => {
-  const scanOptions = source("../src/ui/ScanOptions.jsx");
+  const scanOptions = source("../src/ui/ScanOptions.jsx").replace(/\r\n/g, "\n");
   const staged = scanOptions.slice(
     scanOptions.indexOf("if (staged) {"),
     scanOptions.indexOf("return out;\n    }", scanOptions.indexOf("if (staged) {")) + 16,
