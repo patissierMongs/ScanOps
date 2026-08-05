@@ -29,7 +29,7 @@ const asBytes = (buf) => {
 };
 
 // XLSX는 ZIP이므로 SheetJS가 압축을 풀기 전에 중앙 디렉터리의 총 해제 크기를 제한한다.
-// XLS/CSV는 ZIP이 아니므로 파일 크기만 확인하고 그대로 통과한다.
+// XLS/CSV는 ZIP이 아니므로 파일 크기를 먼저 제한한다.
 export function validateWorkbookArchive(buf, maxExpandedBytes = MAX_WORKBOOK_EXPANDED_BYTES) {
   const bytes = asBytes(buf);
   if (bytes.byteLength > MAX_WORKBOOK_BYTES) {
@@ -92,6 +92,126 @@ export function validateWorkbookArchive(buf, maxExpandedBytes = MAX_WORKBOOK_EXP
   }
   if (pos !== centralEnd) throw new Error("손상된 XLSX ZIP 중앙 디렉터리입니다");
   return bytes;
+}
+
+const startsWith = (bytes, signature) =>
+  bytes.byteLength >= signature.length && signature.every((value, index) => bytes[index] === value);
+
+function textEncoding(bytes) {
+  if (startsWith(bytes, [0xff, 0xfe])) {
+    return { offset: 2, stride: 2, littleEndian: true };
+  }
+  if (startsWith(bytes, [0xfe, 0xff])) {
+    return { offset: 2, stride: 2, littleEndian: false };
+  }
+  return {
+    offset: startsWith(bytes, [0xef, 0xbb, 0xbf]) ? 3 : 0,
+    stride: 1,
+    littleEndian: true,
+  };
+}
+
+function scanDelimitedGrid(bytes, separator, encoding, {
+  enforce = false,
+  maxBytes = Number.POSITIVE_INFINITY,
+} = {}) {
+  const { offset, stride, littleEndian } = encoding;
+  const codeUnitAt = (index) => {
+    if (stride === 1) return bytes[index];
+    if (index + 1 >= bytes.byteLength) return -1;
+    return littleEndian
+      ? bytes[index] | (bytes[index + 1] << 8)
+      : (bytes[index] << 8) | bytes[index + 1];
+  };
+
+  let rows = 0;
+  let columns = 1;
+  let maxColumns = 0;
+  let firstDelimitedRow = null;
+  let firstDelimitedColumns = 1;
+  let rowStarted = false;
+  let fieldStart = true;
+  let quoted = false;
+
+  const finishRow = () => {
+    if (firstDelimitedRow == null && columns > 1) {
+      firstDelimitedRow = rows;
+      firstDelimitedColumns = columns;
+    }
+    rows += 1;
+    maxColumns = Math.max(maxColumns, columns);
+    if (enforce) validateGrid(rows, maxColumns);
+    columns = 1;
+    rowStarted = false;
+    fieldStart = true;
+  };
+
+  const end = Math.min(bytes.byteLength, offset + maxBytes);
+  for (let index = offset; index < end; index += stride) {
+    const code = codeUnitAt(index);
+    if (quoted) {
+      rowStarted = true;
+      if (code === 0x22) {
+        if (codeUnitAt(index + stride) === 0x22) index += stride;
+        else quoted = false;
+      }
+      continue;
+    }
+    if (code === 0x22 && fieldStart) {
+      quoted = true;
+      rowStarted = true;
+      fieldStart = false;
+      continue;
+    }
+    if (code === 0x0a || code === 0x0d) {
+      finishRow();
+      if (code === 0x0d && codeUnitAt(index + stride) === 0x0a) index += stride;
+      continue;
+    }
+    rowStarted = true;
+    if (code === separator) {
+      columns += 1;
+      fieldStart = true;
+      if (enforce && columns > MAX_SHEET_COLS) throw sheetLimitError();
+    } else {
+      fieldStart = false;
+    }
+  }
+  if (rowStarted) finishRow();
+  else if (enforce) validateGrid(rows, maxColumns);
+  return { firstDelimitedRow, firstDelimitedColumns, maxColumns };
+}
+
+function validateDelimitedWorkbookGrid(bytes) {
+  // ZIP XLSX and OLE/CFB XLS have their own structural checks. Text workbooks need a grid
+  // bound before SheetJS materializes cells; the post-parse !ref check is too late for a
+  // permitted 25 MB CSV with millions of columns.
+  if (startsWith(bytes, [0x50, 0x4b, 0x03, 0x04]) ||
+      startsWith(bytes, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])) return;
+
+  const encoding = textEncoding(bytes);
+  // Pick the separator from the earliest delimited record, then force SheetJS to use that
+  // exact separator. This avoids treating punctuation inside a later data cell as a second
+  // delimiter while keeping the preflight and parser on the same grid contract.
+  const separators = [0x2c, 0x09, 0x3b, 0x7c]; // comma, tab, semicolon, pipe
+  const detectionBytes = 1024 * 1024;
+  let selected = separators[0];
+  let selectedStats = null;
+  for (const separator of separators) {
+    const stats = scanDelimitedGrid(bytes, separator, encoding, { maxBytes: detectionBytes });
+    if (stats.firstDelimitedRow == null) continue;
+    if (
+      selectedStats == null
+      || stats.firstDelimitedRow < selectedStats.firstDelimitedRow
+      || (stats.firstDelimitedRow === selectedStats.firstDelimitedRow
+        && stats.firstDelimitedColumns > selectedStats.firstDelimitedColumns)
+    ) {
+      selected = separator;
+      selectedStats = stats;
+    }
+  }
+  scanDelimitedGrid(bytes, selected, encoding, { enforce: true });
+  return String.fromCharCode(selected);
 }
 
 // 컬럼명 자동 매핑 별칭 (정규화 후 부분일치)
@@ -228,7 +348,12 @@ export function computeAutoMap(cols) {
 // 파일 ArrayBuffer → {wb, sheetNames}
 export function readWorkbook(buf) {
   const bytes = validateWorkbookArchive(buf);
-  const wb = XLSX.read(bytes, { type: "array", cellDates: true });
+  const separator = validateDelimitedWorkbookGrid(bytes);
+  const wb = XLSX.read(bytes, {
+    type: "array",
+    cellDates: true,
+    ...(separator ? { FS: separator } : {}),
+  });
   if (!wb.SheetNames || !wb.SheetNames.length) throw new Error("시트를 찾지 못했습니다");
   return { wb, sheetNames: wb.SheetNames.slice() };
 }

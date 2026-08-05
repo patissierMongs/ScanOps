@@ -702,6 +702,7 @@ def build_command(plan: dict, index: int, stage_id: str = "", tcp_ports: list[in
     exclude_flags = ["--exclude", ",".join(excludes)] if excludes else []
     return [
         plan["nmap"],
+        "--unique",
         "--stats-every", plan["stats_every"],
         *timeout_flags,
         *exclude_flags,
@@ -1164,7 +1165,7 @@ def import_contract_unit(plan: dict, run: dict, xml_path: Path) -> dict:
     }
 
 
-def build_import_contract(plan: dict) -> dict | None:
+def build_import_contract(plan: dict, import_xml_files: list[str] | None = None) -> dict | None:
     """Build the allowlisted, versioned sidecar contract consumed by ScanOps web import.
 
     The surrounding manifest intentionally remains human-friendly and may contain absolute
@@ -1182,10 +1183,27 @@ def build_import_contract(plan: dict) -> dict | None:
         return None
     excludes, exclude_networks = parse_excludes(plan.get("exclude", []))
     effective = apply_excludes(expanded, exclude_networks)
+    # A hostname is resolved by Nmap only at execution time, so the sidecar cannot prove
+    # which IPv4 address produced the XML. Preserve that valid workflow with legacy
+    # observed-host semantics instead of emitting a strong contract the web importer must
+    # (and should) reject as unbound.
+    for host in effective:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return None
+        if not isinstance(address, ipaddress.IPv4Address) or str(address) != host:
+            return None
+    selected_xml = set(
+        import_xml_files
+        if import_xml_files is not None
+        else importable_xml(plan, include_discovery_fallback=True)
+    )
     units = []
     for run in latest_runs(plan):
         for value in manifest_xml_files(run):
-            units.append(import_contract_unit(plan, run, Path(value)))
+            if value in selected_xml:
+                units.append(import_contract_unit(plan, run, Path(value)))
     return {
         "schema": IMPORT_CONTRACT_SCHEMA,
         "raw_targets": raw_targets,
@@ -1208,10 +1226,13 @@ def write_manifest(plan: dict, zip_path: str = "") -> None:
     manifest["all_xml_files"] = list(dict.fromkeys(
         p for run in runs for p in manifest_xml_files(run)
     ))
+    # The strong contract and the recommended upload list are one exact set. Diagnostic or
+    # unusable XML may remain in all_xml_files/on disk, but cannot invalidate completed units.
+    import_xml_files = importable_xml(plan, include_discovery_fallback=True)
     # Very old/minimal state files can still be summarized, but they cannot prove the original
     # requested target plan. Keep them on observed-host import semantics instead of inventing it.
     if isinstance(plan.get("batches"), list) and plan.get("batches"):
-        contract = build_import_contract(plan)
+        contract = build_import_contract(plan, import_xml_files)
         if contract is not None:
             manifest["import_contract"] = contract
         else:
@@ -1219,7 +1240,7 @@ def write_manifest(plan: dict, zip_path: str = "") -> None:
     else:
         manifest.pop("import_contract", None)
     # identify 산출물이 하나도 없으면 성공한 discovery XML 을 구제 fallback 으로 추천한다(QA-038).
-    manifest["import_xml_files"] = importable_xml(plan, include_discovery_fallback=True)
+    manifest["import_xml_files"] = import_xml_files
     write_json(Path(plan["manifest_path"]), manifest)
 
 
@@ -1269,6 +1290,11 @@ def importable_xml(plan: dict, include_discovery_fallback: bool = False) -> list
                 seen[p] = None
                 continue
             if run.get("stage_id", "") == "tcp_discovery":
+                # New states know the concrete unit targets, so a usable failed/partial
+                # discovery can be imported safely as observation-only beside later stages.
+                # Old states retain the legacy discovery-only fallback below.
+                if run.get("scan_targets_complete") is True and xml_has_usable_host(path):
+                    seen[p] = None
                 continue
             # '쓸만한 host'(status=up 또는 열린 포트)가 든 식별 XML 만 importable 로 센다. host 없는 빈 XML
             # (QA-049)이나 MAC-only/유령·down-전부필터 host(QA-056)가 seen 을 차지하면 discovery 구제

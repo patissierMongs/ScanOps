@@ -154,9 +154,16 @@ class TcpLabListener:
 
 
 class UdpLabListener:
-    def __init__(self, label: str, avoid_ports: set[int] | None = None) -> None:
+    def __init__(
+        self,
+        label: str,
+        avoid_ports: set[int] | None = None,
+        *,
+        respond: bool = True,
+    ) -> None:
         self.label = label
         self.port = 0
+        self.respond = respond
         self._avoid_ports = set(avoid_ports or set())
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -185,8 +192,12 @@ class UdpLabListener:
             daemon=True,
         )
         self._thread.start()
-        _wait_udp_ready(self.port, self.label)
-        log(f"listener {self.label}: udp://{HOST}:{self.port} pid={os.getpid()}")
+        if self.respond:
+            _wait_udp_ready(self.port, self.label)
+        else:
+            require(self._thread.is_alive(), f"{self.label} silent UDP listener did not start")
+        mode = "responsive" if self.respond else "silent"
+        log(f"listener {self.label}: udp://{HOST}:{self.port} mode={mode} pid={os.getpid()}")
 
     def _serve(self) -> None:
         sock = self._socket
@@ -197,7 +208,8 @@ class UdpLabListener:
                 _payload, address = sock.recvfrom(65535)
                 if self._stop.is_set():
                     return
-                sock.sendto(b"ScanOps runtime E2E UDP listener\n", address)
+                if self.respond:
+                    sock.sendto(b"ScanOps runtime E2E UDP listener\n", address)
             except OSError:
                 if not self._stop.is_set():
                     raise
@@ -212,7 +224,9 @@ class UdpLabListener:
         self._stop.set()
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as wake:
-                wake.sendto(b"", (HOST, self.port))
+                # Windows rejects a zero-length UDP send with WSAEINVAL, leaving recvfrom
+                # blocked and making the immediate close/rebind lifecycle nondeterministic.
+                wake.sendto(b"\0", (HOST, self.port))
         except OSError:
             pass
         if thread is not None:
@@ -587,6 +601,34 @@ def _run_staged(
     return scan_id, _wait_scan(api, token, scan_id, timeout, server_log)
 
 
+def _check_pn_host_count_consistency(
+    api: ApiClient,
+    token: str,
+    scan_id: int,
+    stages: dict,
+) -> dict:
+    scan = api.request("GET", f"/api/scans/{scan_id}", token=token)
+    discovery = next(
+        (stage for stage in stages.get("stages", []) if stage.get("stage") == "discovery"),
+        None,
+    )
+    discovery_live = (discovery or {}).get("counts", {}).get("live")
+    overall_live = stages.get("overall", {}).get("counts", {}).get("live")
+    api_host_count = scan.get("host_count")
+    stages_host_count = stages.get("host_count")
+    require(
+        discovery_live == overall_live == api_host_count == stages_host_count == 1,
+        "-Pn live counts disagree across discovery, job summary, stages, and ScanRun: "
+        f"{discovery_live}, {overall_live}, {stages_host_count}, {api_host_count}",
+    )
+    return {
+        "discovery_live": discovery_live,
+        "job_done_live": overall_live,
+        "stages_host_count": stages_host_count,
+        "scan_host_count": api_host_count,
+    }
+
+
 def _run_selected_rescan(
     api: ApiClient,
     token: str,
@@ -919,6 +961,87 @@ def _browser_escape_dialog(page, dialog, opener, expect) -> None:
             "application shell remained inert after closing a password dialog")
 
 
+def _browser_self_password_dialog(page, expect) -> None:
+    menu = page.get_by_role("button", name="탐색 메뉴 열기", exact=True)
+    if menu.is_visible():
+        menu.click()
+        sidebar = page.get_by_role("dialog", name="주 탐색", exact=True)
+        sidebar.wait_for(state="visible", timeout=5_000)
+        opener = sidebar.get_by_role("button", name="비밀번호 변경", exact=True)
+        restore = menu
+    else:
+        opener = page.get_by_role("button", name="비밀번호 변경", exact=True)
+        restore = opener
+    opener.click()
+    dialog = page.get_by_role("dialog", name="비밀번호 변경", exact=True)
+    first = dialog.get_by_placeholder("현재 비밀번호", exact=True)
+    _browser_assert_dialog(page, dialog, opener, first, expect)
+    _browser_escape_dialog(page, dialog, restore, expect)
+
+
+def _browser_admin_reset_dialog(page, username: str, expect) -> None:
+    _browser_go(page, "사용자")
+    user_row = page.locator("table.tbl tbody tr").filter(has_text=username).first
+    expect(user_row).to_be_visible()
+    opener = user_row.get_by_role("button", name="비밀번호 재설정", exact=True)
+    opener.click()
+    dialog = page.get_by_role("dialog", name=re.compile(re.escape(username)))
+    first = dialog.get_by_placeholder("새 비밀번호 (8자 이상)", exact=True)
+    _browser_assert_dialog(page, dialog, opener, first, expect)
+    _browser_escape_dialog(page, dialog, opener, expect)
+
+
+def _browser_import_focus_contract(page, expect) -> None:
+    _browser_go(page, "스캔")
+    for name, activation in (
+        ("XML 가져오기(여러 개)", "Enter"),
+        ("폴더째 가져오기(XML+manifest)", "Space"),
+    ):
+        button = page.get_by_role("button", name=name, exact=True)
+        expect(button).to_be_visible()
+        button.focus()
+        with page.expect_file_chooser(timeout=5_000) as chooser_info:
+            button.press(activation)
+        chooser_info.value.element.dispatch_event("cancel", {"bubbles": True})
+        expect(button).to_be_focused()
+
+
+def _browser_empty_dashboard_action(page, width: int, expect) -> None:
+    payload = page.evaluate(
+        """
+        async () => {
+          const token = localStorage.getItem('scanops_token');
+          const response = await fetch('/api/dashboard', {
+            headers: {Authorization: `Bearer ${token}`},
+          });
+          if (!response.ok) throw new Error(`dashboard fixture failed: ${response.status}`);
+          return response.json();
+        }
+        """
+    )
+    payload["recent_scans"] = []
+
+    def empty_recent_scans(route):
+        # Do not call route.fetch() from inside the handler: unrouting an active handler can
+        # race with its delayed fulfill. Snapshot the authenticated payload before routing,
+        # then serve that deterministic empty-state fixture.
+        route.fulfill(status=200, content_type="application/json", json=payload)
+
+    pattern = "**/api/dashboard"
+    page.route(pattern, empty_recent_scans)
+    try:
+        _browser_go(page, "대시보드")
+        _browser_overflow_metrics(page, f"{width}px/대시보드")
+        action = page.get_by_role("button", name="스캔 실행/가져오기", exact=True)
+        expect(action).to_be_visible()
+        action.focus()
+        expect(action).to_be_focused()
+        action.press("Enter")
+        page.get_by_role("heading", name="스캔", exact=True).wait_for(timeout=10_000)
+    finally:
+        page.unroute_all(behavior="wait")
+
+
 def _browser_scan_detail(page, fixture: dict, status: str, expect) -> None:
     table = page.locator("table.tbl")
     row = table.locator("tbody > tr").filter(has_text=fixture["name"]).first
@@ -926,8 +1049,9 @@ def _browser_scan_detail(page, fixture: dict, status: str, expect) -> None:
     expect(row).to_contain_text(status)
     require(row.locator(".pill").count() >= 2,
             f"persisted stage timeline is missing for scan #{fixture['id']}")
-    row.get_by_role("button", name="상세", exact=True).click()
     detail = page.locator(f"#scan-detail-{fixture['id']}")
+    if not detail.is_visible():
+        row.get_by_role("button", name="상세", exact=True).click()
     expect(detail).to_be_visible()
     expect(detail).to_contain_text(status)
     expect(detail).to_contain_text("단계 엔진")
@@ -945,6 +1069,39 @@ def _browser_open_finding(page, finding_port: int, owner: str, expect):
     expect(drawer).to_be_visible()
     expect(drawer).to_contain_text(owner)
     return drawer
+
+
+def _browser_assert_no_stale_attribution(page, finding_port: int, stale: tuple[str, ...], expect):
+    _browser_go(page, "발견 관리")
+    port_cell = page.locator("table.tbl").get_by_text(str(finding_port), exact=True).first
+    expect(port_cell).to_be_visible()
+    port_cell.click()
+    drawer = page.locator(".drawer")
+    expect(drawer).to_be_visible()
+    text = drawer.inner_text()
+    require(not any(value and value in text for value in stale),
+            f"finding retained stale asset attribution: {text!r}")
+    drawer.get_by_role("button", name="닫기", exact=True).click()
+    expect(drawer).to_be_hidden()
+
+
+def _browser_assert_no_stale_notification(page, stale: tuple[str, ...], expect) -> None:
+    with page.expect_response(
+        lambda response: response.request.method == "GET"
+        and response.url.endswith("/api/dashboard")
+        and response.status == 200,
+        timeout=10_000,
+    ) as dashboard_info:
+        _browser_go(page, "부서통보")
+    expected_depts = [str(row["dept"]) for row in dashboard_info.value.json()["by_dept"]]
+    option_locator = page.locator("select").first.locator("option")
+    expect(option_locator).to_have_text(["부서 선택…", *expected_depts])
+    options = option_locator.all_text_contents()
+    preview = page.locator(".pre").inner_text()
+    require(not any(value and value in options for value in stale),
+            f"department notification retained a stale department option: {options!r}")
+    require(not any(value and value in preview for value in stale),
+            f"department notification retained stale attribution: {preview!r}")
 
 
 def _browser_admin_checks(
@@ -1064,13 +1221,64 @@ def _browser_admin_checks(
     drawer = _browser_open_finding(
         page, finding_port, fixtures["asset"]["old_owner"], expect,
     )
-    require(fixtures["asset"]["new_owner"] not in drawer.inner_text(),
+    newest_attribution = (
+        fixtures["asset"]["new_dept"], fixtures["asset"]["new_owner"],
+        fixtures["asset"]["new_contact"],
+    )
+    require(not any(value in drawer.inner_text() for value in newest_attribution),
             "finding retained deleted newest-asset attribution after re-entry")
     drawer.get_by_role("button", name="닫기", exact=True).click()
     _browser_go(page, "자산대장")
     expect(page.get_by_text(fixtures["asset"]["old_owner"], exact=True)).to_be_visible()
     require(page.get_by_text(fixtures["asset"]["new_owner"], exact=True).count() == 0,
             "deleted asset remained visible after re-entering the asset ledger")
+
+    blanking = page.evaluate(
+        """
+        async ({assetId, ip}) => {
+          const token = localStorage.getItem('scanops_token');
+          const response = await fetch(`/api/assets/${assetId}`, {
+            method: 'PATCH',
+            headers: {Authorization: `Bearer ${token}`, 'Content-Type': 'application/json'},
+            body: JSON.stringify({ip, dept: '', owner: '', contact: ''}),
+          });
+          return {status: response.status, body: await response.text()};
+        }
+        """,
+        {"assetId": fixtures["asset"]["old_id"], "ip": fixtures["asset"]["ip"]},
+    )
+    require(blanking["status"] == 200,
+            f"browser asset attribution clearing failed: {blanking}")
+    stale_attribution = (
+        fixtures["asset"]["old_dept"], fixtures["asset"]["old_owner"],
+        fixtures["asset"]["old_contact"], *newest_attribution,
+    )
+    _browser_assert_no_stale_attribution(page, finding_port, stale_attribution, expect)
+    _browser_assert_no_stale_notification(page, stale_attribution, expect)
+    _browser_go(page, "자산대장")
+    expect(page.get_by_text(fixtures["asset"]["old_hostname"], exact=True)).to_be_visible()
+    require(page.get_by_text(fixtures["asset"]["old_owner"], exact=True).count() == 0,
+            "blanked asset owner remained visible after re-entry")
+
+    final_deletion = page.evaluate(
+        """
+        async (assetId) => {
+          const token = localStorage.getItem('scanops_token');
+          const response = await fetch(`/api/assets/${assetId}`, {
+            method: 'DELETE', headers: {Authorization: `Bearer ${token}`},
+          });
+          return {status: response.status, body: await response.text()};
+        }
+        """,
+        fixtures["asset"]["old_id"],
+    )
+    require(final_deletion["status"] == 204,
+            f"browser final asset deletion failed: {final_deletion}")
+    _browser_assert_no_stale_attribution(page, finding_port, stale_attribution, expect)
+    _browser_assert_no_stale_notification(page, stale_attribution, expect)
+    _browser_go(page, "자산대장")
+    require(page.get_by_text(fixtures["asset"]["old_hostname"], exact=True).count() == 0,
+            "last deleted asset remained visible after re-entry")
 
     nav_labels = (
         "대시보드", "발견 관리", "히트맵", "규칙", "이력",
@@ -1080,8 +1288,16 @@ def _browser_admin_checks(
     for width, height in ((390, 844), (768, 900), (1280, 800)):
         page.set_viewport_size({"width": width, "height": height})
         for label in nav_labels:
-            _browser_go(page, label)
-            _browser_overflow_metrics(page, f"{width}px/{label}")
+            if label == "대시보드" and width in (390, 1280):
+                _browser_empty_dashboard_action(page, width, expect)
+            else:
+                _browser_go(page, label)
+                _browser_overflow_metrics(page, f"{width}px/{label}")
+            if label == "스캔" and width == 390:
+                _browser_scan_detail(page, fixtures["failed_scan"], "실패", expect)
+        if width == 390:
+            _browser_admin_reset_dialog(page, username, expect)
+            _browser_self_password_dialog(page, expect)
         responsive[str(width)] = {"height": height, "views": list(nav_labels)}
         if artifacts_dir is not None:
             page.screenshot(
@@ -1092,11 +1308,15 @@ def _browser_admin_checks(
         "account_actions": True,
         "toast_roles": {"success": "status/polite", "error": "alert/assertive"},
         "password_dialogs": ["self", "admin-reset"],
+        "password_dialog_viewports": {"self": [1280, 390], "admin-reset": [1280, 390]},
         "xml_focus": ["selection", "cancel"],
         "persisted_stage_details": [
             fixtures["completed_scan"]["id"], fixtures["failed_scan"]["id"],
         ],
         "asset_attribution_reentry": True,
+        "asset_attribution_paths": ["newest-delete-fallback", "explicit-blank", "last-delete"],
+        "failed_scan_detail_viewports": [1280, 390],
+        "dashboard_inline_action_viewports": [390, 1280],
         "history_server_identity": fixtures["server_identity"],
         "responsive": responsive,
     }
@@ -1118,6 +1338,7 @@ def _browser_checks(
 
     checked = []
     admin_checks = {}
+    xml_role_viewports = {"admin": [1280], "auditor": []}
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
@@ -1173,6 +1394,15 @@ def _browser_checks(
                         admin_checks = _browser_admin_checks(
                             page, password, finding_port, fixtures, artifacts_dir, expect,
                         )
+                    if role in ("admin", "auditor"):
+                        widths = (390,) if role == "admin" else (1280, 390)
+                        for width in widths:
+                            page.set_viewport_size({
+                                "width": width, "height": 844 if width == 390 else 800,
+                            })
+                            _browser_import_focus_contract(page, expect)
+                            xml_role_viewports[role].append(width)
+                        page.set_viewport_size({"width": 1280, "height": 800})
                     if artifacts_dir is not None:
                         page.screenshot(path=str(artifacts_dir / f"browser-{role}.png"), full_page=True)
                     checked.append(role)
@@ -1184,7 +1414,11 @@ def _browser_checks(
                     context.close()
         finally:
             browser.close()
-    return {"checked_roles": checked, **admin_checks}
+    return {
+        "checked_roles": checked,
+        "xml_role_viewports": xml_role_viewports,
+        **admin_checks,
+    }
 
 
 def _port_is_bindable(port: int, sock_type: int) -> bool:
@@ -1224,7 +1458,8 @@ def run(args: argparse.Namespace, report: dict) -> None:
     selected = TcpLabListener("selected")
     outside = TcpLabListener("outside")
     udp = UdpLabListener("udp")
-    listeners = [selected, outside, udp]
+    silent_udp = UdpLabListener("silent-udp", respond=False)
+    listeners = [selected, outside, udp, silent_udp]
     process: subprocess.Popen | None = None
     log_handle = None
     server_log: Path | None = None
@@ -1249,6 +1484,8 @@ def run(args: argparse.Namespace, report: dict) -> None:
         outside.start()
         udp._avoid_ports = {selected.port, outside.port}
         udp.start()
+        silent_udp._avoid_ports = {selected.port, outside.port, udp.port}
+        silent_udp.start()
         if not api_port:
             api_port = _free_tcp_port()
         require(api_port not in (selected.port, outside.port),
@@ -1258,6 +1495,8 @@ def run(args: argparse.Namespace, report: dict) -> None:
             "selected_tcp": selected.port,
             "outside_tcp": outside.port,
             "udp": udp.port,
+            "responsive_udp": udp.port,
+            "silent_udp": silent_udp.port,
         }
 
         server_log = run_root / "server.log"
@@ -1299,19 +1538,35 @@ def run(args: argparse.Namespace, report: dict) -> None:
             "viewer_scan_options": 200,
         }
 
-        full_ports = f"T:{selected.port},{outside.port},U:{udp.port}"
+        full_ports = f"T:{selected.port},{outside.port},U:{udp.port},{silent_udp.port}"
         scan_id, stages = _run_staged(
             api, auditor_token, name="runtime-full-open", ports=full_ports,
             include_udp=True, timeout=args.scan_timeout, server_log=server_log,
         )
         report["scans"].append({"id": scan_id, "mode": "full", "transition": "open"})
-        require(stages["host_count"] == 1, "full open scan did not persist one host")
+        report["pn_host_count_consistency"] = _check_pn_host_count_consistency(
+            api, auditor_token, scan_id, stages,
+        )
         selected_finding = _finding(api, auditor_token, selected.port, "tcp")
         outside_finding = _finding(api, auditor_token, outside.port, "tcp")
         udp_finding = _finding(api, auditor_token, udp.port, "udp")
+        silent_udp_finding = _finding(api, auditor_token, silent_udp.port, "udp")
         _assert_active(selected_finding, reopened=False)
         _assert_active(outside_finding, reopened=False)
         _assert_active(udp_finding, reopened=False)
+        require(
+            silent_udp_finding["state"] == "open|filtered",
+            f"silent UDP must remain open|filtered, got {silent_udp_finding['state']}",
+        )
+        if os.name != "nt":
+            require(
+                udp_finding["state"] == "open",
+                f"responsive UDP must be open on POSIX, got {udp_finding['state']}",
+            )
+        initial_udp_states = {
+            "responsive": udp_finding["state"],
+            "silent": silent_udp_finding["state"],
+        }
         report["server_consumers"] = _check_server_consumers(
             api, viewer_token, auditor_token, selected_finding,
         )
@@ -1343,9 +1598,17 @@ def run(args: argparse.Namespace, report: dict) -> None:
             include_udp=True, timeout=args.scan_timeout, server_log=server_log,
         )
         report["scans"].append({"id": scan_id, "mode": "full", "transition": "closed"})
-        for port, proto in ((selected.port, "tcp"), (outside.port, "tcp"), (udp.port, "udp")):
+        closed_states = {}
+        for port, proto in (
+            (selected.port, "tcp"),
+            (outside.port, "tcp"),
+            (udp.port, "udp"),
+            (silent_udp.port, "udp"),
+        ):
             finding = _finding(api, auditor_token, port, proto)
             require(finding["state"] == "closed", f"full scan did not close {port}/{proto}")
+            if proto == "udp":
+                closed_states["responsive" if port == udp.port else "silent"] = finding["state"]
 
         for listener in listeners:
             listener.start()
@@ -1354,11 +1617,34 @@ def run(args: argparse.Namespace, report: dict) -> None:
             include_udp=True, timeout=args.scan_timeout, server_log=server_log,
         )
         report["scans"].append({"id": scan_id, "mode": "full", "transition": "reopened"})
-        for port, proto in ((selected.port, "tcp"), (outside.port, "tcp"), (udp.port, "udp")):
-            _assert_active(_finding(api, auditor_token, port, proto), reopened=True)
+        reopened_states = {}
+        for port, proto in (
+            (selected.port, "tcp"),
+            (outside.port, "tcp"),
+            (udp.port, "udp"),
+            (silent_udp.port, "udp"),
+        ):
+            finding = _finding(api, auditor_token, port, proto)
+            _assert_active(finding, reopened=True)
+            if proto == "udp":
+                reopened_states["responsive" if port == udp.port else "silent"] = finding["state"]
+        require(
+            reopened_states["silent"] == "open|filtered",
+            f"reopened silent UDP must remain open|filtered: {reopened_states}",
+        )
+        report["udp_state_matrix"] = {
+            "initial": initial_udp_states,
+            "closed": closed_states,
+            "reopened": reopened_states,
+            "windows_loopback_response_capture_limited": os.name == "nt",
+        }
 
         out_of_scope: dict[tuple[int, str], tuple[dict, int]] = {}
-        for port, proto in ((outside.port, "tcp"), (udp.port, "udp")):
+        for port, proto in (
+            (outside.port, "tcp"),
+            (udp.port, "udp"),
+            (silent_udp.port, "udp"),
+        ):
             finding = _finding(api, auditor_token, port, proto)
             events = api.request("GET", f"/api/findings/{finding['id']}/events", token=auditor_token)
             out_of_scope[(port, proto)] = (_stable_signature(finding), len(events))
@@ -1460,8 +1746,14 @@ def run(args: argparse.Namespace, report: dict) -> None:
                 "asset": {
                     "old_id": int(old_asset["id"]),
                     "new_id": int(new_asset["id"]),
+                    "ip": HOST,
+                    "old_hostname": "runtime-old-asset",
+                    "old_dept": "Runtime Older Department",
                     "old_owner": "Runtime Older Owner",
+                    "old_contact": "old@example.invalid",
+                    "new_dept": "Runtime Newer Department",
                     "new_owner": "Runtime Newer Owner",
+                    "new_contact": "new@example.invalid",
                 },
             }
             report["browser"] = _browser_checks(
@@ -1476,15 +1768,30 @@ def run(args: argparse.Namespace, report: dict) -> None:
                 artifacts_dir,
             )
             attributed = _finding(api, auditor_token, selected.port, "tcp")
-            require(attributed["owner"] == fixtures["asset"]["old_owner"],
-                    "deleted newest asset did not restore older finding attribution")
+            require(
+                attributed["dept"] == attributed["owner"] == attributed["contact"] == "",
+                "blanked/deleted assets left stale finding attribution",
+            )
             assets = api.request("GET", "/api/assets", token=admin_token)
-            require(all(int(asset["id"]) != fixtures["asset"]["new_id"] for asset in assets),
-                    "browser-deleted asset still exists through the API")
+            deleted_ids = {fixtures["asset"]["old_id"], fixtures["asset"]["new_id"]}
+            require(all(int(asset["id"]) not in deleted_ids for asset in assets),
+                    "browser-deleted asset fixture still exists through the API")
+            preview = api.request(
+                "GET",
+                "/api/notifications/preview?dept=Runtime%20Older%20Department",
+                token=auditor_token,
+            )
+            require(preview["finding_count"] == 0,
+                    f"stale department notification findings remained: {preview}")
+            require(
+                fixtures["asset"]["old_owner"] not in preview["body"]
+                and fixtures["asset"]["old_contact"] not in preview["body"],
+                f"stale department notification attribution remained: {preview['body']!r}",
+            )
             report["browser"]["asset_attribution_api"] = {
-                "deleted": fixtures["asset"]["new_id"],
-                "fallback": fixtures["asset"]["old_id"],
-                "owner": attributed["owner"],
+                "deleted": sorted(deleted_ids),
+                "cleared": {field: attributed[field] for field in ("dept", "owner", "contact")},
+                "stale_notification_findings": preview["finding_count"],
             }
         else:
             report["browser"] = {"skipped": True, "reason": "--browser was not requested"}
@@ -1511,8 +1818,9 @@ def run(args: argparse.Namespace, report: dict) -> None:
             for port in ports:
                 if not _port_is_bindable(port, socket.SOCK_STREAM):
                     cleanup_errors.append(f"TCP port still bound: {port}")
-            if not _port_is_bindable(udp.port, socket.SOCK_DGRAM):
-                cleanup_errors.append(f"UDP port still bound: {udp.port}")
+            for listener in (udp, silent_udp):
+                if not _port_is_bindable(listener.port, socket.SOCK_DGRAM):
+                    cleanup_errors.append(f"UDP port still bound: {listener.port}")
 
         if artifacts_dir is not None and server_log is not None and server_log.exists():
             _capture_cleanup_error(

@@ -31,14 +31,60 @@ _settings = get_settings()
 logger = logging.getLogger(__name__)
 
 _TIMING = {"t0": "-T0", "t1": "-T1", "t2": "-T2", "t3": "-T3", "fast": "-T4", "t5": "-T5"}
+ENGINE_REQUIRED_FILES = (
+    "__init__.py",
+    "__main__.py",
+    "cli.py",
+    "events.py",
+    "nmaprun.py",
+    "pipeline.py",
+    "process_control.py",
+    "spec.py",
+    "state.py",
+)
+_ENGINE_UNAVAILABLE_MESSAGE = (
+    "스캔 엔진 구성요소가 누락되었거나 손상되었습니다. 배포 패키지를 다시 설치하세요."
+)
 
 
 def ensure_available() -> Path:
-    """Return the vendored engine path or fail before a scan record is created."""
+    """Return a runnable vendored engine path or fail before creating a scan."""
     package = Path(_settings.engine_dir) / "scanops_engine"
-    if not (package / "__main__.py").is_file():
-        logger.error("vendored scan engine is missing: %s", package)
-        raise RuntimeError("스캔 엔진 구성요소가 누락되었습니다. 배포 패키지를 다시 설치하세요.")
+    try:
+        for name in ENGINE_REQUIRED_FILES:
+            source = package / name
+            if not source.is_file():
+                raise FileNotFoundError(source)
+            # ``is_file`` does not prove that the service account can read the package.
+            with source.open("rb") as handle:
+                handle.read(1)
+    except OSError:
+        logger.exception("vendored scan engine is missing or unreadable: %s", package)
+        raise RuntimeError(_ENGINE_UNAVAILABLE_MESSAGE) from None
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(_settings.engine_dir) + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-m", "scanops_engine", "--help"],
+            cwd=str(_settings.engine_dir),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.exception("vendored scan engine entrypoint probe failed: %s", package)
+        raise RuntimeError(_ENGINE_UNAVAILABLE_MESSAGE) from None
+    if probe.returncode != 0:
+        logger.error(
+            "vendored scan engine entrypoint is not runnable: %s (probe rc=%s)",
+            package,
+            probe.returncode,
+        )
+        raise RuntimeError(_ENGINE_UNAVAILABLE_MESSAGE)
     return package
 
 
@@ -351,7 +397,10 @@ def ingest_results(db, scan, out_dir, scope_keys: set | None = None,
     )
     from ..api.assets import match_assets
     match_assets(db, commit=False)
-    scan.host_count = len({f["host_ip"] for f in findings})
+    # ``scanned`` is the authoritative set that reached the staged scan, even when no
+    # port was open.  Counting finding rows makes a successful -Pn/cached discovery of
+    # a zero-open host disagree with the engine's final ``counts.live`` value.
+    scan.host_count = len(scanned)
     scan.port_count = len(enriched)
     if commit:
         db.commit()

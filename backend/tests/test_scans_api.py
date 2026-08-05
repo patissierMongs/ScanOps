@@ -1736,6 +1736,32 @@ def _standalone_empty_xml(start: int, proto: str, services: str, total: int) -> 
 """.encode()
 
 
+def _standalone_observed_xml(
+    start: int,
+    proto: str,
+    service: int,
+    host: str,
+    *,
+    include_port: bool = True,
+) -> bytes:
+    scan_type = "udp" if proto == "udp" else "syn"
+    port = _port(proto, service) if include_port else ""
+    return f"""<?xml version="1.0"?>
+<nmaprun start="{start}">
+  <scaninfo type="{scan_type}" protocol="{proto}" numservices="1" services="{service}"/>
+  <host>
+    <status state="up"/>
+    <address addr="{host}" addrtype="ipv4"/>
+    <ports>{port}</ports>
+  </host>
+  <runstats>
+    <finished time="{start + 1}" exit="success"/>
+    <hosts up="1" down="0" total="1"/>
+  </runstats>
+</nmaprun>
+""".encode()
+
+
 def _standalone_manifest(
     xml_name: str,
     xml_bytes: bytes,
@@ -1811,6 +1837,127 @@ def test_standalone_manifest_closes_included_unobserved_but_preserves_excluded(c
     }
     assert rows[included]["state"] == "closed"
     assert rows[excluded]["state"] == "open"
+
+
+def test_strong_single_manifest_rejects_scanned_host_outside_unit_and_server_scope(
+    client, monkeypatch, tmp_path,
+):
+    """A matching hash/runstats count cannot substitute a different observed host."""
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import Finding, ScanRun
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    monkeypatch.setattr(scans_api._settings, "scan_scope", "127.0.0.0/8")
+    requested, unexpected, port = "127.0.0.1", "192.0.2.55", 54448
+    name = "single.xml"
+    xml = _standalone_observed_xml(
+        1893456200, "tcp", port, unexpected, include_port=False,
+    )
+    manifest = _standalone_manifest(
+        name,
+        xml,
+        raw_targets=[requested],
+        exclude=[],
+        closure_targets=[requested],
+        stage_id="single",
+    )
+    before_files = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_file()}
+
+    response = client.post("/api/scans/import-bundle", headers=h, files=[
+        ("files", (name, xml, "text/xml")),
+        ("files", ("single.manifest.json", manifest, "application/json")),
+    ])
+
+    assert response.status_code == 400, response.text
+    assert "unit target" in response.json()["detail"]
+    db = SessionLocal()
+    try:
+        assert db.query(ScanRun).count() == 0
+        assert db.query(Finding).count() == 0
+    finally:
+        db.close()
+    after_files = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_file()}
+    assert after_files == before_files
+
+
+def test_strong_stage_bundle_host_mismatch_is_atomic(client, monkeypatch, tmp_path):
+    """A later mismatched unit must reject the bundle before a valid unit can close data."""
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import Finding, FindingEvent, ScanRun
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    monkeypatch.setattr(scans_api._settings, "scan_scope", "127.0.0.0/8")
+    scans_api._settings.ensure_dirs()
+    requested, unexpected = "127.0.0.1", "192.0.2.56"
+    tcp_port, udp_port = 54449, 54450
+    initial = _scan_xml(
+        1893456000,
+        '<scaninfo type="syn" protocol="tcp" numservices="1" '
+        f'services="{tcp_port}"/><scaninfo type="udp" protocol="udp" '
+        f'numservices="1" services="{udp_port}"/>',
+        _port("tcp", tcp_port) + _port("udp", udp_port),
+        host=requested,
+    )
+    assert client.post(
+        "/api/scans/import", headers=h,
+        files={"file": ("seed.xml", initial, "text/xml")},
+    ).status_code == 200
+
+    tcp_name = "mismatch.tcp_discovery.xml"
+    udp_name = "mismatch.udp_identify.xml"
+    tcp_xml = _standalone_empty_xml(1893456300, "tcp", str(tcp_port), total=1)
+    udp_xml = _standalone_observed_xml(1893456301, "udp", udp_port, unexpected)
+    manifest = json.loads(_standalone_manifest(
+        tcp_name,
+        tcp_xml,
+        raw_targets=[requested],
+        exclude=[],
+        closure_targets=[requested],
+    ))
+    manifest["import_contract"]["units"].append({
+        "batch_index": 0,
+        "stage_id": "udp_identify",
+        "authoritative": True,
+        "closure_targets": [requested],
+        "xml_basename": udp_name,
+        "xml_size": len(udp_xml),
+        "xml_sha256": hashlib.sha256(udp_xml).hexdigest(),
+    })
+    db = SessionLocal()
+    try:
+        before_scans = db.query(ScanRun).count()
+        before_events = db.query(FindingEvent).count()
+    finally:
+        db.close()
+    before_files = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_file()}
+
+    response = client.post("/api/scans/import-bundle", headers=h, files=[
+        ("files", (tcp_name, tcp_xml, "text/xml")),
+        ("files", (udp_name, udp_xml, "text/xml")),
+        ("files", ("mismatch.manifest.json", json.dumps(manifest).encode(), "application/json")),
+    ])
+
+    assert response.status_code == 400, response.text
+    assert "unit target" in response.json()["detail"]
+    db = SessionLocal()
+    try:
+        assert db.query(ScanRun).count() == before_scans
+        assert db.query(FindingEvent).count() == before_events
+        rows = {
+            (row.host_ip, row.proto, row.port): row.state
+            for row in db.query(Finding).all()
+        }
+        assert rows[(requested, "tcp", tcp_port)] == "open"
+        assert rows[(requested, "udp", udp_port)] == "open"
+        assert not any(host == unexpected for host, _proto, _port_num in rows)
+    finally:
+        db.close()
+    after_files = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_file()}
+    assert after_files == before_files
 
 
 @pytest.mark.parametrize("break_contract", ["schema", "hash", "exclude", "count"])
@@ -1961,3 +2108,37 @@ def test_observation_only_manifest_unit_cannot_close_missing_finding(client):
         if row["host_ip"] == host and row["port"] == port and row["proto"] == "tcp"
     )
     assert row["state"] == "open"
+
+
+def test_observation_only_manifest_rejects_finding_outside_effective_batch(client):
+    """Observation-only units may add evidence, but only for their declared batch."""
+    from scanops.db import SessionLocal
+    from scanops.models import Finding, ScanRun
+
+    h = _auth(client)
+    requested, unexpected, port = "127.0.0.1", "127.0.0.2", 54451
+    name = "observe-mismatch.tcp_identify.xml"
+    xml = _standalone_observed_xml(1893456400, "tcp", port, unexpected)
+    manifest = _standalone_manifest(
+        name,
+        xml,
+        raw_targets=[requested],
+        exclude=[],
+        closure_targets=[],
+        stage_id="tcp_identify",
+        authoritative=False,
+    )
+
+    response = client.post("/api/scans/import-bundle", headers=h, files=[
+        ("files", (name, xml, "text/xml")),
+        ("files", ("observe-mismatch.manifest.json", manifest, "application/json")),
+    ])
+
+    assert response.status_code == 400, response.text
+    assert "unit target" in response.json()["detail"]
+    db = SessionLocal()
+    try:
+        assert db.query(ScanRun).count() == 0
+        assert db.query(Finding).count() == 0
+    finally:
+        db.close()

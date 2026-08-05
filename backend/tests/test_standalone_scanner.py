@@ -124,7 +124,10 @@ def main() -> int:
     base = Path(args[args.index("-oA") + 1])
     stage = stage_from_base(base)
     targets = args[args.index("-oA") + 2:]
-    total = int(os.environ.get("FAKE_NMAP_TOTAL", str(len(targets))))
+    if os.environ.get("FAKE_NMAP_UNIQUE_TOTAL") and "--unique" in args:
+        total = int(os.environ["FAKE_NMAP_UNIQUE_TOTAL"])
+    else:
+        total = int(os.environ.get("FAKE_NMAP_TOTAL", str(len(targets))))
     log = os.environ.get("FAKE_NMAP_LOG")
     if log:
         with open(log, "a", encoding="utf-8") as fp:
@@ -1860,6 +1863,69 @@ def test_manifest_contract_binds_effective_targets_excludes_and_original_xml(tmp
     assert unit["xml_size"] == len(xml_bytes)
     assert unit["xml_sha256"] == __import__("hashlib").sha256(xml_bytes).hexdigest()
     assert str(xml_path) in manifest["import_xml_files"]
+
+
+def test_hostname_target_manifest_falls_back_to_legacy_observed_host_import(tmp_path):
+    """Nmap-resolved hostnames cannot be strongly bound to an address before execution."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    response = _run_scanner([
+        "--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "hostname",
+        "--workflow", "single", "scanner.internal",
+    ])
+    assert response.returncode == 0, response.stderr + response.stdout
+
+    manifest = json.loads((out / "hostname.manifest.json").read_text(encoding="utf-8"))
+    xml_path = out / "hostname.scanner.internal.xml"
+    assert xml_path.is_file()
+    assert "import_contract" not in manifest
+    assert manifest["import_xml_files"] == [str(xml_path)]
+
+
+def test_manifest_contract_omits_corrupt_followup_and_exactly_matches_import_list(tmp_path):
+    """A broken observation-only follow-up must not invalidate an earlier completed unit."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    response = _run_scanner(
+        [
+            "--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "corrupt-followup",
+            "--tcp-only", "127.0.0.1",
+        ],
+        env={"FAKE_NMAP_CORRUPT_STAGE": "tcp_identify"},
+    )
+    assert response.returncode == 0, response.stderr + response.stdout
+
+    manifest = json.loads((out / "corrupt-followup.manifest.json").read_text(encoding="utf-8"))
+    discovery = out / "corrupt-followup.127.0.0.1.tcp_discovery.xml"
+    corrupt_identify = out / "corrupt-followup.127.0.0.1.tcp_identify.xml"
+    assert corrupt_identify.exists()  # diagnostic artifact remains on disk
+    assert manifest["import_xml_files"] == [str(discovery)]
+    units = manifest["import_contract"]["units"]
+    assert [unit["xml_basename"] for unit in units] == [discovery.name]
+    assert units[0]["stage_id"] == "tcp_discovery"
+    assert units[0]["authoritative"] is True
+
+
+def test_nonbatch_overlapping_targets_use_nmap_unique_and_keep_closure_authority(tmp_path):
+    """Compact raw argv stays intact while Nmap counts overlapping targets only once."""
+    fake_nmap = _fake_nmap(tmp_path)
+    out = tmp_path / "out"
+    log = tmp_path / "unique.jsonl"
+    response = _run_scanner(
+        [
+            "--nmap", str(fake_nmap), "--output-dir", str(out), "--name", "unique",
+            "--workflow", "single", "127.0.0.1", "127.0.0.1/32",
+        ],
+        env={"FAKE_NMAP_LOG": str(log), "FAKE_NMAP_UNIQUE_TOTAL": "1"},
+    )
+    assert response.returncode == 0, response.stderr + response.stdout
+
+    command = _read_jsonl(log)[0]["args"]
+    assert command.count("--unique") == 1
+    assert command[command.index("-oA") + 2:] == ["127.0.0.1", "127.0.0.1/32"]
+    manifest = json.loads((out / "unique.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["import_contract"]["effective_host_count"] == 1
+    assert manifest["import_contract"]["units"][0]["authoritative"] is True
 
 
 def test_manifest_contract_marks_failed_and_host_timeout_units_observation_only(tmp_path):

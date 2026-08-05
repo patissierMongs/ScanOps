@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import * as XLSX from "xlsx";
 
 import {
@@ -20,6 +22,29 @@ function recordsFromWorkbook(data) {
 
 test("the bundled SheetJS build is the pinned 0.20.3 release", () => {
   assert.equal(XLSX.version, "0.20.3");
+});
+
+
+test("vendored SheetJS hash, dependency path, and license match the supply contract", () => {
+  const archive = readFileSync(new URL("../vendor/xlsx-0.20.3.tgz", import.meta.url));
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const packageLock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+  const installed = JSON.parse(readFileSync(new URL("../node_modules/xlsx/package.json", import.meta.url), "utf8"));
+  const notices = readFileSync(new URL("../../THIRD_PARTY_NOTICES.md", import.meta.url), "utf8");
+  const sha256 = createHash("sha256").update(archive).digest("hex").toUpperCase();
+  const integrity = `sha512-${createHash("sha512").update(archive).digest("base64")}`;
+  const locked = packageLock.packages["node_modules/xlsx"];
+
+  assert.equal(sha256, "8DC73FC3B00203E72D176E85B50938627C7B086E607C682E8D3C22C02BB99FE8");
+  assert.equal(packageJson.dependencies.xlsx, "file:vendor/xlsx-0.20.3.tgz");
+  assert.equal(locked.version, "0.20.3");
+  assert.equal(locked.resolved, "file:vendor/xlsx-0.20.3.tgz");
+  assert.equal(locked.integrity, integrity);
+  assert.equal(locked.license, "Apache-2.0");
+  assert.equal(installed.version, "0.20.3");
+  assert.equal(installed.license, "Apache-2.0");
+  assert.match(notices, new RegExp(sha256));
+  assert.match(notices, /Source: `https:\/\/cdn\.sheetjs\.com\/xlsx-0\.20\.3\/xlsx-0\.20\.3\.tgz`/);
 });
 
 
@@ -80,6 +105,53 @@ test("SheetJS parses legacy XLS and CSV asset files", () => {
   assert.deepEqual(recordsFromWorkbook(csv)[0], {
     ip: "10.0.0.2", dept: "운영팀", extra: {},
   });
+});
+
+
+test("CSV grid limits fail before SheetJS at the production file-size boundary", () => {
+  const wideAtBoundary = new Uint8Array(25 * 1024 * 1024);
+  wideAtBoundary.fill(0x2c); // commas: far more than 512 columns in one row
+  assert.throws(() => readWorkbook(wideAtBoundary), /처리 한도/);
+
+  const tooManyRows = new TextEncoder().encode("a\r\n".repeat(100_001));
+  assert.throws(() => readWorkbook(tooManyRows), /처리 한도/);
+
+  const fiveHundredColumns = `${Array(500).fill("a").join(",")}\n`;
+  const tooManyGridCells = new TextEncoder().encode(fiveHundredColumns.repeat(4_001));
+  assert.throws(() => readWorkbook(tooManyGridCells), /처리 한도/);
+});
+
+
+test("CSV preflight preserves quoted separators and CRLF records", () => {
+  const csv = new TextEncoder().encode(
+    'IP,note\r\n"10.0.0.8","comma, semicolon; tab\t and pipe| stay quoted"\r\n',
+  );
+  const parsed = readWorkbook(csv);
+  const { aoa } = unmergeFillWs(parsed.wb.Sheets[parsed.sheetNames[0]]);
+  assert.deepEqual(aoa[1], ["10.0.0.8", "comma, semicolon; tab\t and pipe| stay quoted"]);
+});
+
+
+test("CSV preflight matches SheetJS quote rules and fixes the detected separator", () => {
+  const embeddedQuoteWide = new TextEncoder().encode(
+    `a"literal,${"b,".repeat(512)}z"\n`,
+  );
+  assert.throws(() => readWorkbook(embeddedQuoteWide), /처리 한도/);
+
+  const punctuationCell = new TextEncoder().encode(
+    `IP,note\r\n10.0.0.9,${"value;".repeat(600)}\r\n`,
+  );
+  const parsed = readWorkbook(punctuationCell);
+  const { aoa } = unmergeFillWs(parsed.wb.Sheets[parsed.sheetNames[0]]);
+  assert.equal(aoa[0].length, 2);
+  assert.equal(aoa[1][0], "10.0.0.9");
+
+  const semicolonCsv = new TextEncoder().encode("IP;dept\r\n10.0.0.10;Security\r\n");
+  const semicolonParsed = readWorkbook(semicolonCsv);
+  const semicolonAoa = unmergeFillWs(
+    semicolonParsed.wb.Sheets[semicolonParsed.sheetNames[0]],
+  ).aoa;
+  assert.deepEqual(semicolonAoa[1], ["10.0.0.10", "Security"]);
 });
 
 

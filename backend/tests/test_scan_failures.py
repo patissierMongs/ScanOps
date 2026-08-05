@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -524,7 +525,9 @@ def test_engine_spawn_and_ingest_failures_have_distinct_stable_codes(monkeypatch
     assert "private" not in ingest_result.failure_message
 
 
-def test_engine_worker_wait_exception_still_closes_owned_process(monkeypatch, tmp_path):
+def test_engine_worker_wait_exception_closes_process_and_persists_safe_failure(
+    client, monkeypatch, tmp_path,
+):
     monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
     scan_id = _scan_with_spec(tmp_path, {
         "targets": ["127.0.0.1"], "out_dir": str(tmp_path),
@@ -532,7 +535,7 @@ def test_engine_worker_wait_exception_still_closes_owned_process(monkeypatch, tm
 
     class BrokenWaitProcess:
         def wait(self):
-            raise RuntimeError("worker interrupted")
+            raise RuntimeError(r"C:\private\worker interrupted")
 
     process = BrokenWaitProcess()
     closed = []
@@ -541,10 +544,101 @@ def test_engine_worker_wait_exception_still_closes_owned_process(monkeypatch, tm
         scans_api.engine_runner, "close_owned", lambda proc: closed.append(proc),
     )
 
-    with pytest.raises(RuntimeError, match="worker interrupted"):
-        scans_api._engine_worker(scan_id)
+    scans_api._engine_worker(scan_id)
 
     assert closed == [process]
+    scan = _read_scan(scan_id)
+    assert scan.status == "failed" and scan.finished_at is not None
+    assert scan.failure_code == "engine_wait_failed"
+    assert scan.failure_message == "단계 스캔 엔진의 종료 상태를 확인하지 못했습니다."
+    assert "private" not in scan.failure_message.lower()
+
+    headers = _headers(client)
+    scan_response = client.get(f"/api/scans/{scan_id}", headers=headers)
+    stages_response = client.get(f"/api/scans/{scan_id}/stages", headers=headers)
+    assert scan_response.status_code == stages_response.status_code == 200
+    assert scan_response.json()["failure_code"] == "engine_wait_failed"
+    stages = stages_response.json()
+    assert stages["status"] == stages["overall"]["status"] == "failed"
+    assert stages["failure_code"] == "engine_wait_failed"
+    assert "private" not in scan_response.text.lower()
+    assert "private" not in stages_response.text.lower()
+
+
+def test_engine_timeline_persistence_exception_is_terminal_and_sanitized(
+    client, monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["127.0.0.1"], "out_dir": str(tmp_path),
+    })
+    process = _Proc(0)
+    closed = []
+    monkeypatch.setattr(scans_api.engine_runner, "spawn", lambda *_args: process)
+    monkeypatch.setattr(
+        scans_api.engine_runner, "close_owned", lambda proc: closed.append(proc),
+    )
+
+    def fail_persist(*_args):
+        raise OSError(r"C:\private\events.ndjson cannot be read")
+
+    monkeypatch.setattr(scans_api, "_persist_stages", fail_persist)
+
+    scans_api._engine_worker(scan_id)
+
+    assert closed == [process]
+    scan = _read_scan(scan_id)
+    assert scan.status == "failed" and scan.finished_at is not None
+    assert scan.failure_code == "engine_timeline_failed"
+    assert scan.failure_message == "단계 스캔 진행 기록을 처리하지 못했습니다."
+    assert "private" not in scan.failure_message.lower()
+
+    headers = _headers(client)
+    scan_response = client.get(f"/api/scans/{scan_id}", headers=headers)
+    stages_response = client.get(f"/api/scans/{scan_id}/stages", headers=headers)
+    assert scan_response.status_code == stages_response.status_code == 200
+    assert scan_response.json()["failure_code"] == "engine_timeline_failed"
+    stages = stages_response.json()
+    assert stages["status"] == stages["overall"]["status"] == "failed"
+    assert stages["failure_code"] == "engine_timeline_failed"
+    assert "private" not in scan_response.text.lower()
+    assert "private" not in stages_response.text.lower()
+
+
+def test_engine_process_cleanup_exception_is_terminal_and_sanitized(
+    client, monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["127.0.0.1"], "out_dir": str(tmp_path),
+    })
+    process = _Proc(0)
+    monkeypatch.setattr(scans_api.engine_runner, "spawn", lambda *_args: process)
+
+    def fail_cleanup(proc):
+        assert proc is process
+        raise OSError(r"C:\private\engine process tree cannot close")
+
+    monkeypatch.setattr(scans_api.engine_runner, "close_owned", fail_cleanup)
+
+    scans_api._engine_worker(scan_id)
+
+    scan = _read_scan(scan_id)
+    assert scan.status == "failed" and scan.finished_at is not None
+    assert scan.failure_code == "engine_cleanup_failed"
+    assert scan.failure_message == "단계 스캔 엔진을 안전하게 종료하지 못했습니다."
+    assert "private" not in scan.failure_message.lower()
+
+    headers = _headers(client)
+    scan_response = client.get(f"/api/scans/{scan_id}", headers=headers)
+    stages_response = client.get(f"/api/scans/{scan_id}/stages", headers=headers)
+    assert scan_response.status_code == stages_response.status_code == 200
+    assert scan_response.json()["failure_code"] == "engine_cleanup_failed"
+    stages = stages_response.json()
+    assert stages["status"] == stages["overall"]["status"] == "failed"
+    assert stages["failure_code"] == "engine_cleanup_failed"
+    assert "private" not in scan_response.text.lower()
+    assert "private" not in stages_response.text.lower()
 
 
 def test_invalid_engine_spec_fails_before_spawn_and_resume_message_is_path_free(
@@ -570,9 +664,53 @@ def test_invalid_engine_spec_fails_before_spawn_and_resume_message_is_path_free(
     assert str(tmp_path) not in response.text
 
 
-def test_missing_packaged_engine_is_rejected_before_scan_record(client, monkeypatch, tmp_path):
+@pytest.mark.parametrize("engine_case", [
+    "missing",
+    "partial",
+    "unreadable",
+    "unimportable",
+    "entrypoint_syntax_error",
+    "entrypoint_import_error",
+])
+def test_unusable_packaged_engine_is_rejected_before_scan_record(
+    client, monkeypatch, tmp_path, engine_case,
+):
     headers = _headers(client)
-    monkeypatch.setattr(scans_api.engine_runner._settings, "engine_dir", tmp_path / "missing")
+    engine_dir = tmp_path / "engine"
+    package = engine_dir / "scanops_engine"
+    unreadable = None
+    if engine_case != "missing":
+        source_package = Path(__file__).resolve().parents[2] / "engine" / "scanops_engine"
+        shutil.copytree(source_package, package)
+        if engine_case == "partial":
+            (package / "pipeline.py").unlink()
+        elif engine_case == "unreadable":
+            unreadable = package / "pipeline.py"
+        elif engine_case == "unimportable":
+            (package / "__init__.py").write_text(
+                r'raise RuntimeError("C:\private\broken engine")' + "\n",
+                encoding="utf-8",
+            )
+        elif engine_case == "entrypoint_syntax_error":
+            (package / "__main__.py").write_text(
+                "if True print('broken')\n",
+                encoding="utf-8",
+            )
+        elif engine_case == "entrypoint_import_error":
+            (package / "__main__.py").write_text(
+                "from .missing_entrypoint import main\n",
+                encoding="utf-8",
+            )
+    monkeypatch.setattr(scans_api.engine_runner._settings, "engine_dir", engine_dir)
+    if unreadable is not None:
+        original_open = Path.open
+
+        def guarded_open(path, *args, **kwargs):
+            if path == unreadable:
+                raise PermissionError(r"C:\private\engine denied")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", guarded_open)
     db = SessionLocal()
     try:
         before = db.query(ScanRun).count()
@@ -584,8 +722,11 @@ def test_missing_packaged_engine_is_rejected_before_scan_record(client, monkeypa
     })
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "스캔 엔진 구성요소가 누락되었습니다. 배포 패키지를 다시 설치하세요."
+    assert response.json()["detail"] == (
+        "스캔 엔진 구성요소가 누락되었거나 손상되었습니다. 배포 패키지를 다시 설치하세요."
+    )
     assert str(tmp_path) not in response.text
+    assert "private" not in response.text.lower()
     db = SessionLocal()
     try:
         assert db.query(ScanRun).count() == before

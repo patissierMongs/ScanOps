@@ -46,6 +46,9 @@ _FAILURE_MESSAGES = {
     "engine_spec_missing": "단계 스캔 설정을 불러오지 못했습니다.",
     "engine_spec_invalid": "저장된 단계 스캔 설정을 해석하지 못했습니다.",
     "engine_launch_failed": "단계 스캔 엔진을 시작하지 못했습니다.",
+    "engine_wait_failed": "단계 스캔 엔진의 종료 상태를 확인하지 못했습니다.",
+    "engine_cleanup_failed": "단계 스캔 엔진을 안전하게 종료하지 못했습니다.",
+    "engine_timeline_failed": "단계 스캔 진행 기록을 처리하지 못했습니다.",
     "engine_failed": "단계 스캔 중 오류가 발생했습니다.",
     "engine_incomplete": "단계 스캔이 완료 결과 없이 종료되었습니다.",
     "engine_ingest_failed": "단계 스캔 결과를 처리하지 못했습니다.",
@@ -1051,12 +1054,33 @@ def _engine_worker(scan_id: int) -> None:
         logger.exception("failed to launch staged engine for scan %s", scan_id)
         _fail(scan_id, "engine_launch_failed")
         return
+    wait_failed = False
+    cleanup_failed = False
     try:
         rc = proc.wait()
+    except Exception:
+        logger.exception("failed while waiting for staged engine scan %s", scan_id)
+        wait_failed = True
+        rc = None
     finally:
-        # 정상 완료뿐 아니라 worker 예외에도 backend ownership을 닫아 engine/Nmap 잔존을 막는다.
-        engine_runner.close_owned(proc)
-    _persist_stages(scan_id, out_dir)
+        # 정상 완료뿐 아니라 wait 예외에도 backend ownership을 닫아 engine/Nmap 잔존을 막는다.
+        try:
+            engine_runner.close_owned(proc)
+        except Exception:
+            logger.exception("failed to close staged engine scan %s process tree", scan_id)
+            cleanup_failed = True
+    if cleanup_failed:
+        _fail(scan_id, "engine_cleanup_failed")
+        return
+    if wait_failed:
+        _fail(scan_id, "engine_wait_failed")
+        return
+    try:
+        _persist_stages(scan_id, out_dir)
+    except Exception:
+        logger.exception("failed to persist staged scan %s timeline", scan_id)
+        _fail(scan_id, "engine_timeline_failed")
+        return
     if engine_runner.stopped(out_dir):
         _mark(scan_id, "canceled")
         return
@@ -1209,6 +1233,38 @@ def _safe_contract_basename(value) -> str:
     return value
 
 
+def _validate_import_observation_hosts(
+    observed_hosts: set,
+    allowed_targets: list[str],
+) -> None:
+    """Bind every imported observation to the unit that claims to have produced it."""
+    observed = set(observed_hosts)
+    observed.discard(None)
+
+    canonical: set[str] = set()
+    for host in observed:
+        if not isinstance(host, str):
+            raise _InvalidImportXML("manifest XML 관측 host가 올바른 IPv4가 아닙니다.")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            raise _InvalidImportXML("manifest XML 관측 host가 올바른 IPv4가 아닙니다.") from None
+        if not isinstance(address, ipaddress.IPv4Address) or str(address) != host:
+            raise _InvalidImportXML("manifest XML 관측 host가 canonical IPv4가 아닙니다.")
+        canonical.add(host)
+
+    unexpected = sorted(canonical.difference(allowed_targets))
+    if unexpected:
+        shown = ", ".join(unexpected[:5])
+        if len(unexpected) > 5:
+            shown += f" 외 {len(unexpected) - 5}건"
+        raise _InvalidImportXML(f"manifest XML 관측 host가 unit target 밖입니다: {shown}")
+    try:
+        scope.check_scope(sorted(canonical))
+    except ValueError as exc:
+        raise _InvalidImportXML(f"manifest XML 관측 host가 서버 scope 밖입니다: {exc}") from None
+
+
 def _validate_import_manifest(manifest_bytes: bytes, payloads: list[dict]) -> dict[str, set[str]] | None:
     """Validate a standalone sidecar fully before the first DB or artifact side effect."""
     try:
@@ -1255,11 +1311,15 @@ def _validate_import_manifest(manifest_bytes: bytes, payloads: list[dict]) -> di
         raise _InvalidImportXML("manifest host_timeout 형식이 올바르지 않습니다.")
 
     by_basename: dict[str, dict] = {}
+    observed_by_basename: dict[str, set] = {}
     for item in payloads:
         basename = Path(item["name"].replace("\\", "/")).name
         if basename in by_basename:
             raise _InvalidImportXML("manifest import에 중복 XML basename이 있습니다.")
-        _prepare_import_xml(item["bytes"], item["name"])
+        _, findings, scanned_hosts, _, _ = _prepare_import_xml(item["bytes"], item["name"])
+        observed = set(scanned_hosts)
+        observed.update(finding.get("host_ip") for finding in findings)
+        observed_by_basename[basename] = observed
         by_basename[basename] = item
 
     units = contract.get("units")
@@ -1305,6 +1365,7 @@ def _validate_import_manifest(manifest_bytes: bytes, payloads: list[dict]) -> di
         if not authoritative:
             if closure_targets:
                 raise _InvalidImportXML("관측 전용 manifest unit은 closure_targets를 가질 수 없습니다.")
+            _validate_import_observation_hosts(observed_by_basename[basename], batches[batch_index])
             authorities[basename] = set()
             continue
         if host_timeout:
@@ -1321,6 +1382,7 @@ def _validate_import_manifest(manifest_bytes: bytes, payloads: list[dict]) -> di
             scope.check_scope(closure_targets)
         except ValueError as exc:
             raise _InvalidImportXML(f"manifest 닫힘 target이 서버 scope 밖입니다: {exc}") from None
+        _validate_import_observation_hosts(observed_by_basename[basename], closure_targets)
         _validate_contract_xml(item["bytes"], stage_id, len(closure_targets))
         authorities[basename] = set(closure_targets)
 

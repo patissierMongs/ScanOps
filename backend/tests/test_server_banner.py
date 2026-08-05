@@ -119,6 +119,20 @@ def test_server_does_not_replace_nmap_service_taxonomy():
     assert parsed[0]["service"] == "apple-iphoto"
 
 
+def test_new_open_event_prefers_server_identity_without_blank_prefix():
+    db = SessionLocal()
+    try:
+        scan_id = _scan(db, "server-new-open")
+        finding = parse_xml(_server_xml("uvicorn", service=""))[0]
+
+        ingest(db, scan_id, [finding], {finding["host_ip"]})
+
+        event = db.query(FindingEvent).filter_by(scan_id=scan_id, type="NEW_OPEN").one()
+        assert event.detail == "uvicorn 8770/tcp 신규 발견"
+    finally:
+        db.close()
+
+
 def test_ingest_server_change_emits_event_and_preserves_operational_fields():
     db = SessionLocal()
     try:

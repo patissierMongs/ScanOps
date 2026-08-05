@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from ..identity import display_identity
 from ..models import ACTIVE_FINDING_STATES, Finding, FindingEvent
 from .nmap_parse import server_observed
 
@@ -57,7 +58,21 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
             row.last_seen = when
             db.add(row)
             db.flush()
-            _event(db, row.id, scan_id, "NEW_OPEN", f"{f['service']} {f['port']}/{f['proto']} 신규 발견", when=when)
+            identity = display_identity(
+                server=f.get("server", ""),
+                product=f.get("product", ""),
+                version=f.get("version", ""),
+                service=f.get("service", ""),
+            )
+            prefix = f"{identity} " if identity else ""
+            _event(
+                db,
+                row.id,
+                scan_id,
+                "NEW_OPEN",
+                f"{prefix}{f['port']}/{f['proto']} 신규 발견",
+                when=when,
+            )
             counts["new"] += 1
             continue
 

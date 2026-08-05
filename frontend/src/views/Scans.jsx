@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { api, uploadMany } from "../api.js";
+import { formatImportSummary, prepareImportGroups, runImportGroups } from "../lib/scanImports.js";
 import { splitScanTokens } from "../lib/scanTargets.js";
 import { useToast } from "../ui/Toast.jsx";
 import ScanOptions from "../ui/ScanOptions.jsx";
@@ -143,22 +144,14 @@ export default function Scans({ user }) {
 
   // 여러 XML 또는 폴더째 가져오기. standalone manifest가 함께 있으면 제외/미관측 범위도 검증한다.
   async function importFiles(fileList, restoreFocusTo = null) {
-    const selected = [...fileList]
-      .filter((f) => {
-        const name = f.name.toLowerCase();
-        return name.endsWith(".xml") || name.endsWith(".manifest.json");
-      })
-      .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
-    const xmls = selected.filter((f) => f.name.toLowerCase().endsWith(".xml"));
-    if (!xmls.length) { toast("가져올 .xml 파일이 없습니다", { type: "err" }); return; }
     setBusy(true);
     try {
-      const r = await uploadMany("/scans/import-bundle", selected.map((f) => ({ file: f, name: f.webkitRelativePath || f.name })));
-      const c = r.counts || {};
-      const closure = r.closure_mode === "manifest" ? "완료 실행 범위" : "관측 호스트 기준";
-      toast(`가져옴 · 결과 ${r.imported}건 / 파일 ${r.file_count}개${r.failed ? ` (실패 ${r.failed})` : ""} · 신규 ${c.new || 0} / 닫힘 ${c.closed || 0} · ${closure}`,
-            r.failed ? { type: "err" } : undefined);
-      load();
+      const plan = await prepareImportGroups(fileList);
+      const summary = await runImportGroups(plan, async (group) => (
+        uploadMany("/scans/import-bundle", group.files)
+      ));
+      toast(formatImportSummary(summary), summary.hasFailures ? { type: "err" } : undefined);
+      if (summary.succeededGroups) load();
     } catch (e) {
       toast(e.message, { type: "err" });
     } finally {

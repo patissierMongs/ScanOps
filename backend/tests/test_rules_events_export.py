@@ -148,6 +148,25 @@ def test_export_xlsx(client):
     assert "spreadsheetml" in r.headers["content-type"]
 
 
+def test_export_preserves_udp_open_filtered_state(client):
+    h = _auth(client)
+    xml = b'''<?xml version="1.0"?><nmaprun><host><status state="up"/>
+    <address addr="127.0.0.1" addrtype="ipv4"/><ports>
+    <port protocol="udp" portid="5353"><state state="open|filtered"/>
+    <service name="mdns"/></port></ports></host></nmaprun>'''
+    imported = client.post(
+        "/api/scans/import", headers=h, files={"file": ("udp.xml", xml, "text/xml")},
+    )
+    assert imported.status_code == 200, imported.text
+
+    exported = client.get(
+        "/api/findings/export", headers=h,
+        params={"cols": "port,proto,state", "fmt": "csv"},
+    )
+    assert exported.status_code == 200
+    assert "5353,udp,open|filtered" in exported.content.decode("utf-8-sig")
+
+
 def test_export_fingerprint_and_owner_columns(client):
     """수집은 되는데 노출 안 되던 값(핑거프린트·담당자)을 선택 컬럼으로 내보낼 수 있어야 한다."""
     h = _auth(client)

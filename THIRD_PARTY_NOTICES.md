@@ -76,3 +76,30 @@ runtime package unless a distributor intentionally ships those sample services.
 - Vendored file: `frontend/vendor/xlsx-0.20.3.tgz`
 - SHA-256: `8DC73FC3B00203E72D176E85B50938627C7B086E607C682E8D3C22C02BB99FE8`
 - License: Apache-2.0
+
+## Vendored SheetJS update and air-gapped verification
+
+1. On a connected, controlled build workstation, download the release archive only from the
+   corresponding versioned `cdn.sheetjs.com` release URL. For a version change, use a new
+   versioned filename, update the `file:vendor/...` dependency in `frontend/package.json`, and
+   regenerate `frontend/package-lock.json` with
+   `npm install --package-lock-only --ignore-scripts`.
+2. Calculate SHA-256 and inspect the archive metadata and license before accepting it. Update
+   the version, source URL, vendored path, hash, and license in this notice together.
+
+   ```powershell
+   $sheetjsArchive = "frontend/vendor/xlsx-0.20.3.tgz"
+   (Get-FileHash -Algorithm SHA256 -LiteralPath $sheetjsArchive).Hash
+   tar -xOf $sheetjsArchive package/package.json
+   tar -xOf $sheetjsArchive package/LICENSE
+   ```
+
+3. On the connected build workstation, run `npm ci`, `npm test`,
+   `npm audit --omit=dev --audit-level=moderate`, `npm audit --audit-level=moderate`, and
+   `npm run build` from `frontend/`. Commit the versioned archive, package and lock files,
+   this notice, tests, and rebuilt `frontend/dist/` together.
+4. After transfer into the air-gapped environment, independently repeat the SHA-256 and
+   archive metadata/license commands and compare them with this notice. The deployed ScanOps
+   runtime uses the prebuilt `frontend/dist/` and does not require Node.js. If the frontend
+   must be rebuilt inside the air gap, transfer a separately verified npm cache and use
+   `npm ci --offline`; do not allow a registry fallback.

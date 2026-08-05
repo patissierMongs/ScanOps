@@ -32,7 +32,11 @@ from scanops_engine.spec import (  # noqa: E402
     JobSpec,
 )
 from scanops_engine.state import RunState  # noqa: E402
+from scanops.api import scans as scans_api  # noqa: E402
+from scanops.db import SessionLocal  # noqa: E402
+from scanops.models import ScanRun  # noqa: E402
 from scanops.scanning import engine_runner, nmap_runner  # noqa: E402
+from tests.conftest import make_user, token_for  # noqa: E402
 import package_runtime_smoke  # noqa: E402
 import runtime_e2e  # noqa: E402
 
@@ -650,6 +654,80 @@ def test_pn_discovery_reports_final_live_count(tmp_path):
     assert next(e for e in sink.events if e["event"] == "job_done")["counts"]["live"] == 1
 
 
+@pytest.mark.parametrize(
+    ("cached_live", "targets", "expected_live"),
+    [
+        (None, ["127.0.0.1"], 1),
+        (["127.0.0.1", "127.0.0.2"], ["127.0.0.0/30"], 2),
+    ],
+    ids=["fresh-pn", "cached-resume"],
+)
+def test_zero_open_live_count_agrees_across_engine_ingest_and_stages_api(
+    client, monkeypatch, tmp_path, cached_live, targets, expected_live,
+):
+    """A live host with no finding rows must not collapse the persisted host count to zero."""
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    make_user("live-count-auditor", "password12", role="auditor")
+    headers = {
+        "Authorization": f"Bearer {token_for(client, 'live-count-auditor', 'password12')}"
+    }
+
+    db = SessionLocal()
+    try:
+        scan = ScanRun(
+            name=f"zero-open-{'resume' if cached_live else 'fresh'}",
+            command="단계스캔(엔진) · 발견 pn",
+            status="done",
+        )
+        db.add(scan)
+        db.commit()
+        out_dir = scans_api._settings.scans_dir / f"scan_{scan.id}"
+        out_dir.mkdir(parents=True)
+        if cached_live is not None:
+            (out_dir / "run-state.json").write_text(json.dumps({
+                "stages_done": ["discovery"],
+                "open_map": {},
+                "live": cached_live,
+                "service_done": [],
+                "stop": False,
+            }), encoding="utf-8")
+
+        spec_dict = {
+            "job_id": f"scan_{scan.id}",
+            "targets": targets,
+            "out_dir": str(out_dir),
+            "stages": {
+                "discovery": {"mode": "sn" if cached_live is not None else "pn"},
+                "tcp": {"enabled": False},
+                "service": {"enabled": False},
+            },
+        }
+        (out_dir / "spec.json").write_text(json.dumps(spec_dict), encoding="utf-8")
+        sink = _Sink()
+        counts = Pipeline(JobSpec.from_dict(spec_dict), sink, "nmap").run()
+        (out_dir / "events.ndjson").write_text(
+            "\n".join(json.dumps(event) for event in sink.events) + "\n",
+            encoding="utf-8",
+        )
+
+        assert counts["live"] == expected_live
+        assert counts["open_tcp"] == counts["open_udp"] == counts["services"] == 0
+        engine_runner.ingest_results(db, scan, out_dir)
+        assert scan.host_count == expected_live
+        assert scan.port_count == 0
+        scan_id = scan.id
+    finally:
+        db.close()
+
+    response = client.get(f"/api/scans/{scan_id}/stages", headers=headers)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["status"] == payload["overall"]["status"] == "done"
+    assert payload["overall"]["counts"]["live"] == payload["host_count"] == expected_live
+    discovery = next(stage for stage in payload["stages"] if stage["stage"] == "discovery")
+    assert discovery["counts"]["live"] == expected_live
+
+
 def test_default_discovery_and_tcp_sweep_argv_match_standalone_policy(
     monkeypatch, tmp_path,
 ):
@@ -1039,7 +1117,12 @@ def test_offline_zip_contains_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "OUT", tmp_path / "ScanOps_offline.zip")
     module.main()
     with zipfile.ZipFile(module.OUT) as bundle:
-        assert "ScanOps/engine/scanops_engine/__main__.py" in bundle.namelist()
+        names = set(bundle.namelist())
+        expected = {
+            f"ScanOps/engine/scanops_engine/{name}"
+            for name in engine_runner.ENGINE_REQUIRED_FILES
+        }
+        assert expected <= names
 
 
 SENSITIVE_PACKAGE_PATHS = (
@@ -1153,7 +1236,8 @@ def test_allinone_copy_and_embedded_python_path_include_engine(tmp_path):
     app = tmp_path / "app"
     app.mkdir()
     module.copy_app(app)
-    assert (app / "engine" / "scanops_engine" / "__main__.py").is_file()
+    package = app / "engine" / "scanops_engine"
+    assert all((package / name).is_file() for name in engine_runner.ENGINE_REQUIRED_FILES)
 
     embed = tmp_path / "embed.zip"
     with zipfile.ZipFile(embed, "w") as archive:

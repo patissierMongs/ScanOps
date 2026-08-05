@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 
 import { cellValue, PRESETS, primaryServiceIdentity } from "../src/lib/columns.js";
 import { deadlinePatchValue } from "../src/lib/findingPatch.js";
-import { scanKind, shouldLoadStages } from "../src/lib/scanStatus.js";
+import { SCAN_STATUS, scanKind, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
 import { splitScanTokens } from "../src/lib/scanTargets.js";
 import { toastAnnouncement, toastDuration } from "../src/lib/toast.js";
 
@@ -32,6 +32,7 @@ test("service identity keeps raw Server separate from fallback display identity"
   assert.equal(primaryServiceIdentity({ product: "OpenSSH", version: "9.7", service: "ssh" }), "OpenSSH 9.7");
   assert.equal(primaryServiceIdentity({ service: "ssh" }), "ssh");
   assert.equal(cellValue({ display_identity: "nginx", server: "" }, "server"), "");
+  assert.equal(cellValue({ state: "open|filtered" }, "state"), "open|filtered");
   assert.ok(PRESETS.find((preset) => preset.id === "p_report").cols.includes("display_identity"));
 });
 
@@ -89,6 +90,22 @@ test("mobile table panels expose overflowing columns inside the panel", () => {
   assert.match(dashboard, /className="tbl recent-scans-table"/);
 });
 
+test("dashboard and scan history share every localized scan status", () => {
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(SCAN_STATUS).map((status) => [status, scanStatus(status).label])),
+    {
+      running: "실행 중",
+      canceling: "중지 중",
+      canceled: "중지됨",
+      interrupted: "중단됨(서버 재시작)",
+      failed: "실패",
+      done: "완료",
+    },
+  );
+  assert.match(source("../src/views/Dashboard.jsx"), /scanStatus\(s\.status\)\.label/);
+  assert.match(source("../src/views/Scans.jsx"), /const st = scanStatus\(s\.status\)/);
+});
+
 test("XML import is activated by visible buttons and restores their focus", () => {
   const scans = source("../src/views/Scans.jsx");
   assert.match(scans, /ref=\{fileButtonRef\}[\s\S]*?XML 가져오기/);
@@ -101,12 +118,13 @@ test("XML import is activated by visible buttons and restores their focus", () =
   assert.doesNotMatch(scans, /<label className="linkbtn"[\s\S]{0,160}type="file"/);
 });
 
-test("standalone folder import sends XML with its versioned manifest", () => {
+test("standalone folder import sends each preflighted XML/manifest group", () => {
   const scans = source("../src/views/Scans.jsx");
-  assert.match(scans, /name\.endsWith\("\.xml"\) \|\| name\.endsWith\("\.manifest\.json"\)/);
-  assert.match(scans, /uploadMany\("\/scans\/import-bundle", selected\.map/);
+  assert.match(scans, /prepareImportGroups\(fileList\)/);
+  assert.match(scans, /runImportGroups\(plan, async \(group\)/);
+  assert.match(scans, /uploadMany\("\/scans\/import-bundle", group\.files\)/);
   assert.match(scans, /accept="\.xml,\.manifest\.json"/);
-  assert.match(scans, /r\.closure_mode === "manifest" \? "완료 실행 범위" : "관측 호스트 기준"/);
+  assert.match(scans, /formatImportSummary\(summary\)/);
   assert.match(scans, /폴더째 가져오기\(XML\+manifest\)/);
 });
 

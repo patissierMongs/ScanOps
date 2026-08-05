@@ -47,13 +47,23 @@ jobs:
             throw "Unexpected Nmap version: $nmapVersion"
           }
 
-      - name: Build frontend
+      - name: Install and test frontend
         working-directory: frontend
         run: |
           npm ci
           npm test
-          npm audit --audit-level=moderate
-          npm run build
+
+      - name: Audit frontend production dependencies
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Audit all frontend dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
 
       - name: Exercise regular and all-in-one archives
         shell: pwsh
