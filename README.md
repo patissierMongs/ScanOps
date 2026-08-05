@@ -84,6 +84,12 @@ python scanner\scanops_scanner.py --resume scanops_scans\weekly.state.json
 - Nmap `service`는 프로토콜 분류·taxonomy·위험 규칙의 안정 키로 유지한다.
 - HTTP/NSE의 자기신고 `Server`는 별도 관측 증거로 저장한다. 화면·검색·내보내기·감사 리포트의
   표시 식별자는 **Server → product+version → service** 순서지만, Server가 taxonomy를 덮어쓰지는 않는다.
+- 다만 `service`로 **분류가 전혀 안 되는** 경우에 한해 Server 배너를 **보조 분류 키**로 쓴다.
+  Server 헤더가 나왔다는 것은 `http-server-header`/`http-headers`가 실제 HTTP 응답을 받아냈다는
+  뜻이라, nmap의 저신뢰 추측(`uniconv`·`apple-iphoto` 등)보다 강한 증거다. taxonomy는 제품명이
+  아니라 서비스명으로 키가 잡혀 있으므로 "이 포트는 HTTP로 말한다"는 사실만 되돌려 `http`
+  (TLS 증거가 있으면 `https`)로 분류한다. 이미 `service`로 분류되는 발견은 건드리지 않아 기존
+  위험등급이 흔들리지 않으며, 보조 키가 쓰인 건은 `관측근거` 항목으로 판정 이유를 남긴다.
 - `open`과 UDP의 `open|filtered`는 활성 finding이다. `closed`/`filtered` 행 자체는 새 finding으로
   인입하지 않는다. 정상 완료된 구조화 실행 단위(단계 스캔 전체 또는 레거시의 완료 배치)는
   **제외 후 유효 타깃 × 요청한 port/proto 범위**에서 미관측된 기존 finding도 닫는다. 제외한 타깃은

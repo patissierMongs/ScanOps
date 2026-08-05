@@ -277,3 +277,84 @@ def test_findings_export_honors_the_same_broad_search(client):
     assert response.status_code == 200, response.text
     rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
     assert rows == [{"IP": "10.9.9.9", "포트": "9000"}]
+
+
+def _lookup():
+    return {
+        "http": {"category": "웹", "usage": "웹 서비스", "risk_level": "medium",
+                 "compliance": [{"std": "KISA", "ref": "웹"}]},
+        "https": {"category": "웹", "usage": "웹 서비스(TLS)", "risk_level": "low",
+                  "compliance": []},
+        "ssh": {"category": "원격", "usage": "원격접속", "risk_level": "high", "compliance": []},
+    }
+
+
+def test_server_banner_classifies_findings_nmap_mislabels():
+    """nmap 이 uniconv 처럼 저신뢰 추측을 내놔도 Server 헤더가 나왔다면 HTTP 로 분류한다.
+
+    Server 헤더는 http-server-header/http-headers 가 실제 HTTP 응답을 받아냈다는 뜻이라
+    service 추측보다 강한 증거다. taxonomy 는 제품명이 아니라 서비스명으로 키가 잡혀 있어
+    '이 포트는 HTTP 로 말한다'는 사실만 키로 되돌린다."""
+    from scanops.scanning.taxonomy import classify
+
+    finding = {"service": "uniconv", "port": 8080, "server": "nginx/1.24.0",
+               "nse_json": {"http-server-header": "nginx/1.24.0"}}
+
+    classify(finding, _lookup(), [])
+
+    assert finding["category"] == "웹"
+    assert finding["usage"] == "웹 서비스"
+    assert finding["risk_level"] == "medium"      # info 로 방치되지 않는다
+    evidence = [c for c in finding["compliance_json"] if c["std"] == "관측근거"]
+    assert evidence and "uniconv" in evidence[0]["ref"] and "nginx/1.24.0" in evidence[0]["ref"]
+
+
+def test_server_banner_classification_uses_tls_evidence_for_https():
+    from scanops.scanning.taxonomy import classify
+
+    for nse in ({"ssl-cert": "commonName=x"}, '{"ssl-cert": "commonName=x"}'):
+        finding = {"service": "apple-iphoto", "port": 8443, "server": "nginx", "nse_json": nse}
+        classify(finding, _lookup(), [])
+        assert finding["usage"] == "웹 서비스(TLS)", nse
+
+
+def test_server_banner_never_overrides_a_service_that_already_classifies():
+    """보조 키일 뿐이라 기존에 잘 분류되던 건의 위험등급을 흔들지 않는다."""
+    from scanops.scanning.taxonomy import classify
+
+    finding = {"service": "ssh", "port": 22, "server": "nginx", "nse_json": {}}
+
+    classify(finding, _lookup(), [])
+
+    assert finding["category"] == "원격" and finding["risk_level"] == "high"
+    assert not [c for c in finding["compliance_json"] if c["std"] == "관측근거"]
+
+
+def test_unclassifiable_finding_without_server_stays_untouched():
+    from scanops.scanning.taxonomy import classify
+
+    finding = {"service": "uniconv", "port": 9999, "server": "", "nse_json": {}}
+
+    classify(finding, _lookup(), [])
+
+    assert finding["category"] == "" and finding["risk_level"] == "info"
+
+
+def test_reclassify_all_applies_server_fallback(client):
+    """재계산 경로에도 관측 증거가 전달돼야 한다(예전엔 service/port 만 넘겼다)."""
+    from scanops.scanning.taxonomy import reclassify_all
+
+    headers = _auth(client)
+    _import_sample(client, headers)
+    _update_finding(9000, service="uniconv", server="nginx/1.24.0",
+                    nse_json={"http-server-header": "nginx/1.24.0"},
+                    category="", usage="", risk_level="info")
+
+    db = SessionLocal()
+    try:
+        reclassify_all(db)
+        row = db.query(Finding).filter(Finding.port == 9000).one()
+        assert row.category == "웹"
+        assert row.risk_level != "info"
+    finally:
+        db.close()
