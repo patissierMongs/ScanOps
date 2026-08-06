@@ -90,6 +90,14 @@ python scanner\scanops_scanner.py --resume scanops_scans\weekly.state.json
   아니라 서비스명으로 키가 잡혀 있으므로 "이 포트는 HTTP로 말한다"는 사실만 되돌려 `http`
   (TLS 증거가 있으면 `https`)로 분류한다. 이미 `service`로 분류되는 발견은 건드리지 않아 기존
   위험등급이 흔들리지 않으며, 보조 키가 쓰인 건은 `관측근거` 항목으로 판정 이유를 남긴다.
+- **핑거프린트 시그니처** — `-sV`가 식별하지 못해 `unknown`으로 남은 포트는, `fingerprint-strings`가
+  남긴 원시 응답을 `backend/scanops/seed/fingerprint_signatures.json`의 표와 대조해 제품을 되돌린다.
+  nmap의 `nmap-service-probes`는 서구 소프트웨어 중심이라 Tibero 같은 국내 엔터프라이즈 제품은
+  match 줄이 없어 unknown으로 남는데, 응답 본문에는 제품명이 그대로 들어 있는 경우가 많다.
+  **이 표는 코드가 아니라 데이터다** — 파일을 고치고 서버를 재시작하면 반영되며, DB 시드와 달리
+  기존 설치에도 그대로 적용된다. 관측된 `service`/`product`가 있으면 **절대 덮어쓰지 않고**,
+  판정에 쓰인 시그니처는 비고에 `fingerprint=<id>`로 남는다. 표가 깨져도 스캔 인입은 계속된다.
+  제품이 채워지면 표시 식별자·검색·`product_rule`이 함께 살아난다.
 - **조직 위험규칙**은 `service`뿐 아니라 **제품(`product_rule`)·CPE(`cpe_rule`)**로도 걸 수 있다.
   `service`가 저신뢰 추측이라 못 잡히는 포트도 제품/CPE로는 잡힌다. 두 규칙은 **부분일치**다 —
   nmap의 product에는 `Samba smbd`처럼 서술 접미사가 붙고 CPE는 여러 개가 `;`로 이어져 저장되므로
