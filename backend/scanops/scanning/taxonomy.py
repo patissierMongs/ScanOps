@@ -91,6 +91,8 @@ def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> d
 
     # 조직 규칙은 taxonomy 기본값을 직접 덮어쓴다. risk_level=info 는 허용/정보 처리다.
     # banned_service 는 기존 호환용 이름이며 항상 금지(banned)로 적용한다.
+    product = (finding.get("product") or "").lower()
+    cpe = (finding.get("cpe") or "").lower()
     for r in rules:
         if r.kind == "banned_service" and r.service and r.service.lower() == svc:
             finding["risk_level"] = "banned"
@@ -98,6 +100,16 @@ def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> d
             finding["risk_level"] = r.risk_level
         elif (r.kind == "port_rule" and r.port == finding.get("port")
               and (not r.service or r.service.lower() == svc)):
+            finding["risk_level"] = r.risk_level
+        # 제품/CPE 규칙은 부분일치다. nmap product 는 'Samba smbd' 처럼 서술 접미사가 붙고,
+        # CPE 는 여러 개가 ';' 로 이어져 저장되므로 정확일치로는 실무에서 쓸 수 없다.
+        elif r.kind == "product_rule" and getattr(r, "product", "") and product:
+            if r.product.lower() not in product:
+                continue
+            finding["risk_level"] = r.risk_level
+        elif r.kind == "cpe_rule" and getattr(r, "cpe", "") and cpe:
+            if r.cpe.lower() not in cpe:
+                continue
             finding["risk_level"] = r.risk_level
         else:
             continue
@@ -116,8 +128,9 @@ def reclassify_all(db: Session) -> int:
     rules = db.query(RiskRule).order_by(RiskRule.created_at, RiskRule.id).all()
     n = 0
     for f in db.query(Finding).all():
-        # Server 배너 보조 분류가 재계산에서도 동일하게 걸리도록 관측 증거를 함께 넘긴다.
-        d = {"service": f.service, "port": f.port, "server": f.server, "nse_json": f.nse_json}
+        # Server 배너 보조 분류와 제품/CPE 규칙이 재계산에서도 동일하게 걸리도록 관측 증거를 함께 넘긴다.
+        d = {"service": f.service, "port": f.port, "server": f.server, "nse_json": f.nse_json,
+             "product": f.product, "cpe": f.cpe}
         classify(d, lookup, rules)
         if f.risk_level != d["risk_level"]:
             n += 1

@@ -50,6 +50,11 @@ def _migrate() -> None:
         user_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
         if "auth_version" not in user_cols:
             conn.exec_driver_sql("ALTER TABLE users ADD COLUMN auth_version INTEGER DEFAULT 0")
+        rule_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(risk_rules)").fetchall()}
+        if rule_cols and "product" not in rule_cols:  # 제품/CPE 기반 조직 규칙
+            conn.exec_driver_sql("ALTER TABLE risk_rules ADD COLUMN product VARCHAR(128) DEFAULT ''")
+        if rule_cols and "cpe" not in rule_cols:
+            conn.exec_driver_sql("ALTER TABLE risk_rules ADD COLUMN cpe VARCHAR(128) DEFAULT ''")
         cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(findings)").fetchall()}
         if "owner" not in cols:  # 자산대장 담당자명 전파용 컬럼
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN owner VARCHAR(128) DEFAULT ''")

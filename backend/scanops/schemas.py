@@ -178,8 +178,10 @@ class EventFeed(BaseModel):
 
 # ---- risk rule ----
 class RuleIn(BaseModel):
-    kind: str  # service_rule / banned_service / port_rule
+    kind: str  # service_rule / banned_service / port_rule / product_rule / cpe_rule
     service: str = ""
+    product: str = ""   # 제품 부분일치(예: "vsftpd"). nmap product 의 서술 접미사 때문에 부분일치
+    cpe: str = ""       # CPE 부분일치(예: "openbsd:openssh"). 발견의 CPE 는 ';' 로 여러 개 저장
     port: int | None = None
     risk_level: str = "high"
     note: str = ""
@@ -190,6 +192,8 @@ class RuleOut(BaseModel):
     id: int
     kind: str
     service: str
+    product: str = ""
+    cpe: str = ""
     port: int | None
     risk_level: str
     note: str
