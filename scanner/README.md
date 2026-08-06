@@ -21,8 +21,10 @@ Windows에서 `scanner\run_gui.bat`를 더블클릭해도 됩니다.
 
 GUI 기본 흐름:
 
-1. 대상 IP/CIDR/범위를 입력하거나 대상 파일을 선택합니다. 필요하면 바로 아래에서 제외할 IPv4 IP/CIDR도 입력합니다.
+1. 대상 IP/CIDR/범위를 입력하거나 대상 파일을 선택합니다. 필요하면 바로 아래에서 제외할 IP(IP/CIDR/범위)와
+   제외할 포트도 입력합니다.
 2. 기본값은 `자동 스캔 - 열린 포트와 용도 파악`입니다. 관리자는 한 번만 실행하고, 내부 단계는 스캐너가 자동으로 진행합니다.
+   노후 장비 대역이면 `자동 스캔 - 저강도(노후 장비 안전)`를 고릅니다.
 3. 결과 폴더와 결과 이름을 확인합니다.
 4. `명령 확인`으로 내부적으로 실행될 nmap 명령들을 확인합니다.
 5. `스캔 시작`을 누르고, 완료 후 생성된 `.xml` 파일을 ScanOps에 가져옵니다.
@@ -60,6 +62,32 @@ python3 scanner/scanops_scanner.py 10.0.0.10 --name branch-a
 과거처럼 nmap을 한 번만 실행해야 하는 경우에는 `--workflow single --profile ...`을 사용합니다.
 사용 가능한 단일 프로필은 `basic`, `phase1`, `quick`, `light`입니다.
 
+## 스캔 강도 (노후 장비)
+
+기본 강도는 사내망 기준으로 공격적입니다(`-T4`에 `--defeat-rst-ratelimit`, 병렬 100). 10~15년 된
+백본/방화벽처럼 control-plane 이 약한 장비에는 `--intensity gentle`을 씁니다. GUI 에서는 실행 방식의
+`자동 스캔 - 저강도(노후 장비 안전)`가 같은 설정입니다.
+
+```bash
+python3 scanops_scanner.py 10.0.0.0/24 --intensity gentle
+python3 scanops_scanner.py 10.0.0.0/24 --intensity gentle --max-rate 80   # 더 낮추기
+```
+
+| 항목 | 기본 | `--intensity gentle` |
+|---|---|---|
+| 타이밍 | `-T4` | `-T3` |
+| RST 율제한 우회 | 사용 | **사용 안 함** |
+| 병렬 | `--max-parallelism 100` | `10` |
+| 호스트 그룹 | `--min-hostgroup 64` | `16` |
+| 재시도 | `--max-retries 2` | `1` |
+| 속도 상한 | 없음 | `--max-rate 150` |
+| 호스트당 상한 | 꺼짐 | `--host-timeout 30m` |
+
+가장 중요한 건 `--defeat-rst-ratelimit`을 쓰지 않는 것입니다. 이 플래그는 장비가 스스로 거는 RST
+율제한 보호를 무력화해 오래된 장비의 CPU 를 가장 확실하게 끌어올립니다. `--max-rate`/`--host-timeout`은
+`--intensity gentle`이 정한 기본값을 명시 지정으로 덮어쓸 수 있고, `--host-timeout 0`으로 끌 수 있습니다.
+저강도는 state 에 저장되어 `--resume` 으로 이어할 때도 같은 강도가 유지됩니다.
+
 ```bash
 python3 scanops_scanner.py 10.0.0.0/24 --workflow single --profile basic --name quick_check
 ```
@@ -88,9 +116,22 @@ python3 scanops_scanner.py --targets-file targets.txt --ports 1-1024 --name week
 
 ```bash
 python3 scanops_scanner.py 10.0.0.0/24 --exclude "10.0.0.1, 10.0.0.2" --exclude 10.0.0.128/25
+python3 scanops_scanner.py 10.0.0.0/24 --exclude 10.0.0.20-30      # 대상과 같은 범위 문법
 ```
 
-`--exclude`는 IPv4 IP/CIDR만 받으며, 토큰 하나라도 잘못되면 스캔 전체를 입력 오류로 거절합니다.
+특정 포트 제외(`--exclude-ports`, nmap 네이티브 전역 필터):
+
+```bash
+python3 scanops_scanner.py 10.0.0.10 --exclude-ports 3030          # 3030만 빼고 전부
+python3 scanops_scanner.py 10.0.0.10 --exclude-ports "3030,U:161"
+```
+
+`--exclude-ports`는 `--ports`와 같은 문법(`3030`, `1-1024`, `T:`/`U:` 접두사)을 쓰며, `-p`를 건드리지
+않는 전역 필터라 자동 워크플로의 모든 단계와 `--top-ports` 프리셋에도 그대로 적용됩니다. `T:1-3029,3031-65535`
+처럼 범위를 손으로 쪼갤 필요가 없습니다.
+
+`--exclude`는 IPv4 IP/CIDR/마지막 옥텟 범위(`10.0.0.1-10`)를 받으며, 토큰 하나라도 잘못되면 스캔 전체를
+입력 오류로 거절합니다.
 대상은 먼저 전개·중복 제거하고 `--max-hosts`를 검사한 다음 원래 대상 전체를 `scope`로 검증하며,
 그 뒤에 제외 대역을 적용합니다. 따라서 넓은 대역을 전부 제외해 host cap이나 scope를 우회할 수 없습니다.
 배치 모드는 제외 후 남은 호스트만 state의 배치에 저장하고, 비배치 모드는 짧은 CIDR/범위 표현을 유지한 채

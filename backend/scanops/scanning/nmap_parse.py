@@ -9,6 +9,8 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
+from . import fingerprints
+
 # (script_id 부분일치, 라벨, 정규식) — NSE 출력에서 한 줄 핵심 추출
 _REMARK_PATTERNS = [
     ("ssl-cert", "CN", re.compile(r"commonName=([^\n,/]+)")),
@@ -80,6 +82,14 @@ def server_observed(nse: list[dict] | None) -> bool:
     return bool(extract_server(fingerprint_scripts))
 
 
+def _fingerprint_of(nse: list[dict] | None) -> str:
+    """NSE 목록에서 fingerprint-strings 원시 응답만 뽑는다(모델의 동명 속성과 같은 계약)."""
+    for script in nse or []:
+        if isinstance(script, dict) and "fingerprint-strings" in str(script.get("id") or "").lower():
+            return str(script.get("output") or "")
+    return ""
+
+
 def _identification(svc) -> str:
     if svc is None:
         return "미확인"
@@ -104,20 +114,8 @@ def pretty_fingerprint(raw: str) -> str:
     """
     if not raw:
         return ""
-    blocks: list[dict] = []
-    cur: dict | None = None
-    for ln in str(raw).replace("\r", "").split("\n"):
-        if not ln.strip():
-            continue
-        m = re.match(r"^\s{1,3}(\S.*?):\s*$", ln)   # probe 그룹 헤더
-        if m:
-            cur = {"probes": m.group(1), "body": []}
-            blocks.append(cur)
-        elif cur is not None:
-            cur["body"].append(ln.strip())
-        else:
-            cur = {"probes": "", "body": [ln.strip()]}
-            blocks.append(cur)
+    # 블록 파싱은 시그니처 대조와 같은 로직이라 fingerprints 에 한 벌만 둔다.
+    blocks = fingerprints.fingerprint_blocks(raw)
     seen: set[str] = set()
     out: list[str] = []
     for b in blocks:
@@ -243,14 +241,25 @@ def parse_xml(source) -> list[dict]:
                    for s in port.findall("script")]
             cpe = ";".join(c.text or "" for c in (svc.findall("cpe") if svc is not None else []))
             detail = _detail(svc)
+            service = (svc.get("name") if svc is not None else "") or ""
+            product = (svc.get("product") if svc is not None else "") or ""
+            remarks = _remarks(detail, nse)
+            # -sV 가 아무것도 못 알아낸 포트만 시그니처 표로 한 번 더 시도한다.
+            # 관측된 service/product 가 있으면 절대 덮어쓰지 않는다.
+            if not product and service.lower() in fingerprints.UNIDENTIFIED_SERVICES:
+                hit = fingerprints.identify(_fingerprint_of(nse))
+                if hit:
+                    product = hit["product"]
+                    evidence = f"fingerprint={hit['id']}"
+                    remarks = f"{remarks} · {evidence}" if remarks else evidence
             findings.append({
                 "host_ip": host_ip,
                 "hostname": hostname,
                 "port": int(port.get("portid")),
                 "proto": port.get("protocol") or "tcp",
                 "state": state,
-                "service": (svc.get("name") if svc is not None else "") or "",
-                "product": (svc.get("product") if svc is not None else "") or "",
+                "service": service,
+                "product": product,
                 "version": (svc.get("version") if svc is not None else "") or "",
                 "server": extract_server(nse),
                 # 세 상태 계약: 미관측(False) / 관측했으나 없음(True+"") / 값 있음(True+value).
@@ -260,6 +269,6 @@ def parse_xml(source) -> list[dict]:
                 "rtt": rtt or "",
                 "identification": _identification(svc),
                 "nse_json": nse,
-                "remarks": _remarks(detail, nse),
+                "remarks": remarks,
             })
     return findings

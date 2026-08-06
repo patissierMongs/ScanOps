@@ -1,0 +1,9 @@
+[
+  {
+    "id": "tmax-tibero",
+    "product": "Tibero",
+    "pattern": "(?im)^[\\s\"']*Tibero[\\s\"']*$",
+    "min_probes": 1,
+    "note": "TmaxSoft Tibero DBMS — 프로토콜과 무관하게 제품명만 응답해 nmap 이 unknown 으로 남긴다"
+  }
+]

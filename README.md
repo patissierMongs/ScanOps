@@ -25,8 +25,17 @@ cd frontend && npm install && npm run dev
 ```
 
 ## 에어갭(오프라인) 배포
-일반 오프라인 ZIP은 wheelhouse 계약에 맞는 **Python 3.12 (x64)** 와 **nmap**이 필요합니다.
-Python을 설치할 수 없는 Windows x64 서버는 Python 3.12 런타임이 포함된 all-in-one ZIP을 사용하세요.
+일반 오프라인 ZIP은 `install.ps1` 이 요구하는 **Python 3.12 (x64)** 와 **nmap**이 필요합니다.
+Python을 설치할 수 없는 Windows x64 서버는 Python 런타임이 포함된 all-in-one ZIP을 사용하세요.
+all-in-one 은 **3.12 / 3.13** 두 런타임으로 만들 수 있습니다.
+
+```powershell
+python packaging\build_allinone.py                  # 3.12 → ..\ScanOps_allinone.zip
+python packaging\build_allinone.py --python 3.13    # 3.13 → ..\ScanOps_allinone_py313.zip
+```
+두 번들 모두 압축만 풀고 `START.bat` 을 실행하면 됩니다(대상에 Python 설치 불필요). 앱 의존성
+버전은 두 번들이 동일하며, 런타임과 바이너리 휠(cp312/cp313)만 다릅니다. 스캔 실행에만 nmap이
+따로 필요하고, XML 가져오기는 nmap 없이도 동작합니다.
 ```powershell
 # 1) 프론트 빌드(Node.js 20.19+ 또는 22.12+, 인터넷 되는 PC에서 1회) → frontend/dist 생성
 cd frontend && npm install && npm run build
@@ -75,6 +84,25 @@ python scanner\scanops_scanner.py --resume scanops_scans\weekly.state.json
 - Nmap `service`는 프로토콜 분류·taxonomy·위험 규칙의 안정 키로 유지한다.
 - HTTP/NSE의 자기신고 `Server`는 별도 관측 증거로 저장한다. 화면·검색·내보내기·감사 리포트의
   표시 식별자는 **Server → product+version → service** 순서지만, Server가 taxonomy를 덮어쓰지는 않는다.
+- 다만 `service`로 **분류가 전혀 안 되는** 경우에 한해 Server 배너를 **보조 분류 키**로 쓴다.
+  Server 헤더가 나왔다는 것은 `http-server-header`/`http-headers`가 실제 HTTP 응답을 받아냈다는
+  뜻이라, nmap의 저신뢰 추측(`uniconv`·`apple-iphoto` 등)보다 강한 증거다. taxonomy는 제품명이
+  아니라 서비스명으로 키가 잡혀 있으므로 "이 포트는 HTTP로 말한다"는 사실만 되돌려 `http`
+  (TLS 증거가 있으면 `https`)로 분류한다. 이미 `service`로 분류되는 발견은 건드리지 않아 기존
+  위험등급이 흔들리지 않으며, 보조 키가 쓰인 건은 `관측근거` 항목으로 판정 이유를 남긴다.
+- **핑거프린트 시그니처** — `-sV`가 식별하지 못해 `unknown`으로 남은 포트는, `fingerprint-strings`가
+  남긴 원시 응답을 `backend/scanops/seed/fingerprint_signatures.json`의 표와 대조해 제품을 되돌린다.
+  nmap의 `nmap-service-probes`는 서구 소프트웨어 중심이라 Tibero 같은 국내 엔터프라이즈 제품은
+  match 줄이 없어 unknown으로 남는데, 응답 본문에는 제품명이 그대로 들어 있는 경우가 많다.
+  **이 표는 코드가 아니라 데이터다** — 파일을 고치고 서버를 재시작하면 반영되며, DB 시드와 달리
+  기존 설치에도 그대로 적용된다. 관측된 `service`/`product`가 있으면 **절대 덮어쓰지 않고**,
+  판정에 쓰인 시그니처는 비고에 `fingerprint=<id>`로 남는다. 표가 깨져도 스캔 인입은 계속된다.
+  제품이 채워지면 표시 식별자·검색·`product_rule`이 함께 살아난다.
+- **조직 위험규칙**은 `service`뿐 아니라 **제품(`product_rule`)·CPE(`cpe_rule`)**로도 걸 수 있다.
+  `service`가 저신뢰 추측이라 못 잡히는 포트도 제품/CPE로는 잡힌다. 두 규칙은 **부분일치**다 —
+  nmap의 product에는 `Samba smbd`처럼 서술 접미사가 붙고 CPE는 여러 개가 `;`로 이어져 저장되므로
+  정확일치로는 실무에서 쓸 수 없다. 규칙 화면이 저장 전에 **매칭 발견 수**를 보여주므로 과매칭을
+  눈으로 확인할 수 있다. 예: `cpe_rule`에 `openbsd:openssh`, `product_rule`에 `vsftpd`.
 - `open`과 UDP의 `open|filtered`는 활성 finding이다. `closed`/`filtered` 행 자체는 새 finding으로
   인입하지 않는다. 정상 완료된 구조화 실행 단위(단계 스캔 전체 또는 레거시의 완료 배치)는
   **제외 후 유효 타깃 × 요청한 port/proto 범위**에서 미관측된 기존 finding도 닫는다. 제외한 타깃은

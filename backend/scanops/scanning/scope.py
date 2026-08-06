@@ -9,8 +9,13 @@ from __future__ import annotations
 
 import ipaddress
 
+import re
+
 from ..config import get_settings
 from .scan_options import NSE_SCRIPTS
+
+# 마지막 옥텟 범위(10.0.0.1-10) — 타겟 입력과 같은 문법을 제외에서도 받는다.
+_EXCLUDE_RANGE_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})-(\d{1,3})$")
 
 
 def parse_scope(spec: str) -> list[ipaddress._BaseNetwork]:
@@ -28,10 +33,11 @@ def parse_scope(spec: str) -> list[ipaddress._BaseNetwork]:
 
 
 def parse_excludes(tokens: list[str] | None) -> list[str]:
-    """제외 IPv4/IP-CIDR 토큰을 검증·정규화하고 입력 순서로 중복 제거한다.
+    """제외 IPv4/IP-CIDR/마지막 옥텟 범위 토큰을 검증·정규화하고 입력 순서로 중복 제거한다.
 
     제외는 안전 경계이므로 토큰 하나라도 잘못되면 전체 요청을 거절한다. 단일 IP는
     IP 표기를 유지하고, CIDR은 host bit를 정규화하되 개별 주소로 확장하지 않는다.
+    타겟 입력이 받는 '10.0.0.1-10' 범위 표기도 같이 받는다(nmap --exclude 가 그대로 해석).
     """
     if tokens is None:
         return []
@@ -42,6 +48,14 @@ def parse_excludes(tokens: list[str] | None) -> list[str]:
     for raw in tokens:
         if not isinstance(raw, str) or not (token := raw.strip()):
             raise ValueError("제외 대상에 빈 토큰을 사용할 수 없습니다.")
+        if match := _EXCLUDE_RANGE_RE.fullmatch(token):
+            base, lo, hi = match.group(1), int(match.group(2)), int(match.group(3))
+            if any(int(o) > 255 for o in base.split(".")) or lo > 255 or hi > 255 or lo > hi:
+                raise ValueError(f"잘못된 제외 IP 범위입니다: {token!r}. 예: 10.0.0.1-10")
+            if token not in seen:
+                seen.add(token)
+                normalized.append(token)
+            continue
         try:
             address = ipaddress.ip_address(token)
             if address.version != 4:
@@ -67,7 +81,14 @@ def apply_excludes(hosts: list[str], tokens: list[str] | None) -> list[str]:
     normalized = parse_excludes(tokens)
     if not normalized:
         return list(hosts)
-    networks = [ipaddress.ip_network(token, strict=False) for token in normalized]
+    networks: list[ipaddress._BaseNetwork] = []
+    for token in normalized:
+        # 범위 토큰은 nmap 에 그대로 넘기되, 파이썬 쪽 차감을 위해 /32 로 전개한다.
+        if match := _EXCLUDE_RANGE_RE.fullmatch(token):
+            base, lo, hi = match.group(1), int(match.group(2)), int(match.group(3))
+            networks.extend(ipaddress.ip_network(f"{base}.{i}/32") for i in range(lo, hi + 1))
+        else:
+            networks.append(ipaddress.ip_network(token, strict=False))
     kept: list[str] = []
     for host in hosts:
         try:
