@@ -479,3 +479,59 @@ def test_skip_known_is_opt_in_so_manual_reimport_still_works(client):
     assert client.post("/api/scans/import-bundle", headers=auth, files=files).json()["imported"] == 2
     again = client.post("/api/scans/import-bundle", headers=auth, files=files).json()
     assert again["imported"] == 2 and again.get("skipped", 0) == 0
+
+
+def test_a_failed_import_does_not_block_a_later_retry(client, monkeypatch):
+    """실패한 인입 행도 지문을 남긴다 — 상태를 안 보면 일시 오류 한 번이 그 결과를 영구히 건너뛴다.
+
+    스캐너에는 '이미 가져온 결과'로 출력되므로 유실이 조용하다는 점이 특히 나쁘다.
+    """
+    auth = _auth(client)
+    xml = (Path(__file__).parent / "fixtures" / "sample_scan.xml").read_bytes()
+    files = [("files", ("weekly.xml", xml, "text/xml"))]
+
+    from scanops.api import scans as scans_api
+    real_commit = scans_api._commit_ingest
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("일시적인 디스크 오류")
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(scans_api, "_commit_ingest", flaky)
+    first = client.post("/api/scans/import-bundle?skip_known=true", headers=auth, files=files)
+    assert first.status_code == 400                     # 실패로 끝났다
+    monkeypatch.undo()
+
+    # 같은 파일을 다시 도킹하면 실제로 재시도돼야 한다.
+    second = client.post("/api/scans/import-bundle?skip_known=true", headers=auth, files=files)
+    assert second.status_code == 200, second.text
+    assert second.json()["imported"] == 1
+    assert second.json()["skipped"] == 0
+
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+    db = SessionLocal()
+    try:
+        assert db.query(ScanRun).filter(ScanRun.status == "done").count() == 1
+    finally:
+        db.close()
+
+
+def test_known_results_ignores_failed_imports(client, monkeypatch):
+    auth = _auth(client)
+    xml = (Path(__file__).parent / "fixtures" / "sample_scan.xml").read_bytes()
+    from scanops.api import scans as scans_api
+    from scanops.api.scans import result_fingerprint
+
+    monkeypatch.setattr(scans_api, "_commit_ingest",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    client.post("/api/scans/import-bundle", headers=auth,
+                files=[("files", ("weekly.xml", xml, "text/xml"))])
+    monkeypatch.undo()
+
+    known = client.post("/api/scans/known-results", headers=auth,
+                        json={"fingerprints": [result_fingerprint([xml])]}).json()
+    assert known["known"] == []

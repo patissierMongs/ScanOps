@@ -1701,8 +1701,9 @@ def known_results(
         return {"known": []}
     if len(wanted) > 5000:
         raise HTTPException(status_code=400, detail="한 번에 확인할 수 있는 지문은 5000개까지입니다.")
+    # 실패로 끝난 인입은 '가져온 것'이 아니다 — 그렇게 세면 재시도가 영구히 막힌다.
     rows = db.query(ScanRun.source_fingerprint).filter(
-        ScanRun.source_fingerprint.in_(wanted)
+        ScanRun.source_fingerprint.in_(wanted), ScanRun.status == "done",
     ).all()
     return {"known": sorted({row[0] for row in rows if row[0]})}
 
@@ -1801,7 +1802,12 @@ async def import_xml_bundle(
             payload_bytes = ([unit["item"]["bytes"]] if unit["kind"] == "single"
                              else [member["bytes"] for member in unit["stages"].values()])
             fingerprint = result_fingerprint(payload_bytes)
-            if db.query(ScanRun.id).filter(ScanRun.source_fingerprint == fingerprint).first():
+            # **성공한 인입만** 이미 가져온 것으로 본다. _fail_import 는 실패해도 지문을 남긴 채
+            # status="failed" 로 행을 보존하므로, 상태를 보지 않으면 일시적인 디스크/DB 오류 한 번이
+            # 그 결과를 영구히 건너뛰게 만든다 — 스캐너에는 "이미 가져온 결과"로 보여 유실이 조용하다.
+            if db.query(ScanRun.id).filter(
+                ScanRun.source_fingerprint == fingerprint, ScanRun.status == "done",
+            ).first():
                 skipped.append(str(unit["sort"]))
                 continue
         try:
