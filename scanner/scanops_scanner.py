@@ -203,6 +203,17 @@ PROFILE_PRESET_OPTIONS = {
 }
 PROFILE_PRESET_PORTS = {"phase1": PRECISION_PORTS}
 PROFILE_PRESET_NSE = {"phase1"}
+# 저강도(gentle) — 15년 전 도입한 백본처럼 control-plane 이 약한 장비를 상대할 때의 기본값.
+# -T3(표준)을 기준으로 속도·병렬·재시도에 상한을 더 걸어 "-T3 보다 조금 더 느린" 강도를 만든다.
+GENTLE_TIMING = "-T3"
+FASTER_TIMING_FLAGS = {"-T4", "-T5"}
+GENTLE_MAX_PARALLELISM = "10"
+GENTLE_MIN_HOSTGROUP = "16"
+GENTLE_MAX_RETRIES = "1"
+GENTLE_MAX_RATE_DEFAULT = "150"   # packets/sec
+GENTLE_HOST_TIMEOUT_DEFAULT = "30m"
+# 허용 강도 — 파서 choices 와 state 재검증이 같은 목록을 쓴다.
+INTENSITY_CHOICES = ("normal", "gentle")
 
 # 타겟은 argv 맨 뒤에 와도 '-' 시작 시 Nmap 옵션으로 재해석된다.
 TARGET_RE = re.compile(r"^(?!-)[A-Za-z0-9_.:/\-]+$")
@@ -315,11 +326,19 @@ def is_unsupported_composite_ipv4_range(target: str) -> bool:
 
 def warn_ambiguous_ports(spec: str) -> None:
     """T:/U: 접두사는 다음 접두사 전까지 sticky(nmap 규칙). 접두사 뒤의 '접두사 없는' 포트는
-    직전 프로토콜로 묶인다(예: T:80,U:53,443 → 443 은 UDP). 사용자 의도와 다를 수 있어 한 번 경고(QA-013)."""
+    직전 프로토콜로 묶인다(예: T:80,U:53,443 → 443 은 UDP). 사용자 의도와 다를 수 있어 한 번 경고(QA-013).
+
+    단, 한 프로토콜 접두사만 쓰인 스펙(예: 포트 제외 우회용 'T:1-3029,3031-65535')은 접두사 없는
+    꼬리가 귀속될 프로토콜이 하나뿐이라 모호하지 않다 → 경고하지 않는다. T:와 U:가 함께 있을 때만
+    실제로 오해가 발생하므로 그 경우로 한정한다."""
     if ":" not in spec:
         return
+    segments = spec.replace(" ", "").split(",")
+    prefixes = {seg.split(":", 1)[0].upper() for seg in segments if ":" in seg}
+    if not {"T", "U"} <= prefixes:
+        return
     current = ""
-    for seg in spec.replace(" ", "").split(","):
+    for seg in segments:
         if ":" in seg:
             current = seg.split(":", 1)[0].upper()
         elif current:
@@ -368,10 +387,14 @@ def check_scope(hosts: list[str], spec: str) -> None:
 
 
 def parse_excludes(values: list[str] | tuple[str, ...] | str | None) -> tuple[list[str], list[ipaddress.IPv4Network]]:
-    """반복 --exclude 값을 IPv4 IP/CIDR 목록으로 검증·정규화한다.
+    """반복 --exclude 값을 IPv4 IP/CIDR/마지막 옥텟 범위 목록으로 검증·정규화한다.
 
     각 옵션 값 안의 쉼표와 모든 공백(CRLF 포함)을 구분자로 쓴다. 잘못된 토큰 하나라도 있으면
     전체 요청을 거절해 오타가 조용히 '제외 없음'으로 바뀌지 않게 한다.
+
+    대상 입력(expand_targets)이 받는 '10.0.0.1-10' 형태를 제외에서는 거절해 '제외가 안 먹는다'로
+    보이던 문법 비대칭을 없앤다. 범위 토큰은 nmap 이 --exclude 에서 그대로 받으므로 canonical 에는
+    압축 표기를 유지하고, 파이썬 쪽 호스트 차감(apply_excludes)을 위해 /32 로 전개해 둔다.
     """
     if values is None:
         raw_values: list[str] = []
@@ -390,12 +413,28 @@ def parse_excludes(values: list[str] | tuple[str, ...] | str | None) -> tuple[li
         if not tokens:
             raise ValueError("--exclude 값이 비어 있습니다. 옵션을 빼거나 IPv4 IP/CIDR을 지정하세요.")
         for token in tokens:
+            # 마지막 옥텟 범위(10.0.0.1-10): 대상 입력과 같은 문법을 제외에서도 받는다.
+            if match := RANGE_RE.fullmatch(token):
+                base, lo, hi = match.group(1), int(match.group(2)), int(match.group(3))
+                octets = [int(o) for o in base.split(".")]
+                if any(o > 255 for o in octets) or lo > 255 or hi > 255 or lo > hi:
+                    raise ValueError(f"잘못된 제외 IP 범위(--exclude)입니다: {token!r}. 예: 10.0.0.1-10")
+                if token in seen:
+                    continue
+                seen.add(token)
+                canonical.append(token)  # nmap --exclude 가 범위 표기를 그대로 받는다.
+                networks.extend(ipaddress.ip_network(f"{base}.{i}/32") for i in range(lo, hi + 1))
+                continue
             try:
                 network = ipaddress.ip_network(token, strict=False)
             except ValueError as exc:
-                raise ValueError(f"잘못된 제외 대상(--exclude)입니다: {token!r}. IPv4 IP/CIDR만 지원합니다.") from exc
+                raise ValueError(
+                    f"잘못된 제외 대상(--exclude)입니다: {token!r}. IPv4 IP/CIDR/범위만 지원합니다."
+                ) from exc
             if not isinstance(network, ipaddress.IPv4Network):
-                raise ValueError(f"잘못된 제외 대상(--exclude)입니다: {token!r}. IPv4 IP/CIDR만 지원합니다.")
+                raise ValueError(
+                    f"잘못된 제외 대상(--exclude)입니다: {token!r}. IPv4 IP/CIDR/범위만 지원합니다."
+                )
             key = network.with_prefixlen
             if key in seen:
                 continue
@@ -504,6 +543,66 @@ def validate_ports(ports: str) -> str:
         if "-" in body and len(nums) == 2 and int(nums[0]) > int(nums[1]):
             raise ValueError(f"포트 범위가 거꾸로입니다(시작>끝): '{seg}'. 예: 22-443")
     return ports
+
+
+def resumed_value(plan: dict, key: str, default, validate):
+    """재개 시 저장값을 되살린다 — '키 부재'와 '명시된 값'을 반드시 구분한다.
+
+    plan.get(key) 는 키가 없는 경우와 명시적 null 을 똑같이 None 으로 돌려준다. 안전 제어
+    필드에서 그 둘을 뭉개면, state 에 `"intensity": null` 한 줄만 넣어도 -T3+속도상한이
+    -T4+무제한으로 조용히 풀린다. 구버전 호환은 키가 '아예 없을 때'만 적용하고, 값이
+    명시돼 있으면 그것이 null 이든 무엇이든 검증기를 통과해야 한다."""
+    if key not in plan:
+        return default          # 구형 state: 그 개념이 없던 시절 → 기본값
+    return validate(plan[key])
+
+
+def validate_intensity(value: object) -> str:
+    """저장된 스캔 강도를 검증한다(fail-closed).
+
+    강도는 노후 장비 보호용 '안전 제어'다. 알 수 없는 값(미래 버전이 쓴 값이나 손상된 값,
+    명시적 null)을 조용히 normal 로 올리면 보호하려던 장비를 그대로 때리게 된다."""
+    if isinstance(value, str) and value in INTENSITY_CHOICES:
+        return value
+    raise ValueError(
+        f"state 파일의 intensity 값을 알 수 없습니다: {value!r}. "
+        f"허용: {', '.join(INTENSITY_CHOICES)} (안전 제어라 임의로 낮추지 않고 거절합니다)"
+    )
+
+
+def validate_max_rate(value: object) -> str:
+    """--max-rate(초당 패킷 상한) 검증. 같은 이유로 손상 값·명시적 null 은 거절한다."""
+    if isinstance(value, str) and not value.strip():
+        return ""               # 빈 문자열은 '지정 안 함'이라는 정상 저장값이다
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f"--max-rate 는 1 이상의 정수여야 합니다: {value!r}")
+    text = str(value).strip()
+    if not text.isdecimal() or int(text) < 1:
+        raise ValueError(f"--max-rate 는 1 이상의 정수여야 합니다: {value!r}")
+    return text
+
+
+def validate_exclude_list(value: object) -> list:
+    """저장된 제외 대상 목록의 형태 검증. 명시적 null 로 제외가 사라지지 않게 한다."""
+    if not isinstance(value, list):
+        raise ValueError(f"state 파일의 exclude 는 목록이어야 합니다: {value!r}")
+    return value
+
+
+def validate_exclude_ports(spec: object) -> str:
+    """--exclude-ports 값 검증. -p 와 같은 포트 문법을 쓰되 오류 문구만 옵션에 맞춘다.
+
+    전역 포트 필터라서 warn_ambiguous_ports(=-p 의도 모호성 경고)는 적용하지 않는다.
+    문자열이 아닌 값(명시적 null 등)은 거절한다 — 운영자가 뺀 포트가 조용히 되살아나면
+    일부러 피한 취약 포트를 그대로 때리게 된다."""
+    if not isinstance(spec, str):
+        raise ValueError(f"허용되지 않는 --exclude-ports 형식입니다: {spec!r}")
+    try:
+        return validate_ports(spec)
+    except ValueError as exc:
+        raise ValueError(
+            f"허용되지 않는 --exclude-ports 형식입니다: {exc} (예: 3030, 3030,3040, T:1-1024)"
+        ) from exc
 
 
 def validate_scripts(scripts: str) -> str:
@@ -706,12 +805,42 @@ def build_base_flags(args: argparse.Namespace) -> list[str]:
     if args.open_only and "--open" not in flags:
         flags.append("--open")
 
+    # 저강도는 마지막에 적용한다: -p/-sU/스크립트 처리가 모두 끝난 뒤 타이밍·속도만 낮춰
+    # QA-037(sticky 포트)·QA-048(U: 누출) 같은 포트 계약을 건드리지 않게 한다.
+    if getattr(args, "intensity", "normal") == "gentle":
+        flags = apply_gentle_intensity(flags, getattr(args, "max_rate", "") or "")
+
     return flags
 
 
 def replace_value_flag(flags: list[str], name: str, value: str) -> list[str]:
     flags = strip_value_flags(flags, {name})
     return [*flags, name, value]
+
+
+def set_value_if_present(flags: list[str], name: str, value: str) -> list[str]:
+    """이미 있는 value flag 의 값만 바꾼다(없으면 추가하지 않는다)."""
+    if name not in flags:
+        return flags
+    return replace_value_flag(flags, name, value)
+
+
+def apply_gentle_intensity(flags: list[str], max_rate: str = "") -> list[str]:
+    """노후 백본 장비 안전용 저강도 변환.
+
+    가장 중요한 건 --defeat-rst-ratelimit 제거다. 이 플래그는 장비가 스스로 거는 RST rate-limit
+    보호를 무력화해, 오래된 control-plane 을 가장 확실하게 괴롭힌다. 타이밍은 -T3 로 낮추고
+    속도/병렬/재시도에 상한을 걸어 '-T3 보다 조금 더 느린' 강도를 만든다.
+
+    --max-parallelism/--min-hostgroup 은 '있을 때만' 축소한다(프리셋이 안 쓰면 굳이 만들지 않음).
+    --max-retries/--max-rate 는 없으면 추가해, 어떤 프리셋에서도 완화가 실제로 걸리게 한다."""
+    flags = [GENTLE_TIMING if f in FASTER_TIMING_FLAGS else f for f in flags]
+    flags = strip_flags(flags, {"--defeat-rst-ratelimit"})
+    flags = set_value_if_present(flags, "--max-parallelism", GENTLE_MAX_PARALLELISM)
+    flags = set_value_if_present(flags, "--min-hostgroup", GENTLE_MIN_HOSTGROUP)
+    flags = replace_value_flag(flags, "--max-retries", GENTLE_MAX_RETRIES)
+    flags = replace_value_flag(flags, "--max-rate", max_rate or GENTLE_MAX_RATE_DEFAULT)
+    return flags
 
 
 def protocol_ports(port_spec: str, protocol: str) -> list[str]:
@@ -804,6 +933,10 @@ def apply_auto_modifiers(flags: list[str], plan: dict, stage_id: str = "") -> li
     # open_only 는 identify 단계(이미 --open 보유)에만 의미가 있으므로 discovery 는 제외한다.
     if plan.get("open_only") and "--open" not in flags and stage_id != "tcp_discovery":
         flags.append("--open")
+    # 저강도: auto 3단계 전부가 이 깔때기를 지나므로 여기 한 곳이면 충분하고,
+    # plan 을 읽으므로 --resume 으로 이어할 때도 같은 강도가 유지된다.
+    if plan.get("intensity") == "gentle":
+        flags = apply_gentle_intensity(flags, plan.get("max_rate", ""))
     return flags
 
 
@@ -851,12 +984,17 @@ def build_command(plan: dict, index: int, stage_id: str = "", tcp_ports: list[in
     # Nmap 7.99는 --exclude를 반복하면 누적하지 않고 마지막 값만 쓴다. CLI에서는 반복 입력을
     # 받되 실제 Nmap에는 검증·정규화된 전체 값을 쉼표로 합쳐 정확히 한 번만 전달한다.
     exclude_flags = ["--exclude", ",".join(excludes)] if excludes else []
+    # 포트 제외는 -p 를 건드리지 않는 전역 필터다. nmap 이 선택된 포트집합(-p / --top-ports)에서
+    # 사후 차감하므로 auto 각 단계와 single 프리셋 모두에 그대로 얹을 수 있다.
+    exclude_ports = plan.get("exclude_ports") or ""
+    exclude_ports_flags = ["--exclude-ports", exclude_ports] if exclude_ports else []
     return [
         plan["nmap"],
         "--unique",
         "--stats-every", plan["stats_every"],
         *timeout_flags,
         *exclude_flags,
+        *exclude_ports_flags,
         *flags,
         "-oA", str(base),
         *scan_targets,
@@ -1647,8 +1785,6 @@ def collect_result_units(output_dir: Path) -> list[dict]:
                 "manifest": None,
                 "xml": [xml_path],
             })
-    for unit in units:
-        unit["fingerprint"] = result_fingerprint([p.read_bytes() for p in unit["xml"]])
     return units
 
 
@@ -1668,14 +1804,18 @@ def _multipart_body(files: list[tuple[str, str, bytes]]) -> tuple[bytes, str]:
     return bytes(out), f"multipart/form-data; boundary={boundary}"
 
 
-def _upload_unit(base_url: str, token: str, unit: dict, timeout: float) -> dict:
+def _upload_unit(base_url: str, token: str, unit: dict, timeout: float,
+                 skip_known: bool = True) -> dict:
     files: list[tuple[str, str, bytes]] = [
         ("files", path.name, path.read_bytes()) for path in unit["xml"]
     ]
     if unit["manifest"] is not None:
         files.append(("files", unit["manifest"].name, unit["manifest"].read_bytes()))
     body, content_type = _multipart_body(files)
-    request = urllib.request.Request(f"{base_url}/api/scans/import-bundle", data=body, method="POST")
+    # 중복 판정은 서버가 한다 — import 단위를 나누는 것도 서버이므로, 여기서 자체 지문으로
+    # 걸러내면 배치 스캔처럼 단위가 갈라지는 순간 판정이 어긋나 같은 결과가 다시 인입된다.
+    url = f"{base_url}/api/scans/import-bundle" + ("?skip_known=true" if skip_known else "")
+    request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Authorization", f"Bearer {token}")
     request.add_header("Content-Type", content_type)
     try:
@@ -1703,29 +1843,27 @@ def sync_results(base_url: str, token: str, output_dir: Path, timeout: float,
     if not units:
         print(f"results: 올릴 결과가 없습니다 ({output_dir})")
         return 0
-    known: set = set()
-    if not resend:
-        response = _sync_request(f"{base_url}/api/scans/known-results", token,
-                                 {"fingerprints": [u["fingerprint"] for u in units]}, timeout)
-        known = set(response.get("known") or [])
-    pending = [u for u in units if u["fingerprint"] not in known]
-    print(f"results: 총 {len(units)}건 · 이미 가져온 것 {len(units) - len(pending)}건 "
-          f"· 올릴 것 {len(pending)}건")
+    print(f"results: {len(units)}건 전송 (이미 가져온 것은 서버가 건너뜁니다)")
 
     failures = 0
-    for unit in pending:
+    for unit in units:
         label = f"{unit['name']} [{unit['status'] or unit['kind']}]"
         try:
-            result = _upload_unit(base_url, token, unit, timeout)
+            result = _upload_unit(base_url, token, unit, timeout, skip_known=not resend)
         except ValueError as exc:
             print(f"  error: {label} — {exc}", file=sys.stderr)
             failures += 1
             continue
         counts = result.get("counts") or {}
+        imported, skipped = result.get("imported", 0), result.get("skipped", 0)
+        if imported == 0 and skipped:
+            print(f"  skipped: {label} — 이미 가져온 결과 {skipped}건")
+            continue
         mode = result.get("closure_mode", "")
         note = " (관측 전용 — 닫힘 판정 없음)" if unit["kind"] == "interrupted" else ""
+        extra = f" · 건너뜀 {skipped}" if skipped else ""
         print(f"  uploaded: {label} → 신규 {counts.get('new', 0)} / 갱신 {counts.get('updated', 0)}"
-              f" · {mode}{note}")
+              f" · {mode}{note}{extra}")
     return failures
 
 
@@ -1796,6 +1934,12 @@ def create_plan(args: argparse.Namespace) -> dict:
         warn_ambiguous_ports(ports_override)
     if args.workflow == "auto" and args.tcp_only and ports_override and not protocol_ports(ports_override, "T"):
         raise ValueError("TCP만 옵션을 사용할 때는 TCP 포트를 지정해야 합니다. 예: --ports 22,443")
+    intensity = validate_intensity(getattr(args, "intensity", "normal"))
+    # --host-timeout 은 None 센티널로 '사용자가 지정하지 않음'을 구분한다. 지정이 없으면 저강도에서만
+    # 30m 을 기본으로 켜고(느린 스캔이 한 호스트에 무한정 묶이지 않게), 기본 강도는 종전대로 꺼둔다(QA-007).
+    host_timeout_raw = getattr(args, "host_timeout", None)
+    if host_timeout_raw is None:
+        host_timeout_raw = GENTLE_HOST_TIMEOUT_DEFAULT if intensity == "gentle" else HOST_TIMEOUT_DEFAULT
     return {
         "tool": "scanops_scanner",
         "version": VERSION,
@@ -1813,7 +1957,7 @@ def create_plan(args: argparse.Namespace) -> dict:
         "preset_options": getattr(args, "preset_options", None),
         "timing": getattr(args, "preset_timing", "") or "",
         "stats_every": validate_stats_every(args.stats_every),
-        "host_timeout": validate_host_timeout(getattr(args, "host_timeout", HOST_TIMEOUT_DEFAULT)),
+        "host_timeout": validate_host_timeout(host_timeout_raw),
         "base_flags": build_base_flags(args),
         "scan_type": args.scan_type,
         "ports_override": ports_override,
@@ -1827,6 +1971,9 @@ def create_plan(args: argparse.Namespace) -> dict:
         "include_closed": args.include_closed,
         "raw_targets": raw_targets,
         "exclude": excludes,
+        "exclude_ports": validate_exclude_ports(getattr(args, "exclude_ports", "")),
+        "intensity": intensity,
+        "max_rate": validate_max_rate(getattr(args, "max_rate", "")),
         "scan_scope": scope_spec,
         "max_hosts": args.max_hosts,
         "requested_host_count": len(expanded),
@@ -1861,8 +2008,13 @@ def load_plan(path: str, nmap_override: str = "", dry_run: bool = False,
         raise ValueError("state 파일의 target 형식이 올바르지 않습니다.")
     validate_targets(saved_batch_targets)
 
-    excludes, exclude_networks = parse_excludes(plan.get("exclude", []))
+    # 안전 제어 필드는 '키 부재'(구형 state)와 '명시된 값'을 구분해 되살린다.
+    # plan.get() 으로 뭉개면 `"intensity": null` 한 줄로 보호가 조용히 풀린다(resumed_value 주석 참고).
+    excludes, exclude_networks = parse_excludes(resumed_value(plan, "exclude", [], validate_exclude_list))
     plan["exclude"] = excludes  # 구형 state는 빈 목록으로 호환, 새 state는 canonical 형태로 재검증.
+    plan["exclude_ports"] = resumed_value(plan, "exclude_ports", "", validate_exclude_ports)
+    plan["intensity"] = resumed_value(plan, "intensity", "normal", validate_intensity)
+    plan["max_rate"] = resumed_value(plan, "max_rate", "", validate_max_rate)
     raw_targets = plan.get("raw_targets")
     if raw_targets is None:
         raw_targets = saved_batch_targets
@@ -2491,13 +2643,24 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--open-only", action="store_true", help="Add --open. Faster/smaller, but closed ports are omitted from heatmap XML.")
     p.add_argument("--include-closed", action="store_true", help="Remove --open so closed/filtered ports remain in XML.")
     p.add_argument("--stats-every", default=STATS_EVERY_DEFAULT, help="nmap --stats-every value.")
-    p.add_argument("--host-timeout", default=HOST_TIMEOUT_DEFAULT,
-                   help="Per-host nmap --host-timeout. Off by default (0); set e.g. 30m to opt in.")
+    p.add_argument("--host-timeout", default=None,
+                   help="Per-host nmap --host-timeout. Off by default (0); --intensity gentle defaults to 30m. "
+                        "Set e.g. 30m to opt in, or 0 to force off.")
+    p.add_argument("--intensity", choices=list(INTENSITY_CHOICES), default="normal",
+                   help="gentle: safer for old/fragile gear (-T3, no --defeat-rst-ratelimit, capped rate/"
+                        "parallelism/retries, 30m host timeout).")
+    p.add_argument("--max-rate", default="", metavar="PPS",
+                   help="nmap --max-rate packets/sec cap. Applied automatically by --intensity gentle "
+                        f"(default {GENTLE_MAX_RATE_DEFAULT}) when unset.")
     p.add_argument("--scan-scope", default="",
                    help="Allowed scan range(s): comma/space CIDR or IP. Targets outside are rejected before scanning. "
                         "Falls back to the SCANOPS_SCAN_SCOPE env var. Empty means unrestricted.")
     p.add_argument("--exclude", action="append", default=[], metavar="IP_OR_CIDR",
-                   help="Exclude IPv4 IP/CIDR values. Repeatable; each value may use comma/space/newline separators.")
+                   help="Exclude IPv4 IP/CIDR/last-octet range (10.0.0.1-10) values. Repeatable; each value may use "
+                        "comma/space/newline separators.")
+    p.add_argument("--exclude-ports", default="", metavar="PORT_SPEC",
+                   help="Exclude these ports from every nmap stage (nmap --exclude-ports). Same grammar as --ports: "
+                        "3030, 3030,3040, 1-1024, T:/U: prefixes.")
     p.add_argument("--batch-size", type=int, default=0, help="Expand targets and run batches of this size. 0 means one nmap run.")
     p.add_argument("--max-hosts", type=int, default=65536, help="Safety cap when expanding CIDR/ranges for batching.")
     p.add_argument("--resume", help="Resume from a previous *.state.json.")
@@ -2553,6 +2716,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.resume and (args.preset or args.options):
             raise ValueError("--resume 은 저장된 state 의 구성을 그대로 이어갑니다. --preset/--options 를 함께 쓸 수 없습니다.")
         apply_cli_options(args)
+        if args.resume and (args.exclude or args.exclude_ports):
+            raise ValueError(
+                "--resume에서는 --exclude/--exclude-ports를 변경할 수 없습니다. state에 저장된 제외 설정을 사용합니다."
+            )
         plan = (load_plan(args.resume, args.nmap, args.dry_run, args.scan_scope)
                 if args.resume else create_plan(args))
         return execute(plan, dry_run=args.dry_run, zip_outputs=args.zip)

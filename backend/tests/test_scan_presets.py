@@ -387,36 +387,12 @@ def test_docking_collects_manifest_units_and_interrupted_xml_separately(tmp_path
     assert kinds["manifest"]["manifest"] is not None
     assert kinds["interrupted"]["manifest"] is None      # 계약 없음 = 닫힘 권한 없음
     assert kinds["interrupted"]["status"] == "interrupted"
-    assert len({u["fingerprint"] for u in units}) == 2
+    # 지문은 더 이상 클라이언트가 계산하지 않는다 — import 단위를 나누는 서버가 판정한다.
+    assert all("fingerprint" not in unit for unit in units)
 
 
-def test_docking_uploads_only_units_the_server_does_not_have(tmp_path, monkeypatch, capsys):
-    scanner = _load_scanner()
-    out = tmp_path / "scanops_scans"
-    out.mkdir(parents=True)
-    (out / "a.xml").write_bytes(b"<nmaprun a=''/>")
-    (out / "a.manifest.json").write_text(json.dumps({
-        "tool": "scanops_scanner", "status": "done", "import_xml_files": [str(out / "a.xml")],
-    }), encoding="utf-8")
-    (out / "b.xml").write_bytes(b"<nmaprun b=''/>")
-    (out / "b.manifest.json").write_text(json.dumps({
-        "tool": "scanops_scanner", "status": "done", "import_xml_files": [str(out / "b.xml")],
-    }), encoding="utf-8")
-
-    already = scanner.result_fingerprint([b"<nmaprun a=''/>"])
-    uploaded: list = []
-    monkeypatch.setattr(scanner, "_sync_request",
-                        lambda url, token, payload, timeout: {"known": [already]})
-    monkeypatch.setattr(scanner, "_upload_unit",
-                        lambda base, token, unit, timeout: uploaded.append(unit["name"]) or
-                        {"counts": {"new": 1, "updated": 0}, "closure_mode": "manifest"})
-
-    assert scanner.sync_results("http://server:8770", "t", out, 5.0) == 0
-    assert uploaded == ["b"]                       # 이미 있는 a 는 다시 올리지 않는다
-    assert "이미 가져온 것 1건" in capsys.readouterr().out
-
-
-def test_resend_results_ignores_the_server_side_dedup(tmp_path, monkeypatch):
+def test_docking_lets_the_server_decide_what_is_already_imported(tmp_path, monkeypatch, capsys):
+    """중복 판정은 서버가 한다 — import 단위를 나누는 것도 서버이기 때문이다."""
     scanner = _load_scanner()
     out = tmp_path / "scanops_scans"
     out.mkdir(parents=True)
@@ -425,12 +401,81 @@ def test_resend_results_ignores_the_server_side_dedup(tmp_path, monkeypatch):
         "tool": "scanops_scanner", "status": "done", "import_xml_files": [str(out / "a.xml")],
     }), encoding="utf-8")
 
-    uploaded: list = []
-    def refuse(*_a, **_k):
-        raise AssertionError("--resend-results 는 서버에 중복 확인을 묻지 않는다")
-    monkeypatch.setattr(scanner, "_sync_request", refuse)
+    seen: list = []
     monkeypatch.setattr(scanner, "_upload_unit",
-                        lambda base, token, unit, timeout: uploaded.append(unit["name"]) or
-                        {"counts": {"new": 0, "updated": 1}, "closure_mode": "manifest"})
+                        lambda base, token, unit, timeout, skip_known=True:
+                        seen.append(skip_known) or
+                        {"imported": 0, "skipped": 1, "counts": {}, "closure_mode": "manifest"})
+    assert scanner.sync_results("http://s:8770", "t", out, 5.0) == 0
+    assert seen == [True]                       # 서버에 판정을 맡긴다
+    assert "이미 가져온 결과" in capsys.readouterr().out
+
+
+def test_resend_results_tells_the_server_not_to_skip(tmp_path, monkeypatch):
+    scanner = _load_scanner()
+    out = tmp_path / "scanops_scans"
+    out.mkdir(parents=True)
+    (out / "a.xml").write_bytes(b"<nmaprun a=''/>")
+    (out / "a.manifest.json").write_text(json.dumps({
+        "tool": "scanops_scanner", "status": "done", "import_xml_files": [str(out / "a.xml")],
+    }), encoding="utf-8")
+
+    seen: list = []
+    monkeypatch.setattr(scanner, "_upload_unit",
+                        lambda base, token, unit, timeout, skip_known=True:
+                        seen.append(skip_known) or
+                        {"imported": 1, "skipped": 0, "counts": {"new": 0, "updated": 1},
+                         "closure_mode": "manifest"})
     assert scanner.sync_results("http://s:8770", "t", out, 5.0, resend=True) == 0
-    assert uploaded == ["a"]
+    assert seen == [False]
+
+
+def _batched_bundle() -> list[tuple[str, bytes]]:
+    """2배치 × (TCP 발견, TCP 식별) — 서버가 base 별로 2개 단위로 쪼개는 형태."""
+    xml = (Path(__file__).parent / "fixtures" / "sample_scan.xml").read_bytes()
+    files = []
+    for batch in ("b0000", "b0001"):
+        for stage in ("tcp_discovery", "tcp_identify"):
+            # 배치·단계마다 내용이 달라야 실제 스캔과 같다.
+            body = xml.replace(b"<nmaprun", f"<nmaprun data-u='{batch}{stage}'".encode(), 1)
+            files.append((f"weekly.10.0.0.1.{batch}.{stage}.xml", body))
+    return files
+
+
+def test_redocking_a_multi_batch_folder_creates_no_duplicate_scan_runs(client):
+    """`--batch-size` 는 정상 워크플로다. 클라이언트가 manifest 하나를 한 덩어리로 지문화하면
+    서버의 배치별 단위와 어긋나, 재도킹할 때마다 스캔 이력과 닫힘 판정이 다시 생긴다."""
+    auth = _auth(client)
+    files = [("files", (name, body, "text/xml")) for name, body in _batched_bundle()]
+
+    first = client.post("/api/scans/import-bundle?skip_known=true", headers=auth, files=files)
+    assert first.status_code == 200, first.text
+    assert first.json()["imported"] == 2 and first.json()["skipped"] == 0
+
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+    db = SessionLocal()
+    try:
+        after_first = db.query(ScanRun).count()
+    finally:
+        db.close()
+
+    second = client.post("/api/scans/import-bundle?skip_known=true", headers=auth, files=files)
+    assert second.status_code == 200, second.text
+    assert second.json()["imported"] == 0
+    assert second.json()["skipped"] == 2          # 배치별 단위 그대로 건너뛴다
+
+    db = SessionLocal()
+    try:
+        assert db.query(ScanRun).count() == after_first
+    finally:
+        db.close()
+
+
+def test_skip_known_is_opt_in_so_manual_reimport_still_works(client):
+    """웹의 수동 [XML 가져오기]는 같은 파일을 일부러 다시 넣을 수 있어야 한다."""
+    auth = _auth(client)
+    files = [("files", (name, body, "text/xml")) for name, body in _batched_bundle()]
+    assert client.post("/api/scans/import-bundle", headers=auth, files=files).json()["imported"] == 2
+    again = client.post("/api/scans/import-bundle", headers=auth, files=files).json()
+    assert again["imported"] == 2 and again.get("skipped", 0) == 0

@@ -141,12 +141,48 @@ def _effective_hosts(hosts: list[str], excludes: list[str]) -> list[str]:
     return effective
 
 
-def _with_nmap_excludes(argv: list[str], excludes: list[str] | None) -> list[str]:
-    """Apply canonical exclusions as one Nmap option (repeated --exclude keeps only the last)."""
+def _with_nmap_excludes(argv: list[str], excludes: list[str] | None,
+                        exclude_ports: str = "") -> list[str]:
+    """Apply canonical exclusions as one Nmap option (repeated --exclude keeps only the last).
+
+    포트 제외는 -p 를 건드리지 않는 전역 필터라, 같은 자리에서 한 번만 얹으면 모든 단계에 적용된다."""
     canonical = scope.parse_excludes(excludes)
-    if not canonical:
+    port_spec = scan_options.validate_ports(exclude_ports or "")
+    injected: list[str] = []
+    if canonical:
+        injected += ["--exclude", ",".join(canonical)]
+    if port_spec:
+        injected += ["--exclude-ports", port_spec]
+    if not injected:
         return argv
-    return [argv[0], "--exclude", ",".join(canonical), *argv[1:]]
+    return [argv[0], *injected, *argv[1:]]
+
+
+def _merge_raw_excludes(argv: list[str], excludes: list[str] | None) -> list[str]:
+    """직접 입력 명령에 구조화된 제외 대상을 합친다.
+
+    Nmap 은 --exclude 를 반복하면 마지막 값만 쓰므로, 명령에 이미 있는 인라인 --exclude 를 그냥 두고
+    하나 더 붙이면 둘 중 하나가 조용히 사라진다. 인라인 값을 걷어내 구조화 값과 함께 검증·중복제거한
+    뒤 정확히 하나의 --exclude 로 되돌린다(다른 실행 경로와 같은 계약)."""
+    inline: list[str] = []
+    cleaned: list[str] = []
+    take_value = False
+    for token in argv:
+        if take_value:
+            take_value = False
+            inline.extend(token.replace(",", " ").split())
+            continue
+        if token == "--exclude":
+            take_value = True
+            continue
+        if token.startswith("--exclude="):
+            inline.extend(token.split("=", 1)[1].replace(",", " ").split())
+            continue
+        cleaned.append(token)
+    merged = [*inline, *(excludes or [])]
+    if not merged:
+        return argv
+    return _with_nmap_excludes(cleaned, merged)
 
 
 def _validate_staged_protocol_selection(body: ScanRunIn) -> None:
@@ -663,7 +699,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             nmap_runner.build_auto_command(
                 nmap, "tcp_discovery", batch, discovery_base, ports=ports, nse=nse,
             ),
-            state.get("exclude"),
+            state.get("exclude"), state.get("exclude_ports", ""),
         )
         _checked_stage(scan_id, argv, discovery_log)
         discovery_xml = nmap_runner.xml_of(discovery_base)
@@ -683,7 +719,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
                     nmap, "tcp_identify", discovery_live or batch, identify_base,
                     ports=ports, tcp_ports=tcp_ports, nse=nse,
                 ),
-                state.get("exclude"),
+                state.get("exclude"), state.get("exclude_ports", ""),
             )
             _checked_stage(scan_id, argv, identify_log)
             identify_xml = nmap_runner.xml_of(identify_base)
@@ -708,7 +744,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             nmap_runner.build_auto_command(
                 nmap, "udp_identify", udp_targets, udp_base, ports=ports, nse=nse,
             ),
-            state.get("exclude"),
+            state.get("exclude"), state.get("exclude_ports", ""),
         )
         _checked_stage(scan_id, argv, udp_log)
         udp_xml = nmap_runner.xml_of(udp_base)
@@ -791,7 +827,7 @@ def _chunk_worker(scan_id: int) -> None:
                     nmap, st.get("preset", "quick"), batch, b_base,
                     ports=st.get("ports", ""), nse=st.get("nse"),
                 )
-            argv = _with_nmap_excludes(argv, st.get("exclude"))
+            argv = _with_nmap_excludes(argv, st.get("exclude"), st.get("exclude_ports", ""))
         except ValueError:
             logger.exception("invalid stored scan settings for scan %s", scan_id)
             _fail(scan_id, "invalid_scan_state")
@@ -1693,9 +1729,17 @@ async def import_xml(
 @router.post("/import-bundle")
 async def import_xml_bundle(
     files: list[UploadFile] = File(...),
+    skip_known: bool = False,
     user: User = Depends(require_role("auditor")),
     db: Session = Depends(get_db),
 ):
+    """XML 묶음 가져오기.
+
+    skip_known=true(단독 스캐너 도킹)면 이미 같은 내용을 가져온 단위는 건너뛴다. **중복 판정은
+    서버가 한다** — import 단위를 나누는 것도 서버(_stage_file_info 기준 base 묶음)이므로,
+    클라이언트가 자기 방식으로 묶어 지문을 내면 배치 스캔처럼 단위가 갈라지는 순간 판정이
+    어긋나 같은 결과가 다시 인입된다.
+    """
     payloads = []
     manifests = []
     total_bytes = 0
@@ -1751,7 +1795,15 @@ async def import_xml_bundle(
     total = _zero_counts()
     imported = []
     failed = []
+    skipped = []
     for unit in sorted(units, key=lambda u: str(u["sort"]).lower()):
+        if skip_known:
+            payload_bytes = ([unit["item"]["bytes"]] if unit["kind"] == "single"
+                             else [member["bytes"] for member in unit["stages"].values()])
+            fingerprint = result_fingerprint(payload_bytes)
+            if db.query(ScanRun.id).filter(ScanRun.source_fingerprint == fingerprint).first():
+                skipped.append(str(unit["sort"]))
+                continue
         try:
             if unit["kind"] == "bundle":
                 result = _import_stage_bundle(db, user, unit["base"], unit["stages"])
@@ -1772,11 +1824,13 @@ async def import_xml_bundle(
             logger.exception("failed to import XML bundle unit")
             failed.append({"name": str(unit["sort"]), "error": "XML 가져오기에 실패했습니다."})
             record(db, user, "SCAN_IMPORT", target=str(unit["sort"]), detail="실패", ok=False)
-    if not imported and failed:
+    if not imported and failed and not skipped:
         raise HTTPException(status_code=400, detail=f"XML 파싱 실패: {failed[0]['error']}")
     return {
         "imported": len(imported),
         "failed": len(failed),
+        "skipped": len(skipped),
+        "skipped_units": skipped,
         "file_count": len(payloads),
         "counts": total,
         "scans": imported,
@@ -1805,6 +1859,7 @@ def run_scan(
         scope.check_scope(requested_hosts)
         hosts = _effective_hosts(requested_hosts, excludes)
         batches = chunker.make_batches(hosts, body.batch_size)
+        exclude_ports = scan_options.validate_ports(body.exclude_ports or "")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     nmap = nmap_runner.find_nmap(_settings.nmap_path)
@@ -1827,7 +1882,7 @@ def run_scan(
             argv0 = nmap_runner.build_command(
                 nmap, body.preset, batches[0], _basename(0), ports=body.ports, nse=body.nse,
             )
-        argv0 = _with_nmap_excludes(argv0, excludes)
+        argv0 = _with_nmap_excludes(argv0, excludes, exclude_ports)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1844,6 +1899,7 @@ def run_scan(
             "workflow": body.workflow, "options": body.options, "ports": body.ports,
             "preset": body.preset, "nse": body.nse,
             "exclude": excludes,
+            "exclude_ports": exclude_ports,
             "udp_all_targets": body.udp_all_targets,
         })
         # 명령 표기는 대표(타겟·-oA 제외) — 호스트 수/배치 수를 덧붙여 가독.
@@ -1899,6 +1955,9 @@ def run_command(
         # (호스트명만 있는 명령은 검증 불가라 거절 — /run 과 동일한 엄격성)
         scope.check_raw_scope(toks)
         argv, ip_tokens = nmap_runner.build_command_raw(nmap, body.command, _basename(0))
+        # 구조화 제외 대상도 직접 명령에 적용한다. 예전에는 이 경로만 제외를 버려서, 폼에 제외를
+        # 입력한 뒤 '명령 직접 입력'으로 바꾸면 제외가 조용히 사라졌다.
+        argv = _merge_raw_excludes(argv, body.exclude)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

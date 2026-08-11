@@ -1,13 +1,22 @@
 """All-in-one (Python 포함) 에어갭 번들 생성 — 타깃에 아무 설치 없이 압축만 풀고 START.bat.
 
-구성: Windows 임베디드 Python 3.12 + 의존성 사전설치(runtime/site) + 앱 + 프론트 dist.
+구성: Windows 임베디드 Python + 의존성 사전설치(runtime/site) + 앱 + 프론트 dist.
 타깃 요건: Windows x64. (Python 불필요. 스캔 실행만 별도 nmap 필요, XML 가져오기는 불필요.)
 
-ASCII 전용 스크립트. Usage: py -3.12 packaging/build_allinone.py
-Output: ../ScanOps_allinone.zip
+ASCII 전용 스크립트.
+Usage:
+    python packaging/build_allinone.py                  # 3.12 (기본, ../ScanOps_allinone.zip)
+    python packaging/build_allinone.py --python 3.13    # ../ScanOps_allinone_py313.zip
+    python packaging/build_allinone.py --python 3.12 --out /path/to/custom.zip
+
+wheelhouse 는 지원 버전별 win_amd64 휠을 모두 담고 있어야 한다(pure 휠은 공용, 바이너리
+휠은 cp312/cp313 각각). 인자 없이 실행할 때의 산출물 이름/스테이지 경로는 기존 계약 그대로다
+(scripts/package_runtime_smoke.py 가 그 이름을 기대한다).
 """
 from __future__ import annotations
 
+import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -19,11 +28,44 @@ ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "packaging"
 CACHE = PKG / "_cache"
 WHEELHOUSE = PKG / "wheelhouse"
-PYVER = "3.12.8"
+
+# 지원하는 임베디드 런타임: 마이너 버전 -> 배포 패치 버전.
+PY_RELEASES = {"3.12": "3.12.8", "3.13": "3.13.9"}
+DEFAULT_PYTHON = "3.12"
+
+# 아래 4개는 --python 에 따라 configure() 가 다시 묶는다. 모듈 전역으로 두는 이유는
+# 테스트가 monkeypatch 로 ROOT/OUT 을 갈아끼우기 때문이다.
+PYTHON = DEFAULT_PYTHON
+PYVER = PY_RELEASES[DEFAULT_PYTHON]
+ABI = "cp312"
 EMBED_URL = f"https://www.python.org/ftp/python/{PYVER}/python-{PYVER}-embed-amd64.zip"
 STAGE = ROOT.parent / "_allinone_stage"
 OUT = ROOT.parent / "ScanOps_allinone.zip"
 PREFIX = "ScanOps"
+
+# Windows 조건부 의존성. pip 의 크로스 설치(--platform win_amd64)는 환경 마커를 '빌드 호스트'
+# 기준으로 평가해서, 리눅스에서 만들면 'colorama; platform_system == "Windows"' 가 통째로
+# 빠진다. click(=uvicorn CLI)이 Windows 에서 ANSI 출력을 감쌀 때 import 하는 필수 런타임
+# 의존성이라, 여기서 명시적으로 채워 넣어야 완전 오프라인 타깃에서 죽지 않는다.
+WINDOWS_EXTRA_PACKAGES = ["colorama"]
+
+# 확장 모듈 파일명의 ABI 태그(_pydantic_core.cp312-win_amd64.pyd -> cp312).
+_ABI_TAG_RE = re.compile(r"\.(cp\d+)-")
+
+
+def configure(python: str = DEFAULT_PYTHON, out: Path | None = None) -> None:
+    """선택한 마이너 버전에 맞춰 런타임/ABI/산출물 경로를 묶는다."""
+    global PYTHON, PYVER, ABI, EMBED_URL, STAGE, OUT
+    if python not in PY_RELEASES:
+        raise SystemExit(f"지원하지 않는 Python 버전: {python} (가능: {', '.join(PY_RELEASES)})")
+    PYTHON = python
+    PYVER = PY_RELEASES[python]
+    ABI = "cp" + python.replace(".", "")
+    EMBED_URL = f"https://www.python.org/ftp/python/{PYVER}/python-{PYVER}-embed-amd64.zip"
+    # 기본(3.12)은 기존 이름을 그대로 써서 smoke/CI 계약을 깨지 않는다.
+    suffix = "" if python == DEFAULT_PYTHON else f"_py{python.replace('.', '')}"
+    STAGE = ROOT.parent / f"_allinone_stage{suffix}"
+    OUT = Path(out) if out else ROOT.parent / f"ScanOps_allinone{suffix}.zip"
 
 SKIP_DIR = {".venv", ".venv312", ".venv313", "__pycache__", ".pytest_cache", "tests", ".vite"}
 SKIP_EXT = {".pyc", ".pyo", ".log"}
@@ -135,19 +177,50 @@ def copy_app(app: Path) -> None:
 def install_site(app: Path) -> None:
     site = app / "runtime" / "site"
     site.mkdir(parents=True)
-    log("pip install --target runtime/site (offline, win_amd64 cp312 wheels)")
-    # 타깃 고정 설치: 빌드 호스트 OS/파이썬과 무관하게 Windows cp312 휠로 설치(리눅스에서 크로스빌드 가능).
+    log(f"pip install --target runtime/site (offline, win_amd64 {ABI} wheels)")
+    # 타깃 고정 설치: 빌드 호스트 OS/파이썬과 무관하게 Windows 휠로 설치(리눅스에서 크로스빌드 가능).
     # --only-binary=:all: 가 있어야 --platform/--abi/--python-version 가 허용된다(소스빌드 금지).
+    cross = [
+        "--platform", "win_amd64", "--python-version", PYTHON,
+        "--abi", ABI, "--implementation", "cp", "--only-binary=:all:",
+    ]
     subprocess.check_call([
         sys.executable, "-m", "pip", "install", "--no-index",
         "--find-links", str(WHEELHOUSE), "--target", str(site),
-        "--platform", "win_amd64", "--python-version", "3.12",
-        "--abi", "cp312", "--implementation", "cp", "--only-binary=:all:",
-        "-r", str(ROOT / "backend" / "requirements.txt"),
+        *cross, "-r", str(ROOT / "backend" / "requirements.txt"),
+    ])
+    # Windows 전용 의존성 보강(위 WINDOWS_EXTRA_PACKAGES 주석 참고). --no-deps 로 붙여
+    # requirements 해석 결과를 흔들지 않는다.
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "--no-index",
+        "--find-links", str(WHEELHOUSE), "--target", str(site),
+        *cross, "--no-deps", *WINDOWS_EXTRA_PACKAGES,
     ])
     # 용량/잡음 줄이기: 사전설치본의 캐시 제거
     for pc in site.rglob("__pycache__"):
         shutil.rmtree(pc, ignore_errors=True)
+    verify_site(site)
+
+
+def verify_site(site: Path) -> None:
+    """완전 오프라인 타깃에서 import 가능한 형태인지 빌드 시점에 확인한다."""
+    missing = [
+        name for name in ("fastapi", "uvicorn", "sqlalchemy", "pydantic",
+                          "pydantic_core", "pydantic_settings", "starlette",
+                          "openpyxl", "multipart", "click", "colorama", "greenlet")
+        if not (site / name).exists() and not list(site.glob(f"{name}*"))
+    ]
+    if missing:
+        raise SystemExit(f"runtime/site 에 빠진 패키지: {', '.join(missing)}")
+    # 확장 모듈이 선택한 ABI 와 맞는지(엉뚱한 cp 태그가 섞이면 타깃에서 import 실패).
+    # ABI 태그가 없는 .pyd 는 버전 무관이므로 통과시킨다.
+    wrong = sorted({
+        p.name for p in site.rglob("*.pyd")
+        if (tag := _ABI_TAG_RE.search(p.name)) and tag.group(1) != ABI
+    })
+    if wrong:
+        raise SystemExit(f"{ABI} 가 아닌 확장 모듈이 섞였습니다: {wrong[:5]}")
+    log(f"verified runtime/site: {len(list(site.glob('*')))} entries, all {ABI}")
 
 
 def place_python(app: Path, embed_zip: Path) -> None:
@@ -199,7 +272,15 @@ def zip_bundle(app: Path) -> int:
     return count
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(description="Build the all-in-one air-gapped bundle.")
+    ap.add_argument("--python", default=DEFAULT_PYTHON, choices=sorted(PY_RELEASES),
+                    help="Embedded CPython minor version to bundle.")
+    ap.add_argument("--out", default=None, help="Output zip path (default: ../ScanOps_allinone[_pyXYZ].zip)")
+    args = ap.parse_args(argv)
+    configure(args.python, Path(args.out) if args.out else None)
+
+    log(f"target: Windows x64 / embedded CPython {PYVER} ({ABI})")
     embed_zip = download_embed()
     if STAGE.exists():
         shutil.rmtree(STAGE)
