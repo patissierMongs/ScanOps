@@ -186,14 +186,39 @@ def _sort_key(key: str):
     return text
 
 
+def _overdue_before(today: str):
+    """마감초과 기준일 — 화면이 보낸 '오늘'(사용자 로컬 날짜)을 쓴다.
+
+    서버 UTC 날짜로 판정하면 KST 오전처럼 날짜가 하루 어긋나는 시간대에서 화면의
+    'N일 초과' 표시와 필터 결과가 달라진다. 값이 없으면(스크립트 호출 등) 서버 날짜로 폴백.
+    """
+    text = (today or "").strip()
+    if text:
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="today 는 YYYY-MM-DD 형식이어야 합니다.")
+    return datetime.now(timezone.utc).date()
+
+
 def _view_rows(db: Session, *, status=None, risk=None, host=None, q=None, state="open",
-               dept=None, match="contains", filters="", sort="", direction="asc"):
+               dept=None, match="contains", filters="", sort="", direction="asc",
+               hide_normal=False, overdue_only=False, today=""):
     """목록·내보내기 공통 뷰 — 표에 보이는 값 그대로 필터·정렬한다.
 
     '표 = 내보내기' 불변식을 지키려면 계산 컬럼(표시 식별·용도근거·컴플라이언스)도 같은 기준으로
     걸러야 한다. 그래서 DB 로 줄일 수 있는 것만 SQL 로 줄이고, 컬럼 단위 판정은 표시값으로 한다.
+
+    화면 토글(정상처리 제외·마감초과만)도 **여기서** 걸러야 한다. 페이지를 자른 뒤 화면에서
+    걸러내면 조건에 맞는 행이 뒷 페이지에 남아 첫 페이지가 빈 것처럼 보이고, 건수·내보내기도
+    화면과 어긋난다.
     """
     rows = _filtered(db, status, risk, host, None, state, dept).all()
+    if hide_normal:
+        rows = [f for f in rows if f.status != "정상처리"]
+    if overdue_only:
+        limit_day = _overdue_before(today)
+        rows = [f for f in rows if f.deadline is not None and f.deadline.date() < limit_day]
     column_filters = _parse_filters(filters)
     if column_filters:
         exact_cols = match == "exact"
@@ -228,6 +253,9 @@ def list_findings(
     filters: str = "",
     sort: str = "",
     dir: str = "asc",
+    hide_normal: bool = False,
+    overdue_only: bool = False,
+    today: str = "",
     limit: int = 0,
     offset: int = 0,
     cols: str = "",
@@ -247,7 +275,8 @@ def list_findings(
     if dir not in ("asc", "desc"):
         raise HTTPException(status_code=400, detail="dir 은 asc 또는 desc 여야 합니다.")
     rows = _view_rows(db, status=status, risk=risk, host=host, q=q, state=state, dept=dept,
-                      match=match, filters=filters, sort=sort, direction=dir)
+                      match=match, filters=filters, sort=sort, direction=dir,
+                      hide_normal=hide_normal, overdue_only=overdue_only, today=today)
     response.headers["X-Total-Count"] = str(len(rows))
     if limit > 0:
         rows = rows[max(0, offset):max(0, offset) + limit]
@@ -277,6 +306,9 @@ def export_findings(
     filters: str = "",
     sort: str = "",
     dir: str = "asc",
+    hide_normal: bool = False,
+    overdue_only: bool = False,
+    today: str = "",
     _: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -287,7 +319,8 @@ def export_findings(
     headers = [_COL_MAP[k][0] for k in keys]
     # 목록과 같은 뷰 함수를 쓴다 — 화면에서 걸러 본 것과 내보낸 것이 달라지면 안 된다.
     rows = _view_rows(db, status=status, risk=risk, host=host, q=q, state=state,
-                      match=match, filters=filters, sort=sort, direction=dir)
+                      match=match, filters=filters, sort=sort, direction=dir,
+                      hide_normal=hide_normal, overdue_only=overdue_only, today=today)
 
     if fmt == "xlsx":
         import openpyxl

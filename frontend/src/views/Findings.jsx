@@ -15,6 +15,11 @@ const COLS_KEY = "scanops_cols";
 const CUSTOM_KEY = "scanops_custom_presets";
 // 한 번에 그리는 행 수. 발견이 수천 건이어도 DOM 이 그만큼 커지지 않게 서버 페이지로 끊는다.
 const PAGE_SIZE = 200;
+// 브라우저 로컬 날짜(YYYY-MM-DD) — 마감초과 판정 기준을 서버 UTC 가 아니라 사용자 기준으로 맞춘다.
+const localToday = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 const loadJSON = (k, fb) => { try { return JSON.parse(localStorage.getItem(k)) ?? fb; } catch { return fb; } };
 
 export default function Findings({ user }) {
@@ -59,8 +64,14 @@ export default function Findings({ user }) {
     const active = Object.fromEntries(Object.entries(colFilters).filter(([, v]) => v.trim()));
     if (Object.keys(active).length) qs.set("filters", JSON.stringify(active));
     if (sort.key) { qs.set("sort", sort.key); qs.set("dir", sort.dir); }
+    // 이 두 토글도 서버가 걸러야 한다. 페이지를 자른 뒤 화면에서 걸러내면 조건에 맞는 행이
+    // 뒷 페이지에 남아 첫 페이지가 빈 것처럼 보이고, 건수·내보내기도 화면과 어긋난다.
+    if (hideNormal) qs.set("hide_normal", "true");
+    if (overdueOnly) qs.set("overdue_only", "true");
+    // 마감초과 판정은 사용자 로컬 날짜 기준이어야 화면의 'N일 초과' 표시와 일치한다.
+    if (overdueOnly) qs.set("today", localToday());
     return qs;
-  }, [match, cols, risk, status, q, colFilters, sort]);
+  }, [match, cols, risk, status, q, colFilters, sort, hideNormal, overdueOnly]);
 
   function load(targetPage = page) {
     const qs = new URLSearchParams(queryString);
@@ -83,13 +94,8 @@ export default function Findings({ user }) {
   }, [queryString.toString(), imeTick]);
   useEffect(() => { load(page); }, [page]);
 
-  // 서버가 이미 걸러 준 뒤라 여기서는 화면 전용 토글만 적용한다.
-  const view = useMemo(() => {
-    let v = findings;
-    if (hideNormal) v = v.filter((f) => f.status !== "정상처리");
-    if (overdueOnly) v = v.filter((f) => dday(f.deadline).over);
-    return v;
-  }, [findings, overdueOnly, hideNormal]);
+  // 필터는 전부 서버가 페이지를 자르기 전에 적용한다 — 여기서 다시 거르면 페이지와 어긋난다.
+  const view = findings;
 
   const filterCount = Object.values(colFilters).filter((v) => v.trim()).length
     + (q.trim() ? 1 : 0) + (risk ? 1 : 0) + (status ? 1 : 0) + (overdueOnly ? 1 : 0);

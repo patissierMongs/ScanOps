@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from datetime import datetime
 
 from scanops.db import SessionLocal
 from scanops.models import Finding
@@ -197,3 +198,67 @@ def test_export_applies_the_same_search_filters_and_sort_as_the_table(client):
                         headers=auth).json()
     assert exported == [(r["host_ip"], str(r["port"])) for r in listed]
     assert exported == [("10.0.0.10", "443"), ("10.0.0.1", "22")]
+
+
+# ── 화면 토글은 페이지를 자르기 전에 적용돼야 한다 ──
+
+def _seed_many(normal=200, open_rows=1):
+    for i in range(normal):
+        _add(host_ip=f"10.1.{i // 250}.{i % 250}", port=1000 + i, status="정상처리")
+    for i in range(open_rows):
+        _add(host_ip=f"10.9.9.{i}", port=2000 + i, status="미조치")
+
+
+def test_hide_normal_runs_before_paging_so_the_first_page_is_not_empty(client):
+    """페이지를 자른 뒤 화면에서 걸러내면, 조건에 맞는 행이 뒷 페이지에 남아 첫 페이지가 빈 것처럼
+    보인다. 정상처리 200건 뒤에 미조치 1건이 있는 배치가 정확히 그 상황이다."""
+    auth = _auth(client)
+    _seed_many(normal=200, open_rows=1)
+
+    r = client.get("/api/findings?hide_normal=true&limit=200&offset=0", headers=auth)
+    rows = r.json()
+    assert r.headers["X-Total-Count"] == "1"      # 화면에 실제로 보일 건수
+    assert [row["host_ip"] for row in rows] == ["10.9.9.0"]
+    assert all(row["status"] != "정상처리" for row in rows)
+
+
+def test_overdue_only_runs_before_paging_too(client):
+    auth = _auth(client)
+    for i in range(200):
+        _add(host_ip=f"10.2.0.{i % 250}", port=3000 + i, status="미조치",
+             deadline=datetime(2999, 1, 1))
+    _add(host_ip="10.9.9.9", port=4000, status="미조치", deadline=datetime(2000, 1, 1))
+
+    r = client.get("/api/findings?overdue_only=true&today=2026-08-11&limit=200&offset=0", headers=auth)
+    assert r.headers["X-Total-Count"] == "1"
+    assert [row["host_ip"] for row in r.json()] == ["10.9.9.9"]
+
+
+def test_overdue_uses_the_client_date_not_the_server_timezone(client):
+    """화면의 'N일 초과' 표시는 사용자 로컬 날짜 기준이다. 서버 UTC 로 판정하면 KST 오전처럼
+    날짜가 하루 어긋나는 시간대에서 표시와 필터 결과가 달라진다."""
+    auth = _auth(client)
+    _add(host_ip="10.3.0.1", port=22, status="미조치", deadline=datetime(2026, 8, 10))
+
+    # 사용자의 오늘이 8/11 이면 8/10 마감은 초과다.
+    assert len(client.get("/api/findings?overdue_only=true&today=2026-08-11", headers=auth).json()) == 1
+    # 사용자의 오늘이 아직 8/10 이면 초과가 아니다.
+    assert client.get("/api/findings?overdue_only=true&today=2026-08-10", headers=auth).json() == []
+    assert client.get("/api/findings?overdue_only=true&today=nope", headers=auth).status_code == 400
+
+
+def test_export_matches_the_filtered_view_beyond_one_page(client):
+    """건수·화면·내보내기가 같은 뷰를 봐야 한다. 예전엔 CSV 에 정상처리 200건이 그대로 들어갔다."""
+    auth = _auth(client)
+    _seed_many(normal=200, open_rows=1)
+
+    body = client.get("/api/findings/export?cols=host_ip,status&fmt=csv&hide_normal=true",
+                      headers=auth).content.decode("utf-8-sig")
+    rows = list(csv.reader(io.StringIO(body)))[1:]
+    assert rows == [["10.9.9.0", "미조치"]]
+
+
+def test_findings_without_a_deadline_are_never_overdue(client):
+    auth = _auth(client)
+    _add(host_ip="10.4.0.1", port=22, status="미조치")
+    assert client.get("/api/findings?overdue_only=true&today=2026-08-11", headers=auth).json() == []
