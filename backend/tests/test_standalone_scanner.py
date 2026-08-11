@@ -2200,3 +2200,79 @@ def test_gui_exposes_gentle_auto_mode_and_port_exclusion():
     source = GUI_SCRIPT.read_text(encoding="utf-8")
     assert '"--intensity", "gentle"' in source
     assert '"--exclude-ports", exclude_ports' in source
+
+
+def test_unknown_saved_intensity_is_rejected_not_silently_downgraded(tmp_path):
+    """저장된 강도가 미지원 값이면 fail-closed 로 거절한다.
+
+    강도는 노후 장비 보호용 안전 제어다. 알 수 없는 값(미래 버전이 쓴 값이나 손상 값)을
+    조용히 normal 로 올리면 '-T3 + 속도상한'이 '-T4 + 무제한'으로 바뀌어, 보호하려던
+    장비를 그대로 때리게 된다. 구버전 호환은 키가 '아예 없을 때'만 적용한다."""
+    import json
+    import pytest
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--intensity", "gentle", "10.0.0.1",
+    ]))
+    state = tmp_path / "i.state.json"
+
+    def resume_with(mutate):
+        saved = json.loads(json.dumps(plan))
+        mutate(saved)
+        state.write_text(json.dumps(saved), encoding="utf-8")
+        return scanner.load_plan(str(state), "nmap", True, "")
+
+    # 정상 gentle 은 강도가 유지된다.
+    kept = scanner.build_command(resume_with(lambda p: None), 0, "tcp_discovery")
+    assert "-T3" in kept and "-T4" not in kept
+    assert kept[kept.index("--max-rate") + 1] == scanner.GENTLE_MAX_RATE_DEFAULT
+
+    # 명시된 미지원 값 → 거절(조용한 강등 금지).
+    for bad in ("paranoid-v2", "", "NORMAL", 3, None if False else []):
+        with pytest.raises(ValueError, match="intensity"):
+            resume_with(lambda p, b=bad: p.__setitem__("intensity", b))
+
+    # 키가 아예 없는 구형 state 만 normal 로 호환한다.
+    legacy = resume_with(lambda p: p.pop("intensity"))
+    assert legacy["intensity"] == "normal"
+    assert "-T4" in scanner.build_command(legacy, 0, "tcp_discovery")
+
+
+def test_saved_max_rate_is_validated_fail_closed(tmp_path):
+    """속도 상한도 같은 안전 제어다 — 손상 값을 그대로 nmap 에 넘기지 않는다."""
+    import json
+    import pytest
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--intensity", "gentle", "--max-rate", "80", "10.0.0.1",
+    ]))
+    state = tmp_path / "r.state.json"
+
+    def resume_with(value, drop=False):
+        saved = json.loads(json.dumps(plan))
+        saved.pop("max_rate") if drop else saved.__setitem__("max_rate", value)
+        state.write_text(json.dumps(saved), encoding="utf-8")
+        return scanner.load_plan(str(state), "nmap", True, "")
+
+    command = scanner.build_command(resume_with("80"), 0, "tcp_discovery")
+    assert command[command.index("--max-rate") + 1] == "80"
+
+    for bad in ("abc", "0", "-5", "12.5"):
+        with pytest.raises(ValueError, match="max-rate"):
+            resume_with(bad)
+
+    # 키가 없으면 gentle 기본값으로 되돌아간다(강도는 그대로 유지).
+    fallback = scanner.build_command(resume_with(None, drop=True), 0, "tcp_discovery")
+    assert fallback[fallback.index("--max-rate") + 1] == scanner.GENTLE_MAX_RATE_DEFAULT
+
+
+def test_intensity_and_max_rate_validators_are_shared_by_parser_and_state():
+    """파서 choices 와 state 재검증이 같은 목록을 쓰는지(둘이 갈라지면 계약이 깨진다)."""
+    scanner = _load_scanner()
+    assert scanner.INTENSITY_CHOICES == ("normal", "gentle")
+    action = next(a for a in scanner.parser()._actions if "--intensity" in (a.option_strings or []))
+    assert tuple(action.choices) == scanner.INTENSITY_CHOICES
+    assert scanner.validate_intensity(None) == "normal"
+    assert scanner.validate_max_rate(None) == "" and scanner.validate_max_rate(" 150 ") == "150"

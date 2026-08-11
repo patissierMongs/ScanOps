@@ -113,6 +113,8 @@ GENTLE_MIN_HOSTGROUP = "16"
 GENTLE_MAX_RETRIES = "1"
 GENTLE_MAX_RATE_DEFAULT = "150"   # packets/sec
 GENTLE_HOST_TIMEOUT_DEFAULT = "30m"
+# 허용 강도 — 파서 choices 와 state 재검증이 같은 목록을 쓴다.
+INTENSITY_CHOICES = ("normal", "gentle")
 
 # 타겟은 argv 맨 뒤에 와도 '-' 시작 시 Nmap 옵션으로 재해석된다.
 TARGET_RE = re.compile(r"^(?!-)[A-Za-z0-9_.:/\-]+$")
@@ -441,6 +443,34 @@ def validate_ports(ports: str) -> str:
         if "-" in body and len(nums) == 2 and int(nums[0]) > int(nums[1]):
             raise ValueError(f"포트 범위가 거꾸로입니다(시작>끝): '{seg}'. 예: 22-443")
     return ports
+
+
+def validate_intensity(value: object) -> str:
+    """저장된 스캔 강도를 검증한다. 키가 없을 때만 normal 로 호환한다.
+
+    강도는 노후 장비 보호용 '안전 제어'다. 알 수 없는 값(미래 버전이 쓴 값이나 손상된 값)을
+    조용히 normal 로 올리면 -T3+속도상한이 -T4+무제한으로 바뀌어, 보호하려던 장비를 그대로
+    때리게 된다. 명시돼 있는데 허용되지 않는 값이면 fail-closed 로 거절한다."""
+    if value is None:
+        return "normal"  # 구형 state: 키 자체가 없음 → 강도 개념이 없던 시절이므로 기본값
+    if isinstance(value, str) and value in INTENSITY_CHOICES:
+        return value
+    raise ValueError(
+        f"state 파일의 intensity 값을 알 수 없습니다: {value!r}. "
+        f"허용: {', '.join(INTENSITY_CHOICES)} (안전 제어라 임의로 낮추지 않고 거절합니다)"
+    )
+
+
+def validate_max_rate(value: object) -> str:
+    """--max-rate(초당 패킷 상한) 검증. 같은 이유로 손상 값은 거절한다."""
+    if value is None or value == "":
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if not text.isdecimal() or int(text) < 1:
+        raise ValueError(f"--max-rate 는 1 이상의 정수여야 합니다: {value!r}")
+    return text
 
 
 def validate_exclude_ports(spec: str) -> str:
@@ -1073,7 +1103,7 @@ def create_plan(args: argparse.Namespace) -> dict:
         warn_ambiguous_ports(ports_override)
     if args.workflow == "auto" and args.tcp_only and ports_override and not protocol_ports(ports_override, "T"):
         raise ValueError("TCP만 옵션을 사용할 때는 TCP 포트를 지정해야 합니다. 예: --ports 22,443")
-    intensity = getattr(args, "intensity", "normal")
+    intensity = validate_intensity(getattr(args, "intensity", None))
     # --host-timeout 은 None 센티널로 '사용자가 지정하지 않음'을 구분한다. 지정이 없으면 저강도에서만
     # 30m 을 기본으로 켜고(느린 스캔이 한 호스트에 무한정 묶이지 않게), 기본 강도는 종전대로 꺼둔다(QA-007).
     host_timeout_raw = getattr(args, "host_timeout", None)
@@ -1109,7 +1139,7 @@ def create_plan(args: argparse.Namespace) -> dict:
         "exclude": excludes,
         "exclude_ports": validate_exclude_ports(getattr(args, "exclude_ports", "")),
         "intensity": intensity,
-        "max_rate": getattr(args, "max_rate", "") or "",
+        "max_rate": validate_max_rate(getattr(args, "max_rate", "")),
         "scan_scope": scope_spec,
         "max_hosts": args.max_hosts,
         "requested_host_count": len(expanded),
@@ -1146,11 +1176,10 @@ def load_plan(path: str, nmap_override: str = "", dry_run: bool = False,
 
     excludes, exclude_networks = parse_excludes(plan.get("exclude", []))
     plan["exclude"] = excludes  # 구형 state는 빈 목록으로 호환, 새 state는 canonical 형태로 재검증.
-    # 포트 제외·강도도 같은 계약으로 재검증한다(구형 state는 기본값으로 호환).
+    # 포트 제외·강도도 같은 계약으로 재검증한다(구형 state는 키가 없을 때만 기본값으로 호환).
     plan["exclude_ports"] = validate_exclude_ports(plan.get("exclude_ports", "") or "")
-    if plan.get("intensity") not in ("normal", "gentle"):
-        plan["intensity"] = "normal"
-    plan["max_rate"] = str(plan.get("max_rate", "") or "")
+    plan["intensity"] = validate_intensity(plan.get("intensity"))
+    plan["max_rate"] = validate_max_rate(plan.get("max_rate"))
     raw_targets = plan.get("raw_targets")
     if raw_targets is None:
         raw_targets = saved_batch_targets
@@ -1740,7 +1769,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--host-timeout", default=None,
                    help="Per-host nmap --host-timeout. Off by default (0); --intensity gentle defaults to 30m. "
                         "Set e.g. 30m to opt in, or 0 to force off.")
-    p.add_argument("--intensity", choices=["normal", "gentle"], default="normal",
+    p.add_argument("--intensity", choices=list(INTENSITY_CHOICES), default="normal",
                    help="gentle: safer for old/fragile gear (-T3, no --defeat-rst-ratelimit, capped rate/"
                         "parallelism/retries, 30m host timeout).")
     p.add_argument("--max-rate", default="", metavar="PPS",
