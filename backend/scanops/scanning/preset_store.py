@@ -24,6 +24,9 @@ MAX_NAME_LEN = 60
 MAX_DESC_LEN = 200
 MAX_PRESETS = 200
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# 이름은 URL 경로 조각(PUT /api/scan-presets/item/{name})과 파일 목록에 그대로 실린다.
+# 경로 구분자가 섞이면 어느 프리셋을 가리키는지 서버·프록시·클라이언트가 다르게 읽을 수 있다.
+_NAME_FORBIDDEN = ("/", "\\")
 
 # 파일 안의 workflow 는 단독 스캐너 어휘(single)를 정본으로 쓴다. 웹 UI 의 'manual' 은 같은 뜻.
 _WORKFLOW_ALIASES = {"manual": "single", "single": "single", "auto": "auto"}
@@ -55,6 +58,15 @@ def _clean_text(value, label: str, limit: int) -> str:
     return text
 
 
+def validate_name(value) -> str:
+    name = _clean_text(value, "이름", MAX_NAME_LEN)
+    if not name:
+        raise ValueError("프리셋 이름이 비어 있습니다.")
+    if any(token in name for token in _NAME_FORBIDDEN):
+        raise ValueError("프리셋 이름에 / 또는 \\ 를 쓸 수 없습니다.")
+    return name
+
+
 def _ordered_unique(values, label: str) -> list[str]:
     if isinstance(values, str) or not isinstance(values, (list, tuple)):
         raise ValueError(f"프리셋 {label}은 문자열 목록이어야 합니다.")
@@ -71,9 +83,7 @@ def normalize_preset(raw: dict) -> dict:
     """단일 프리셋 검증·정규화. 화이트리스트 밖 옵션/NSE/포트는 여기서 거절된다."""
     if not isinstance(raw, dict):
         raise ValueError("프리셋 항목이 객체가 아닙니다.")
-    name = _clean_text(raw.get("name"), "이름", MAX_NAME_LEN)
-    if not name:
-        raise ValueError("프리셋 이름이 비어 있습니다.")
+    name = validate_name(raw.get("name"))
     options = _ordered_unique(raw.get("options") or [], "options")
     scan_options.validate_keys(options)
     nse = _ordered_unique(raw.get("nse") or [], "nse")
@@ -128,6 +138,32 @@ def fingerprint(preset: dict) -> str:
     }
     blob = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def document_revision(presets: list[dict]) -> str:
+    """목록 전체의 내용 지문.
+
+    목록 통째로 교체하는 쓰기는 이 값을 함께 보내야 한다. 클라이언트가 읽은 시점 이후에
+    다른 클라이언트(웹 저장·단독 스캐너 동기화)가 무언가 추가했다면 값이 달라지므로,
+    읽지도 못한 프리셋을 조용히 지우는 대신 409 로 거절할 수 있다.
+    """
+    body = [{"name": name_key(p["name"]), "fingerprint": fingerprint(p)} for p in presets]
+    body.sort(key=lambda item: item["name"])
+    blob = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+def upsert(presets: list[dict], preset: dict) -> list[dict]:
+    """이름 하나만 추가/교체한다. 나머지 항목은 그대로 — 이 경로엔 lost update 가 없다."""
+    key = name_key(preset["name"])
+    return normalize_presets([p for p in presets if name_key(p["name"]) != key] + [preset])
+
+
+def remove(presets: list[dict], name: str) -> tuple[list[dict], bool]:
+    """이름 하나만 제거. 두 번째 값은 실제로 지운 것이 있었는지."""
+    key = name_key(name)
+    kept = [p for p in presets if name_key(p["name"]) != key]
+    return kept, len(kept) != len(presets)
 
 
 def diff(local: list[dict], remote: list[dict]) -> dict:

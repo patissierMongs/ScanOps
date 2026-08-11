@@ -123,11 +123,22 @@ backend/scanops/
 - `POST /api/notifications`(부서별 통보 생성), `GET /api/notifications`
 - `GET /api/reports/audit`(xlsx 감사 리포트), `GET /api/dashboard`(요약 지표)
 - `GET/POST /api/rules`(위험 규칙), `GET/POST /api/users`(admin)
-- `GET/PUT /api/scan-presets`(스캔 프리셋 목록/전체 교체), `POST /api/scan-presets/sync`(단독 스캐너 도킹 동기화)
+- `GET /api/scan-presets`(목록 + `revision` + 항목별 `name_key`),
+  `PUT|DELETE /api/scan-presets/item/{name}`(한 건 추가·교체·삭제),
+  `PUT /api/scan-presets`(목록 전체 교체 — `revision` 일치 필수),
+  `POST /api/scan-presets/sync`(단독 스캐너 도킹 동기화)
   - 프리셋은 nmap 플래그가 아니라 **옵션 키**로 저장한다 — 웹 UI 토글과 단독 스캐너가 같은 값을
     서로 해석할 수 있어야 동기화가 성립하고, 임의 플래그 주입도 차단된다.
   - 서버는 `data/scan_presets.json`, 단독 스캐너는 자기 폴더의 `scanops_presets.json` 에 **같은 형식**으로
     보관한다. `sync` 는 같은 이름·다른 내용을 충돌로 보고, **하나라도 있으면 부분 병합 없이 전부 취소**한다.
+  - **동시 쓰기** — 프리셋이 파일 하나에 모여 있어 read-modify-write 가 겹치면 한쪽 저장이 통째로
+    사라진다. 그래서 낱개 편집은 다른 항목을 읽지도 않는 `/item/{name}` 로 하고, 목록 전체 교체만
+    `revision`(내용 지문) 일치를 요구해 중간 변경 시 409 로 거절한다. `sync` 는 서버 잠금 안에서
+    읽기→병합→쓰기를 한 번에 처리한다.
+  - **이름 정규화의 단일 기준** — 연속 공백 접기 + `casefold()` 는 서버 규칙이며, 응답이 항목마다
+    `name_key` 를 실어 보낸다. 클라이언트가 자기 방식으로(`trim().toLowerCase()` 등) 다시 판정하면
+    `Weekly  Full` 과 `weekly full` 을 다르게 보고 서버는 중복이라 거절하는 불일치가 생긴다.
+    이름은 URL 경로 조각으로도 쓰이므로 `/`·`\` 를 받지 않는다.
 
 ## 6. 보안 원칙
 

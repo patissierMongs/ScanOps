@@ -137,29 +137,38 @@ export default function ScanOptions({
     let live = true;
     api("/scan-presets")
       .then(async (r) => {
-        const server = r.presets || [];
-        const legacy = readLegacyPresets().filter(
-          (p) => !server.some((s) => s.name.trim().toLowerCase() === p.name.toLowerCase())
-        );
-        if (!legacy.length) return server;
-        try {
-          const merged = await api("/scan-presets", { method: "PUT", json: { presets: [...server, ...legacy] } });
-          localStorage.setItem(LEGACY_MIGRATED_KEY, "1");
-          return merged.presets || server;
-        } catch {
-          return server;
+        let list = r.presets || [];
+        // create_only 이관: 서버에 같은 이름이 있으면 409 로 거절되고 서버 값이 유지된다.
+        // '같은 이름인가'를 여기서 판정하지 않는 것이 요점 — 정규화 규칙은 서버만 안다.
+        let settled = true;
+        for (const legacy of readLegacyPresets()) {
+          try {
+            const saved = await api(
+              `/scan-presets/item/${encodeURIComponent(legacy.name)}?create_only=true`,
+              { method: "PUT", json: legacy },
+            );
+            list = saved.presets || list;
+          } catch (e) {
+            // 409 = 서버에 이미 같은 이름이 있음(이관 완료로 본다). 그 외(예: 열람 전용 계정의 403)는
+            // 아직 못 옮긴 것이므로 완료 표시를 남기지 않는다 — 권한이 생긴 뒤 다시 시도된다.
+            if (e.status !== 409) settled = false;
+          }
         }
+        if (settled) localStorage.setItem(LEGACY_MIGRATED_KEY, "1");
+        return list;
       })
       .then((list) => { if (live) setPresets(list); })
       .catch(() => {});
     return () => { live = false; };
   }, []);
 
-  async function writePresets(next, message) {
-    const saved = await api("/scan-presets", { method: "PUT", json: { presets: next } });
+  // 저장/삭제는 이름 하나만 건드리는 요청이다. 목록 전체를 되보내면 이 화면이 목록을 읽은 뒤
+  // 다른 사람이(또는 단독 스캐너 동기화가) 추가한 프리셋을 조용히 지운다.
+  async function writePreset(path, opts, message) {
+    const saved = await api(path, opts);
     setPresets(saved.presets || []);
     if (message) toast(message);
-    return saved.presets || [];
+    return saved;
   }
 
   const selectedScripts = useMemo(
@@ -396,19 +405,21 @@ export default function ScanOptions({
     const name = prompt("스캔 프리셋 이름", workflow === "auto" ? "자동 스캔" : "단일 실행");
     if (!name || !name.trim()) return;
     const trimmed = name.trim();
-    const key = trimmed.toLowerCase();
-    // 같은 이름은 교체한다 — 서버 파일은 이름을 고유 키로 쓰고, 중복 이름은 거절된다.
-    const next = [
-      ...presets.filter((p) => p.name.trim().toLowerCase() !== key),
-      { name: trimmed, description: "", workflow: toStoredWorkflow(workflow), options: [...sel], ports, nse: [...nseSel] },
-    ];
-    writePresets(next, `프리셋 저장됨 · ${trimmed}`)
-      .then(() => setPresetId(trimmed))
+    // 같은 이름이면 서버가 교체한다. 어떤 이름이 '같은' 이름인지는 서버 규칙(연속 공백 접기 +
+    // casefold)만 알고 있으므로 여기서 비교하지 않는다.
+    writePreset(
+      `/scan-presets/item/${encodeURIComponent(trimmed)}`,
+      { method: "PUT", json: { name: trimmed, description: "", workflow: toStoredWorkflow(workflow), options: [...sel], ports, nse: [...nseSel] } },
+      `프리셋 저장됨 · ${trimmed}`,
+    )
+      // 서버가 어떤 이름으로 저장했는지 응답이 알려준다(입력 표기와 다를 수 있다).
+      .then((saved) => setPresetId(saved.name || trimmed))
       .catch((e) => toast(e.message, { type: "err" }));
   }
 
   function delPreset() {
-    writePresets(presets.filter((p) => p.name !== presetId), `프리셋 삭제됨 · ${presetId}`)
+    writePreset(`/scan-presets/item/${encodeURIComponent(presetId)}`, { method: "DELETE" },
+      `프리셋 삭제됨 · ${presetId}`)
       .then(() => setPresetId(""))
       .catch((e) => toast(e.message, { type: "err" }));
   }

@@ -113,23 +113,115 @@ def test_newer_schema_file_is_refused_instead_of_silently_downgraded(tmp_path):
 
 def test_viewer_can_read_presets_but_not_write(client):
     viewer = _auth(client, "viewer")
-    assert client.get("/api/scan-presets", headers=viewer).json() == {"schema": 1, "presets": []}
-    assert client.put("/api/scan-presets", headers=viewer, json={"presets": [_preset("x")]}).status_code == 403
+    empty = client.get("/api/scan-presets", headers=viewer).json()
+    assert empty["schema"] == 1 and empty["presets"] == []
+    assert client.put("/api/scan-presets", headers=viewer,
+                      json={"revision": empty["revision"], "presets": [_preset("x")]}).status_code == 403
+    assert client.put("/api/scan-presets/item/x", headers=viewer, json=_preset("x")).status_code == 403
+    assert client.delete("/api/scan-presets/item/x", headers=viewer).status_code == 403
     assert client.post("/api/scan-presets/sync", headers=viewer, json={"presets": []}).status_code == 403
 
 
 def test_presets_persist_to_the_server_file_and_come_back(client):
     auth = _auth(client)
-    r = client.put("/api/scan-presets", headers=auth, json={"presets": [_preset("weekly")]})
+    r = client.put("/api/scan-presets/item/weekly", headers=auth, json=_preset("weekly"))
     assert r.status_code == 200, r.text
     assert [p["name"] for p in r.json()["presets"]] == ["weekly"]
     assert get_settings().preset_file.exists()
     assert [p["name"] for p in client.get("/api/scan-presets", headers=auth).json()["presets"]] == ["weekly"]
 
 
+def test_saving_one_preset_never_drops_presets_the_client_had_not_read(client):
+    """lost update 회귀: 목록을 읽은 뒤 다른 곳에서 추가된 항목이 저장으로 사라지면 안 된다.
+
+    웹 화면이 빈 목록을 읽고 있는 동안 단독 스캐너 동기화가 프리셋을 넣는 상황이다.
+    """
+    auth = _auth(client)
+    assert client.get("/api/scan-presets", headers=auth).json()["presets"] == []   # 화면이 읽은 시점
+    client.post("/api/scan-presets/sync", headers=auth, json={"presets": [_preset("from-scanner")]})
+
+    r = client.put("/api/scan-presets/item/from-web", headers=auth, json=_preset("from-web"))
+    assert r.status_code == 200, r.text
+    assert [p["name"] for p in r.json()["presets"]] == ["from-scanner", "from-web"]
+
+
+def test_whole_list_replacement_is_refused_when_the_document_moved(client):
+    """전체 교체는 '내가 읽은 것이 전부였다'는 주장이다 — 사실이 아니면 409."""
+    auth = _auth(client)
+    stale = client.get("/api/scan-presets", headers=auth).json()["revision"]
+    client.put("/api/scan-presets/item/from-scanner", headers=auth, json=_preset("from-scanner"))
+
+    r = client.put("/api/scan-presets", headers=auth,
+                   json={"revision": stale, "presets": [_preset("from-web")]})
+    assert r.status_code == 409, r.text
+    assert [p["name"] for p in client.get("/api/scan-presets", headers=auth).json()["presets"]] \
+        == ["from-scanner"]
+
+    fresh = client.get("/api/scan-presets", headers=auth).json()["revision"]
+    ok = client.put("/api/scan-presets", headers=auth,
+                    json={"revision": fresh, "presets": [_preset("from-web")]})
+    assert ok.status_code == 200, ok.text
+    assert [p["name"] for p in ok.json()["presets"]] == ["from-web"]
+
+
+def test_two_stale_clients_cannot_both_replace_the_whole_list(client):
+    """A·B 가 같은 목록을 읽고 각자 다른 목록을 PUT — 둘 다 200 이면 한쪽이 조용히 사라진다."""
+    auth = _auth(client)
+    shared = client.get("/api/scan-presets", headers=auth).json()["revision"]
+
+    first = client.put("/api/scan-presets", headers=auth,
+                       json={"revision": shared, "presets": [_preset("from-a")]})
+    second = client.put("/api/scan-presets", headers=auth,
+                        json={"revision": shared, "presets": [_preset("from-b")]})
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409, second.text
+    assert [p["name"] for p in client.get("/api/scan-presets", headers=auth).json()["presets"]] == ["from-a"]
+
+
+def test_server_publishes_the_name_key_clients_must_not_recompute(client):
+    """이름 정규화가 클라이언트마다 다르면 '교체'가 '중복 생성'이 된다 — 기준을 서버가 준다."""
+    auth = _auth(client)
+    client.put("/api/scan-presets/item/Weekly  Full", headers=auth, json=_preset("Weekly  Full"))
+    listed = client.get("/api/scan-presets", headers=auth).json()["presets"]
+    assert listed[0]["name"] == "Weekly Full"          # 연속 공백은 접어서 저장
+    assert listed[0]["name_key"] == "weekly full"
+
+    # 표기가 다른 같은 이름은 새 항목이 아니라 교체다(예전 프론트 규칙이라면 400 중복이 났다).
+    r = client.put("/api/scan-presets/item/weekly full", headers=auth,
+                   json=_preset("weekly full", ports="8443"))
+    assert r.status_code == 200, r.text
+    assert len(r.json()["presets"]) == 1
+    assert r.json()["presets"][0]["ports"] == "8443"
+    assert r.json()["name"] == "weekly full"
+
+
+def test_create_only_upsert_refuses_to_overwrite_an_existing_name(client):
+    """예전 localStorage 프리셋 이관이 서버의 동명 프리셋을 덮어쓰면 안 된다."""
+    auth = _auth(client)
+    client.put("/api/scan-presets/item/weekly", headers=auth, json=_preset("weekly", ports="22"))
+    r = client.put("/api/scan-presets/item/weekly?create_only=true", headers=auth,
+                   json=_preset("weekly", ports="443"))
+    assert r.status_code == 409, r.text
+    assert client.get("/api/scan-presets", headers=auth).json()["presets"][0]["ports"] == "22"
+
+
+def test_item_endpoints_reject_a_mismatched_or_path_hostile_name(client):
+    auth = _auth(client)
+    clash = client.put("/api/scan-presets/item/weekly", headers=auth, json=_preset("monthly"))
+    assert clash.status_code == 400, clash.text
+    assert client.delete("/api/scan-presets/item/nope", headers=auth).status_code == 404
+
+
+def test_preset_names_cannot_contain_path_separators():
+    """이름은 /item/{name} 경로 조각으로도 쓰인다 — 구분자가 섞이면 대상이 모호해진다."""
+    for bad in ("a/b", "a\\b"):
+        with pytest.raises(ValueError):
+            preset_store.normalize_preset(_preset(bad))
+
+
 def test_sync_unions_both_sides_when_no_name_collides(client):
     auth = _auth(client)
-    client.put("/api/scan-presets", headers=auth, json={"presets": [_preset("server-only")]})
+    client.put("/api/scan-presets/item/server-only", headers=auth, json=_preset("server-only"))
     r = client.post("/api/scan-presets/sync", headers=auth, json={"presets": [_preset("scanner-only")]})
     body = r.json()
     assert body["status"] == "synced"
@@ -143,7 +235,7 @@ def test_sync_unions_both_sides_when_no_name_collides(client):
 
 def test_sync_conflict_changes_nothing_on_the_server(client):
     auth = _auth(client)
-    client.put("/api/scan-presets", headers=auth, json={"presets": [_preset("weekly", ports="22")]})
+    client.put("/api/scan-presets/item/weekly", headers=auth, json=_preset("weekly", ports="22"))
     r = client.post("/api/scan-presets/sync", headers=auth,
                     json={"presets": [_preset("weekly", ports="443"), _preset("brand-new")]})
     body = r.json()

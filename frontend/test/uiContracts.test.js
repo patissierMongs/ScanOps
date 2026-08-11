@@ -263,7 +263,6 @@ test("scan presets live on the server so the standalone scanner can sync the sam
   const scanOptions = source("../src/ui/ScanOptions.jsx");
   // localStorage 에 남으면 단독 스캐너 동기화 대상에서 빠진다 — 읽기/쓰기 모두 서버 API 로.
   assert.match(scanOptions, /api\("\/scan-presets"\)/);
-  assert.match(scanOptions, /api\("\/scan-presets", \{ method: "PUT", json: \{ presets/);
   assert.doesNotMatch(scanOptions, /localStorage\.setItem\(LEGACY_PRESET_KEY/);
 
   // 파일 형식의 workflow 어휘는 단독 스캐너 기준(single) — 웹의 manual 과 상호 변환한다.
@@ -271,13 +270,21 @@ test("scan presets live on the server so the standalone scanner can sync the sam
   assert.match(scanOptions, /const toUiWorkflow = \(workflow\) => \(workflow === "auto" \? "auto" : "manual"\)/);
   assert.match(scanOptions, /setWorkflow\(toUiWorkflow\(p\.workflow\)\)/);
   assert.match(scanOptions, /workflow: toStoredWorkflow\(workflow\)/);
+});
 
-  // 서버는 이름을 고유 키로 쓰고 중복 이름을 거절한다 → 같은 이름 저장은 교체여야 한다.
-  const save = scanOptions.slice(
-    scanOptions.indexOf("function savePreset"),
-    scanOptions.indexOf("function delPreset"),
-  );
-  assert.match(save, /presets\.filter\(\(p\) => p\.name\.trim\(\)\.toLowerCase\(\) !== key\)/);
+test("preset writes touch one name so a stale list cannot erase other people's presets", () => {
+  const scanOptions = source("../src/ui/ScanOptions.jsx");
+  // 목록 전체를 되보내면 이 화면이 목록을 읽은 뒤 추가된 프리셋이 조용히 사라진다.
+  assert.doesNotMatch(scanOptions, /json: \{ presets: \[/);
+  assert.match(scanOptions, /`\/scan-presets\/item\/\$\{encodeURIComponent\(trimmed\)\}`[\s\S]*?method: "PUT"/);
+  assert.match(scanOptions, /`\/scan-presets\/item\/\$\{encodeURIComponent\(presetId\)\}`, \{ method: "DELETE" \}/);
+  // 이관은 create_only — 서버에 이미 있는 동명 프리셋을 덮어쓰지 않는다.
+  assert.match(scanOptions, /\?create_only=true`/);
+
+  // '같은 이름인가'는 서버 규칙(연속 공백 접기 + casefold)만 안다. 클라이언트가 재구현하면
+  // 'Weekly  Full' 과 'weekly full' 을 다르게 보고 서버는 중복이라 거절하는 불일치가 생긴다.
+  assert.doesNotMatch(scanOptions, /name\.trim\(\)\.toLowerCase\(\)/);
+  assert.match(scanOptions, /setPresetId\(saved\.name \|\| trimmed\)/);
 });
 
 test("timing controls and presets resolve to one backend-visible timing", () => {

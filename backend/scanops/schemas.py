@@ -64,8 +64,9 @@ class ScanPresetItem(BaseModel):
     """저장되는 스캔 프리셋 한 건 — nmap 플래그가 아니라 '옵션 키'로 담는다.
 
     웹 UI 토글과 단독 스캐너가 같은 값을 서로 해석할 수 있어야 동기화가 성립한다.
-    workflow 는 auto / single(웹의 manual 과 동의어)."""
-    name: str
+    workflow 는 auto / single(웹의 manual 과 동의어).
+    name 은 /item/{name} 경로가 대상을 정하므로 그 경로에서는 생략할 수 있다."""
+    name: str = ""
     description: str = ""
     workflow: str = "single"
     options: list[str] = []
@@ -75,6 +76,12 @@ class ScanPresetItem(BaseModel):
 
 
 class ScanPresetSync(BaseModel):
+    presets: list[ScanPresetItem] = []
+
+
+class ScanPresetReplace(BaseModel):
+    """목록 전체 교체 — 읽은 시점의 revision 을 함께 보내야 한다(중간 변경 시 409)."""
+    revision: str
     presets: list[ScanPresetItem] = []
 
 

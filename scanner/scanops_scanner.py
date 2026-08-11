@@ -122,6 +122,9 @@ PRESET_MAX_DESC_LEN = 200
 PRESET_MAX_COUNT = 200
 PRESET_WORKFLOW_ALIASES = {"manual": "single", "single": "single", "auto": "auto"}
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+# 이름은 서버 API 의 URL 경로 조각(PUT /api/scan-presets/item/{name})으로도 쓰인다.
+# 경로 구분자가 섞이면 어느 프리셋을 가리키는지 양쪽이 다르게 읽을 수 있다.
+PRESET_NAME_FORBIDDEN = ("/", "\\")
 
 # 웹 UI 의 스캔 옵션 레지스트리(backend/scanops/scanning/scan_options.py SCAN_OPTIONS) 사본.
 # 프리셋은 nmap 플래그가 아니라 이 '키'로 오가므로, 양쪽이 같은 키→플래그 표를 가져야 한다.
@@ -1211,6 +1214,8 @@ def normalize_preset(raw: dict) -> dict:
     name = _preset_text(raw.get("name"), "이름", PRESET_MAX_NAME_LEN)
     if not name:
         raise ValueError("프리셋 이름이 비어 있습니다.")
+    if any(token in name for token in PRESET_NAME_FORBIDDEN):
+        raise ValueError("프리셋 이름에 / 또는 \\ 를 쓸 수 없습니다.")
     return {
         "name": name,
         "description": _preset_text(raw.get("description"), "설명", PRESET_MAX_DESC_LEN),
