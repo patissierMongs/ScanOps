@@ -1530,7 +1530,10 @@ def sync_presets(args: argparse.Namespace, preset_path: Path) -> int:
     merged = normalize_presets(result.get("presets"))
     save_presets(preset_path, merged)
     print(f"synced: {len(merged)}건 → {preset_path}")
-    for changed in delta["metadata_changed"]:
+    # 안내는 **실제로 쓴 결과**(merged)와 시작 시점의 로컬을 비교해 만든다. 위쪽 확인용 delta 는
+    # 첫 GET 기준이라, 그 뒤 다른 사용자가 서버 설명을 바꿔 병합 응답에 실려 오면 로컬 파일은
+    # 덮이는데 안내는 비어 있게 된다(GET→POST 사이 TOCTOU).
+    for changed in diff_presets(local, merged)["metadata_changed"]:
         # 스캔 동작은 같아 충돌이 아니지만 로컬 설명/표기가 서버 값으로 바뀐다 — 조용히 넘기지 않는다.
         print(f"note: '{changed['name']}' 의 설명/이름 표기를 서버 값('{changed['remote_name']}')으로 맞췄습니다.")
     print(f"서버에 추가됨: {', '.join(result.get('added_to_server') or []) or '없음'}")

@@ -2253,3 +2253,30 @@ def test_sync_reports_when_the_server_metadata_replaces_the_local_one(tmp_path, 
     assert scanner.sync_presets(args, path) == 0
     assert "설명/이름 표기를 서버 값" in capsys.readouterr().out
     assert scanner.load_presets(path)[0]["description"] == "서버 설명"
+
+
+def test_sync_reports_server_metadata_adopted_between_the_check_and_the_merge(tmp_path, monkeypatch, capsys):
+    """GET→POST 사이에 서버 설명이 바뀌어도 안내가 나와야 한다.
+
+    안내를 첫 GET 기준으로 계산하면, 확인 시점엔 같았다가 병합 응답에서 달라진 설명이
+    로컬 파일을 덮는데도 아무 말 없이 지나간다(TOCTOU). 안내는 실제로 쓴 결과 기준이어야 한다.
+    """
+    scanner = _load_scanner()
+    path = tmp_path / "presets.json"
+    local = {"name": "weekly", "description": "내가 쓴 설명", "workflow": "single",
+             "options": ["syn"], "ports": "22", "nse": []}
+    scanner.save_presets(path, [local])
+
+    def fake_request(url, token, payload, timeout):
+        if payload is None:
+            return {"schema": 1, "presets": [dict(local)]}          # 확인 시점: 완전히 동일
+        # 확인과 병합 사이에 다른 사용자가 서버 설명을 바꿨다.
+        return {"status": "synced", "presets": [{**local, "description": "남이 바꾼 설명"}],
+                "added_to_server": [], "added_to_client": []}
+
+    monkeypatch.setattr(scanner, "_sync_request", fake_request)
+    args = argparse.Namespace(server="http://server:8770", token="t", username="", password="",
+                              sync_timeout=5.0)
+    assert scanner.sync_presets(args, path) == 0
+    assert scanner.load_presets(path)[0]["description"] == "남이 바꾼 설명"
+    assert "설명/이름 표기를 서버 값" in capsys.readouterr().out
