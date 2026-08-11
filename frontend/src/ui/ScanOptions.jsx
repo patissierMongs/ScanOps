@@ -1,9 +1,33 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
+import { useToast } from "./Toast.jsx";
 
-const PRESET_KEY = "scanops_scan_presets";
+// 프리셋은 서버 파일(data/scan_presets.json)이 진실원천이다. 단독 스캐너가 같은 형식의 파일을
+// 자기 폴더에 두고 도킹 동기화하므로, 브라우저 localStorage 에 남으면 동기화 대상에서 빠진다.
+// 예전 버전에서 만든 localStorage 프리셋은 최초 1회 서버로 올려 이관한다.
+const LEGACY_PRESET_KEY = "scanops_scan_presets";
+const LEGACY_MIGRATED_KEY = "scanops_scan_presets_migrated";
 const RESCAN_OPTION_KEYS = new Set(["version_all", "version_light"]);
-const loadPresets = () => { try { return JSON.parse(localStorage.getItem(PRESET_KEY)) || []; } catch { return []; } };
+
+// 파일 형식의 workflow 어휘는 단독 스캐너 기준(single). 웹 UI 의 manual 과 같은 뜻이다.
+const toStoredWorkflow = (workflow) => (workflow === "auto" ? "auto" : "single");
+const toUiWorkflow = (workflow) => (workflow === "auto" ? "auto" : "manual");
+
+function readLegacyPresets() {
+  if (localStorage.getItem(LEGACY_MIGRATED_KEY)) return [];
+  let raw = [];
+  try { raw = JSON.parse(localStorage.getItem(LEGACY_PRESET_KEY)) || []; } catch { raw = []; }
+  return raw
+    .filter((p) => p && typeof p.name === "string" && p.name.trim())
+    .map((p) => ({
+      name: p.name.trim(),
+      description: "",
+      workflow: toStoredWorkflow(p.workflow),
+      options: Array.isArray(p.keys) ? p.keys : [],
+      ports: typeof p.ports === "string" ? p.ports : "",
+      nse: Array.isArray(p.nse) ? p.nse : [],
+    }));
+}
 
 const PRECISION_OPTS = ["noping", "dns_no", "syn", "fast", "version", "version_all",
   "max_retries", "open_only", "reason", "defeat_rst", "min_hostgroup", "max_parallel", "udp"];
@@ -85,9 +109,10 @@ export default function ScanOptions({
   const [udpPorts, setUdpPorts] = useState("");
   const [showManualOptions, setShowManualOptions] = useState(false);
   const [showNse, setShowNse] = useState(false);
-  const [presets, setPresets] = useState(loadPresets);
+  const [presets, setPresets] = useState([]);
   const [presetId, setPresetId] = useState("");
   const [touchedPorts, setTouchedPorts] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     let live = true;
@@ -105,6 +130,37 @@ export default function ScanOptions({
       .catch(() => {});
     return () => { live = false; };
   }, []);
+
+  // 프리셋 로드(+ 예전 localStorage 프리셋 1회 이관). 열람 전용 계정은 이관 권한이 없으므로
+  // 실패해도 조용히 서버 목록만 쓴다.
+  useEffect(() => {
+    let live = true;
+    api("/scan-presets")
+      .then(async (r) => {
+        const server = r.presets || [];
+        const legacy = readLegacyPresets().filter(
+          (p) => !server.some((s) => s.name.trim().toLowerCase() === p.name.toLowerCase())
+        );
+        if (!legacy.length) return server;
+        try {
+          const merged = await api("/scan-presets", { method: "PUT", json: { presets: [...server, ...legacy] } });
+          localStorage.setItem(LEGACY_MIGRATED_KEY, "1");
+          return merged.presets || server;
+        } catch {
+          return server;
+        }
+      })
+      .then((list) => { if (live) setPresets(list); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
+
+  async function writePresets(next, message) {
+    const saved = await api("/scan-presets", { method: "PUT", json: { presets: next } });
+    setPresets(saved.presets || []);
+    if (message) toast(message);
+    return saved.presets || [];
+  }
 
   const selectedScripts = useMemo(
     () => nseReg.filter((s) => nseSel.has(s.key)).map((s) => s.key),
@@ -318,45 +374,43 @@ export default function ScanOptions({
     setPresetId("");
   }
 
-  function applyPreset(id) {
-    const p = presets.find((x) => x.id === id);
+  function applyPreset(name) {
+    const p = presets.find((x) => x.name === name);
     if (p) {
-      const nextSel = normalizeSelections(p.keys || []);
+      const nextSel = normalizeSelections(p.options || []);
       let nextPorts = p.ports || "";
       if (nextSel.has("connect")) {
         nextPorts = tcpOnlyPortSpec(nextPorts);
       } else if (hasExplicitUdpPorts(nextPorts)) {
         nextSel.add("udp");
       }
-      setWorkflow(p.workflow || "manual");
+      setWorkflow(toUiWorkflow(p.workflow));
       setSel(nextSel);
       setPorts(nextPorts);
       setNseSel(new Set(p.nse || []));
     }
-    setPresetId(id);
+    setPresetId(name);
   }
 
   function savePreset() {
     const name = prompt("스캔 프리셋 이름", workflow === "auto" ? "자동 스캔" : "단일 실행");
     if (!name || !name.trim()) return;
-    const next = [...presets, {
-      id: "sp_" + Date.now(),
-      name: name.trim(),
-      workflow,
-      keys: [...sel],
-      ports,
-      nse: [...nseSel],
-    }];
-    setPresets(next);
-    localStorage.setItem(PRESET_KEY, JSON.stringify(next));
-    setPresetId(next[next.length - 1].id);
+    const trimmed = name.trim();
+    const key = trimmed.toLowerCase();
+    // 같은 이름은 교체한다 — 서버 파일은 이름을 고유 키로 쓰고, 중복 이름은 거절된다.
+    const next = [
+      ...presets.filter((p) => p.name.trim().toLowerCase() !== key),
+      { name: trimmed, description: "", workflow: toStoredWorkflow(workflow), options: [...sel], ports, nse: [...nseSel] },
+    ];
+    writePresets(next, `프리셋 저장됨 · ${trimmed}`)
+      .then(() => setPresetId(trimmed))
+      .catch((e) => toast(e.message, { type: "err" }));
   }
 
   function delPreset() {
-    const next = presets.filter((p) => p.id !== presetId);
-    setPresets(next);
-    localStorage.setItem(PRESET_KEY, JSON.stringify(next));
-    setPresetId("");
+    writePresets(presets.filter((p) => p.name !== presetId), `프리셋 삭제됨 · ${presetId}`)
+      .then(() => setPresetId(""))
+      .catch((e) => toast(e.message, { type: "err" }));
   }
 
   const { tcp, udp } = autoPortSpecs((ports || portsAuto).trim(), udpPorts);
@@ -369,9 +423,10 @@ export default function ScanOptions({
           <button type="button" className={workflow === "auto" ? "on" : ""} onClick={() => setWorkflow("auto")}>자동 스캔</button>
           <button type="button" className={workflow === "manual" ? "on" : ""} onClick={() => setWorkflow("manual")}>단일 실행</button>
         </div>
-        <select value={presetId} onChange={(e) => applyPreset(e.target.value)} aria-label="프리셋 선택">
+        <select value={presetId} onChange={(e) => applyPreset(e.target.value)} aria-label="프리셋 선택"
+                title="프리셋은 서버에 저장되며 단독 스캐너와 동기화됩니다.">
           <option value="">프리셋 선택…</option>
-          {presets.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          {presets.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
         </select>
         <button type="button" className="sm" onClick={savePreset}>현재 구성 저장</button>
         {presetId && <button type="button" className="sm" onClick={delPreset}>삭제</button>}

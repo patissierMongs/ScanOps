@@ -931,6 +931,7 @@ def test_gui_forwards_exclude_only_for_new_scan():
     gui.target_file = Value("")
     gui.zip_outputs = Value(False)
     gui.resume_path = Value("saved.state.json")
+    gui.preset_name = Value(gui_module.NO_PRESET_LABEL)
 
     command = gui._command(dry_run=True)
     assert command[command.index("--exclude") + 1] == "10.0.0.1, 10.0.0.2\r\n10.0.0.3"
@@ -1283,7 +1284,8 @@ def test_interrupt_writes_interrupted_state_and_resume_hint(tmp_path, monkeypatc
         # 어차피 subprocess.call 을 boom 으로 막아 nmap 을 실행하지 않으므로 경로 검증 외엔 영향 없음.
         monkeypatch.setattr(scanner, "find_nmap", lambda *a, **k: "nmap")
         plan = scanner.create_plan(args)
-        monkeypatch.setattr(scanner.subprocess, "call", boom)
+        # nmap 실행 지점은 run_nmap_process 하나다(정지 신호 후 부분 결과를 기다리는 곳도 여기).
+        monkeypatch.setattr(scanner, "run_nmap_process", boom)
         rc = scanner.execute(plan)
         assert rc == 130
         state = json.loads((tmp_path / "i.state.json").read_text(encoding="utf-8"))
@@ -1992,3 +1994,240 @@ def test_import_contract_normalizes_large_batch_size_within_web_cap():
     assert contract is not None
     assert contract["max_hosts"] == scanner.IMPORT_CONTRACT_MAX_HOSTS
     assert contract["batch_size"] == scanner.IMPORT_CONTRACT_MAX_HOSTS
+
+
+# ── 저장 프리셋 ──
+
+def _preset_cli(tmp_path: Path, *args: str, **kw):
+    """프리셋 파일이 tmp_path 안에 만들어지도록 --preset-file 을 항상 고정한다."""
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--preset-file", str(tmp_path / "presets.json"), *args],
+        text=True, encoding="utf-8", capture_output=True, check=False, **kw,
+    )
+
+
+def test_preset_save_list_and_delete_round_trip_in_the_scanner_folder(tmp_path):
+    saved = _preset_cli(
+        tmp_path, "--workflow", "single", "--options", "syn,version,fast",
+        "--ports", "22,443", "--save-preset", "웹 점검",
+    )
+    assert saved.returncode == 0, saved.stderr
+    assert "웹 점검" in saved.stdout
+
+    listed = _preset_cli(tmp_path, "--list-presets")
+    assert "웹 점검" in listed.stdout
+
+    # 같은 이름 재저장은 실수로 덮어쓰지 않도록 명시적 허용을 요구한다.
+    again = _preset_cli(tmp_path, "--workflow", "single", "--options", "syn", "--save-preset", "웹 점검")
+    assert again.returncode == 2
+    assert "--overwrite-preset" in again.stderr
+
+    removed = _preset_cli(tmp_path, "--delete-preset", "웹 점검")
+    assert removed.returncode == 0, removed.stderr
+    assert "(저장된 프리셋 없음)" in _preset_cli(tmp_path, "--list-presets").stdout
+
+
+def _normalized_commands(stdout: str) -> list[list[str]]:
+    """미리보기 명령을 비교 가능한 형태로. 토큰 순서와 --script 목록 순서는 의미가 없으므로 정렬한다."""
+    out = []
+    for line in stdout.splitlines():
+        if not line.startswith("nmap "):
+            continue
+        tokens = line.split()
+        if "--script" in tokens:
+            index = tokens.index("--script") + 1
+            tokens[index] = ",".join(sorted(tokens[index].split(",")))
+        out.append(sorted(tokens))
+    return out
+
+
+def test_default_auto_preset_reproduces_the_built_in_auto_workflow(tmp_path):
+    """웹 기본 옵션으로 만든 auto 프리셋은 내장 자동 워크플로와 같은 스캔을 낸다.
+
+    이 성질이 깨지면 '웹에서 만든 프리셋을 스캐너로 가져와 돌렸더니 다른 스캔'이 된다.
+    """
+    assert _preset_cli(tmp_path, "--save-preset", "기본 자동").returncode == 0
+
+    baseline = _preset_cli(tmp_path, "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+                           "--name", "n", "127.0.0.1")
+    via_preset = _preset_cli(tmp_path, "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+                             "--name", "n", "--preset", "기본 자동", "127.0.0.1")
+    assert baseline.returncode == 0, baseline.stderr
+    assert via_preset.returncode == 0, via_preset.stderr
+    assert _normalized_commands(via_preset.stdout) == _normalized_commands(baseline.stdout)
+
+
+def test_preset_owned_settings_cannot_be_silently_overridden_on_the_command_line(tmp_path):
+    assert _preset_cli(tmp_path, "--workflow", "single", "--options", "syn",
+                        "--save-preset", "p").returncode == 0
+    clash = _preset_cli(tmp_path, "--dry-run", "--nmap", "nmap", "--preset", "p", "--udp", "127.0.0.1")
+    assert clash.returncode == 2
+    assert "--udp" in clash.stderr
+
+
+def test_profiles_that_cannot_be_expressed_as_option_keys_are_refused(tmp_path):
+    """quick/light 는 --top-ports 를 쓴다. 웹 옵션 어휘에 없는 값을 프리셋에 담아
+    조용히 다른 스캔이 되게 두느니 저장을 거절한다."""
+    refused = _preset_cli(tmp_path, "--workflow", "single", "--profile", "quick", "--save-preset", "q")
+    assert refused.returncode == 2
+    assert "--options" in refused.stderr
+
+
+def test_udp_identify_stage_never_inherits_a_tcp_scan_type():
+    """프리셋의 -sS 가 UDP 식별 단계까지 새면 그 실행이 TCP+UDP 동시 스캔이 된다."""
+    scanner = _load_scanner()
+    plan = {"scan_type": "syn", "ports_override": "", "all_ports": False, "scripts": "", "timing": ""}
+    udp = scanner.build_auto_flags(plan, "udp_identify")
+    assert "-sS" not in udp and "-sU" in udp
+    assert "-sS" in scanner.build_auto_flags(plan, "tcp_discovery")
+
+
+def test_preset_scripts_are_filtered_per_stage_like_the_web_workflow():
+    scanner = _load_scanner()
+    plan = {"scan_type": "", "ports_override": "", "all_ports": False, "timing": "",
+            "scripts": "http-title,snmp-info,custom-script"}
+    discovery = scanner.build_auto_flags(plan, "tcp_discovery")
+    assert "--script" not in discovery      # 발견 단계는 속도가 목적이라 NSE 를 붙이지 않는다
+
+    tcp = scanner.build_auto_flags(plan, "tcp_identify", [80])
+    assert tcp[tcp.index("--script") + 1] == "http-title,custom-script"
+    udp = scanner.build_auto_flags(plan, "udp_identify")
+    assert udp[udp.index("--script") + 1] == "snmp-info,custom-script"
+
+
+def test_preset_timing_replaces_the_stage_default(tmp_path):
+    scanner = _load_scanner()
+    plan = {"scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "-T2"}
+    flags = scanner.build_auto_flags(plan, "tcp_discovery")
+    assert "-T2" in flags and "-T4" not in flags
+
+
+def test_sync_conflict_leaves_the_local_preset_file_untouched(tmp_path, monkeypatch):
+    scanner = _load_scanner()
+    path = tmp_path / "presets.json"
+    scanner.save_presets(path, [{"name": "weekly", "workflow": "single",
+                                 "options": ["syn"], "ports": "22", "nse": []}])
+    before = path.read_text(encoding="utf-8")
+
+    def fake_request(url, token, payload, timeout):
+        assert payload is None, "충돌 확인 전에는 서버에 쓰기 요청을 보내지 않는다"
+        return {"schema": 1, "presets": [{"name": "weekly", "workflow": "single",
+                                          "options": ["syn"], "ports": "443", "nse": []}]}
+
+    monkeypatch.setattr(scanner, "_sync_request", fake_request)
+    args = argparse.Namespace(server="http://server:8770", token="t", username="", password="",
+                              sync_timeout=5.0)
+    assert scanner.sync_presets(args, path) == 3
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_sync_writes_the_merged_server_result_to_the_local_file(tmp_path, monkeypatch):
+    scanner = _load_scanner()
+    path = tmp_path / "presets.json"
+    local = {"name": "scanner-only", "workflow": "single", "options": ["syn"], "ports": "22", "nse": []}
+    remote = {"name": "server-only", "workflow": "auto", "options": ["syn", "udp"], "ports": "", "nse": []}
+    scanner.save_presets(path, [local])
+
+    def fake_request(url, token, payload, timeout):
+        if payload is None:
+            return {"schema": 1, "presets": [remote]}
+        assert [p["name"] for p in payload["presets"]] == ["scanner-only"]
+        return {"status": "synced", "presets": [local, remote],
+                "added_to_server": ["scanner-only"], "added_to_client": ["server-only"]}
+
+    monkeypatch.setattr(scanner, "_sync_request", fake_request)
+    args = argparse.Namespace(server="http://server:8770/", token="t", username="", password="",
+                              sync_timeout=5.0)
+    assert scanner.sync_presets(args, path) == 0
+    assert [p["name"] for p in scanner.load_presets(path)] == ["scanner-only", "server-only"]
+
+
+def test_sync_requires_an_http_url_and_credentials(tmp_path):
+    import pytest
+    scanner = _load_scanner()
+    args = argparse.Namespace(server="", token="t", username="", password="", sync_timeout=5.0)
+    with pytest.raises(ValueError):
+        scanner.sync_presets(args, tmp_path / "presets.json")
+    args.server = "file:///etc/passwd"
+    with pytest.raises(ValueError):
+        scanner.sync_presets(args, tmp_path / "presets.json")
+
+
+# ── 중단 표시 ──
+
+def test_interrupted_outputs_are_renamed_and_never_overwritten(tmp_path):
+    scanner = _load_scanner()
+    base = tmp_path / "scan.10_0_0_1.tcp_discovery"
+    for suffix in (".xml", ".nmap", ".gnmap"):
+        Path(str(base) + suffix).write_text("partial", encoding="utf-8")
+
+    first = scanner.mark_interrupted_outputs(base)
+    assert [Path(p).name for p in first] == [
+        "scan.10_0_0_1.tcp_discovery.interrupted.xml",
+        "scan.10_0_0_1.tcp_discovery.interrupted.nmap",
+        "scan.10_0_0_1.tcp_discovery.interrupted.gnmap",
+    ]
+    assert not scanner.existing_outputs(base)
+
+    # 재개 후 다시 중단해도 앞선 부분 결과를 덮어쓰지 않는다.
+    Path(str(base) + ".xml").write_text("second partial", encoding="utf-8")
+    second = scanner.mark_interrupted_outputs(base)
+    assert Path(second[0]).name == "scan.10_0_0_1.tcp_discovery.interrupted-2.xml"
+    assert Path(str(base) + ".interrupted.xml").read_text(encoding="utf-8") == "partial"
+
+
+def test_interrupted_stage_is_recorded_before_the_stop_propagates(tmp_path, monkeypatch):
+    """중단을 state 에 남기지 않으면 부분 결과가 유령 파일이 되고, 재개 시 조용히 덮어써진다."""
+    import pytest
+    scanner = _load_scanner()
+    plan = {
+        "tool": "scanops_scanner", "nmap": "nmap", "name": "scan", "output_dir": str(tmp_path),
+        "workflow": "auto", "batches": [["10.0.0.1"]], "cursor": 0, "runs": [],
+        "stats_every": "10s", "host_timeout": "", "exclude": [], "raw_targets": ["10.0.0.1"],
+        "scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "",
+        "batch_size": 0, "max_hosts": 65536,
+    }
+    base = scanner.output_base(plan, 0, "tcp_discovery")
+    state_path = tmp_path / "scan.state.json"
+
+    def fake_run(cmd):
+        Path(str(base) + ".xml").write_text("<nmaprun/>", encoding="utf-8")
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(scanner, "run_nmap_process", fake_run)
+    with pytest.raises(KeyboardInterrupt):
+        scanner.run_nmap_stage(plan, 0, state_path, "tcp_discovery")
+
+    run = plan["runs"][-1]
+    assert run["interrupted"] is True and run["returncode"] == 130
+    assert [Path(f).name for f in run["files"]] == ["scan.10.0.0.1.tcp_discovery.interrupted.xml"]
+    assert json.loads(state_path.read_text(encoding="utf-8"))["runs"][-1]["interrupted"] is True
+    # 재개는 성공으로 보지 않으므로 이 단계를 다시 돌린다.
+    assert not scanner.stage_succeeded(plan, 0, "tcp_discovery")
+
+
+def test_inline_options_behave_exactly_like_the_saved_preset_they_would_make(tmp_path):
+    """--options 로 직접 준 구성과, 그 구성을 저장해 --preset 으로 부른 실행이 같아야 한다."""
+    inline_args = ["--options", "connect,version,t2,open_only,reason", "--workflow", "single",
+                   "--ports", "22,443"]
+    assert _preset_cli(tmp_path, *inline_args, "--save-preset", "p").returncode == 0
+
+    inline = _preset_cli(tmp_path, "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+                         "--name", "n", *inline_args, "127.0.0.1")
+    saved = _preset_cli(tmp_path, "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+                        "--name", "n", "--preset", "p", "127.0.0.1")
+    assert inline.returncode == 0, inline.stderr
+    assert saved.returncode == 0, saved.stderr
+    assert _normalized_commands(inline.stdout) == _normalized_commands(saved.stdout)
+    # connect 는 raw 소켓 가속 플래그와 함께 쓸 수 없다 — 조합이 새면 nmap 이 거절한다.
+    assert "--defeat-rst-ratelimit" not in inline.stdout
+    assert "-sT" in inline.stdout and "-T2" in inline.stdout
+
+
+def test_tcp_only_auto_preset_keeps_the_udp_stage_off_when_replayed(tmp_path):
+    """'TCP만'은 옵션 키가 아니라 스위치다 — 프리셋 본문에 udp 제외로 담기지 않으면 다시 켜진다."""
+    assert _preset_cli(tmp_path, "--tcp-only", "--save-preset", "TCP만").returncode == 0
+    replay = _preset_cli(tmp_path, "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+                         "--name", "n", "--preset", "TCP만", "127.0.0.1")
+    assert replay.returncode == 0, replay.stderr
+    assert "주요 UDP 서비스 식별" not in replay.stdout

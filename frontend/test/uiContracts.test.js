@@ -229,7 +229,7 @@ test("scan type controls cannot submit connect with SYN or UDP", () => {
   assert.match(udp, /n\.add\("udp"\)/);
   assert.match(udp, /n\.add\("syn"\)/);
   assert.match(udp, /n\.delete\("connect"\)/);
-  assert.match(scanOptions, /const nextSel = normalizeSelections\(p\.keys \|\| \[\]\)/);
+  assert.match(scanOptions, /const nextSel = normalizeSelections\(p\.options \|\| \[\]\)/);
   assert.match(scanOptions, /next\.has\("connect"\)[\s\S]*?next\.delete\("defeat_rst"\)/);
 });
 
@@ -257,6 +257,27 @@ test("port presets and protocol toggles keep staged request combinations valid",
   );
   assert.match(preset, /nextSel\.has\("connect"\)[\s\S]*?nextPorts = tcpOnlyPortSpec\(nextPorts\)/);
   assert.match(preset, /hasExplicitUdpPorts\(nextPorts\)[\s\S]*?nextSel\.add\("udp"\)/);
+});
+
+test("scan presets live on the server so the standalone scanner can sync the same file", () => {
+  const scanOptions = source("../src/ui/ScanOptions.jsx");
+  // localStorage 에 남으면 단독 스캐너 동기화 대상에서 빠진다 — 읽기/쓰기 모두 서버 API 로.
+  assert.match(scanOptions, /api\("\/scan-presets"\)/);
+  assert.match(scanOptions, /api\("\/scan-presets", \{ method: "PUT", json: \{ presets/);
+  assert.doesNotMatch(scanOptions, /localStorage\.setItem\(LEGACY_PRESET_KEY/);
+
+  // 파일 형식의 workflow 어휘는 단독 스캐너 기준(single) — 웹의 manual 과 상호 변환한다.
+  assert.match(scanOptions, /const toStoredWorkflow = \(workflow\) => \(workflow === "auto" \? "auto" : "single"\)/);
+  assert.match(scanOptions, /const toUiWorkflow = \(workflow\) => \(workflow === "auto" \? "auto" : "manual"\)/);
+  assert.match(scanOptions, /setWorkflow\(toUiWorkflow\(p\.workflow\)\)/);
+  assert.match(scanOptions, /workflow: toStoredWorkflow\(workflow\)/);
+
+  // 서버는 이름을 고유 키로 쓰고 중복 이름을 거절한다 → 같은 이름 저장은 교체여야 한다.
+  const save = scanOptions.slice(
+    scanOptions.indexOf("function savePreset"),
+    scanOptions.indexOf("function delPreset"),
+  );
+  assert.match(save, /presets\.filter\(\(p\) => p\.name\.trim\(\)\.toLowerCase\(\) !== key\)/);
 });
 
 test("timing controls and presets resolve to one backend-visible timing", () => {

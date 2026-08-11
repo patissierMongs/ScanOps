@@ -50,6 +50,18 @@ python scanner\scanops_scanner.py --resume scanops_scans\weekly.state.json
 ```
 자세한 사용법은 [`scanner/README.md`](./scanner/README.md) 참고.
 
+### 스캔 프리셋 (웹 ↔ 단독 스캐너 동기화)
+자주 쓰는 스캔 구성은 이름을 붙여 프리셋으로 저장한다. 프리셋 본문은 nmap 플래그가 아니라
+**웹 UI 와 같은 옵션 키**로 저장되므로 웹 스캐너와 단독 스캐너가 같은 파일을 해석할 수 있다.
+- 웹: 스캔 화면의 `프리셋 선택… / 현재 구성 저장` → 서버 `data/scan_presets.json` 에 저장(auditor 이상).
+- 단독 스캐너: `--save-preset`/`--preset` → 스캐너 폴더의 `scanops_presets.json` 에 저장.
+- 동기화: 단독 스캐너가 웹서버에 도킹해 **먼저 이름 충돌(같은 이름·다른 내용)을 확인**하고,
+  하나라도 있으면 양쪽 모두 그대로 둔 채 충돌 목록만 보고한다(종료 코드 3). 충돌이 없으면 합집합으로
+  맞춰 **같은 내용의 프리셋 파일이 두 곳에 존재**하게 된다.
+```powershell
+python scanner\scanops_scanner.py --sync --server http://<서버IP>:8770 --username auditor1
+```
+
 ## 역할
 - **admin** — 사용자 관리 + 전체 권한 + 감사 로그 열람
 - **auditor** — 스캔 실행·발견 운영(상태/담당/마감)·통보

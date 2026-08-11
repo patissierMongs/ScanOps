@@ -2,6 +2,7 @@
 """Tkinter GUI for the standalone ScanOps scanner."""
 from __future__ import annotations
 
+import json
 import os
 import queue
 import re
@@ -15,16 +16,35 @@ from pathlib import Path
 # 순수 함수(parse_marker, GUI↔CLI 표식 계약)와 상수까지 단위 테스트할 수 없다(QA-028).
 # GUI 를 '실행' 하려면 당연히 tkinter 가 필요하지만, 'import' 하는 데는 필요 없게 가드한다.
 try:
-    from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox
+    from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox, simpledialog
     from tkinter import scrolledtext, ttk
     _TK_IMPORT_ERROR: Exception | None = None
 except ImportError as _exc:  # noqa: F841 — headless 환경: 순수 로직만 import 가능하게 유지
-    BooleanVar = StringVar = Tk = filedialog = messagebox = None  # type: ignore[assignment]
+    BooleanVar = StringVar = Tk = filedialog = messagebox = simpledialog = None  # type: ignore[assignment]
     scrolledtext = ttk = None  # type: ignore[assignment]
     _TK_IMPORT_ERROR = _exc
 
 SCRIPT = Path(__file__).with_name("scanops_scanner.py")
+PRESET_FILE = Path(__file__).with_name("scanops_presets.json")
 DEFAULT_OUTPUT = "scanops_scans"
+NO_PRESET_LABEL = "프리셋 사용 안 함"
+# CLI 가 정지 신호 후 nmap 의 부분 결과 저장 + state 기록을 마칠 시간(NMAP_STOP_GRACE_SECONDS)보다
+# 넉넉히 뒤에 강제 종료해야 '중지'가 결과 유실로 바뀌지 않는다.
+FORCE_KILL_DELAY_MS = 12000
+
+
+def read_preset_names(path: Path = PRESET_FILE) -> list[str]:
+    """프리셋 파일에서 이름만 읽는다(순수 함수, Tk 불필요 → 단위 테스트 가능).
+    파일이 없거나 손상됐으면 빈 목록 — 드롭다운이 비는 것이지 GUI 가 죽지는 않는다."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    presets = data.get("presets") if isinstance(data, dict) else None
+    if not isinstance(presets, list):
+        return []
+    return [p["name"] for p in presets
+            if isinstance(p, dict) and isinstance(p.get("name"), str) and p["name"].strip()]
 
 
 def parse_marker(line: str) -> dict:
@@ -121,6 +141,9 @@ class ScannerGui:
         self.nmap_path = StringVar()
         self.mode_label = StringVar(value=RUN_MODE_LABELS["auto"])
         self.mode_desc = StringVar(value=RUN_MODE_DESCRIPTIONS["auto"])
+        self.preset_name = StringVar(value=NO_PRESET_LABEL)
+        self.sync_server = StringVar()
+        self.sync_user = StringVar()
         self.port_preset = StringVar(value="프로필 기본")
         self.ports = StringVar()
         self.scan_type_label = StringVar(value="프로필 기본")
@@ -185,6 +208,16 @@ class ScannerGui:
         ttk.Label(basics, text="결과 이름").grid(row=2, column=0, sticky="w", padx=10, pady=(0, 10))
         ttk.Entry(basics, textvariable=self.output_name).grid(row=2, column=1, sticky="ew", padx=6, pady=(0, 10))
         ttk.Label(basics, text="비우면 scan_날짜").grid(row=2, column=2, columnspan=2, sticky="w", padx=6, pady=(0, 10))
+        ttk.Label(basics, text="프리셋").grid(row=3, column=0, sticky="w", padx=10, pady=(0, 10))
+        self.preset_combo = ttk.Combobox(basics, textvariable=self.preset_name, state="readonly")
+        self.preset_combo.grid(row=3, column=1, sticky="ew", padx=6, pady=(0, 10))
+        preset_buttons = ttk.Frame(basics)
+        preset_buttons.grid(row=3, column=2, columnspan=2, sticky="w", padx=6, pady=(0, 10))
+        ttk.Button(preset_buttons, text="현재 구성 저장", command=self._save_preset).pack(side="left", padx=(0, 6))
+        ttk.Button(preset_buttons, text="삭제", command=self._delete_preset).pack(side="left", padx=(0, 6))
+        ttk.Button(preset_buttons, text="서버와 동기화", command=self._sync_presets).pack(side="left", padx=(0, 6))
+        ttk.Button(preset_buttons, text="새로고침", command=self._reload_presets).pack(side="left")
+        self._reload_presets()
 
         expected = ttk.LabelFrame(outer, text="스캔이 끝나면 얻는 정보")
         expected.grid(row=2, column=0, sticky="ew", pady=(0, 10))
@@ -301,6 +334,105 @@ class ScannerGui:
         value = PORT_PRESETS.get(self.port_preset.get(), "")
         self.ports.set(value)
 
+    # ── 프리셋 ──
+    def _reload_presets(self) -> None:
+        names = read_preset_names()
+        self.preset_combo.configure(values=[NO_PRESET_LABEL, *names])
+        if self.preset_name.get() not in names:
+            self.preset_name.set(NO_PRESET_LABEL)
+
+    def _selected_preset(self) -> str:
+        name = self.preset_name.get().strip()
+        return "" if name in ("", NO_PRESET_LABEL) else name
+
+    def _run_preset_cli(self, extra: list[str], title: str, secrets: dict | None = None) -> bool:
+        """프리셋 관리 명령은 CLI 를 그대로 호출한다 — 검증/파일 형식을 한 곳에서만 관리."""
+        try:
+            cmd = self._base_command() + extra
+        except ValueError as exc:
+            messagebox.showerror("입력 확인", str(exc))
+            return False
+        self._append_log("\n$ " + self._display_command(cmd) + "\n")
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        env.update(secrets or {})
+        try:
+            done = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", env=env, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            messagebox.showerror(title, str(exc))
+            return False
+        self._append_log((done.stdout or "") + (done.stderr or ""))
+        if done.returncode != 0:
+            messagebox.showerror(title, (done.stderr or done.stdout or "").strip() or f"종료 코드 {done.returncode}")
+            return False
+        self._reload_presets()
+        return True
+
+    def _save_preset(self) -> None:
+        name = simpledialog.askstring("프리셋 저장", "프리셋 이름", parent=self.root)
+        if not name or not name.strip():
+            return
+        mode = self._mode()
+        extra = ["--save-preset", name.strip(), "--overwrite-preset"]
+        extra += ["--workflow", "auto"] if mode == "auto" else ["--workflow", "single", "--profile", self._single_profile()]
+        ports = self.ports.get().strip()
+        if ports:
+            extra += ["--ports", ports]
+        scan_type = SCAN_TYPES.get(self.scan_type_label.get(), "")
+        if scan_type:
+            extra += ["--scan-type", scan_type]
+        if self.tcp_only.get():
+            extra.append("--tcp-only")
+        if self.udp.get():
+            extra.append("--udp")
+        if self.nse_default.get():
+            extra.append("--nse-default")
+        if self.no_scripts.get():
+            extra.append("--no-scripts")
+        if self.open_only.get():
+            extra.append("--open-only")
+        if self._run_preset_cli(extra, "프리셋 저장"):
+            self.preset_name.set(name.strip())
+
+    def _delete_preset(self) -> None:
+        name = self._selected_preset()
+        if not name:
+            messagebox.showinfo("프리셋 삭제", "삭제할 프리셋을 먼저 선택하세요.")
+            return
+        if not messagebox.askyesno("프리셋 삭제", f"'{name}' 프리셋을 삭제할까요?"):
+            return
+        self._run_preset_cli(["--delete-preset", name], "프리셋 삭제")
+
+    def _sync_presets(self) -> None:
+        """웹서버에 도킹해 프리셋을 동기화. 충돌이 있으면 양쪽 모두 그대로 두고 목록만 보고한다."""
+        server = simpledialog.askstring(
+            "서버와 동기화", "ScanOps 웹 주소 (예: http://10.0.0.5:8770)",
+            parent=self.root, initialvalue=self.sync_server.get(),
+        )
+        if not server or not server.strip():
+            return
+        user = simpledialog.askstring("서버와 동기화", "ScanOps 계정 (auditor 이상)",
+                                      parent=self.root, initialvalue=self.sync_user.get())
+        if not user or not user.strip():
+            return
+        password = simpledialog.askstring("서버와 동기화", "비밀번호", parent=self.root, show="*")
+        if password is None:
+            return
+        self.sync_server.set(server.strip())
+        self.sync_user.set(user.strip())
+        # 비밀번호는 argv 가 아니라 자식 프로세스 환경변수로 넘긴다. 명령줄은 같은 호스트의 다른
+        # 사용자에게도 프로세스 목록으로 보이지만 환경변수는 그렇지 않다. 로그에 찍히는 명령에도
+        # 남지 않는다.
+        ok = self._run_preset_cli(
+            ["--sync", "--server", server.strip(), "--username", user.strip()],
+            "프리셋 동기화",
+            secrets={"SCANOPS_PASSWORD": password},
+        )
+        if ok:
+            messagebox.showinfo("프리셋 동기화", "동기화가 끝났습니다. 로그에서 추가된 항목을 확인하세요.")
+
     def _mode(self) -> str:
         return RUN_MODE_BY_LABEL.get(self.mode_label.get(), "auto")
 
@@ -366,7 +498,12 @@ class ScannerGui:
         if nmap:
             cmd += ["--nmap", nmap]
         mode = self._mode()
-        if mode == "auto":
+        preset = self._selected_preset()
+        if preset:
+            # 프리셋이 실행 방식·스캔 기법·NSE 를 결정한다(CLI 도 같은 항목의 중복 지정을 거절한다).
+            # 포트와 결과 표시 보정만 GUI 값으로 덮어쓴다.
+            cmd += ["--preset", preset]
+        elif mode == "auto":
             cmd += ["--workflow", "auto"]
         else:
             cmd += ["--workflow", "single", "--profile", self._single_profile()]
@@ -374,17 +511,17 @@ class ScannerGui:
         if ports:
             cmd += ["--ports", ports]
         scan_type = SCAN_TYPES.get(self.scan_type_label.get(), "")
-        if scan_type:
+        if scan_type and not preset:
             cmd += ["--scan-type", scan_type]
         if self.tcp_only.get():
             cmd.append("--tcp-only")
-        if self.udp.get():
+        if self.udp.get() and not preset:
             cmd.append("--udp")
-        if self.udp_all_targets.get() and mode == "auto":
+        if self.udp_all_targets.get() and (preset or mode == "auto"):
             cmd.append("--udp-all-targets")
-        if self.nse_default.get():
+        if self.nse_default.get() and not preset:
             cmd.append("--nse-default")
-        if self.no_scripts.get():
+        if self.no_scripts.get() and not preset:
             cmd.append("--no-scripts")
         if self.open_only.get():
             cmd.append("--open-only")
@@ -475,8 +612,9 @@ class ScannerGui:
                 proc.terminate()
             except OSError:
                 pass
-        # 정상 종료가 지연되면 강제 종료로 폴백(좀비 방지).
-        self.root.after(6000, lambda: self._force_kill(proc))
+        # 정상 종료가 지연되면 강제 종료로 폴백(좀비 방지). CLI 는 이 사이에 nmap 의 부분 결과를
+        # 파일로 받아 `.interrupted` 로 표시하고 state 를 기록한다 — 그 시간을 뺏지 않는다.
+        self.root.after(FORCE_KILL_DELAY_MS, lambda: self._force_kill(proc))
 
     def _force_kill(self, proc: subprocess.Popen) -> None:
         if self.proc is not proc or proc.poll() is not None:
@@ -566,7 +704,7 @@ class ScannerGui:
             # (창을 바로 destroy 하면 _stop 의 after(force_kill) 타이머가 사라져 nmap 이 고아가 될 수 있음.)
             self._stop()
             try:
-                proc.wait(timeout=6)
+                proc.wait(timeout=FORCE_KILL_DELAY_MS / 1000)
             except subprocess.TimeoutExpired:
                 self._force_kill(proc)
             except OSError:

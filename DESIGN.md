@@ -123,6 +123,11 @@ backend/scanops/
 - `POST /api/notifications`(부서별 통보 생성), `GET /api/notifications`
 - `GET /api/reports/audit`(xlsx 감사 리포트), `GET /api/dashboard`(요약 지표)
 - `GET/POST /api/rules`(위험 규칙), `GET/POST /api/users`(admin)
+- `GET/PUT /api/scan-presets`(스캔 프리셋 목록/전체 교체), `POST /api/scan-presets/sync`(단독 스캐너 도킹 동기화)
+  - 프리셋은 nmap 플래그가 아니라 **옵션 키**로 저장한다 — 웹 UI 토글과 단독 스캐너가 같은 값을
+    서로 해석할 수 있어야 동기화가 성립하고, 임의 플래그 주입도 차단된다.
+  - 서버는 `data/scan_presets.json`, 단독 스캐너는 자기 폴더의 `scanops_presets.json` 에 **같은 형식**으로
+    보관한다. `sync` 는 같은 이름·다른 내용을 충돌로 보고, **하나라도 있으면 부분 병합 없이 전부 취소**한다.
 
 ## 6. 보안 원칙
 
