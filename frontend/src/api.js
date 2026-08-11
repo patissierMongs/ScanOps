@@ -19,7 +19,12 @@ export async function api(path, opts = {}) {
     throw Object.assign(new Error(e.detail || "요청 실패"), { status: res.status });
   }
   const ct = res.headers.get("content-type") || "";
-  return ct.includes("application/json") ? res.json() : res;
+  if (!ct.includes("application/json")) return res;
+  const body = await res.json();
+  // raw:true 는 본문과 함께 전체 건수를 돌려준다(페이지 목록에서 '몇 건 중 몇 건'을 보여주려면 필요).
+  if (!opts.raw) return body;
+  const total = Number(res.headers.get("X-Total-Count"));
+  return { body, total: Number.isFinite(total) ? total : (Array.isArray(body) ? body.length : 0) };
 }
 
 export async function upload(path, file) {

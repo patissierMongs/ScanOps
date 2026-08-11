@@ -2155,25 +2155,29 @@ def test_sync_requires_an_http_url_and_credentials(tmp_path):
 
 # ── 중단 표시 ──
 
-def test_interrupted_outputs_are_renamed_and_never_overwritten(tmp_path):
+def test_interrupted_outputs_move_to_their_own_folder_and_never_overwrite(tmp_path):
+    """중단본은 결과 폴더를 어지럽히지 않고 interrupted/ 로 빠진다 — '폴더째 가져오기'가
+    온전한 결과만 집어가고, 사람 눈에도 가져올 것과 아닌 것이 바로 갈린다."""
     scanner = _load_scanner()
     base = tmp_path / "scan.10_0_0_1.tcp_discovery"
     for suffix in (".xml", ".nmap", ".gnmap"):
         Path(str(base) + suffix).write_text("partial", encoding="utf-8")
 
     first = scanner.mark_interrupted_outputs(base)
+    assert [Path(p).parent.name for p in first] == ["interrupted"] * 3
     assert [Path(p).name for p in first] == [
-        "scan.10_0_0_1.tcp_discovery.interrupted.xml",
-        "scan.10_0_0_1.tcp_discovery.interrupted.nmap",
-        "scan.10_0_0_1.tcp_discovery.interrupted.gnmap",
+        "scan.10_0_0_1.tcp_discovery.xml",
+        "scan.10_0_0_1.tcp_discovery.nmap",
+        "scan.10_0_0_1.tcp_discovery.gnmap",
     ]
-    assert not scanner.existing_outputs(base)
+    assert not scanner.existing_outputs(base)          # 결과 폴더에는 남지 않는다
+    assert not list(tmp_path.glob("*.xml"))
 
     # 재개 후 다시 중단해도 앞선 부분 결과를 덮어쓰지 않는다.
     Path(str(base) + ".xml").write_text("second partial", encoding="utf-8")
     second = scanner.mark_interrupted_outputs(base)
-    assert Path(second[0]).name == "scan.10_0_0_1.tcp_discovery.interrupted-2.xml"
-    assert Path(str(base) + ".interrupted.xml").read_text(encoding="utf-8") == "partial"
+    assert Path(second[0]).name == "scan.10_0_0_1.tcp_discovery-2.xml"
+    assert (tmp_path / "interrupted" / "scan.10_0_0_1.tcp_discovery.xml").read_text(encoding="utf-8") == "partial"
 
 
 def test_interrupted_stage_is_recorded_before_the_stop_propagates(tmp_path, monkeypatch):
@@ -2200,7 +2204,8 @@ def test_interrupted_stage_is_recorded_before_the_stop_propagates(tmp_path, monk
 
     run = plan["runs"][-1]
     assert run["interrupted"] is True and run["returncode"] == 130
-    assert [Path(f).name for f in run["files"]] == ["scan.10.0.0.1.tcp_discovery.interrupted.xml"]
+    assert [Path(f).parent.name for f in run["files"]] == ["interrupted"]
+    assert [Path(f).name for f in run["files"]] == ["scan.10.0.0.1.tcp_discovery.xml"]
     assert json.loads(state_path.read_text(encoding="utf-8"))["runs"][-1]["interrupted"] is True
     # 재개는 성공으로 보지 않으므로 이 단계를 다시 돌린다.
     assert not scanner.stage_succeeded(plan, 0, "tcp_discovery")

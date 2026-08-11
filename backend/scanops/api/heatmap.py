@@ -312,6 +312,7 @@ def build_heatmap(db: Session) -> dict:
             "server": server,
             "display_identity": display_identity(
                 server=server, product=product, version=version, service=service,
+                identification=finding.identification if finding else "",
             ),
             "risk_level": risk,
             "risk_label": RISK_LABELS_KO.get(risk, risk),

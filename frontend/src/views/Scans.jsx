@@ -243,29 +243,77 @@ export default function Scans({ user }) {
     <div className="content">
       {canRun && (
         <div className="panel">
-          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-            <h3 style={{ margin: 0 }}>스캔 실행</h3>
-            <div className="row" style={{ gap: 14 }}>
-              <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}
-                     title="켜면 발견→TCP→UDP→서비스 단계를 한 번에 몰아 돌리지 않고, 단계로 나눠 분산 순차 실행합니다(앞 단계 결과를 다음 단계 입력으로). 아래 '실행될 명령어'에 단계별 명령이 표시됩니다.">
-                <input type="checkbox" checked={staged} disabled={rawMode}
-                       onChange={(e) => setStaged(e.target.checked)} />
-                단계 분리 (발견→포트→서비스 · 분산 실행)
-              </label>
-              <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}>
-                <input type="checkbox" checked={rawMode}
-                       onChange={(e) => { setRawMode(e.target.checked); setRawEdited(false); }} />
-                명령 직접 입력 (고급)
-              </label>
+          <h3 style={{ margin: 0 }}>스캔 실행</h3>
+          <p className="muted scan-intro">
+            열린 포트를 찾아 <b>무엇이 돌고 있는지</b> 확인하고, 그 결과를 발견 관리로 넘깁니다.
+            아래 <b>3단계</b>만 채우면 됩니다.
+          </p>
+
+          {/* 1단계 — 어디를 볼 것인가 */}
+          <section className="scan-step">
+            <div className="scan-step-head">
+              <span className="scan-step-no">1</span>
+              <div>
+                <b>어디를 스캔할까요?</b>
+                <span className="muted"> IP·대역을 공백이나 줄바꿈으로 나열합니다.</span>
+              </div>
             </div>
-          </div>
-          <div className="row" style={{ marginBottom: 12, marginTop: 10 }}>
-            <input placeholder="이름(선택)" value={name} onChange={(e) => setName(e.target.value)} />
+            <div className="row" style={{ marginBottom: 10 }}>
+              <input placeholder="이름 (선택 · 이력에서 알아보기 쉽게)" value={name}
+                     onChange={(e) => setName(e.target.value)} />
+              {!rawMode && (
+                <input style={{ flex: 1, minWidth: 240 }} placeholder="예: 10.0.12.0/24 10.0.13.5"
+                       value={targets} onChange={(e) => setTargets(e.target.value)} />
+              )}
+            </div>
             {!rawMode && (
-              <input style={{ flex: 1, minWidth: 240 }} placeholder="타겟 (예: 10.0.12.0/24 10.0.13.5)"
-                     value={targets} onChange={(e) => setTargets(e.target.value)} />
+              <div className="muted scan-hint">
+                {targetList.length
+                  ? `대상 ${targetList.length}개 입력됨${est ? ` · ${est.host_count} 호스트` : ""}`
+                  : "대상을 입력해야 실행할 수 있습니다."}
+              </div>
             )}
-          </div>
+          </section>
+
+          {/* 2단계 — 어떻게 볼 것인가 */}
+          <section className="scan-step">
+            <div className="scan-step-head">
+              <span className="scan-step-no">2</span>
+              <div>
+                <b>어떻게 스캔할까요?</b>
+                <span className="muted"> 잘 모르겠으면 첫 번째(권장)를 그대로 두세요.</span>
+              </div>
+            </div>
+            <div className="scan-mode-cards">
+              {[
+                {
+                  id: "staged", title: "단계별 정밀 (권장)",
+                  desc: "살아있는 호스트 → 열린 포트 → 그 포트의 서비스 순서로 좁혀 갑니다. 넓은 대역에 가장 빠르고 정확합니다.",
+                  on: staged && !rawMode,
+                  pick: () => { setRawMode(false); setStaged(true); },
+                },
+                {
+                  id: "single", title: "한 번에 실행",
+                  desc: "옵션을 직접 조합해 nmap 을 한 번만 돌립니다. 대상이 적고 무엇을 볼지 이미 아는 경우에.",
+                  on: !staged && !rawMode,
+                  pick: () => { setRawMode(false); setStaged(false); },
+                },
+                {
+                  id: "raw", title: "명령 직접 입력 (고급)",
+                  desc: "nmap 명령을 그대로 씁니다. 단발 실행이라 이어하기는 안 됩니다.",
+                  on: rawMode,
+                  pick: () => { setRawMode(true); setRawEdited(false); },
+                },
+              ].map((mode) => (
+                <button key={mode.id} type="button" onClick={mode.pick}
+                        className={"scan-mode-card" + (mode.on ? " on" : "")}
+                        aria-pressed={mode.on}>
+                  <b>{mode.title}</b>
+                  <small>{mode.desc}</small>
+                </button>
+              ))}
+            </div>
+          </section>
           {!rawMode && (
             <div style={{ marginBottom: 12 }}>
               <label className="cb-label" htmlFor="scan-exclude">제외할 IPv4/CIDR (선택)</label>
@@ -334,8 +382,16 @@ export default function Scans({ user }) {
             )}
           </div>
 
-          <div className="row" style={{ marginTop: 14 }}>
-            <button className="primary" disabled={busy || (rawMode ? !rawCmd.trim() : !targetList.length)} onClick={runScan}>
+          <div className="scan-step-head" style={{ marginTop: 18 }}>
+            <span className="scan-step-no">3</span>
+            <div>
+              <b>실행</b>
+              <span className="muted"> 백그라운드로 돕니다. 진행은 아래 [스캔 이력]에서 보고, 언제든 중지·이어하기 할 수 있습니다.</span>
+            </div>
+          </div>
+          <div className="row" style={{ marginTop: 8 }}>
+            <button className="primary" disabled={busy || (rawMode ? !rawCmd.trim() : !targetList.length)} onClick={runScan}
+                    title={rawMode ? "명령을 입력하면 실행할 수 있습니다" : "대상을 입력하면 실행할 수 있습니다"}>
               {busy ? "시작 중…" : "스캔 실행"}
             </button>
             <button ref={fileButtonRef} type="button" className="linkbtn inline-action" disabled={busy}

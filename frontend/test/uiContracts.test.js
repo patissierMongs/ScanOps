@@ -75,11 +75,37 @@ test("mobile navigation and password dialog retain keyboard contracts", () => {
 });
 
 test("search Enter handlers ignore Korean IME composition", () => {
-  for (const file of ["../src/views/Findings.jsx", "../src/views/History.jsx"]) {
-    const view = source(file);
-    assert.match(view, /nativeEvent\.isComposing \|\| e\.keyCode === 229/);
-    assert.match(view, /if \(e\.key === "Enter"\) load\(\)/);
-  }
+  // Enter 로 검색하는 화면은 조합 중 Enter(한글 확정)를 검색으로 오인하면 안 된다.
+  const view = source("../src/views/History.jsx");
+  assert.match(view, /nativeEvent\.isComposing \|\| e\.keyCode === 229/);
+  assert.match(view, /if \(e\.key === "Enter"\) load\(\)/);
+});
+
+test("findings search debounces on typing without firing mid-composition", () => {
+  const view = source("../src/views/Findings.jsx");
+  // 입력하는 대로 검색하므로 Enter 는 필요 없지만, 조합 중에는 질의가 나가면 안 된다.
+  // 'ㄴ' → '나' → '남' 단계마다 검색하면 엉뚱한 결과가 스쳐 가고 서버도 헛돈다.
+  assert.match(view, /onCompositionStart: \(\) => \{ composing\.current = true; \}/);
+  assert.match(view, /onCompositionEnd: \(\) => \{ composing\.current = false; setImeTick/);
+  assert.match(view, /if \(composing\.current\) return;/);
+  assert.match(view, /setTimeout\(\(\) => \{ setPage\(0\); load\(0\); \}, 250\)/);
+  // 조합이 끝나면 그때 한 번은 반드시 나가야 한다.
+  assert.match(view, /\[queryString\.toString\(\), imeTick\]/);
+  // 검색창과 컬럼 필터 모두 같은 보호를 받는다.
+  assert.ok(view.split("{...imeProps}").length - 1 >= 3, "search + column filters must share the IME guard");
+});
+
+test("findings table offers per-column filters, sorting, and a filter reset", () => {
+  const view = source("../src/views/Findings.jsx");
+  const css = source("../src/styles.css");
+  assert.match(view, /className="filter-row"/);
+  assert.match(view, /onClick=\{\(\) => toggleSort\(k\)\}/);
+  // 오름차순 → 내림차순 → 해제 순환이어야 원래 순서로 돌아올 수 있다.
+  assert.match(view, /s\.dir === "asc" \? \{ key, dir: "desc" \} : \{ key: "", dir: "asc" \}/);
+  assert.match(view, /필터 제거/);
+  assert.match(view, /setMatch\("contains"\)/);
+  assert.match(view, /setMatch\("exact"\)/);
+  assert.match(css, /\.tbl thead tr\.filter-row/);
 });
 
 test("table panels contain overflowing columns at every shell breakpoint", () => {

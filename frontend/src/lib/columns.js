@@ -6,16 +6,35 @@ const fmtDate = (v) => (v ? String(v).slice(0, 10) : "");
 const joinCompliance = (list) =>
   (list || []).map((c) => `${c.std}:${c.ref}`).join("; ");
 
-export function primaryServiceIdentity(finding) {
+// Nmap 이 프로브로 확인하지 못하면 포트번호 관례표(nmap-services)의 이름을 그대로 내놓는다.
+// 예: 8770 → "apple-iphoto". 실제로 도는 건 uvicorn 인데도 그렇다. 이 이름은 관측이 아니라
+// '그 포트는 보통 이거였다'는 관례일 뿐이므로, 관측값과 같은 무게로 보여주면 안 된다.
+export const isGuessedService = (finding) => finding?.identification === "추측";
+
+export function observedIdentity(finding) {
   const productVersion = [finding?.product, finding?.version].filter(Boolean).join(" ");
-  return finding?.display_identity || finding?.server || productVersion || finding?.service || "—";
+  return finding?.server || productVersion || "";
+}
+
+export function primaryServiceIdentity(finding) {
+  // 서버 identity.display_identity 가 표기의 단일 진실원천이다(추측 표시 포함).
+  // 여기서 다시 계산하면 표와 내보내기가 서로 다른 문자열을 내게 된다.
+  if (finding?.display_identity) return finding.display_identity;
+  const observed = observedIdentity(finding);
+  if (observed) return observed;
+  const service = finding?.service;
+  if (!service) return "—";
+  return isGuessedService(finding) ? `${service} (포트 추측)` : service;
 }
 
 export function secondaryServiceIdentity(finding) {
   const primary = primaryServiceIdentity(finding);
+  const service = finding?.service;
   const values = [
     [finding?.product, finding?.version].filter(Boolean).join(" "),
-    finding?.service,
+    // 관측값이 있는데 포트 관례 이름을 옆에 덧붙이면 'uvicorn apple-iphoto' 처럼 읽혀
+    // 오히려 식별을 흐린다. 추측 이름은 주 식별이 관측값일 때 숨긴다.
+    isGuessedService(finding) && observedIdentity(finding) ? "" : service,
   ].filter((value, index, all) => value && value !== primary && all.indexOf(value) === index);
   return values.join(" · ");
 }

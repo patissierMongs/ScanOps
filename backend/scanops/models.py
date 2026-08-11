@@ -161,7 +161,8 @@ class Finding(Base):
         from .identity import display_identity
 
         return display_identity(
-            server=self.server, product=self.product, version=self.version, service=self.service,
+            server=self.server, product=self.product, version=self.version,
+            service=self.service, identification=self.identification,
         )
 
 

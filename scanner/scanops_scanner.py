@@ -29,8 +29,8 @@ VERSION = "0.2.0"
 IMPORT_CONTRACT_SCHEMA = 1
 IMPORT_CONTRACT_MAX_HOSTS = 65536
 STATS_EVERY_DEFAULT = "10s"
-# 중단된 실행의 산출물에 붙는 표식 — 파일명만 보고 '중간에 끊긴 결과'를 구분할 수 있게.
-INTERRUPTED_SUFFIX = ".interrupted"
+# 중단된 실행의 산출물을 모아 두는 하위 폴더 — 결과 폴더에는 온전한 결과만 남긴다.
+INTERRUPTED_DIR_NAME = "interrupted"
 # 정지 신호 후 nmap 이 진행분을 파일로 쓸 때까지 기다리는 시간. GUI 의 강제 종료 타이머보다
 # 짧아야 부분 결과 저장과 state 기록이 끝난 뒤에 강제 종료가 온다.
 NMAP_STOP_GRACE_SECONDS = 5.0
@@ -876,36 +876,49 @@ def existing_outputs(base: Path) -> list[str]:
     return files
 
 
+def interrupted_dir(base: Path) -> Path:
+    """중단 산출물을 모으는 하위 폴더 — 결과 폴더 안의 `interrupted/`.
+
+    파일명 표식만으로는 결과 폴더가 온전한 결과와 부분 결과로 뒤섞인다. 폴더를 나누면
+    (1) 가져올 것과 아닌 것이 눈으로 바로 갈리고, (2) `폴더째 가져오기`가 온전한 결과만
+    집어가며, (3) 중단본만 따로 보관·삭제·검토하기 쉽다.
+    """
+    return Path(base).parent / INTERRUPTED_DIR_NAME
+
+
 def interrupted_base(base: Path) -> Path:
-    """중단 표식이 붙은 산출물 basename. 같은 단계를 여러 번 중단하면 번호를 올려
+    """중단 산출물의 목적지 basename(하위 폴더 안). 같은 단계를 여러 번 중단하면 번호를 올려
     이전 중단본을 덮어쓰지 않는다(부분 결과 보존)."""
-    candidate = Path(str(base) + INTERRUPTED_SUFFIX)
+    candidate = interrupted_dir(base) / Path(base).name
     index = 2
     while existing_outputs(candidate):
-        candidate = Path(f"{base}{INTERRUPTED_SUFFIX}-{index}")
+        candidate = interrupted_dir(base) / f"{Path(base).name}-{index}"
         index += 1
     return candidate
 
 
 def mark_interrupted_outputs(base: Path) -> list[str]:
-    """중단된 실행의 산출물 파일명에 `.interrupted` 를 붙인다.
+    """중단된 실행의 산출물을 `interrupted/` 하위 폴더로 옮긴다.
 
-    이렇게 해야 (1) 폴더만 보고도 어떤 결과가 중간에 끊긴 것인지 알 수 있고,
-    (2) --resume 이 같은 basename 으로 다시 돌 때 온전한 결과가 부분 결과를 덮어쓰지 않는다.
-    state/manifest 파일명은 --resume 경로가 깨지지 않도록 그대로 둔다.
+    이렇게 해야 (1) 결과 폴더에는 온전한 결과만 남고, (2) `--resume` 이 같은 basename 으로
+    다시 돌 때 온전한 결과가 부분 결과를 덮어쓰지 않는다. state/manifest 파일명과 위치는
+    `--resume` 경로가 깨지지 않도록 그대로 둔다.
     """
     sources = existing_outputs(base)
     if not sources:
         return []
     target = interrupted_base(base)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return sources           # 폴더를 못 만들어도 부분 결과 자체는 계속 기록한다
     renamed: list[str] = []
     for source in sources:
-        suffix = Path(source).suffix
-        destination = Path(str(target) + suffix)
+        destination = Path(str(target) + Path(source).suffix)
         try:
             os.replace(source, destination)
         except OSError:
-            renamed.append(source)   # 이름을 못 바꿔도 부분 결과 자체는 계속 기록한다
+            renamed.append(source)
             continue
         renamed.append(str(destination))
     return renamed

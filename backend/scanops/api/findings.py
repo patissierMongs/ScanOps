@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -70,6 +70,7 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("state", "상태", lambda f: f.state),
     ("display_identity", "표시 식별", lambda f: display_identity(
         server=f.server, product=f.product, version=f.version, service=f.service,
+        identification=f.identification,
     )),
     ("server", "Server", lambda f: f.server),
     ("service", "서비스", lambda f: f.service),
@@ -104,6 +105,7 @@ _DEFAULT_COLS = [
 
 
 def _filtered(db: Session, status, risk, host, q, state, dept=None):
+    """DB 레벨 축소만 담당. 컬럼 단위 검색/정렬은 _view_rows 가 표시값 기준으로 처리한다."""
     query = db.query(Finding)
     if status:
         query = query.filter(Finding.status == status)
@@ -117,30 +119,147 @@ def _filtered(db: Session, status, risk, host, q, state, dept=None):
         )
     if dept:
         query = query.filter(Finding.dept == dept)
-    if q:
-        like = f"%{q}%"
-        product_version = func.trim(
-            func.coalesce(Finding.product, "") + " " + func.coalesce(Finding.version, "")
-        )
-        query = query.filter(or_(
-            Finding.server.like(like), Finding.product.like(like), Finding.version.like(like),
-            product_version.like(like), Finding.service.like(like), Finding.hostname.like(like),
-        ))
+    # q 는 여기서 처리하지 않는다: 계산 컬럼(표시 식별·용도근거 등)까지 '보이는 값'으로
+    # 매칭해야 하므로 SQL 프리필터를 걸면 그런 행이 조용히 빠진다. _view_rows 가 담당.
     return query.order_by(Finding.host_ip, Finding.port)
 
 
-@router.get("", response_model=list[FindingOut])
+# 표시값 계산이 비싼 컬럼 — 전체 검색에서 마지막에 평가해 조기 종료 확률을 높인다.
+_EXPENSIVE_COLS = {"fingerprint", "purpose", "compliance"}
+_SEARCH_ORDER = (
+    [key for key, _h, _g in COLUMNS if key not in _EXPENSIVE_COLS]
+    + [key for key, _h, _g in COLUMNS if key in _EXPENSIVE_COLS]
+)
+_NUMERIC_COLS = {"port"}
+
+
+def _cell(finding: Finding, key: str) -> str:
+    getter = _COL_MAP.get(key)
+    if getter is None:
+        return ""
+    try:
+        return str(getter[1](finding) or "")
+    except Exception:      # 표시값 계산 실패가 목록 전체를 죽이면 안 된다
+        return ""
+
+
+def _matches(finding: Finding, needle: str, exact: bool) -> bool:
+    """모든 컬럼의 '보이는 값' 중 하나라도 맞으면 통과. 첫 일치에서 멈춘다."""
+    if exact:
+        return any(_cell(finding, key).strip().casefold() == needle for key in _SEARCH_ORDER)
+    return any(needle in _cell(finding, key).casefold() for key in _SEARCH_ORDER)
+
+
+def _parse_filters(raw: str) -> dict[str, str]:
+    """컬럼별 필터 — {"컬럼키": "검색어"} JSON. 알 수 없는 키는 거절(오타가 조용히 무시되지 않게)."""
+    if not (raw or "").strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"filters 를 해석할 수 없습니다: {exc}")
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="filters 는 객체여야 합니다.")
+    out: dict[str, str] = {}
+    for key, value in parsed.items():
+        if key not in _COL_MAP:
+            raise HTTPException(status_code=400, detail=f"알 수 없는 필터 컬럼: {key}")
+        text = str(value or "").strip().casefold()
+        if text:
+            out[key] = text
+    return out
+
+
+def _sort_key(key: str):
+    if key in _NUMERIC_COLS:
+        def numeric(finding: Finding):
+            raw = _cell(finding, key)
+            try:
+                return (0, float(raw), "")
+            except ValueError:
+                return (1, 0.0, raw.casefold())
+        return numeric
+
+    def text(finding: Finding):
+        value = _cell(finding, key)
+        return (0 if value else 1, 0.0, value.casefold())
+    return text
+
+
+def _view_rows(db: Session, *, status=None, risk=None, host=None, q=None, state="open",
+               dept=None, match="contains", filters="", sort="", direction="asc"):
+    """목록·내보내기 공통 뷰 — 표에 보이는 값 그대로 필터·정렬한다.
+
+    '표 = 내보내기' 불변식을 지키려면 계산 컬럼(표시 식별·용도근거·컴플라이언스)도 같은 기준으로
+    걸러야 한다. 그래서 DB 로 줄일 수 있는 것만 SQL 로 줄이고, 컬럼 단위 판정은 표시값으로 한다.
+    """
+    rows = _filtered(db, status, risk, host, None, state, dept).all()
+    column_filters = _parse_filters(filters)
+    if column_filters:
+        exact_cols = match == "exact"
+        rows = [
+            f for f in rows
+            if all(
+                (_cell(f, key).strip().casefold() == text) if exact_cols
+                else (text in _cell(f, key).casefold())
+                for key, text in column_filters.items()
+            )
+        ]
+    needle = (q or "").strip().casefold()
+    if needle:
+        rows = [f for f in rows if _matches(f, needle, match == "exact")]
+    if sort:
+        if sort not in _COL_MAP:
+            raise HTTPException(status_code=400, detail=f"알 수 없는 정렬 컬럼: {sort}")
+        rows.sort(key=_sort_key(sort), reverse=direction == "desc")
+    return rows
+
+
+@router.get("")
 def list_findings(
+    response: Response,
     status: str | None = None,
     risk: str | None = None,
     host: str | None = None,
     q: str | None = None,
     state: str | None = "open",
     dept: str | None = None,
+    match: str = "contains",
+    filters: str = "",
+    sort: str = "",
+    dir: str = "asc",
+    limit: int = 0,
+    offset: int = 0,
+    cols: str = "",
     _: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    return _filtered(db, status, risk, host, q, state, dept).all()
+    """발견 목록.
+
+    `limit` 이 0 이면 전부 반환(하위호환). 페이지를 쓸 때는 전체 건수를 `X-Total-Count` 헤더로
+    돌려주므로 응답 본문 모양은 그대로 목록이다.
+
+    `cols` 로 화면이 실제로 쓰는 컬럼만 받으면 `fingerprint` 같은 큰 원문을 payload 에서 뺀다 —
+    발견이 수천 건일 때 목록 응답 크기를 좌우하는 게 이 필드다.
+    """
+    if match not in ("contains", "exact"):
+        raise HTTPException(status_code=400, detail="match 는 contains 또는 exact 여야 합니다.")
+    if dir not in ("asc", "desc"):
+        raise HTTPException(status_code=400, detail="dir 은 asc 또는 desc 여야 합니다.")
+    rows = _view_rows(db, status=status, risk=risk, host=host, q=q, state=state, dept=dept,
+                      match=match, filters=filters, sort=sort, direction=dir)
+    response.headers["X-Total-Count"] = str(len(rows))
+    if limit > 0:
+        rows = rows[max(0, offset):max(0, offset) + limit]
+    wanted = {c.strip() for c in cols.split(",") if c.strip()}
+    include_fingerprint = not wanted or "fingerprint" in wanted
+    out = []
+    for finding in rows:
+        item = FindingOut.model_validate(finding).model_dump(mode="json")
+        if not include_fingerprint:
+            item["fingerprint"] = ""
+        out.append(item)
+    return out
 
 
 # --- /export 와 /rescan-command 는 /{fid} 보다 먼저 등록해야 경로 충돌이 없다 ---
@@ -154,6 +273,10 @@ def export_findings(
     host: str | None = None,
     q: str | None = None,
     state: str | None = "open",
+    match: str = "contains",
+    filters: str = "",
+    sort: str = "",
+    dir: str = "asc",
     _: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -162,7 +285,9 @@ def export_findings(
     if unknown:
         raise HTTPException(status_code=400, detail=f"알 수 없는 컬럼: {unknown}")
     headers = [_COL_MAP[k][0] for k in keys]
-    rows = _filtered(db, status, risk, host, q, state).all()
+    # 목록과 같은 뷰 함수를 쓴다 — 화면에서 걸러 본 것과 내보낸 것이 달라지면 안 된다.
+    rows = _view_rows(db, status=status, risk=risk, host=host, q=q, state=state,
+                      match=match, filters=filters, sort=sort, direction=dir)
 
     if fmt == "xlsx":
         import openpyxl
