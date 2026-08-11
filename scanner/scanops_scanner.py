@@ -445,14 +445,23 @@ def validate_ports(ports: str) -> str:
     return ports
 
 
-def validate_intensity(value: object) -> str:
-    """저장된 스캔 강도를 검증한다. 키가 없을 때만 normal 로 호환한다.
+def resumed_value(plan: dict, key: str, default, validate):
+    """재개 시 저장값을 되살린다 — '키 부재'와 '명시된 값'을 반드시 구분한다.
 
-    강도는 노후 장비 보호용 '안전 제어'다. 알 수 없는 값(미래 버전이 쓴 값이나 손상된 값)을
-    조용히 normal 로 올리면 -T3+속도상한이 -T4+무제한으로 바뀌어, 보호하려던 장비를 그대로
-    때리게 된다. 명시돼 있는데 허용되지 않는 값이면 fail-closed 로 거절한다."""
-    if value is None:
-        return "normal"  # 구형 state: 키 자체가 없음 → 강도 개념이 없던 시절이므로 기본값
+    plan.get(key) 는 키가 없는 경우와 명시적 null 을 똑같이 None 으로 돌려준다. 안전 제어
+    필드에서 그 둘을 뭉개면, state 에 `"intensity": null` 한 줄만 넣어도 -T3+속도상한이
+    -T4+무제한으로 조용히 풀린다. 구버전 호환은 키가 '아예 없을 때'만 적용하고, 값이
+    명시돼 있으면 그것이 null 이든 무엇이든 검증기를 통과해야 한다."""
+    if key not in plan:
+        return default          # 구형 state: 그 개념이 없던 시절 → 기본값
+    return validate(plan[key])
+
+
+def validate_intensity(value: object) -> str:
+    """저장된 스캔 강도를 검증한다(fail-closed).
+
+    강도는 노후 장비 보호용 '안전 제어'다. 알 수 없는 값(미래 버전이 쓴 값이나 손상된 값,
+    명시적 null)을 조용히 normal 로 올리면 보호하려던 장비를 그대로 때리게 된다."""
     if isinstance(value, str) and value in INTENSITY_CHOICES:
         return value
     raise ValueError(
@@ -462,21 +471,32 @@ def validate_intensity(value: object) -> str:
 
 
 def validate_max_rate(value: object) -> str:
-    """--max-rate(초당 패킷 상한) 검증. 같은 이유로 손상 값은 거절한다."""
-    if value is None or value == "":
-        return ""
+    """--max-rate(초당 패킷 상한) 검증. 같은 이유로 손상 값·명시적 null 은 거절한다."""
+    if isinstance(value, str) and not value.strip():
+        return ""               # 빈 문자열은 '지정 안 함'이라는 정상 저장값이다
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f"--max-rate 는 1 이상의 정수여야 합니다: {value!r}")
     text = str(value).strip()
-    if not text:
-        return ""
     if not text.isdecimal() or int(text) < 1:
         raise ValueError(f"--max-rate 는 1 이상의 정수여야 합니다: {value!r}")
     return text
 
 
-def validate_exclude_ports(spec: str) -> str:
+def validate_exclude_list(value: object) -> list:
+    """저장된 제외 대상 목록의 형태 검증. 명시적 null 로 제외가 사라지지 않게 한다."""
+    if not isinstance(value, list):
+        raise ValueError(f"state 파일의 exclude 는 목록이어야 합니다: {value!r}")
+    return value
+
+
+def validate_exclude_ports(spec: object) -> str:
     """--exclude-ports 값 검증. -p 와 같은 포트 문법을 쓰되 오류 문구만 옵션에 맞춘다.
 
-    전역 포트 필터라서 warn_ambiguous_ports(=-p 의도 모호성 경고)는 적용하지 않는다."""
+    전역 포트 필터라서 warn_ambiguous_ports(=-p 의도 모호성 경고)는 적용하지 않는다.
+    문자열이 아닌 값(명시적 null 등)은 거절한다 — 운영자가 뺀 포트가 조용히 되살아나면
+    일부러 피한 취약 포트를 그대로 때리게 된다."""
+    if not isinstance(spec, str):
+        raise ValueError(f"허용되지 않는 --exclude-ports 형식입니다: {spec!r}")
     try:
         return validate_ports(spec)
     except ValueError as exc:
@@ -1103,7 +1123,7 @@ def create_plan(args: argparse.Namespace) -> dict:
         warn_ambiguous_ports(ports_override)
     if args.workflow == "auto" and args.tcp_only and ports_override and not protocol_ports(ports_override, "T"):
         raise ValueError("TCP만 옵션을 사용할 때는 TCP 포트를 지정해야 합니다. 예: --ports 22,443")
-    intensity = validate_intensity(getattr(args, "intensity", None))
+    intensity = validate_intensity(getattr(args, "intensity", "normal"))
     # --host-timeout 은 None 센티널로 '사용자가 지정하지 않음'을 구분한다. 지정이 없으면 저강도에서만
     # 30m 을 기본으로 켜고(느린 스캔이 한 호스트에 무한정 묶이지 않게), 기본 강도는 종전대로 꺼둔다(QA-007).
     host_timeout_raw = getattr(args, "host_timeout", None)
@@ -1174,12 +1194,13 @@ def load_plan(path: str, nmap_override: str = "", dry_run: bool = False,
         raise ValueError("state 파일의 target 형식이 올바르지 않습니다.")
     validate_targets(saved_batch_targets)
 
-    excludes, exclude_networks = parse_excludes(plan.get("exclude", []))
+    # 안전 제어 필드는 '키 부재'(구형 state)와 '명시된 값'을 구분해 되살린다.
+    # plan.get() 으로 뭉개면 `"intensity": null` 한 줄로 보호가 조용히 풀린다(resumed_value 주석 참고).
+    excludes, exclude_networks = parse_excludes(resumed_value(plan, "exclude", [], validate_exclude_list))
     plan["exclude"] = excludes  # 구형 state는 빈 목록으로 호환, 새 state는 canonical 형태로 재검증.
-    # 포트 제외·강도도 같은 계약으로 재검증한다(구형 state는 키가 없을 때만 기본값으로 호환).
-    plan["exclude_ports"] = validate_exclude_ports(plan.get("exclude_ports", "") or "")
-    plan["intensity"] = validate_intensity(plan.get("intensity"))
-    plan["max_rate"] = validate_max_rate(plan.get("max_rate"))
+    plan["exclude_ports"] = resumed_value(plan, "exclude_ports", "", validate_exclude_ports)
+    plan["intensity"] = resumed_value(plan, "intensity", "normal", validate_intensity)
+    plan["max_rate"] = resumed_value(plan, "max_rate", "", validate_max_rate)
     raw_targets = plan.get("raw_targets")
     if raw_targets is None:
         raw_targets = saved_batch_targets

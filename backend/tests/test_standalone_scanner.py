@@ -2228,10 +2228,20 @@ def test_unknown_saved_intensity_is_rejected_not_silently_downgraded(tmp_path):
     assert "-T3" in kept and "-T4" not in kept
     assert kept[kept.index("--max-rate") + 1] == scanner.GENTLE_MAX_RATE_DEFAULT
 
-    # 명시된 미지원 값 → 거절(조용한 강등 금지).
-    for bad in ("paranoid-v2", "", "NORMAL", 3, None if False else []):
+    # 명시된 미지원 값 → 거절(조용한 강등 금지). None 은 '명시적 JSON null' 경로다:
+    # plan.get() 으로 뭉개면 키 부재와 구분되지 않아 `"intensity": null` 한 줄로 보호가 풀린다.
+    for bad in ("paranoid-v2", "", "NORMAL", 3, [], None):
         with pytest.raises(ValueError, match="intensity"):
             resume_with(lambda p, b=bad: p.__setitem__("intensity", b))
+
+    # 명시적 null 은 재개 자체가 막혀야 하고, 강도가 조용히 -T4 로 바뀌어선 안 된다.
+    import json as _json
+    nulled = _json.loads(_json.dumps(plan))
+    nulled["intensity"] = None
+    state.write_text(_json.dumps(nulled), encoding="utf-8")
+    assert '"intensity": null' in state.read_text(encoding="utf-8")   # 진짜 JSON null 인지 확인
+    with pytest.raises(ValueError, match="intensity"):
+        scanner.load_plan(str(state), "nmap", True, "")
 
     # 키가 아예 없는 구형 state 만 normal 로 호환한다.
     legacy = resume_with(lambda p: p.pop("intensity"))
@@ -2259,7 +2269,7 @@ def test_saved_max_rate_is_validated_fail_closed(tmp_path):
     command = scanner.build_command(resume_with("80"), 0, "tcp_discovery")
     assert command[command.index("--max-rate") + 1] == "80"
 
-    for bad in ("abc", "0", "-5", "12.5"):
+    for bad in ("abc", "0", "-5", "12.5", None, [], True):
         with pytest.raises(ValueError, match="max-rate"):
             resume_with(bad)
 
@@ -2274,5 +2284,64 @@ def test_intensity_and_max_rate_validators_are_shared_by_parser_and_state():
     assert scanner.INTENSITY_CHOICES == ("normal", "gentle")
     action = next(a for a in scanner.parser()._actions if "--intensity" in (a.option_strings or []))
     assert tuple(action.choices) == scanner.INTENSITY_CHOICES
-    assert scanner.validate_intensity(None) == "normal"
-    assert scanner.validate_max_rate(None) == "" and scanner.validate_max_rate(" 150 ") == "150"
+    # 기본값은 검증기가 아니라 '키 부재' 분기(resumed_value)가 책임진다 — 그래야 명시적
+    # null 을 기본값으로 오인하지 않는다. 검증기 자체는 None 을 거절해야 한다.
+    import pytest
+    with pytest.raises(ValueError):
+        scanner.validate_intensity(None)
+    with pytest.raises(ValueError):
+        scanner.validate_max_rate(None)
+    assert scanner.validate_max_rate(" 150 ") == "150" and scanner.validate_max_rate("") == ""
+    assert scanner.resumed_value({}, "intensity", "normal", scanner.validate_intensity) == "normal"
+    with pytest.raises(ValueError):
+        scanner.resumed_value({"intensity": None}, "intensity", "normal", scanner.validate_intensity)
+
+
+def test_explicit_json_null_never_relaxes_a_safety_control(tmp_path):
+    """`plan.get()` 은 키 부재와 명시적 JSON null 을 구분하지 못한다.
+
+    안전 제어 필드에서 그 둘을 뭉개면 state 에 한 줄만 넣어도 보호가 조용히 풀린다 —
+    intensity=null 이면 -T3+속도상한이 -T4+무제한이 되고, exclude_ports=null 이면
+    운영자가 일부러 뺀 포트가 되살아난다. 키가 '있으면' 반드시 검증을 통과해야 한다."""
+    import json
+    import pytest
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--intensity", "gentle", "--max-rate", "80",
+        "--exclude", "10.0.0.5", "--exclude-ports", "3030", "10.0.0.0/29",
+    ]))
+    state = tmp_path / "n.state.json"
+
+    # 기준: 정상 재개는 네 가지 보호가 모두 살아 있다.
+    state.write_text(json.dumps(plan), encoding="utf-8")
+    ok = scanner.build_command(scanner.load_plan(str(state), "nmap", True, ""), 0, "tcp_discovery")
+    assert "-T3" in ok and "--exclude" in ok and "--exclude-ports" in ok
+    assert ok[ok.index("--max-rate") + 1] == "80"
+
+    for key in ("intensity", "max_rate", "exclude", "exclude_ports"):
+        nulled = json.loads(json.dumps(plan))
+        nulled[key] = None
+        state.write_text(json.dumps(nulled), encoding="utf-8")
+        assert f'"{key}": null' in state.read_text(encoding="utf-8")
+        with pytest.raises(ValueError):
+            scanner.load_plan(str(state), "nmap", True, "")
+
+
+def test_missing_safety_keys_still_resume_for_legacy_states(tmp_path):
+    """반대편 계약: 그 개념이 없던 구형 state(키 자체가 없음)는 계속 재개돼야 한다."""
+    import json
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "10.0.0.1",
+    ]))
+    for key in ("intensity", "max_rate", "exclude_ports"):
+        plan.pop(key, None)
+    state = tmp_path / "legacy.state.json"
+    state.write_text(json.dumps(plan), encoding="utf-8")
+
+    loaded = scanner.load_plan(str(state), "nmap", True, "")
+
+    assert loaded["intensity"] == "normal"
+    assert loaded["max_rate"] == "" and loaded["exclude_ports"] == ""
+    assert "-T4" in scanner.build_command(loaded, 0, "tcp_discovery")
