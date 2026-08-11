@@ -2231,3 +2231,25 @@ def test_tcp_only_auto_preset_keeps_the_udp_stage_off_when_replayed(tmp_path):
                          "--name", "n", "--preset", "TCP만", "127.0.0.1")
     assert replay.returncode == 0, replay.stderr
     assert "주요 UDP 서비스 식별" not in replay.stdout
+
+
+def test_sync_reports_when_the_server_metadata_replaces_the_local_one(tmp_path, monkeypatch, capsys):
+    """스캔 동작이 같으면 충돌이 아니지만, 병합이 로컬 설명을 서버 값으로 바꾸는 건 알려야 한다."""
+    scanner = _load_scanner()
+    path = tmp_path / "presets.json"
+    local = {"name": "weekly", "description": "내가 쓴 설명", "workflow": "single",
+             "options": ["syn"], "ports": "22", "nse": []}
+    remote = {**local, "description": "서버 설명"}
+    scanner.save_presets(path, [local])
+
+    def fake_request(url, token, payload, timeout):
+        if payload is None:
+            return {"schema": 1, "presets": [remote]}
+        return {"status": "synced", "presets": [remote], "added_to_server": [], "added_to_client": []}
+
+    monkeypatch.setattr(scanner, "_sync_request", fake_request)
+    args = argparse.Namespace(server="http://server:8770", token="t", username="", password="",
+                              sync_timeout=5.0)
+    assert scanner.sync_presets(args, path) == 0
+    assert "설명/이름 표기를 서버 값" in capsys.readouterr().out
+    assert scanner.load_presets(path)[0]["description"] == "서버 설명"

@@ -164,6 +164,51 @@ def test_whole_list_replacement_is_refused_when_the_document_moved(client):
     assert [p["name"] for p in ok.json()["presets"]] == ["from-web"]
 
 
+def test_metadata_only_edits_still_invalidate_a_stale_whole_list_replace(client):
+    """revision 은 '이 쓰기가 파괴할 수 있는 모든 것'을 덮어야 한다.
+
+    fingerprint 는 '같은 스캔인가'를 묻는 값이라 description 을 일부러 뺀다. revision 이 그걸
+    재사용하면 설명만 바꾼 수정은 revision 을 못 움직이고, 낡은 목록을 든 전체 교체가 409 없이
+    통과하며 그 수정을 조용히 되돌린다.
+    """
+    auth = _auth(client)
+    client.put("/api/scan-presets/item/weekly", headers=auth,
+               json=_preset("weekly", description="예전 설명"))
+    stale = client.get("/api/scan-presets", headers=auth).json()
+    stale_revision = stale["revision"]
+
+    # 스캔 동작은 그대로 두고 설명만 바꾼다 → fingerprint 는 안 변한다.
+    client.put("/api/scan-presets/item/weekly", headers=auth,
+               json=_preset("weekly", description="새 설명"))
+    after = client.get("/api/scan-presets", headers=auth).json()
+    assert preset_store.fingerprint(after["presets"][0]) == preset_store.fingerprint(stale["presets"][0])
+    assert after["revision"] != stale_revision
+
+    r = client.put("/api/scan-presets", headers=auth,
+                   json={"revision": stale_revision, "presets": stale["presets"]})
+    assert r.status_code == 409, r.text
+    assert client.get("/api/scan-presets", headers=auth).json()["presets"][0]["description"] == "새 설명"
+
+
+def test_revision_tracks_every_persisted_field():
+    """설명·이름 표기·저장 시각까지 — 저장되는 값이 달라지면 revision 도 달라져야 한다."""
+    base = [_preset("weekly", description="a", updated_at="2026-01-01T00:00:00Z")]
+    revision = preset_store.document_revision(preset_store.normalize_presets(base))
+    for changed in (
+        _preset("weekly", description="b", updated_at="2026-01-01T00:00:00Z"),
+        _preset("Weekly", description="a", updated_at="2026-01-01T00:00:00Z"),
+        _preset("weekly", description="a", updated_at="2026-02-02T00:00:00Z"),
+        _preset("weekly", description="a", updated_at="2026-01-01T00:00:00Z", ports="8443"),
+    ):
+        assert preset_store.document_revision(preset_store.normalize_presets([changed])) != revision
+
+    # 같은 내용이면 항목 순서가 달라도 같은 revision(정규화가 순서를 고정한다).
+    pair = [_preset("b-name", updated_at="2026-01-01T00:00:00Z"),
+            _preset("a-name", updated_at="2026-01-01T00:00:00Z")]
+    assert preset_store.document_revision(preset_store.normalize_presets(pair)) \
+        == preset_store.document_revision(preset_store.normalize_presets(list(reversed(pair))))
+
+
 def test_two_stale_clients_cannot_both_replace_the_whole_list(client):
     """A·B 가 같은 목록을 읽고 각자 다른 목록을 PUT — 둘 다 200 이면 한쪽이 조용히 사라진다."""
     auth = _auth(client)

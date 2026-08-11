@@ -1270,8 +1270,18 @@ def diff_presets(local: list[dict], remote: list[dict]) -> dict:
         for key in sorted(set(local_by) & set(remote_by))
         if preset_fingerprint(local_by[key]) != preset_fingerprint(remote_by[key])
     ]
+    # 같은 스캔인데 설명/이름 표기만 다른 항목. 충돌은 아니지만(그렇게 보면 동기화가 계속
+    # 사람 손을 요구한다) 병합이 서버 값으로 맞추므로, 로컬 표기가 바뀐다는 사실은 보고한다.
+    metadata_changed = [
+        {"name": local_by[key]["name"], "remote_name": remote_by[key]["name"]}
+        for key in sorted(set(local_by) & set(remote_by))
+        if preset_fingerprint(local_by[key]) == preset_fingerprint(remote_by[key])
+        and (local_by[key]["description"] != remote_by[key]["description"]
+             or local_by[key]["name"] != remote_by[key]["name"])
+    ]
     return {
         "conflicts": conflicts,
+        "metadata_changed": metadata_changed,
         "only_local": [local_by[key] for key in sorted(set(local_by) - set(remote_by))],
         "only_remote": [remote_by[key] for key in sorted(set(remote_by) - set(local_by))],
     }
@@ -1520,6 +1530,9 @@ def sync_presets(args: argparse.Namespace, preset_path: Path) -> int:
     merged = normalize_presets(result.get("presets"))
     save_presets(preset_path, merged)
     print(f"synced: {len(merged)}건 → {preset_path}")
+    for changed in delta["metadata_changed"]:
+        # 스캔 동작은 같아 충돌이 아니지만 로컬 설명/표기가 서버 값으로 바뀐다 — 조용히 넘기지 않는다.
+        print(f"note: '{changed['name']}' 의 설명/이름 표기를 서버 값('{changed['remote_name']}')으로 맞췄습니다.")
     print(f"서버에 추가됨: {', '.join(result.get('added_to_server') or []) or '없음'}")
     print(f"스캐너에 추가됨: {', '.join(result.get('added_to_client') or []) or '없음'}")
     return 0

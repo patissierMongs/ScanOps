@@ -141,15 +141,16 @@ def fingerprint(preset: dict) -> str:
 
 
 def document_revision(presets: list[dict]) -> str:
-    """목록 전체의 내용 지문.
+    """저장 문서 전체의 지문 — 전체 교체 쓰기의 optimistic-concurrency 토큰.
 
-    목록 통째로 교체하는 쓰기는 이 값을 함께 보내야 한다. 클라이언트가 읽은 시점 이후에
-    다른 클라이언트(웹 저장·단독 스캐너 동기화)가 무언가 추가했다면 값이 달라지므로,
-    읽지도 못한 프리셋을 조용히 지우는 대신 409 로 거절할 수 있다.
+    **`fingerprint()` 를 재사용하면 안 된다.** fingerprint 는 '같은 스캔인가'를 묻는 값이라
+    description·updated_at·이름 표기를 일부러 뺀다. 그 값으로 revision 을 만들면 설명만 바꾼
+    수정이 revision 을 움직이지 못해, 낡은 목록을 든 전체 교체가 409 없이 통과하며 그 수정을
+    조용히 되돌린다. revision 은 '이 쓰기가 파괴할 수 있는 모든 것'을 덮어야 하므로
+    정규화된 저장 문서를 통째로 해시한다(normalize_presets 가 순서까지 고정한다).
     """
-    body = [{"name": name_key(p["name"]), "fingerprint": fingerprint(p)} for p in presets]
-    body.sort(key=lambda item: item["name"])
-    blob = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    normalized = normalize_presets(presets)
+    blob = json.dumps(normalized, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
 
 
