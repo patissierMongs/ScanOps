@@ -666,7 +666,8 @@ def test_exclude_values_split_canonical_and_fail_closed():
         ["192.0.2.8", "192.0.2.9", "192.0.2.10", "192.0.2.11", "192.0.2.12", "node.local"],
         networks,
     ) == ["192.0.2.8", "node.local"]
-    for bad in ("node.local", "192.0.2.1-3", "2001:db8::1", "192.0.2.0/33", "192.0.2.1,broken"):
+    # 마지막 옥텟 범위는 대상 입력과 같은 문법이라 이제 정상 입력이다(아래 전용 테스트 참고).
+    for bad in ("node.local", "2001:db8::1", "192.0.2.0/33", "192.0.2.1,broken"):
         with pytest.raises(ValueError, match="IPv4 IP/CIDR"):
             scanner.parse_excludes([bad])
 
@@ -928,6 +929,7 @@ def test_gui_forwards_exclude_only_for_new_scan():
     gui.include_closed = Value(False)
     gui.batch_size = Value("0")
     gui.exclude = Value("10.0.0.1, 10.0.0.2\r\n10.0.0.3")
+    gui.exclude_ports = Value("")
     gui.target_file = Value("")
     gui.zip_outputs = Value(False)
     gui.resume_path = Value("saved.state.json")
@@ -1992,3 +1994,354 @@ def test_import_contract_normalizes_large_batch_size_within_web_cap():
     assert contract is not None
     assert contract["max_hosts"] == scanner.IMPORT_CONTRACT_MAX_HOSTS
     assert contract["batch_size"] == scanner.IMPORT_CONTRACT_MAX_HOSTS
+
+
+# ── 포트 제외(--exclude-ports) ─────────────────────────────────────────────────
+
+def test_exclude_ports_injected_once_in_every_stage(tmp_path):
+    """포트 제외는 -p 를 건드리지 않는 전역 필터 → 모든 단계에 정확히 한 번씩."""
+    scanner = _load_scanner()
+    common = ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+              "--exclude-ports", "3030,3040"]
+    auto = scanner.create_plan(scanner.parser().parse_args([*common, "10.0.0.0/29"]))
+    single = scanner.create_plan(scanner.parser().parse_args([
+        *common, "--workflow", "single", "10.0.0.0/29"]))
+    light = scanner.create_plan(scanner.parser().parse_args([
+        *common, "--workflow", "single", "--profile", "light", "10.0.0.0/29"]))
+
+    commands = [
+        scanner.build_command(auto, 0, "tcp_discovery"),
+        scanner.build_command(auto, 0, "tcp_identify", [22], targets=["10.0.0.4"]),
+        scanner.build_command(auto, 0, "udp_identify", targets=["10.0.0.4"]),
+        scanner.build_command(single, 0),
+        scanner.build_command(light, 0),
+    ]
+    for command in commands:
+        assert command.count("--exclude-ports") == 1
+        assert command[command.index("--exclude-ports") + 1] == "3030,3040"
+
+    # --top-ports 프리셋과 공존한다(nmap 이 선택된 포트집합에서 사후 차감).
+    light_cmd = scanner.build_command(light, 0)
+    assert "--top-ports" in light_cmd and light_cmd[light_cmd.index("--top-ports") + 1] == "100"
+
+
+def test_exclude_ports_grammar_matches_ports_and_fails_closed():
+    scanner = _load_scanner()
+    for good in ("3030", "3030,3040", "1-1024", "T:1-1024", "U:53,443", "T:1-3029,3031-65535"):
+        assert scanner.validate_exclude_ports(good) == good.replace(" ", "")
+    for bad in ("abc", "70000", "443-22", ",,", "T:", "X:80"):
+        try:
+            scanner.validate_exclude_ports(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"should reject: {bad!r}")
+
+
+def test_exclude_ports_frozen_in_state_and_blocked_on_resume(tmp_path):
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--exclude-ports", "3030", "10.0.0.1",
+    ]))
+    assert plan["exclude_ports"] == "3030"
+
+    state = tmp_path / "s.state.json"
+    state.write_text(json.dumps(plan), encoding="utf-8")
+    rc = scanner.main(["--resume", str(state), "--exclude-ports", "4040", "--dry-run"])
+    assert rc == 2  # 재개 중 제외 설정 변경은 거절
+
+
+# ── IP 제외: 마지막 옥텟 범위 문법(대상 입력과 비대칭이던 부분) ───────────────
+
+def test_exclude_accepts_last_octet_range_like_targets():
+    scanner = _load_scanner()
+    canonical, networks = scanner.parse_excludes(["10.0.0.5-8"])
+    assert canonical == ["10.0.0.5-8"]  # nmap 이 그대로 받는 압축 표기 유지
+    kept = scanner.apply_excludes(
+        ["10.0.0.4", "10.0.0.5", "10.0.0.7", "10.0.0.8", "10.0.0.9"], networks)
+    assert kept == ["10.0.0.4", "10.0.0.9"]
+
+    for bad in (["10.0.0.9-2"], ["10.0.0.300-5"], ["10.0.0-5.1"]):
+        try:
+            scanner.parse_excludes(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"should reject: {bad!r}")
+
+
+def test_exclude_range_removed_from_batches_and_reaches_every_nmap_stage(tmp_path):
+    """제외한 범위가 batch(전개)와 non-batch(nmap --exclude) 양쪽에서 실제로 빠지는지."""
+    scanner = _load_scanner()
+    common = ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+              "--exclude", "10.0.0.2-4"]
+
+    batched = scanner.create_plan(scanner.parser().parse_args(
+        [*common, "--batch-size", "8", "10.0.0.0/29"]))
+    scanned = [host for batch in batched["batches"] for host in batch]
+    assert scanned == ["10.0.0.0", "10.0.0.1", "10.0.0.5", "10.0.0.6", "10.0.0.7"]
+
+    nonbatch = scanner.create_plan(scanner.parser().parse_args([*common, "10.0.0.0/29"]))
+    assert nonbatch["exclude"] == ["10.0.0.2-4"]
+    for command in (
+        scanner.build_command(nonbatch, 0, "tcp_discovery"),
+        scanner.build_command(nonbatch, 0, "tcp_identify", [22], targets=["10.0.0.5"]),
+        scanner.build_command(nonbatch, 0, "udp_identify", targets=["10.0.0.5"]),
+    ):
+        assert command.count("--exclude") == 1
+        assert command[command.index("--exclude") + 1] == "10.0.0.2-4"
+    # 제외 후 실제 스캔 대상에도 범위가 빠져 있어야 한다(가져오기 닫힘 범위 계약).
+    concrete, _observation_only = scanner.concrete_scan_targets(nonbatch, 0)
+    assert not {"10.0.0.2", "10.0.0.3", "10.0.0.4"} & set(concrete)
+    assert {"10.0.0.0", "10.0.0.5"} <= set(concrete)
+
+
+# ── 포트 스펙 모호성 경고 범위 축소 ────────────────────────────────────────────
+
+def test_single_protocol_port_spec_does_not_warn(capsys):
+    """'3030 포트만 빼기' 우회(T:1-3029,3031-65535)가 가짜 경고를 내지 않아야 한다."""
+    scanner = _load_scanner()
+    scanner.warn_ambiguous_ports("T:1-3029,3031-65535")
+    scanner.warn_ambiguous_ports("U:53,443")
+    assert capsys.readouterr().err == ""
+
+    # 진짜 모호한 경우(T:와 U:가 섞여 접두사 없는 포트의 귀속이 헷갈림)는 계속 경고한다(QA-013).
+    scanner.warn_ambiguous_ports("T:80,U:53,443")
+    assert "nmap 규칙" in capsys.readouterr().err
+
+
+# ── 저강도(gentle) 강도 ────────────────────────────────────────────────────────
+
+def test_gentle_intensity_lowers_load_in_every_auto_stage(tmp_path):
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--intensity", "gentle", "10.0.0.0/29",
+    ]))
+    for command in (
+        scanner.build_command(plan, 0, "tcp_discovery"),
+        scanner.build_command(plan, 0, "tcp_identify", [22], targets=["10.0.0.4"]),
+        scanner.build_command(plan, 0, "udp_identify", targets=["10.0.0.4"]),
+    ):
+        assert "-T3" in command and "-T4" not in command
+        # 노후 장비에 가장 위험한 플래그(장비의 RST rate-limit 보호를 무력화)
+        assert "--defeat-rst-ratelimit" not in command
+        assert command[command.index("--max-retries") + 1] == "1"
+        assert command[command.index("--max-rate") + 1] == "150"
+        assert command[command.index("--host-timeout") + 1] == "30m"
+    discovery = scanner.build_command(plan, 0, "tcp_discovery")
+    assert discovery[discovery.index("--max-parallelism") + 1] == "10"
+    assert discovery[discovery.index("--min-hostgroup") + 1] == "16"
+
+
+def test_gentle_intensity_applies_to_single_profiles():
+    scanner = _load_scanner()
+    flags = scanner.build_base_flags(_args(profile="phase1", intensity="gentle", max_rate=""))
+    assert "-T3" in flags and "-T4" not in flags
+    assert "--defeat-rst-ratelimit" not in flags
+    assert flags[flags.index("--max-parallelism") + 1] == "10"
+    assert flags[flags.index("--min-hostgroup") + 1] == "16"
+    assert flags[flags.index("--max-retries") + 1] == "1"
+    assert flags[flags.index("--max-rate") + 1] == "150"
+    # 포트 계약은 건드리지 않는다(QA-037/QA-048 유지).
+    assert flags[flags.index("-p") + 1] == scanner.PRECISION_PORTS
+
+
+def test_gentle_host_timeout_default_is_opt_out_and_normal_stays_off(tmp_path):
+    scanner = _load_scanner()
+    common = ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path)]
+
+    normal = scanner.create_plan(scanner.parser().parse_args([*common, "10.0.0.1"]))
+    assert normal["host_timeout"] == ""  # QA-007: 기본 강도는 종전대로 꺼짐
+
+    gentle = scanner.create_plan(scanner.parser().parse_args(
+        [*common, "--intensity", "gentle", "10.0.0.1"]))
+    assert gentle["host_timeout"] == "30m"
+
+    override = scanner.create_plan(scanner.parser().parse_args(
+        [*common, "--intensity", "gentle", "--host-timeout", "5m", "10.0.0.1"]))
+    assert override["host_timeout"] == "5m"
+
+    disabled = scanner.create_plan(scanner.parser().parse_args(
+        [*common, "--intensity", "gentle", "--host-timeout", "0", "10.0.0.1"]))
+    assert disabled["host_timeout"] == ""
+
+    rate = scanner.create_plan(scanner.parser().parse_args(
+        [*common, "--intensity", "gentle", "--max-rate", "80", "10.0.0.1"]))
+    cmd = scanner.build_command(rate, 0, "tcp_discovery")
+    assert cmd[cmd.index("--max-rate") + 1] == "80"
+
+
+def test_gentle_intensity_survives_resume(tmp_path):
+    """저강도는 plan 을 통해 적용되므로 재개해도 같은 강도가 유지돼야 한다."""
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--intensity", "gentle", "--exclude-ports", "3030", "10.0.0.1",
+    ]))
+    state = tmp_path / "g.state.json"
+    state.write_text(json.dumps(plan), encoding="utf-8")
+    loaded = scanner.load_plan(str(state), "nmap", True, "")
+    assert loaded["intensity"] == "gentle"
+    assert loaded["exclude_ports"] == "3030"
+    command = scanner.build_command(loaded, 0, "tcp_discovery")
+    assert "-T3" in command and "--defeat-rst-ratelimit" not in command
+    assert command[command.index("--exclude-ports") + 1] == "3030"
+
+
+# ── GUI 계약 ───────────────────────────────────────────────────────────────────
+
+def test_gui_exposes_gentle_auto_mode_and_port_exclusion():
+    gui = _load_gui()
+    assert "auto_gentle" in gui.RUN_MODE_LABELS
+    assert "auto_gentle" in gui.RUN_MODE_DESCRIPTIONS
+    assert gui.AUTO_MODES == ("auto", "auto_gentle")
+    # auto 계열은 프로필을 쓰지 않는다(--workflow auto 로 나간다).
+    assert "auto_gentle" not in gui.RUN_MODE_TO_PROFILE
+    source = GUI_SCRIPT.read_text(encoding="utf-8")
+    assert '"--intensity", "gentle"' in source
+    assert '"--exclude-ports", exclude_ports' in source
+
+
+def test_unknown_saved_intensity_is_rejected_not_silently_downgraded(tmp_path):
+    """저장된 강도가 미지원 값이면 fail-closed 로 거절한다.
+
+    강도는 노후 장비 보호용 안전 제어다. 알 수 없는 값(미래 버전이 쓴 값이나 손상 값)을
+    조용히 normal 로 올리면 '-T3 + 속도상한'이 '-T4 + 무제한'으로 바뀌어, 보호하려던
+    장비를 그대로 때리게 된다. 구버전 호환은 키가 '아예 없을 때'만 적용한다."""
+    import json
+    import pytest
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--intensity", "gentle", "10.0.0.1",
+    ]))
+    state = tmp_path / "i.state.json"
+
+    def resume_with(mutate):
+        saved = json.loads(json.dumps(plan))
+        mutate(saved)
+        state.write_text(json.dumps(saved), encoding="utf-8")
+        return scanner.load_plan(str(state), "nmap", True, "")
+
+    # 정상 gentle 은 강도가 유지된다.
+    kept = scanner.build_command(resume_with(lambda p: None), 0, "tcp_discovery")
+    assert "-T3" in kept and "-T4" not in kept
+    assert kept[kept.index("--max-rate") + 1] == scanner.GENTLE_MAX_RATE_DEFAULT
+
+    # 명시된 미지원 값 → 거절(조용한 강등 금지). None 은 '명시적 JSON null' 경로다:
+    # plan.get() 으로 뭉개면 키 부재와 구분되지 않아 `"intensity": null` 한 줄로 보호가 풀린다.
+    for bad in ("paranoid-v2", "", "NORMAL", 3, [], None):
+        with pytest.raises(ValueError, match="intensity"):
+            resume_with(lambda p, b=bad: p.__setitem__("intensity", b))
+
+    # 명시적 null 은 재개 자체가 막혀야 하고, 강도가 조용히 -T4 로 바뀌어선 안 된다.
+    import json as _json
+    nulled = _json.loads(_json.dumps(plan))
+    nulled["intensity"] = None
+    state.write_text(_json.dumps(nulled), encoding="utf-8")
+    assert '"intensity": null' in state.read_text(encoding="utf-8")   # 진짜 JSON null 인지 확인
+    with pytest.raises(ValueError, match="intensity"):
+        scanner.load_plan(str(state), "nmap", True, "")
+
+    # 키가 아예 없는 구형 state 만 normal 로 호환한다.
+    legacy = resume_with(lambda p: p.pop("intensity"))
+    assert legacy["intensity"] == "normal"
+    assert "-T4" in scanner.build_command(legacy, 0, "tcp_discovery")
+
+
+def test_saved_max_rate_is_validated_fail_closed(tmp_path):
+    """속도 상한도 같은 안전 제어다 — 손상 값을 그대로 nmap 에 넘기지 않는다."""
+    import json
+    import pytest
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--intensity", "gentle", "--max-rate", "80", "10.0.0.1",
+    ]))
+    state = tmp_path / "r.state.json"
+
+    def resume_with(value, drop=False):
+        saved = json.loads(json.dumps(plan))
+        saved.pop("max_rate") if drop else saved.__setitem__("max_rate", value)
+        state.write_text(json.dumps(saved), encoding="utf-8")
+        return scanner.load_plan(str(state), "nmap", True, "")
+
+    command = scanner.build_command(resume_with("80"), 0, "tcp_discovery")
+    assert command[command.index("--max-rate") + 1] == "80"
+
+    for bad in ("abc", "0", "-5", "12.5", None, [], True):
+        with pytest.raises(ValueError, match="max-rate"):
+            resume_with(bad)
+
+    # 키가 없으면 gentle 기본값으로 되돌아간다(강도는 그대로 유지).
+    fallback = scanner.build_command(resume_with(None, drop=True), 0, "tcp_discovery")
+    assert fallback[fallback.index("--max-rate") + 1] == scanner.GENTLE_MAX_RATE_DEFAULT
+
+
+def test_intensity_and_max_rate_validators_are_shared_by_parser_and_state():
+    """파서 choices 와 state 재검증이 같은 목록을 쓰는지(둘이 갈라지면 계약이 깨진다)."""
+    scanner = _load_scanner()
+    assert scanner.INTENSITY_CHOICES == ("normal", "gentle")
+    action = next(a for a in scanner.parser()._actions if "--intensity" in (a.option_strings or []))
+    assert tuple(action.choices) == scanner.INTENSITY_CHOICES
+    # 기본값은 검증기가 아니라 '키 부재' 분기(resumed_value)가 책임진다 — 그래야 명시적
+    # null 을 기본값으로 오인하지 않는다. 검증기 자체는 None 을 거절해야 한다.
+    import pytest
+    with pytest.raises(ValueError):
+        scanner.validate_intensity(None)
+    with pytest.raises(ValueError):
+        scanner.validate_max_rate(None)
+    assert scanner.validate_max_rate(" 150 ") == "150" and scanner.validate_max_rate("") == ""
+    assert scanner.resumed_value({}, "intensity", "normal", scanner.validate_intensity) == "normal"
+    with pytest.raises(ValueError):
+        scanner.resumed_value({"intensity": None}, "intensity", "normal", scanner.validate_intensity)
+
+
+def test_explicit_json_null_never_relaxes_a_safety_control(tmp_path):
+    """`plan.get()` 은 키 부재와 명시적 JSON null 을 구분하지 못한다.
+
+    안전 제어 필드에서 그 둘을 뭉개면 state 에 한 줄만 넣어도 보호가 조용히 풀린다 —
+    intensity=null 이면 -T3+속도상한이 -T4+무제한이 되고, exclude_ports=null 이면
+    운영자가 일부러 뺀 포트가 되살아난다. 키가 '있으면' 반드시 검증을 통과해야 한다."""
+    import json
+    import pytest
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--intensity", "gentle", "--max-rate", "80",
+        "--exclude", "10.0.0.5", "--exclude-ports", "3030", "10.0.0.0/29",
+    ]))
+    state = tmp_path / "n.state.json"
+
+    # 기준: 정상 재개는 네 가지 보호가 모두 살아 있다.
+    state.write_text(json.dumps(plan), encoding="utf-8")
+    ok = scanner.build_command(scanner.load_plan(str(state), "nmap", True, ""), 0, "tcp_discovery")
+    assert "-T3" in ok and "--exclude" in ok and "--exclude-ports" in ok
+    assert ok[ok.index("--max-rate") + 1] == "80"
+
+    for key in ("intensity", "max_rate", "exclude", "exclude_ports"):
+        nulled = json.loads(json.dumps(plan))
+        nulled[key] = None
+        state.write_text(json.dumps(nulled), encoding="utf-8")
+        assert f'"{key}": null' in state.read_text(encoding="utf-8")
+        with pytest.raises(ValueError):
+            scanner.load_plan(str(state), "nmap", True, "")
+
+
+def test_missing_safety_keys_still_resume_for_legacy_states(tmp_path):
+    """반대편 계약: 그 개념이 없던 구형 state(키 자체가 없음)는 계속 재개돼야 한다."""
+    import json
+    scanner = _load_scanner()
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "10.0.0.1",
+    ]))
+    for key in ("intensity", "max_rate", "exclude_ports"):
+        plan.pop(key, None)
+    state = tmp_path / "legacy.state.json"
+    state.write_text(json.dumps(plan), encoding="utf-8")
+
+    loaded = scanner.load_plan(str(state), "nmap", True, "")
+
+    assert loaded["intensity"] == "normal"
+    assert loaded["max_rate"] == "" and loaded["exclude_ports"] == ""
+    assert "-T4" in scanner.build_command(loaded, 0, "tcp_discovery")

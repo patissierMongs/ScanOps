@@ -184,8 +184,14 @@ class RiskRule(Base):
     """taxonomy 위에 얹는 조직 커스텀 규칙."""
     __tablename__ = "risk_rules"
     id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[str] = mapped_column(String(16))  # service_rule / banned_service / port_rule
+    # service_rule / banned_service / port_rule / product_rule / cpe_rule
+    kind: Mapped[str] = mapped_column(String(16))
     service: Mapped[str] = mapped_column(String(64), default="")
+    # nmap 의 service 는 저신뢰 추측일 때가 많아(uniconv 등) 제품/CPE 로도 규칙을 걸 수 있어야 한다.
+    # product 는 서술 접미사(Samba smbd 등)가 붙으므로 부분일치, CPE 는 여러 개가 ';' 로 이어져
+    # 저장되므로 역시 부분일치로 본다. 매칭 건수를 UI 가 미리 보여주므로 과매칭은 확인 가능하다.
+    product: Mapped[str] = mapped_column(String(128), default="")
+    cpe: Mapped[str] = mapped_column(String(128), default="")
     port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     risk_level: Mapped[str] = mapped_column(String(16), default="high")
     note: Mapped[str] = mapped_column(Text, default="")

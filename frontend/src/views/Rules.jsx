@@ -4,15 +4,25 @@ import { useToast } from "../ui/Toast.jsx";
 import { RISK_LABEL } from "../lib/format.js";
 
 const RISK = ["banned", "high", "medium", "low", "info"];
-const EMPTY_FORM = { kind: "service_rule", service: "", port: "", risk_level: "high", note: "" };
+const EMPTY_FORM = { kind: "service_rule", service: "", product: "", cpe: "", port: "", risk_level: "high", note: "" };
 
 const kindLabel = (k) => {
   if (k === "banned_service") return "금지 서비스";
   if (k === "service_rule") return "서비스 규칙";
+  if (k === "product_rule") return "제품 규칙";
+  if (k === "cpe_rule") return "CPE 규칙";
   return "서비스/포트 규칙";
 };
 
 const riskLabel = (r) => (r === "info" ? "허용/정보" : RISK_LABEL[r] || r);
+
+// 목록의 '대상' 칸 — 규칙 종류마다 실제로 매칭에 쓰이는 값을 보여준다.
+const ruleTarget = (r) => {
+  if (r.kind === "port_rule") return r.service ? `${r.service} / ${r.port}` : r.port;
+  if (r.kind === "product_rule") return r.product;
+  if (r.kind === "cpe_rule") return r.cpe;
+  return r.service;
+};
 
 function KindSelect({ value, onChange }) {
   return (
@@ -20,6 +30,8 @@ function KindSelect({ value, onChange }) {
       <option value="service_rule">서비스 규칙</option>
       <option value="port_rule">서비스/포트 규칙</option>
       <option value="banned_service">금지 서비스</option>
+      <option value="product_rule">제품 규칙</option>
+      <option value="cpe_rule">CPE 규칙</option>
     </select>
   );
 }
@@ -45,6 +57,27 @@ function TargetInputs({ form, setForm }) {
       </>
     );
   }
+  // nmap 의 service 는 저신뢰 추측일 때가 많다(uniconv 등). 그런 포트도 제품/CPE 로는 잡힌다.
+  // 둘 다 부분일치라 'Samba smbd' 같은 서술 접미사나 여러 개 이어진 CPE 에도 걸린다.
+  if (form.kind === "product_rule") {
+    return (
+      <input
+        placeholder="제품명 부분일치 (예: vsftpd, OpenSSH)"
+        value={form.product}
+        onChange={(e) => setForm({ ...form, product: e.target.value })}
+      />
+    );
+  }
+  if (form.kind === "cpe_rule") {
+    return (
+      <input
+        style={{ minWidth: 260 }}
+        placeholder="CPE 부분일치 (예: openbsd:openssh)"
+        value={form.cpe}
+        onChange={(e) => setForm({ ...form, cpe: e.target.value })}
+      />
+    );
+  }
   return (
     <input
       placeholder="서비스명 (예: telnet)"
@@ -67,13 +100,18 @@ export default function Rules({ user }) {
   useEffect(() => { load(); }, []);
 
   function valid(f) {
-    return f.kind === "port_rule" ? !!f.port : !!f.service.trim();
+    if (f.kind === "port_rule") return !!f.port;
+    if (f.kind === "product_rule") return !!f.product.trim();
+    if (f.kind === "cpe_rule") return !!f.cpe.trim();
+    return !!f.service.trim();
   }
 
   function toBody(f) {
     const body = {
       kind: f.kind,
       service: f.service.trim(),
+      product: f.product.trim(),
+      cpe: f.cpe.trim(),
       port: null,
       risk_level: f.kind === "banned_service" ? "banned" : f.risk_level,
       note: f.note,
@@ -100,6 +138,8 @@ export default function Rules({ user }) {
       id: r.id,
       kind: r.kind,
       service: r.service || "",
+      product: r.product || "",
+      cpe: r.cpe || "",
       port: r.port == null ? "" : String(r.port),
       risk_level: r.risk_level || "high",
       note: r.note || "",
@@ -173,7 +213,7 @@ export default function Rules({ user }) {
                   <>
                     <td>{kindLabel(r.kind)}</td>
                     <td className="mono">
-                      {r.kind === "port_rule" ? (r.service ? `${r.service} / ${r.port}` : r.port) : r.service}
+                      {ruleTarget(r)}
                     </td>
                     <td><span className={"pill " + r.risk_level}>{riskLabel(r.risk_level)}</span></td>
                   </>

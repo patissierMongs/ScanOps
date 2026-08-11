@@ -406,3 +406,102 @@ def test_asset_contact_extra_and_propagation(client):
     f = client.get(f"/api/findings/{findings[0]['id']}", headers=h).json()
     assert f["dept"] == "보안팀" and f["contact"] == "010-1234-5678"
     assert f["owner"] == "김담당"   # 자산 담당자명 → 발견(통보용)
+
+
+# ---- 제품/CPE 규칙 ----
+
+def _seed_misidentified(port=9100, **over):
+    """nmap 이 service 를 저신뢰 추측으로 잘못 붙인 발견 하나."""
+    from scanops.db import SessionLocal
+    from scanops.models import Finding
+
+    values = {
+        "finding_key": f"10.0.0.5|{port}|tcp", "host_ip": "10.0.0.5", "port": port,
+        "proto": "tcp", "state": "open", "status": "열림",
+        "service": "uniconv",                      # ← nmap 오판
+        "product": "OpenSSH", "version": "9.6p1",
+        "cpe": "cpe:/a:openbsd:openssh:9.6p1",
+    }
+    values.update(over)
+    db = SessionLocal()
+    try:
+        db.add(Finding(**values))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _risk(client, h, port):
+    return next(f["risk_level"] for f in client.get("/api/findings", headers=h).json()
+                if f["port"] == port)
+
+
+def test_product_rule_catches_finding_whose_service_nmap_misidentified(client):
+    """service 로는 못 잡는 포트를 제품명으로 잡는다.
+
+    nmap 의 service 는 저신뢰 추측일 때가 많아(uniconv 등) service 만으로는 조직 규칙을
+    걸 수 없었다. 제품은 'Samba smbd' 처럼 서술 접미사가 붙으므로 부분일치로 본다."""
+    h = _auth(client)
+    _seed_misidentified()
+    assert _risk(client, h, 9100) == "info"       # 규칙 전에는 분류 불가
+
+    created = client.post("/api/rules", headers=h, json={
+        "kind": "product_rule", "product": "OpenSSH", "risk_level": "high", "note": "구버전 SSH"})
+
+    assert created.status_code == 201, created.text
+    assert created.json()["match_count"] == 1     # 저장 전 과매칭 확인용 카운트
+    assert created.json()["product"] == "OpenSSH"
+    assert _risk(client, h, 9100) == "high"
+
+    # 규칙을 지우면 등급이 원복된다.
+    assert client.delete(f"/api/rules/{created.json()['id']}", headers=h).status_code == 204
+    assert _risk(client, h, 9100) == "info"
+
+
+def test_product_rule_matches_substring_for_nmap_descriptive_suffixes(client):
+    h = _auth(client)
+    _seed_misidentified(port=9101, product="Samba smbd", cpe="")
+
+    created = client.post("/api/rules", headers=h, json={
+        "kind": "product_rule", "product": "samba", "risk_level": "banned"})
+
+    assert created.status_code == 201, created.text
+    assert created.json()["match_count"] == 1     # 'Samba smbd' 안의 'samba'
+    assert _risk(client, h, 9101) == "banned"
+
+
+def test_cpe_rule_matches_vendor_product_tuple(client):
+    """CPE 는 ';' 로 여러 개 저장되므로 vendor:product 부분일치로 건다."""
+    h = _auth(client)
+    _seed_misidentified(port=9102, cpe="cpe:/o:linux:linux_kernel;cpe:/a:openbsd:openssh:9.6p1")
+
+    created = client.post("/api/rules", headers=h, json={
+        "kind": "cpe_rule", "cpe": "openbsd:openssh", "risk_level": "banned", "note": "EOL"})
+
+    assert created.status_code == 201, created.text
+    assert created.json()["match_count"] == 1
+    assert created.json()["cpe"] == "openbsd:openssh"
+    assert _risk(client, h, 9102) == "banned"
+
+
+def test_product_and_cpe_rules_require_their_match_value(client):
+    h = _auth(client)
+
+    for body in ({"kind": "product_rule", "product": "  ", "risk_level": "high"},
+                 {"kind": "cpe_rule", "cpe": "", "risk_level": "high"}):
+        assert client.post("/api/rules", headers=h, json=body).status_code == 400, body
+
+
+def test_product_rule_survives_update_and_reclassify(client):
+    h = _auth(client)
+    _seed_misidentified(port=9103)
+    created = client.post("/api/rules", headers=h, json={
+        "kind": "product_rule", "product": "OpenSSH", "risk_level": "medium"}).json()
+    assert _risk(client, h, 9103) == "medium"
+
+    updated = client.put(f"/api/rules/{created['id']}", headers=h, json={
+        "kind": "product_rule", "product": "OpenSSH", "risk_level": "banned", "note": "승격"})
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["product"] == "OpenSSH"
+    assert _risk(client, h, 9103) == "banned"     # 수정이 기존 발견에 즉시 반영

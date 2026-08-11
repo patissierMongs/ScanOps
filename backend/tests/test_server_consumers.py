@@ -204,3 +204,157 @@ def test_heatmap_reuses_server_extractor_and_report_escapes_formula(client):
     assert ws.cell(row_num, columns["표시 식별"]).value == "'=1+1"
     assert ws.cell(row_num, columns["Server"]).value == "'=1+1"
     assert ws.cell(row_num, columns["서비스"]).value == "http"
+
+
+def test_findings_search_covers_ip_port_and_every_displayed_field(client):
+    """발견 관리 검색은 '화면에 보이는 모든 요소'로 찾을 수 있어야 한다.
+
+    한때 이 폭넓은 검색이 있었는데 Server 우선표시 작업 때 6개 컬럼으로 좁아졌다.
+    IP·포트로 못 찾는 검색은 운영에서 사실상 쓸 수 없다."""
+    headers = _auth(client)
+    _import_sample(client, headers)
+    _update_finding(
+        9000, host_ip="10.9.9.9", hostname="wiki.corp", service="http",
+        product="nginx", version="1.24", server="nginx/1.24",
+        banner="Zimbra-Collab", cpe="cpe:/a:nginx:nginx", category="웹",
+        usage="사내 위키", remarks="NSE: TLS_CN=wiki.corp",
+        dept="정보보안팀", owner="김보안", contact="010-0000-0000",
+        manual_note="차기 점검 대상",
+    )
+
+    def found(term):
+        response = client.get("/api/findings", headers=headers, params={"q": term})
+        assert response.status_code == 200, response.text
+        return [row["port"] for row in response.json()]
+
+    # IP(부분일치 포함)와 포트 — 사용자가 가장 자주 쓰는 두 축
+    assert found("10.9.9.9") == [9000]
+    assert found("10.9.9") == [9000]
+    assert found("9000") == [9000]
+    # 나머지 표시 필드 전부. 'http' 처럼 다른 발견과도 겹치는 값이 있으므로 포함 여부로 본다.
+    for term in ("wiki.corp", "http", "nginx", "1.24", "nginx/1.24", "Zimbra-Collab",
+                 "cpe:/a:nginx", "웹", "사내 위키", "TLS_CN", "정보보안팀", "김보안",
+                 "010-0000-0000", "차기 점검"):
+        assert 9000 in found(term), f"'{term}' 로 검색되지 않음"
+    # 결합된 표시 식별자(product + version)도 유지
+    assert found("nginx 1.24") == [9000]
+    # 없는 값은 안 잡혀야 한다(전부 매칭되는 헛검색 방지)
+    assert found("존재하지않는값") == []
+
+
+def test_findings_search_ignores_surrounding_whitespace(client):
+    headers = _auth(client)
+    _import_sample(client, headers)
+    _update_finding(9000, host_ip="10.9.9.9")
+
+    response = client.get("/api/findings", headers=headers, params={"q": "  10.9.9.9  "})
+
+    assert response.status_code == 200, response.text
+    assert [row["port"] for row in response.json()] == [9000]
+
+
+def test_findings_search_rejects_non_ascii_digits_without_crashing(client):
+    """isdigit() 은 '②' 같은 유니코드 숫자에도 True 라 int() 에서 500 이 난다.
+    isdecimal() 이어야 포트 변환이 안전하다."""
+    headers = _auth(client)
+    _import_sample(client, headers)
+
+    response = client.get("/api/findings", headers=headers, params={"q": "９０００"})
+
+    assert response.status_code == 200, response.text
+
+
+def test_findings_export_honors_the_same_broad_search(client):
+    headers = _auth(client)
+    _import_sample(client, headers)
+    _update_finding(9000, host_ip="10.9.9.9", dept="정보보안팀")
+
+    response = client.get(
+        "/api/findings/export", headers=headers,
+        params={"q": "10.9.9.9", "fmt": "csv", "cols": "host_ip,port"},
+    )
+
+    assert response.status_code == 200, response.text
+    rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
+    assert rows == [{"IP": "10.9.9.9", "포트": "9000"}]
+
+
+def _lookup():
+    return {
+        "http": {"category": "웹", "usage": "웹 서비스", "risk_level": "medium",
+                 "compliance": [{"std": "KISA", "ref": "웹"}]},
+        "https": {"category": "웹", "usage": "웹 서비스(TLS)", "risk_level": "low",
+                  "compliance": []},
+        "ssh": {"category": "원격", "usage": "원격접속", "risk_level": "high", "compliance": []},
+    }
+
+
+def test_server_banner_classifies_findings_nmap_mislabels():
+    """nmap 이 uniconv 처럼 저신뢰 추측을 내놔도 Server 헤더가 나왔다면 HTTP 로 분류한다.
+
+    Server 헤더는 http-server-header/http-headers 가 실제 HTTP 응답을 받아냈다는 뜻이라
+    service 추측보다 강한 증거다. taxonomy 는 제품명이 아니라 서비스명으로 키가 잡혀 있어
+    '이 포트는 HTTP 로 말한다'는 사실만 키로 되돌린다."""
+    from scanops.scanning.taxonomy import classify
+
+    finding = {"service": "uniconv", "port": 8080, "server": "nginx/1.24.0",
+               "nse_json": {"http-server-header": "nginx/1.24.0"}}
+
+    classify(finding, _lookup(), [])
+
+    assert finding["category"] == "웹"
+    assert finding["usage"] == "웹 서비스"
+    assert finding["risk_level"] == "medium"      # info 로 방치되지 않는다
+    evidence = [c for c in finding["compliance_json"] if c["std"] == "관측근거"]
+    assert evidence and "uniconv" in evidence[0]["ref"] and "nginx/1.24.0" in evidence[0]["ref"]
+
+
+def test_server_banner_classification_uses_tls_evidence_for_https():
+    from scanops.scanning.taxonomy import classify
+
+    for nse in ({"ssl-cert": "commonName=x"}, '{"ssl-cert": "commonName=x"}'):
+        finding = {"service": "apple-iphoto", "port": 8443, "server": "nginx", "nse_json": nse}
+        classify(finding, _lookup(), [])
+        assert finding["usage"] == "웹 서비스(TLS)", nse
+
+
+def test_server_banner_never_overrides_a_service_that_already_classifies():
+    """보조 키일 뿐이라 기존에 잘 분류되던 건의 위험등급을 흔들지 않는다."""
+    from scanops.scanning.taxonomy import classify
+
+    finding = {"service": "ssh", "port": 22, "server": "nginx", "nse_json": {}}
+
+    classify(finding, _lookup(), [])
+
+    assert finding["category"] == "원격" and finding["risk_level"] == "high"
+    assert not [c for c in finding["compliance_json"] if c["std"] == "관측근거"]
+
+
+def test_unclassifiable_finding_without_server_stays_untouched():
+    from scanops.scanning.taxonomy import classify
+
+    finding = {"service": "uniconv", "port": 9999, "server": "", "nse_json": {}}
+
+    classify(finding, _lookup(), [])
+
+    assert finding["category"] == "" and finding["risk_level"] == "info"
+
+
+def test_reclassify_all_applies_server_fallback(client):
+    """재계산 경로에도 관측 증거가 전달돼야 한다(예전엔 service/port 만 넘겼다)."""
+    from scanops.scanning.taxonomy import reclassify_all
+
+    headers = _auth(client)
+    _import_sample(client, headers)
+    _update_finding(9000, service="uniconv", server="nginx/1.24.0",
+                    nse_json={"http-server-header": "nginx/1.24.0"},
+                    category="", usage="", risk_level="info")
+
+    db = SessionLocal()
+    try:
+        reclassify_all(db)
+        row = db.query(Finding).filter(Finding.port == 9000).one()
+        assert row.category == "웹"
+        assert row.risk_level != "info"
+    finally:
+        db.close()

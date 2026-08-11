@@ -155,7 +155,8 @@ export default function Findings({ user }) {
 
       <div className="panel">
         <div className="row" style={{ marginBottom: 12 }}>
-          <input style={{ flex: 1, minWidth: 180 }} placeholder="검색 (Server/서비스/호스트명)" value={q}
+          <input style={{ flex: 1, minWidth: 180 }}
+                 placeholder="검색 (모든 필드 · IP·포트·호스트명·서비스·배너·비고·부서·담당자 등)" value={q}
                  onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => {
                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                    if (e.key === "Enter") load();

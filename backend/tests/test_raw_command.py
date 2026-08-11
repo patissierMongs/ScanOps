@@ -77,3 +77,62 @@ def test_scope_accepts_cidr_subnet():
 def test_scope_rejects_cidr_outside():
     with pytest.raises(ValueError):
         check_scope(["172.16.0.0/16"], spec="10.0.0.0/8")
+
+
+def test_raw_command_merges_structured_and_inline_excludes_into_one_option():
+    """직접 명령 모드에서도 구조화 제외가 적용되고, 인라인 --exclude 와 하나로 합쳐진다.
+
+    Nmap 은 --exclude 를 반복하면 마지막 값만 쓰므로 두 개를 그대로 두면 한쪽이 조용히 사라진다.
+    예전에는 이 경로가 구조화 제외를 아예 버려, 폼에 제외를 입력한 뒤 '명령 직접 입력'으로
+    바꾸면 제외 없이 스캔이 나갔다."""
+    from scanops.api.scans import _merge_raw_excludes
+
+    argv = ["nmap", "--exclude", "10.0.0.5", "-sV", "-oA", "base"]
+    merged = _merge_raw_excludes(argv, ["10.0.0.7", "10.0.0.20-30"])
+
+    assert merged.count("--exclude") == 1
+    values = merged[merged.index("--exclude") + 1].split(",")
+    assert set(values) == {"10.0.0.5", "10.0.0.7", "10.0.0.20-30"}
+    assert merged[-2:] == ["-oA", "base"]  # 서버가 강제한 출력 경로는 그대로 마지막에
+
+
+def test_raw_command_merges_attached_exclude_form():
+    from scanops.api.scans import _merge_raw_excludes
+
+    merged = _merge_raw_excludes(
+        ["nmap", "--exclude=10.0.0.5,10.0.0.6", "-sV", "-oA", "base"], ["10.0.0.7"])
+
+    assert merged.count("--exclude") == 1
+    assert not any(t.startswith("--exclude=") for t in merged)
+    assert set(merged[merged.index("--exclude") + 1].split(",")) == {
+        "10.0.0.5", "10.0.0.6", "10.0.0.7"}
+
+
+def test_raw_command_without_any_exclude_is_unchanged():
+    from scanops.api.scans import _merge_raw_excludes
+
+    argv = ["nmap", "-sV", "-oA", "base", "10.0.0.1"]
+    assert _merge_raw_excludes(argv, []) == argv
+    assert _merge_raw_excludes(argv, None) == argv
+
+
+def test_raw_command_rejects_invalid_structured_exclude():
+    from scanops.api.scans import _merge_raw_excludes
+
+    with pytest.raises(ValueError):
+        _merge_raw_excludes(["nmap", "-sV", "-oA", "base"], ["not-an-ip"])
+
+
+def test_nmap_exclusions_add_port_filter_once():
+    """포트 제외는 -p 를 건드리지 않는 전역 필터라 명령 앞에 한 번만 붙는다."""
+    from scanops.api.scans import _with_nmap_excludes
+
+    argv = _with_nmap_excludes(
+        ["nmap", "-sS", "-p", "T:1-65535", "-oA", "b", "10.0.0.0/24"],
+        ["10.0.0.1-10"], "3030,3040")
+
+    assert argv.count("--exclude-ports") == 1
+    assert argv[argv.index("--exclude-ports") + 1] == "3030,3040"
+    assert argv[argv.index("--exclude") + 1] == "10.0.0.1-10"
+    # 포트 선택(-p)은 그대로 유지된다.
+    assert argv[argv.index("-p") + 1] == "T:1-65535"

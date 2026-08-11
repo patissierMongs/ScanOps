@@ -209,7 +209,10 @@ export default function Scans({ user }) {
     if (rawMode) {
       if (!rawCmd.trim()) { toast("명령을 입력하세요", { type: "err" }); return; }
       setBusy(true);
-      api("/scans/run-command", { method: "POST", json: { name, command: rawCmd } })
+      // 제외 대상도 함께 보낸다. 예전에는 직접 명령 모드에서만 제외가 조용히 버려져,
+      // 폼에 제외를 입력한 뒤 모드를 바꾸면 제외 없이 스캔이 나갔다. 서버가 명령 안의
+      // --exclude 와 합쳐 하나의 옵션으로 만든다.
+      api("/scans/run-command", { method: "POST", json: { name, command: rawCmd, exclude: excludeList } })
         .then((s) => { toast(`직접 명령 스캔 시작됨 · #${s.id} (단발 실행 — 이어가기 미지원)`); load(); })
         .catch((e2) => toast(e2.message, { type: "err" }))
         .finally(() => setBusy(false));
@@ -266,18 +269,19 @@ export default function Scans({ user }) {
                      value={targets} onChange={(e) => setTargets(e.target.value)} />
             )}
           </div>
-          {!rawMode && (
-            <div style={{ marginBottom: 12 }}>
-              <label className="cb-label" htmlFor="scan-exclude">제외할 IPv4/CIDR (선택)</label>
-              <textarea id="scan-exclude" aria-describedby="scan-exclude-help" rows={2}
-                        style={{ width: "100%", resize: "vertical" }}
-                        placeholder="예: 10.0.12.1, 10.0.13.0/28"
-                        value={exclude} onChange={(e) => setExclude(e.target.value)} />
-              <div id="scan-exclude-help" className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>
-                공백·쉼표·줄바꿈으로 구분합니다. 제외 대상은 스캔과 닫힘 판정 범위에서 빠집니다.
-              </div>
+          {/* 직접 명령 모드에서도 보여준다: 숨긴 채 값만 보내면 무엇이 제외되는지 알 수 없고,
+              반대로 값을 버리면 '입력했는데 제외가 안 되는' 예전 동작으로 돌아간다. */}
+          <div style={{ marginBottom: 12 }}>
+            <label className="cb-label" htmlFor="scan-exclude">제외할 IPv4/CIDR/범위 (선택)</label>
+            <textarea id="scan-exclude" aria-describedby="scan-exclude-help" rows={2}
+                      style={{ width: "100%", resize: "vertical" }}
+                      placeholder="예: 10.0.12.1, 10.0.13.0/28, 10.0.12.20-30"
+                      value={exclude} onChange={(e) => setExclude(e.target.value)} />
+            <div id="scan-exclude-help" className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>
+              공백·쉼표·줄바꿈으로 구분합니다. 제외 대상은 스캔과 닫힘 판정 범위에서 빠집니다.
+              {rawMode && " 직접 명령의 --exclude 와 합쳐 하나의 옵션으로 전달됩니다."}
             </div>
-          )}
+          </div>
 
           {rawMode && (
             <div style={{ marginBottom: 12 }}>

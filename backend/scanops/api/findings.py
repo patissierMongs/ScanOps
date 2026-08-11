@@ -118,14 +118,27 @@ def _filtered(db: Session, status, risk, host, q, state, dept=None):
     if dept:
         query = query.filter(Finding.dept == dept)
     if q:
-        like = f"%{q}%"
+        term = q.strip()
+        like = f"%{term}%"
+        # 발견 관리 검색은 '화면에 보이는 모든 요소'를 아우른다 — IP·호스트명·서비스·제품·버전·
+        # 서버배너·배너·CPE·분류·용도·비고(NSE 추출)·부서·담당자·연락처·메모. 표시 식별자가
+        # Server → product+version → service 순서라, 합쳐진 'product version' 형태로 보이는
+        # 문자열도 그대로 검색되게 결합 컬럼을 함께 건다.
         product_version = func.trim(
             func.coalesce(Finding.product, "") + " " + func.coalesce(Finding.version, "")
         )
-        query = query.filter(or_(
-            Finding.server.like(like), Finding.product.like(like), Finding.version.like(like),
-            product_version.like(like), Finding.service.like(like), Finding.hostname.like(like),
-        ))
+        text_cols = [
+            Finding.host_ip, Finding.hostname, Finding.service, Finding.product,
+            Finding.version, Finding.server, Finding.banner, Finding.cpe,
+            Finding.category, Finding.usage, Finding.remarks, Finding.dept,
+            Finding.owner, Finding.contact, Finding.manual_note,
+        ]
+        cond = or_(product_version.like(like), *[col.like(like) for col in text_cols])
+        # isdecimal(): 0-9 만(포트로 int 변환 가능). isdigit() 은 위첨자 '²'·원숫자 '①' 등
+        # int() 로 못 바꾸는 유니코드 숫자에도 True → int() ValueError → HTTP 500.
+        if term.isdecimal():
+            cond = or_(cond, Finding.port == int(term))
+        query = query.filter(cond)
     return query.order_by(Finding.host_ip, Finding.port)
 
 

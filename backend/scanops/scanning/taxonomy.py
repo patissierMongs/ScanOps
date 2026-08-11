@@ -36,17 +36,63 @@ def build_lookup(db: Session) -> dict[str, dict]:
     }
 
 
+def _tls_evidence(finding: dict) -> bool:
+    """이 포트가 TLS 위에서 말하는지에 대한 관측 증거."""
+    if "ssl" in (finding.get("service") or "").lower():
+        return True
+    nse = finding.get("nse_json") or {}
+    if isinstance(nse, str):
+        try:
+            nse = json.loads(nse)
+        except (ValueError, TypeError):
+            return False
+    if not isinstance(nse, dict):
+        return False
+    return any(key in nse for key in ("ssl-cert", "tls-alpn"))
+
+
+def fallback_service_key(finding: dict) -> str:
+    """service 로 분류가 안 될 때 쓸 보조 분류 키를 관측 증거에서 끌어낸다.
+
+    nmap 의 service 는 종종 저신뢰 추측이다(uniconv·apple-iphoto 처럼). 반면 Server 헤더는
+    http-server-header/http-headers 가 실제로 HTTP 응답을 받아냈다는 뜻이라, 값이 무엇이든
+    '이 포트는 HTTP 로 말한다'는 사실 자체가 service 추측보다 강한 증거다. taxonomy 는
+    제품명(nginx)이 아니라 서비스명(http)으로 키가 잡혀 있으므로 그 사실만 키로 되돌린다.
+    """
+    if not (finding.get("server") or "").strip():
+        return ""
+    return "https" if _tls_evidence(finding) else "http"
+
+
 def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> dict:
     """finding 에 분류 필드를 채워 반환(같은 dict 수정)."""
     svc = (finding.get("service") or "").lower()
     info = lookup.get(svc, {})
+    # 보조 키: service 로 분류가 전혀 안 될 때만 관측 증거(Server 배너)로 한 번 더 시도한다.
+    # service 로 이미 분류된 건은 건드리지 않아 기존 위험등급이 흔들리지 않는다.
+    fallback_used = ""
+    if not info:
+        fallback = fallback_service_key(finding)
+        if fallback and fallback in lookup:
+            info = lookup[fallback]
+            fallback_used = fallback
     finding["category"] = info.get("category", "")
     finding["usage"] = info.get("usage", "")
     finding["risk_level"] = info.get("risk_level", "info")
     finding["compliance_json"] = list(info.get("compliance", []))
+    if fallback_used:
+        # 왜 이렇게 분류됐는지 남긴다. nmap 이 뭐라 했든 Server 헤더가 나왔다는 사실로
+        # 분류한 것이므로 근거를 보여줘야 운영자가 판단을 검증할 수 있다.
+        finding["compliance_json"].append({
+            "std": "관측근거",
+            "ref": (f"nmap service '{svc or '미상'}' 로는 분류되지 않아 Server 배너"
+                    f"({finding.get('server', '').strip()}) 기준 {fallback_used} 로 분류"),
+        })
 
     # 조직 규칙은 taxonomy 기본값을 직접 덮어쓴다. risk_level=info 는 허용/정보 처리다.
     # banned_service 는 기존 호환용 이름이며 항상 금지(banned)로 적용한다.
+    product = (finding.get("product") or "").lower()
+    cpe = (finding.get("cpe") or "").lower()
     for r in rules:
         if r.kind == "banned_service" and r.service and r.service.lower() == svc:
             finding["risk_level"] = "banned"
@@ -54,6 +100,16 @@ def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> d
             finding["risk_level"] = r.risk_level
         elif (r.kind == "port_rule" and r.port == finding.get("port")
               and (not r.service or r.service.lower() == svc)):
+            finding["risk_level"] = r.risk_level
+        # 제품/CPE 규칙은 부분일치다. nmap product 는 'Samba smbd' 처럼 서술 접미사가 붙고,
+        # CPE 는 여러 개가 ';' 로 이어져 저장되므로 정확일치로는 실무에서 쓸 수 없다.
+        elif r.kind == "product_rule" and getattr(r, "product", "") and product:
+            if r.product.lower() not in product:
+                continue
+            finding["risk_level"] = r.risk_level
+        elif r.kind == "cpe_rule" and getattr(r, "cpe", "") and cpe:
+            if r.cpe.lower() not in cpe:
+                continue
             finding["risk_level"] = r.risk_level
         else:
             continue
@@ -72,7 +128,9 @@ def reclassify_all(db: Session) -> int:
     rules = db.query(RiskRule).order_by(RiskRule.created_at, RiskRule.id).all()
     n = 0
     for f in db.query(Finding).all():
-        d = {"service": f.service, "port": f.port}
+        # Server 배너 보조 분류와 제품/CPE 규칙이 재계산에서도 동일하게 걸리도록 관측 증거를 함께 넘긴다.
+        d = {"service": f.service, "port": f.port, "server": f.server, "nse_json": f.nse_json,
+             "product": f.product, "cpe": f.cpe}
         classify(d, lookup, rules)
         if f.risk_level != d["risk_level"]:
             n += 1

@@ -18,7 +18,7 @@ from .deps import current_user, require_role
 
 router = APIRouter()
 
-_KINDS = ("service_rule", "banned_service", "port_rule")
+_KINDS = ("service_rule", "banned_service", "port_rule", "product_rule", "cpe_rule")
 
 
 def _match_count(db: Session, rule: RiskRule) -> int:
@@ -35,7 +35,23 @@ def _match_count(db: Session, rule: RiskRule) -> int:
         if rule.service:  # 기본포트 사용 금지 = 서비스+포트 조합
             q = q.filter(func.lower(Finding.service) == rule.service.lower())
         return q.scalar() or 0
+    # 제품/CPE 는 부분일치(taxonomy.classify 와 같은 의미). UI 가 이 건수를 보여주므로
+    # 운영자가 규칙을 저장하기 전에 과매칭 여부를 눈으로 확인할 수 있다.
+    if rule.kind == "product_rule":
+        if not (rule.product or "").strip():
+            return 0
+        return q.filter(func.lower(Finding.product).contains(rule.product.lower())).scalar() or 0
+    if rule.kind == "cpe_rule":
+        if not (rule.cpe or "").strip():
+            return 0
+        return q.filter(func.lower(Finding.cpe).contains(rule.cpe.lower())).scalar() or 0
     return 0
+
+
+def _label(rule: RiskRule) -> str:
+    """감사 로그용 라벨 — 규칙 종류별로 실제 매칭 값을 보여준다."""
+    value = rule.service or rule.product or rule.cpe or rule.port
+    return f"{rule.kind}:{value}"
 
 
 def _out(db: Session, rule: RiskRule) -> RuleOut:
@@ -53,6 +69,10 @@ def _validate_rule(body: RuleIn) -> None:
         raise HTTPException(status_code=400, detail="서비스 규칙은 service 가 필요합니다.")
     if body.kind == "port_rule" and body.port is None:
         raise HTTPException(status_code=400, detail="포트 규칙은 port 가 필요합니다.")
+    if body.kind == "product_rule" and not body.product.strip():
+        raise HTTPException(status_code=400, detail="제품 규칙은 product 가 필요합니다.")
+    if body.kind == "cpe_rule" and not body.cpe.strip():
+        raise HTTPException(status_code=400, detail="CPE 규칙은 cpe 가 필요합니다.")
 
 
 @router.get("", response_model=list[RuleOut])
@@ -68,7 +88,8 @@ def create_rule(
 ):
     _validate_rule(body)
     rule = RiskRule(
-        kind=body.kind, service=body.service.strip(), port=body.port,
+        kind=body.kind, service=body.service.strip(),
+        product=body.product.strip(), cpe=body.cpe.strip(), port=body.port,
         risk_level="banned" if body.kind == "banned_service" else body.risk_level,
         note=body.note, created_by=user.id,
     )
@@ -76,7 +97,7 @@ def create_rule(
     db.commit()
     db.refresh(rule)
     taxonomy.reclassify_all(db)  # 기존 발견에 즉시 반영(금지 승격 등)
-    record(db, user, "RULE_CREATE", target=f"{rule.kind}:{rule.service or rule.port}",
+    record(db, user, "RULE_CREATE", target=_label(rule),
            detail=f"#{rule.id} → {rule.risk_level}")
     return _out(db, rule)
 
@@ -92,16 +113,18 @@ def update_rule(
     if rule is None:
         raise HTTPException(status_code=404, detail="규칙을 찾을 수 없습니다.")
     _validate_rule(body)
-    old = f"{rule.kind}:{rule.service or rule.port} → {rule.risk_level}"
+    old = f"{_label(rule)} → {rule.risk_level}"
     rule.kind = body.kind
     rule.service = body.service.strip()
+    rule.product = body.product.strip()
+    rule.cpe = body.cpe.strip()
     rule.port = body.port
     rule.risk_level = "banned" if body.kind == "banned_service" else body.risk_level
     rule.note = body.note
     db.commit()
     db.refresh(rule)
     taxonomy.reclassify_all(db)
-    record(db, user, "RULE_UPDATE", target=f"{rule.kind}:{rule.service or rule.port}",
+    record(db, user, "RULE_UPDATE", target=_label(rule),
            detail=f"#{rule.id} {old} -> {rule.risk_level}")
     return _out(db, rule)
 
@@ -115,7 +138,7 @@ def delete_rule(
     rule = db.get(RiskRule, rule_id)
     if rule is None:
         raise HTTPException(status_code=404, detail="규칙을 찾을 수 없습니다.")
-    label = f"{rule.kind}:{rule.service or rule.port}"
+    label = _label(rule)
     db.delete(rule)
     db.commit()
     taxonomy.reclassify_all(db)  # 규칙 제거 후 등급 원복

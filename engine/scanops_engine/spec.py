@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass, field
 # argv 옵션 주입을 막는 타겟 계약: 허용 문자여도 '-' 로 시작할 수 없다.
 _TARGET_RE = re.compile(r"^(?!-)[A-Za-z0-9_.:/\-]+$")
 _PORTS_RE = re.compile(r"^[0-9TUtu:,\-\s]*$")
+# 마지막 옥텟 범위(10.0.0.1-10) — 제외 대상이 타겟과 같은 문법을 받도록.
+_EXCLUDE_RANGE_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})-(\d{1,3})$")
 _PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
 _NSE_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 _TIMINGS = {"-T0", "-T1", "-T2", "-T3", "-T4", "-T5"}
@@ -83,6 +85,12 @@ def _validate_target(value, label: str) -> None:
 def _validate_exclude(value) -> None:
     if not isinstance(value, str) or not value:
         raise ValueError(f"제외 대상은 IPv4 주소/CIDR이어야 합니다: {value!r}")
+    # 마지막 옥텟 범위(10.0.0.1-10) — 타겟과 같은 문법을 제외에서도 받는다(nmap 이 그대로 해석).
+    if match := _EXCLUDE_RANGE_RE.fullmatch(value):
+        base, lo, hi = match.group(1), int(match.group(2)), int(match.group(3))
+        if any(int(o) > 255 for o in base.split(".")) or lo > 255 or hi > 255 or lo > hi:
+            raise ValueError(f"잘못된 제외 IP 범위입니다: {value!r}. 예: 10.0.0.1-10")
+        return
     try:
         network = ipaddress.ip_network(value, strict=False)
     except ValueError as exc:

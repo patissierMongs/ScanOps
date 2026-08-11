@@ -196,7 +196,10 @@ test("scan exclusions share one deduplicated token contract across estimate and 
   assert.match(scans, /\/scans\/estimate[\s\S]*?exclude: excludeList/);
   assert.match(scans, /const estKey = JSON\.stringify\(\{[^}]*s: staged \}\)/);
   assert.match(scans, /\/scans\/estimate[\s\S]*?batch_size: batchSize, staged/);
-  assert.equal((scans.match(/exclude: excludeList/g) || []).length, 3);
+  // estimate + staged run + 일반 run + 직접 명령. 직접 명령 모드도 제외를 보내야 한다:
+  // 예전에는 이 경로만 제외를 버려서 폼에 입력한 제외가 조용히 사라졌다.
+  assert.equal((scans.match(/exclude: excludeList/g) || []).length, 4);
+  assert.match(scans, /\/scans\/run-command[\s\S]*?exclude: excludeList/);
   assert.match(scans, /const previewExcludes = est\?\.exclude \?\? excludeList/);
   assert.match(scans, /targets=\{targetList\} excludes=\{previewExcludes\} staged=\{staged\}/);
   assert.match(scans, /setTargets\(""\); setExclude\(""\); setName\(""\)/);
