@@ -156,7 +156,9 @@ test("standalone folder import sends each preflighted XML/manifest group", () =>
   assert.match(scans, /uploadMany\("\/scans\/import-bundle", group\.files\)/);
   assert.match(scans, /accept="\.xml,\.manifest\.json"/);
   assert.match(scans, /formatImportSummary\(summary\)/);
-  assert.match(scans, /폴더째 가져오기\(XML\+manifest\)/);
+  // 라벨은 짧게 두고 'manifest 까지 함께 읽는다'는 설명은 보조 문구로 — 폴더 경로 자체는 남아야 한다.
+  assert.match(scans, /폴더째 가져오기/);
+  assert.match(scans, /manifest 까지 함께 읽습니다/);
 });
 
 test("scan details expose persisted timeline and safe failure fields", () => {
@@ -357,4 +359,21 @@ test("staged preview mirrors discovery, protocol sweeps, and per-host service pr
   assert.match(staged, /"<호스트 1대>"/);
   assert.match(source("../src/views/Scans.jsx"), /targets=\{targetList\} excludes=\{previewExcludes\} staged=\{staged\}/);
   assert.match(scanOptions, /단계별 명령 템플릿/);
+});
+
+test("scan screen shows target and run first, with everything else folded away", () => {
+  const scans = source("../src/views/Scans.jsx");
+  const css = source("../src/styles.css");
+  // 세부 설정은 기본 접힘 — 체크박스 80여 개와 명령 미리보기가 실행 버튼 앞을 가로막으면
+  // 화면을 처음 보는 사람은 무엇을 해야 하는지 읽어낼 수 없다.
+  assert.match(scans, /const \[showAdvanced, setShowAdvanced\] = useState\(false\)/);
+  assert.match(scans, /className="scan-advanced" style=\{\{ display: showAdvanced \? "block" : "none" \}\}/);
+  // 옵션 빌더는 접혀 있어도 마운트를 유지해야 raw 모드의 '채우기'가 최신 명령을 얻는다.
+  assert.doesNotMatch(scans, /showAdvanced && <ScanOptions/);
+  // 세부 설정을 펼치지 않아도 무엇을 하려는지 한 줄로 확인하고 실행할 수 있어야 한다.
+  assert.match(scans, /const planSummary = \(\(\) => \{/);
+  assert.match(scans, /className="scan-summary"/);
+  assert.match(css, /\.scan-summary\s*\{/);
+  // 가져오기는 '스캔한다'와 다른 작업이라 실행 버튼 옆이 아니라 따로 둔다.
+  assert.match(scans, /className="scan-import-row"/);
 });

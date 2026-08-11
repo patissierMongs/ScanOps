@@ -334,3 +334,24 @@ input::placeholder { color: oklch(0.72 0.01 262); }
   padding: 8px 12px; background: var(--surface); font-size: 12px;
 }
 .phase-strip > div span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- 스캔 실행: 대상 + 실행만 먼저, 나머지는 접기 ---------- */
+/* 예전에는 체크박스 80여 개와 명령 미리보기가 실행 버튼 앞을 가로막아 무엇을 해야 하는지
+   읽히지 않았다. 기본 화면은 '어디를 스캔할지'와 '실행' 둘만 남긴다. */
+.scan-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.scan-head .muted { font-size: 12.5px; }
+.scan-target-field { display: block; margin-bottom: 12px; }
+.scan-target-field textarea { font-size: 14px; }
+.scan-summary {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 10px 13px; margin-bottom: 12px;
+  background: var(--accent-bg); border-radius: 9px; font-size: 13px;
+}
+.scan-summary .muted { font-size: 11.5px; }
+.scan-run-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+button.scan-run { padding: 9px 22px; font-size: 14px; }
+.scan-advanced { margin-top: 16px; padding-top: 4px; border-top: 1px solid var(--line); }
+.scan-import-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line-soft); font-size: 12.5px;
+}
