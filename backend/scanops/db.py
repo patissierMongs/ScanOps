@@ -84,6 +84,13 @@ def _migrate() -> None:
             conn.exec_driver_sql("ALTER TABLE scan_runs ADD COLUMN failure_code VARCHAR(64) DEFAULT ''")
         if "failure_message" not in sc_cols:
             conn.exec_driver_sql("ALTER TABLE scan_runs ADD COLUMN failure_message VARCHAR(256) DEFAULT ''")
+        # 도킹 중복 인입 방지용 원본 지문(기존 DB 보강)
+        if "source_fingerprint" not in sc_cols:
+            conn.exec_driver_sql("ALTER TABLE scan_runs ADD COLUMN source_fingerprint VARCHAR(64) DEFAULT ''")
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_scan_runs_source_fingerprint "
+                "ON scan_runs (source_fingerprint)"
+            )
 
 
 def get_db() -> Iterator[Session]:

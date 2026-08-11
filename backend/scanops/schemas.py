@@ -60,6 +60,11 @@ class ScanRunIn(BaseModel):
     udp_all_targets: bool = False  # auto: UDP 식별을 discovery live host 가 아닌 원본 타깃 전체로(-Pn)
 
 
+class KnownResultsIn(BaseModel):
+    """도킹 전 중복 확인 — 스캐너가 가진 결과 지문 목록."""
+    fingerprints: list[str] = []
+
+
 class ScanPresetItem(BaseModel):
     """저장되는 스캔 프리셋 한 건 — nmap 플래그가 아니라 '옵션 키'로 담는다.
 

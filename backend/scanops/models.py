@@ -85,6 +85,9 @@ class ScanRun(Base):
     # 사용자에게 노출 가능한 안정적 실패 분류/메시지. 원시 경로·명령·traceback은 로그에만 남긴다.
     failure_code: Mapped[str] = mapped_column(String(64), default="")
     failure_message: Mapped[str] = mapped_column(String(256), default="")
+    # 가져온 원본 XML 내용의 지문(SHA-256). 단독 스캐너가 도킹할 때마다 같은 결과를 다시 올려
+    # 스캔 이력이 불어나고 닫힘 판정이 재실행되는 것을 막는다. 직접 실행한 스캔은 빈 값.
+    source_fingerprint: Mapped[str] = mapped_column(String(64), default="", index=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 

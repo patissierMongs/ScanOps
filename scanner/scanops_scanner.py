@@ -1493,29 +1493,59 @@ def server_login(base_url: str, username: str, password: str, timeout: float) ->
         raise ValueError(f"서버 로그인 응답을 해석할 수 없습니다: {exc}")
 
 
-def sync_presets(args: argparse.Namespace, preset_path: Path) -> int:
-    """단독 스캐너 프리셋 ↔ 웹 서버 프리셋 동기화(도킹).
+def dock(args: argparse.Namespace, preset_path: Path) -> int:
+    """도킹 — 프리셋 동기화 + 스캔 결과 업로드를 한 번에.
 
-    1) 서버 목록을 읽어 이름 충돌(같은 이름·다른 내용)이 있는지 먼저 확인한다.
-    2) 충돌이 하나라도 있으면 **양쪽 모두 그대로 두고** 충돌 목록만 보고한다(코드 3).
-    3) 충돌이 없으면 서버가 합집합을 저장하고, 그 최종 목록을 로컬 파일에도 그대로 쓴다.
+    프리셋 충돌은 결과 업로드를 막지 않는다(둘은 독립적인 데이터다). 다만 충돌이 있었으면
+    사람이 볼 수 있도록 종료 코드로 남긴다.
     """
+    base_url, token = _dock_endpoint(args)
+    what = getattr(args, "sync_only", "") or "all"
+    preset_rc = 0
+    if what in ("all", "presets"):
+        preset_rc = sync_presets(args, preset_path, base_url=base_url, token=token)
+    result_failures = 0
+    if what in ("all", "results"):
+        result_failures = sync_results(
+            base_url, token, Path(args.output_dir), args.sync_timeout,
+            resend=getattr(args, "resend_results", False),
+        )
+    if result_failures:
+        return 1
+    return preset_rc
+
+
+def _dock_endpoint(args: argparse.Namespace) -> tuple[str, str]:
+    """--server/--token(또는 로그인)에서 도킹 대상과 토큰을 확정한다."""
     base_url = (args.server or "").strip().rstrip("/")
     if not base_url:
         raise ValueError("--server 로 ScanOps 웹 주소를 지정하세요. 예: --server http://10.0.0.5:8770")
     if not base_url.lower().startswith(("http://", "https://")):
         raise ValueError(f"--server 는 http:// 또는 https:// 로 시작해야 합니다: {base_url}")
     token = (args.token or os.environ.get("SCANOPS_TOKEN", "")).strip()
-    if not token:
-        # 비밀번호는 환경변수로도 받는다 — argv 는 같은 호스트의 다른 사용자에게 보인다.
-        password = args.password or os.environ.get("SCANOPS_PASSWORD", "")
-        if not (args.username and password):
-            raise ValueError(
-                "--token 또는 --username/--password 로 인증하세요"
-                "(환경변수 SCANOPS_TOKEN·SCANOPS_PASSWORD 도 가능). "
-                "프리셋 동기화는 auditor 이상 권한이 필요합니다."
-            )
-        token = server_login(base_url, args.username, password, args.sync_timeout)
+    if token:
+        return base_url, token
+    # 비밀번호는 환경변수로도 받는다 — argv 는 같은 호스트의 다른 사용자에게 보인다.
+    password = args.password or os.environ.get("SCANOPS_PASSWORD", "")
+    if not (args.username and password):
+        raise ValueError(
+            "--token 또는 --username/--password 로 인증하세요"
+            "(환경변수 SCANOPS_TOKEN·SCANOPS_PASSWORD 도 가능). "
+            "도킹은 auditor 이상 권한이 필요합니다."
+        )
+    return base_url, server_login(base_url, args.username, password, args.sync_timeout)
+
+
+def sync_presets(args: argparse.Namespace, preset_path: Path,
+                 base_url: str = "", token: str = "") -> int:
+    """단독 스캐너 프리셋 ↔ 웹 서버 프리셋 동기화(도킹).
+
+    1) 서버 목록을 읽어 이름 충돌(같은 이름·다른 내용)이 있는지 먼저 확인한다.
+    2) 충돌이 하나라도 있으면 **양쪽 모두 그대로 두고** 충돌 목록만 보고한다(코드 3).
+    3) 충돌이 없으면 서버가 합집합을 저장하고, 그 최종 목록을 로컬 파일에도 그대로 쓴다.
+    """
+    if not (base_url and token):
+        base_url, token = _dock_endpoint(args)
 
     local = load_presets(preset_path)
     remote_doc = _sync_request(f"{base_url}/api/scan-presets", token, None, args.sync_timeout)
@@ -1554,6 +1584,151 @@ def sync_presets(args: argparse.Namespace, preset_path: Path) -> int:
     return 0
 
 
+# ── 스캔 결과 도킹(업로드) ──
+
+def result_fingerprint(xml_payloads: list[bytes]) -> str:
+    """가져온 결과 단위의 내용 지문 — 서버 scans.result_fingerprint 와 같은 규칙.
+
+    파일 내용만으로 계산하므로 폴더를 복사해 다른 경로에서 도킹해도 같은 결과로 인식된다.
+    """
+    parts = sorted(hashlib.sha256(payload).hexdigest() for payload in xml_payloads)
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def stage_of(name: str) -> str:
+    for stage_id, _label in AUTO_STAGES:
+        if name.lower().endswith(f".{stage_id}.xml"):
+            return stage_id
+    return ""
+
+
+def collect_result_units(output_dir: Path) -> list[dict]:
+    """업로드할 결과 단위 목록.
+
+    - manifest 가 있는 실행: manifest 가 추천하는 XML 만 한 단위로 묶는다(닫힘 계약 유지).
+    - `interrupted/` 안의 XML: manifest 가 없다(중단 시점엔 아직 안 만들어짐). 각각 단위로 올리되
+      계약 없이 가므로 서버가 관측 전용으로 받는다 — 닫힘 판정 권한은 없다.
+    """
+    output_dir = Path(output_dir)
+    units: list[dict] = []
+    claimed: set[Path] = set()
+    for manifest_path in sorted(output_dir.glob("*.manifest.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(manifest, dict) or manifest.get("tool") != "scanops_scanner":
+            continue
+        xml_paths = []
+        for value in manifest.get("import_xml_files") or []:
+            path = Path(value)
+            if not path.is_absolute():
+                path = output_dir / path.name
+            if path.exists():
+                xml_paths.append(path)
+        if not xml_paths:
+            continue
+        claimed.update(xml_paths)
+        units.append({
+            "kind": "manifest",
+            "name": manifest_path.stem.replace(".manifest", ""),
+            "status": manifest.get("status", ""),
+            "manifest": manifest_path,
+            "xml": xml_paths,
+        })
+
+    interrupted = output_dir / INTERRUPTED_DIR_NAME
+    if interrupted.is_dir():
+        for xml_path in sorted(interrupted.glob("*.xml")):
+            units.append({
+                "kind": "interrupted",
+                "name": xml_path.name,
+                "status": "interrupted",
+                "manifest": None,
+                "xml": [xml_path],
+            })
+    for unit in units:
+        unit["fingerprint"] = result_fingerprint([p.read_bytes() for p in unit["xml"]])
+    return units
+
+
+def _multipart_body(files: list[tuple[str, str, bytes]]) -> tuple[bytes, str]:
+    """multipart/form-data 본문을 표준 라이브러리만으로 조립(스캐너는 의존성이 없다)."""
+    boundary = "----scanops" + hashlib.sha256(
+        b"".join(payload for _f, _n, payload in files) + str(len(files)).encode()
+    ).hexdigest()[:24]
+    out = bytearray()
+    for field, filename, payload in files:
+        out += f"--{boundary}\r\n".encode()
+        out += (f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
+                "Content-Type: application/octet-stream\r\n\r\n").encode()
+        out += payload
+        out += b"\r\n"
+    out += f"--{boundary}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+
+def _upload_unit(base_url: str, token: str, unit: dict, timeout: float) -> dict:
+    files: list[tuple[str, str, bytes]] = [
+        ("files", path.name, path.read_bytes()) for path in unit["xml"]
+    ]
+    if unit["manifest"] is not None:
+        files.append(("files", unit["manifest"].name, unit["manifest"].read_bytes()))
+    body, content_type = _multipart_body(files)
+    request = urllib.request.Request(f"{base_url}/api/scans/import-bundle", data=body, method="POST")
+    request.add_header("Authorization", f"Bearer {token}")
+    request.add_header("Content-Type", content_type)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("detail", "")
+        except Exception:
+            pass
+        raise ValueError(f"업로드 실패 {exc.code}: {detail or exc.reason}")
+    except urllib.error.URLError as exc:
+        raise ValueError(f"서버에 연결할 수 없습니다: {base_url} ({exc.reason})")
+
+
+def sync_results(base_url: str, token: str, output_dir: Path, timeout: float,
+                 resend: bool = False) -> int:
+    """결과 폴더의 스캔 결과를 서버로 올린다(자동 인입).
+
+    서버에 이미 있는 지문은 빼고 새 결과만 보낸다 — 그러지 않으면 도킹할 때마다 같은 결과로
+    스캔 이력이 불어나고 닫힘 판정이 다시 돈다.
+    """
+    units = collect_result_units(output_dir)
+    if not units:
+        print(f"results: 올릴 결과가 없습니다 ({output_dir})")
+        return 0
+    known: set = set()
+    if not resend:
+        response = _sync_request(f"{base_url}/api/scans/known-results", token,
+                                 {"fingerprints": [u["fingerprint"] for u in units]}, timeout)
+        known = set(response.get("known") or [])
+    pending = [u for u in units if u["fingerprint"] not in known]
+    print(f"results: 총 {len(units)}건 · 이미 가져온 것 {len(units) - len(pending)}건 "
+          f"· 올릴 것 {len(pending)}건")
+
+    failures = 0
+    for unit in pending:
+        label = f"{unit['name']} [{unit['status'] or unit['kind']}]"
+        try:
+            result = _upload_unit(base_url, token, unit, timeout)
+        except ValueError as exc:
+            print(f"  error: {label} — {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        counts = result.get("counts") or {}
+        mode = result.get("closure_mode", "")
+        note = " (관측 전용 — 닫힘 판정 없음)" if unit["kind"] == "interrupted" else ""
+        print(f"  uploaded: {label} → 신규 {counts.get('new', 0)} / 갱신 {counts.get('updated', 0)}"
+              f" · {mode}{note}")
+    return failures
+
+
 def run_preset_command(args: argparse.Namespace) -> int | None:
     """프리셋 관리 하위 명령. 스캔을 실행하지 않고 끝나면 종료 코드를, 아니면 None 을 준다."""
     preset_path = Path(args.preset_file) if args.preset_file else default_preset_path()
@@ -1587,7 +1762,7 @@ def run_preset_command(args: argparse.Namespace) -> int | None:
         print(f"saved: {preset_summary(preset)} → {preset_path}")
         return 0
     if args.sync:
-        return sync_presets(args, preset_path)
+        return dock(args, preset_path)
     return None
 
 
@@ -2292,7 +2467,11 @@ def parser() -> argparse.ArgumentParser:
     presets.add_argument("--overwrite-preset", action="store_true", help="Allow --save-preset to replace an existing name.")
     presets.add_argument("--delete-preset", metavar="NAME", default="", help="Delete a saved preset and exit.")
     presets.add_argument("--sync", action="store_true",
-                         help="Dock to a ScanOps web server: check for conflicting preset names, then sync both sides. Exits without scanning.")
+                         help="Dock to a ScanOps web server: sync presets and upload scan results (auto-ingested). Exits without scanning.")
+    presets.add_argument("--sync-only", choices=["all", "presets", "results"], default="all",
+                         help="Limit what --sync does. Default all (presets + scan results).")
+    presets.add_argument("--resend-results", action="store_true",
+                         help="Upload every scan result again, even ones the server already imported.")
     presets.add_argument("--server", default="", help="ScanOps web base URL for --sync. Example: http://10.0.0.5:8770")
     presets.add_argument("--token", default="", help="ScanOps API token for --sync. Falls back to the SCANOPS_TOKEN env var.")
     presets.add_argument("--username", default="", help="ScanOps account for --sync when no token is given.")

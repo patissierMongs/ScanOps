@@ -333,3 +333,104 @@ def test_a_preset_written_by_the_scanner_loads_on_the_server_and_back(tmp_path):
     assert round_tripped == scanner.load_presets(scanner_file)
     # 지문까지 같아야 '내용이 같다'는 판정이 양쪽에서 일치한다.
     assert scanner.preset_fingerprint(round_tripped[0]) == preset_store.fingerprint(from_server[0])
+
+
+# ── 도킹: 스캔 결과 업로드 ──
+
+def test_known_results_lets_the_scanner_skip_what_the_server_already_has(client):
+    """도킹할 때마다 폴더 전체를 올리면 같은 결과로 스캔 이력이 불어나고 닫힘 판정이 다시 돈다."""
+    auth = _auth(client)
+    xml = (Path(__file__).parent / "fixtures" / "sample_scan.xml").read_bytes()
+
+    r = client.post("/api/scans/import", headers=auth,
+                    files={"file": ("weekly.xml", xml, "text/xml")})
+    assert r.status_code == 200, r.text
+
+    from scanops.api.scans import result_fingerprint
+    fingerprint = result_fingerprint([xml])
+    known = client.post("/api/scans/known-results", headers=auth,
+                        json={"fingerprints": [fingerprint, "0" * 64]}).json()
+    assert known["known"] == [fingerprint]
+
+
+def test_result_fingerprint_ignores_file_name_and_stage_order():
+    """폴더를 복사해 다른 경로·다른 순서로 도킹해도 같은 결과로 인식돼야 중복이 막힌다."""
+    from scanops.api.scans import result_fingerprint
+    a, b = b"<nmaprun/>", b"<nmaprun x=''/>"
+    assert result_fingerprint([a, b]) == result_fingerprint([b, a])
+    assert result_fingerprint([a]) != result_fingerprint([b])
+
+
+def test_scanner_and_server_compute_the_same_result_fingerprint():
+    """지문 규칙이 두 곳에 복제돼 있다 — 어긋나면 중복 제거가 통째로 무력해진다."""
+    from scanops.api.scans import result_fingerprint as server_side
+    scanner = _load_scanner()
+    payloads = [b"<nmaprun a=''/>", b"<nmaprun b=''/>"]
+    assert scanner.result_fingerprint(payloads) == server_side(payloads)
+
+
+def test_docking_collects_manifest_units_and_interrupted_xml_separately(tmp_path):
+    """중단본은 manifest 가 없다 — 계약 없이 올라가 서버가 관측 전용으로 받는다."""
+    scanner = _load_scanner()
+    out = tmp_path / "scanops_scans"
+    (out / scanner.INTERRUPTED_DIR_NAME).mkdir(parents=True)
+    (out / "weekly.10.0.0.1.tcp_discovery.xml").write_bytes(b"<nmaprun/>")
+    (out / "weekly.manifest.json").write_text(json.dumps({
+        "tool": "scanops_scanner", "status": "done",
+        "import_xml_files": [str(out / "weekly.10.0.0.1.tcp_discovery.xml")],
+    }), encoding="utf-8")
+    (out / scanner.INTERRUPTED_DIR_NAME / "adhoc.tcp_discovery.xml").write_bytes(b"<nmaprun p=''/>")
+
+    units = scanner.collect_result_units(out)
+    kinds = {u["kind"]: u for u in units}
+    assert set(kinds) == {"manifest", "interrupted"}
+    assert kinds["manifest"]["manifest"] is not None
+    assert kinds["interrupted"]["manifest"] is None      # 계약 없음 = 닫힘 권한 없음
+    assert kinds["interrupted"]["status"] == "interrupted"
+    assert len({u["fingerprint"] for u in units}) == 2
+
+
+def test_docking_uploads_only_units_the_server_does_not_have(tmp_path, monkeypatch, capsys):
+    scanner = _load_scanner()
+    out = tmp_path / "scanops_scans"
+    out.mkdir(parents=True)
+    (out / "a.xml").write_bytes(b"<nmaprun a=''/>")
+    (out / "a.manifest.json").write_text(json.dumps({
+        "tool": "scanops_scanner", "status": "done", "import_xml_files": [str(out / "a.xml")],
+    }), encoding="utf-8")
+    (out / "b.xml").write_bytes(b"<nmaprun b=''/>")
+    (out / "b.manifest.json").write_text(json.dumps({
+        "tool": "scanops_scanner", "status": "done", "import_xml_files": [str(out / "b.xml")],
+    }), encoding="utf-8")
+
+    already = scanner.result_fingerprint([b"<nmaprun a=''/>"])
+    uploaded: list = []
+    monkeypatch.setattr(scanner, "_sync_request",
+                        lambda url, token, payload, timeout: {"known": [already]})
+    monkeypatch.setattr(scanner, "_upload_unit",
+                        lambda base, token, unit, timeout: uploaded.append(unit["name"]) or
+                        {"counts": {"new": 1, "updated": 0}, "closure_mode": "manifest"})
+
+    assert scanner.sync_results("http://server:8770", "t", out, 5.0) == 0
+    assert uploaded == ["b"]                       # 이미 있는 a 는 다시 올리지 않는다
+    assert "이미 가져온 것 1건" in capsys.readouterr().out
+
+
+def test_resend_results_ignores_the_server_side_dedup(tmp_path, monkeypatch):
+    scanner = _load_scanner()
+    out = tmp_path / "scanops_scans"
+    out.mkdir(parents=True)
+    (out / "a.xml").write_bytes(b"<nmaprun a=''/>")
+    (out / "a.manifest.json").write_text(json.dumps({
+        "tool": "scanops_scanner", "status": "done", "import_xml_files": [str(out / "a.xml")],
+    }), encoding="utf-8")
+
+    uploaded: list = []
+    def refuse(*_a, **_k):
+        raise AssertionError("--resend-results 는 서버에 중복 확인을 묻지 않는다")
+    monkeypatch.setattr(scanner, "_sync_request", refuse)
+    monkeypatch.setattr(scanner, "_upload_unit",
+                        lambda base, token, unit, timeout: uploaded.append(unit["name"]) or
+                        {"counts": {"new": 0, "updated": 1}, "closure_mode": "manifest"})
+    assert scanner.sync_results("http://s:8770", "t", out, 5.0, resend=True) == 0
+    assert uploaded == ["a"]

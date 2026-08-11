@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import SessionLocal, get_db
 from ..models import ACTIVE_FINDING_STATES, Finding, ScanRun, User
-from ..schemas import IngestSummary, RawCommandIn, ScanOut, ScanRunIn
+from ..schemas import IngestSummary, KnownResultsIn, RawCommandIn, ScanOut, ScanRunIn
 from ..uploads import read_limited
 from ..scanning import chunker, engine_runner, nmap_runner, scan_options, scope, taxonomy
 from ..scanning.presets import PRESETS
@@ -1461,6 +1461,16 @@ def _fail_import(db: Session, scan_id: int, artifact_paths: list[Path]) -> None:
             )
 
 
+def result_fingerprint(xml_payloads: list[bytes]) -> str:
+    """가져온 결과 단위의 내용 지문.
+
+    같은 XML 을 다시 도킹하면 같은 값이 나오도록 파일 내용만으로 계산한다(파일명·경로 무관).
+    묶음은 구성 파일 지문을 정렬해 합치므로 단계 순서가 달라도 같은 값이다.
+    """
+    parts = sorted(hashlib.sha256(payload).hexdigest() for payload in xml_payloads)
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
 def _import_single_xml(
     db: Session,
     user: User,
@@ -1471,7 +1481,8 @@ def _import_single_xml(
     # Full parsing precedes every persistent side effect. A malformed upload therefore
     # cannot leave a ScanRun row, raw XML file, finding mutation, or success audit record.
     sdate, findings, scanned_hosts, tcp_scope, udp_scope = _prepare_import_xml(xml_bytes, name)
-    scan = ScanRun(name=f"가져오기: {name}", status="running", created_by=user.id)
+    scan = ScanRun(name=f"가져오기: {name}", status="running", created_by=user.id,
+                   source_fingerprint=result_fingerprint([xml_bytes]))
     db.add(scan)
     db.commit()
     if sdate is not None:
@@ -1517,7 +1528,9 @@ def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, d
     dates = [values[0] for values in prepared.values() if values[0] is not None]
     sdate = min(dates) if dates else None
     display = Path(base.replace("\\", "/")).name
-    scan = ScanRun(name=f"가져오기: {display} 자동 스캔 묶음", status="running", created_by=user.id)
+    scan = ScanRun(name=f"가져오기: {display} 자동 스캔 묶음", status="running", created_by=user.id,
+                   source_fingerprint=result_fingerprint(
+                       [item["bytes"] for item in stages.values()]))
     scan.command = "자동 스캔 XML 묶음 · TCP 발견 → TCP 식별 → UDP 식별"
     db.add(scan)
     db.commit()
@@ -1633,6 +1646,29 @@ def get_scan(scan_id: int, _: User = Depends(current_user), db: Session = Depend
     if scan is None:
         raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
     return scan
+
+
+@router.post("/known-results")
+def known_results(
+    body: KnownResultsIn,
+    _: User = Depends(require_role("auditor")),
+    db: Session = Depends(get_db),
+) -> dict:
+    """이미 가져온 결과의 지문을 알려 준다 — 단독 스캐너 도킹의 중복 인입 방지용.
+
+    스캐너가 매번 폴더 전체를 올리면 같은 결과로 스캔 이력이 불어나고 닫힘 판정이 다시 돈다.
+    올리기 전에 이 목록을 빼면 새 결과만 전송된다. 지문은 XML 내용만으로 계산하므로 파일을
+    다른 경로로 복사해 와도 같은 결과로 인식된다.
+    """
+    wanted = {f for f in body.fingerprints if isinstance(f, str) and f}
+    if not wanted:
+        return {"known": []}
+    if len(wanted) > 5000:
+        raise HTTPException(status_code=400, detail="한 번에 확인할 수 있는 지문은 5000개까지입니다.")
+    rows = db.query(ScanRun.source_fingerprint).filter(
+        ScanRun.source_fingerprint.in_(wanted)
+    ).all()
+    return {"known": sorted({row[0] for row in rows if row[0]})}
 
 
 @router.post("/import", response_model=IngestSummary)
