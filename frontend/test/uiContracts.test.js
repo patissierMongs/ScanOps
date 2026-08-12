@@ -130,6 +130,8 @@ test("dashboard and scan history share every localized scan status", () => {
       canceled: "중지됨",
       interrupted: "중단됨(서버 재시작)",
       failed: "실패",
+      // nmap 이 끝까지 정상 종료하지 못한 실행 — 결과는 쓰되 닫힘 판정에서 제외된다.
+      partial: "부분 완료",
       done: "완료",
     },
   );
