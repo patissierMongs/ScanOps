@@ -121,6 +121,60 @@ print("SLIM-OK")
 """
 
 
+def _split_fixture(tmp_path, payload: bytes, limit_mb: float):
+    build = _builder()
+    archive = tmp_path / "ScanOps_allinone.zip"
+    archive.write_bytes(payload)
+    parts = build.split_archive(archive, limit_mb)
+    return build, archive, parts
+
+
+def test_split_parts_stay_under_the_limit_and_rejoin_byte_for_byte(tmp_path):
+    """조각을 이어붙인 것이 원본과 '바이트가 같아야' 한다.
+
+    받는 쪽에서 이 성질이 깨지면 zip 이 열리다 말고 끝나는데, 그때는 이미
+    에어갭 안이라 되돌릴 수 없다."""
+    import hashlib
+    import os
+
+    payload = os.urandom(5 * 1024 * 1024) + b"tail"
+    _, archive, parts = _split_fixture(tmp_path, payload, limit_mb=2)
+
+    assert [p.name for p in parts] == [
+        "ScanOps_allinone.zip.001",
+        "ScanOps_allinone.zip.002",
+        "ScanOps_allinone.zip.003",
+    ]
+    assert all(p.stat().st_size <= 2 * 1024 * 1024 for p in parts)
+    assert b"".join(p.read_bytes() for p in parts) == payload
+    # 원본은 남기지 않는다 — 조각과 원본이 같이 있으면 어느 쪽을 옮길지 헷갈린다.
+    assert not archive.exists()
+
+    recorded = (tmp_path / "ScanOps_allinone.zip.sha256").read_text().split()[0]
+    assert recorded == hashlib.sha256(payload).hexdigest()
+
+
+def test_join_script_lists_every_part_in_order_and_checks_the_hash(tmp_path):
+    import hashlib
+
+    payload = b"z" * (3 * 1024 * 1024)
+    _, _, parts = _split_fixture(tmp_path, payload, limit_mb=1)
+    script = (tmp_path / "JOIN.bat").read_text(encoding="ascii")
+
+    joined = "+".join(f'"{p.name}"' for p in parts)
+    assert joined in script                      # 순서가 어긋나면 zip 이 깨진다
+    assert hashlib.sha256(payload).hexdigest() in script
+    assert "Get-FileHash" in script and "copy /b" in script
+
+
+def test_split_rejects_a_nonpositive_limit(tmp_path):
+    build = _builder()
+    archive = tmp_path / "ScanOps_allinone.zip"
+    archive.write_bytes(b"x")
+    with pytest.raises(SystemExit):
+        build.split_archive(archive, 0)
+
+
 def test_server_answers_requests_with_every_trimmed_module_blocked(tmp_path):
     code = _BLOCKED_RUN.format(
         backend=str(ROOT / "backend"),

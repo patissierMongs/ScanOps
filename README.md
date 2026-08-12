@@ -47,8 +47,23 @@ import 하면 빌드가 그 자리에서 멈추고(`verify_stdlib_drop`), 같은
 
 크기 참고(3.13, 슬림 적용): **약 15 MB**. 이 중 임베디드 CPython 런타임만 약 9.8 MB
 (`python313.dll` 2.5 · 표준 라이브러리 2.9 · OpenSSL 2.2 · `sqlite3.dll` 0.85)이고, 나머지는
-`pydantic_core` 2.0 · SQLAlchemy 1.6 · 프론트 dist 0.5 입니다. 이 구성으로 10 MB 밑은 나오지
-않습니다 — 위 항목은 모두 서버가 부팅하고 로그인하는 데 필요합니다.
+`pydantic_core` 2.0 · SQLAlchemy 1.6 · 프론트 dist 0.5 입니다. 이 구성으로 한 파일 10 MB 밑은
+나오지 않습니다 — 위 항목은 모두 서버가 부팅하고 로그인하는 데 필요합니다.
+
+### 반출 한도에 맞춰 조각으로 나누기
+파일 하나의 크기 제한(USB·메일·반출 심사)이 있으면 **지우지 말고 나눕니다.**
+
+```powershell
+python packaging\build_allinone.py --split-mb 10 --max-mb 10
+# -> ScanOps_allinone.zip.001 (10.0 MB), .002 (5.0 MB), JOIN.bat, .sha256
+```
+- 받는 쪽에서 **반디집/7-Zip 은 `.001` 을 그대로 열면** 됩니다(나머지 조각은 같은 폴더에 두세요).
+- 그런 도구가 없는 서버는 함께 들어 있는 **`JOIN.bat`** 을 실행하면 Windows 기본 `copy /b` 로
+  되붙이고 SHA-256 까지 확인합니다. 값이 다르면 합친 파일을 지우고 멈춥니다 — USB 복사가
+  중간에 잘린 채로 압축을 풀다 마는 사고를 막기 위해서입니다.
+- 형식은 zip 분할 볼륨(`.z01`)이 아니라 단순 바이트 분할입니다. 분할 볼륨은 전용 도구가 없으면
+  손쓸 방법이 없지만, 바이트 분할은 도구가 없어도 `copy /b` 로 되돌릴 수 있습니다.
+- `--max-mb` 는 **조각 하나의** 한도로 판정합니다(분할하지 않으면 전체 크기).
 ```powershell
 # 1) 프론트 빌드(Node.js 20.19+ 또는 22.12+, 인터넷 되는 PC에서 1회) → frontend/dist 생성
 cd frontend && npm install && npm run build

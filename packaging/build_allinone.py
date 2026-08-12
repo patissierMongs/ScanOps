@@ -5,9 +5,10 @@
 
 ASCII 전용 스크립트.
 Usage:
-    python packaging/build_allinone.py                  # 3.12 (기본, ../ScanOps_allinone.zip)
-    python packaging/build_allinone.py --python 3.13    # ../ScanOps_allinone_py313.zip
-    python packaging/build_allinone.py --python 3.12 --out /path/to/custom.zip
+    python packaging/build_allinone.py                     # 3.13 (기본, ../ScanOps_allinone.zip)
+    python packaging/build_allinone.py --python 3.12       # ../ScanOps_allinone_py312.zip
+    python packaging/build_allinone.py --split-mb 10       # 10 MB 조각 + JOIN.bat (반출 한도용)
+    python packaging/build_allinone.py --out /path/to/custom.zip
 
 wheelhouse 는 지원 버전별 win_amd64 휠을 모두 담고 있어야 한다(pure 휠은 공용, 바이너리
 휠은 cp312/cp313 각각). 인자 없이 실행할 때의 산출물 이름/스테이지 경로는 기존 계약 그대로다
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import re
 import shutil
 import subprocess
@@ -389,6 +391,70 @@ def zip_bundle(app: Path) -> int:
     return count
 
 
+def split_archive(archive: Path, limit_mb: float) -> list[Path]:
+    """전송 한도(USB/메일/반출 심사) 때문에 산출물을 조각으로 나눈다.
+
+    형식은 zip 의 분할 볼륨(.z01)이 아니라 **단순 바이트 분할**(.001, .002 …)이다.
+    이유는 받는 쪽의 선택지를 넓히려는 것 하나다 — 반디집/7-Zip 은 .001 을 그대로 열고,
+    그런 도구가 아예 없는 서버에서도 함께 넣은 JOIN.bat 이 Windows 기본 `copy /b` 로
+    되붙인다. 분할 볼륨 zip 은 도구 없이는 손쓸 방법이 없고 파이썬 표준 라이브러리로
+    만들 수도 없다.
+
+    조각을 이어붙이면 원본과 바이트가 같아야 하므로, 합친 결과의 SHA-256 을 옆에 적어
+    둔다(USB 복사가 중간에 잘리는 사고는 조용히 지나가면 안 된다)."""
+    limit = int(limit_mb * 1024 * 1024)
+    if limit <= 0:
+        raise SystemExit("--split-mb 는 0 보다 커야 합니다.")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    parts: list[Path] = []
+    with archive.open("rb") as src:
+        while chunk := src.read(limit):
+            part = archive.with_name(f"{archive.name}.{len(parts) + 1:03d}")
+            part.write_bytes(chunk)
+            parts.append(part)
+    archive.with_name(archive.name + ".sha256").write_text(
+        f"{digest} *{archive.name}\n", encoding="ascii",
+    )
+    write_join_script(archive, parts, digest)
+    archive.unlink()          # 조각만 남긴다. 원본이 같이 있으면 어느 쪽을 옮길지 헷갈린다.
+    for part in parts:
+        log(f"part {part.name}: {part.stat().st_size / 1024 / 1024:.1f} MB")
+    return parts
+
+
+def write_join_script(archive: Path, parts: list[Path], digest: str) -> Path:
+    """조각을 되붙이는 배치 파일. 반디집이 없는 서버를 위한 최후 수단이다."""
+    joined = "+".join(f'"{p.name}"' for p in parts)
+    script = archive.with_name("JOIN.bat")
+    script.write_text(
+        "@echo off\r\n"
+        "setlocal\r\n"
+        "cd /d \"%~dp0\"\r\n"
+        f"echo Joining {len(parts)} parts into {archive.name} ...\r\n"
+        f"copy /b {joined} \"{archive.name}\" >nul\r\n"
+        "if errorlevel 1 goto :failed\r\n"
+        "echo Verifying SHA-256 ...\r\n"
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command "
+        f"\"if ((Get-FileHash -Algorithm SHA256 '{archive.name}').Hash -ne '{digest}')"
+        " { exit 1 }\"\r\n"
+        "if errorlevel 1 goto :corrupt\r\n"
+        f"echo OK. Unzip {archive.name} and run START.bat\r\n"
+        "pause\r\n"
+        "exit /b 0\r\n"
+        ":failed\r\n"
+        "echo [ERROR] join failed -- are all parts in this folder?\r\n"
+        "pause\r\n"
+        "exit /b 1\r\n"
+        ":corrupt\r\n"
+        "echo [ERROR] checksum mismatch -- copy the parts again.\r\n"
+        f"del \"{archive.name}\"\r\n"
+        "pause\r\n"
+        "exit /b 1\r\n",
+        encoding="ascii",
+    )
+    return script
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Build the all-in-one air-gapped bundle.")
     ap.add_argument("--python", default=DEFAULT_PYTHON, choices=sorted(PY_RELEASES),
@@ -398,6 +464,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="Keep the untrimmed runtime (debugging the bundle itself).")
     ap.add_argument("--max-mb", type=float, default=None,
                     help="Fail the build if the archive exceeds this size in MB.")
+    ap.add_argument("--split-mb", type=float, default=None, metavar="MB",
+                    help="Split the archive into .001/.002 parts of at most MB each "
+                         "(Bandizip/7-Zip open the .001; JOIN.bat rejoins without them).")
     args = ap.parse_args(argv)
     configure(args.python, Path(args.out) if args.out else None)
 
@@ -419,10 +488,15 @@ def main(argv: list[str] | None = None) -> None:
     n = zip_bundle(app)
     size_mb = OUT.stat().st_size / 1024 / 1024
     log(f"wrote {OUT} : {n} files, {size_mb:.1f} MB")
-    if args.max_mb and size_mb > args.max_mb:
+    # --max-mb 는 '한 조각의' 한도다. 분할하면 조각 크기로 판정한다.
+    limit_target = size_mb if not args.split_mb else min(args.split_mb, size_mb)
+    if args.max_mb and limit_target > args.max_mb:
         raise SystemExit(
-            f"번들이 한도를 넘었습니다: {size_mb:.1f} MB > {args.max_mb} MB"
+            f"번들이 한도를 넘었습니다: {limit_target:.1f} MB > {args.max_mb} MB"
         )
+    if args.split_mb:
+        parts = split_archive(OUT, args.split_mb)
+        log(f"split into {len(parts)} parts (+ JOIN.bat, {OUT.name}.sha256)")
 
 
 if __name__ == "__main__":
