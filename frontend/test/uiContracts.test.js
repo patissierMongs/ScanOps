@@ -377,3 +377,47 @@ test("scan screen shows target and run first, with everything else folded away",
   // 가져오기는 '스캔한다'와 다른 작업이라 실행 버튼 옆이 아니라 따로 둔다.
   assert.match(scans, /className="scan-import-row"/);
 });
+
+test("folder import drops interrupted scan output before uploading it", async () => {
+  const { prepareImportGroups, isInterruptedPath } = await import("../src/lib/scanImports.js");
+
+  assert.ok(isInterruptedPath("scans/interrupted/scan.x.tcp_discovery.interrupted.xml"));
+  assert.ok(isInterruptedPath("scan.x.tcp_identify.interrupted.xml"));
+  assert.ok(isInterruptedPath("scans/interrupted/scan.x.xml"));
+  // 'interrupted' 가 이름의 일부일 뿐인 온전한 결과는 막지 않는다.
+  assert.equal(isInterruptedPath("scans/interrupted_hosts_report.xml"), false);
+  assert.equal(isInterruptedPath("scans/scan.x.tcp_discovery.xml"), false);
+
+  const file = (path) => ({
+    webkitRelativePath: path,
+    name: path.split("/").at(-1),
+    text: async () => "",
+  });
+  const plan = await prepareImportGroups([
+    file("scans/scan.a.tcp_discovery.xml"),
+    file("scans/interrupted/scan.a.tcp_identify.interrupted.xml"),
+  ]);
+
+  const uploaded = plan.groups.flatMap((group) => group.files.map((f) => f.name));
+  assert.deepEqual(uploaded, ["scans/scan.a.tcp_discovery.xml"]);
+  assert.equal(plan.interruptedXmlCount, 1);
+});
+
+test("import summary says how many interrupted scans it left out", async () => {
+  const { formatImportSummary } = await import("../src/lib/scanImports.js");
+  const message = formatImportSummary({
+    imported: 1, groupCount: 1, succeededGroups: 1, fileCount: 1,
+    selectedXmlCount: 1, interruptedXmlCount: 2, counts: {}, closureModes: [],
+  });
+  assert.match(message, /중단된 스캔 2개 제외/);
+});
+
+test("interrupted output that never uploads is not counted as a failure", async () => {
+  const { runImportGroups } = await import("../src/lib/scanImports.js");
+  const summary = await runImportGroups(
+    { groups: [], selectedXmlCount: 0, skippedXmlCount: 0, interruptedXmlCount: 3 },
+    async () => ({}),
+  );
+  assert.equal(summary.interruptedXmlCount, 3);
+  assert.equal(summary.hasFailures, false);
+});

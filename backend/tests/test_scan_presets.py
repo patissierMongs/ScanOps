@@ -369,8 +369,11 @@ def test_scanner_and_server_compute_the_same_result_fingerprint():
     assert scanner.result_fingerprint(payloads) == server_side(payloads)
 
 
-def test_docking_collects_manifest_units_and_interrupted_xml_separately(tmp_path):
-    """중단본은 manifest 가 없다 — 계약 없이 올라가 서버가 관측 전용으로 받는다."""
+def test_docking_uploads_completed_runs_only_and_leaves_interrupted_output_behind(tmp_path):
+    """도킹은 완주한 실행만 올린다 — 중단본은 목록에 오르지도 않는다.
+
+    부분 결과는 열린 포트를 다 못 본 상태라 인입하면 미탐이 되고, 재시도가 잘린 자리의
+    filtered 를 관측으로 믿으면 오탐이 된다."""
     scanner = _load_scanner()
     out = tmp_path / "scanops_scans"
     (out / scanner.INTERRUPTED_DIR_NAME).mkdir(parents=True)
@@ -379,14 +382,16 @@ def test_docking_collects_manifest_units_and_interrupted_xml_separately(tmp_path
         "tool": "scanops_scanner", "status": "done",
         "import_xml_files": [str(out / "weekly.10.0.0.1.tcp_discovery.xml")],
     }), encoding="utf-8")
-    (out / scanner.INTERRUPTED_DIR_NAME / "adhoc.tcp_discovery.xml").write_bytes(b"<nmaprun p=''/>")
+    (out / scanner.INTERRUPTED_DIR_NAME
+     / "adhoc.tcp_discovery.interrupted.xml").write_bytes(b"<nmaprun p=''/>")
 
     units = scanner.collect_result_units(out)
-    kinds = {u["kind"]: u for u in units}
-    assert set(kinds) == {"manifest", "interrupted"}
-    assert kinds["manifest"]["manifest"] is not None
-    assert kinds["interrupted"]["manifest"] is None      # 계약 없음 = 닫힘 권한 없음
-    assert kinds["interrupted"]["status"] == "interrupted"
+    assert [unit["kind"] for unit in units] == ["manifest"]
+    assert units[0]["manifest"] is not None
+    # 남겨 둔 중단본은 사람에게 알려 주기 위해서만 센다.
+    assert [p.name for p in scanner.interrupted_outputs(out)] == [
+        "adhoc.tcp_discovery.interrupted.xml",
+    ]
     # 지문은 더 이상 클라이언트가 계산하지 않는다 — import 단위를 나누는 서버가 판정한다.
     assert all("fingerprint" not in unit for unit in units)
 

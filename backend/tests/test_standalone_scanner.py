@@ -2167,10 +2167,11 @@ def test_interrupted_outputs_move_to_their_own_folder_and_never_overwrite(tmp_pa
 
     first = scanner.mark_interrupted_outputs(base)
     assert [Path(p).parent.name for p in first] == ["interrupted"] * 3
+    # 폴더만이 아니라 파일명에도 표식이 박힌다 — 파일 하나를 끌어다 놓아도 구분이 남는다.
     assert [Path(p).name for p in first] == [
-        "scan.10_0_0_1.tcp_discovery.xml",
-        "scan.10_0_0_1.tcp_discovery.nmap",
-        "scan.10_0_0_1.tcp_discovery.gnmap",
+        "scan.10_0_0_1.tcp_discovery.interrupted.xml",
+        "scan.10_0_0_1.tcp_discovery.interrupted.nmap",
+        "scan.10_0_0_1.tcp_discovery.interrupted.gnmap",
     ]
     assert not scanner.existing_outputs(base)          # 결과 폴더에는 남지 않는다
     assert not list(tmp_path.glob("*.xml"))
@@ -2178,32 +2179,54 @@ def test_interrupted_outputs_move_to_their_own_folder_and_never_overwrite(tmp_pa
     # 재개 후 다시 중단해도 앞선 부분 결과를 덮어쓰지 않는다.
     Path(str(base) + ".xml").write_text("second partial", encoding="utf-8")
     second = scanner.mark_interrupted_outputs(base)
-    assert Path(second[0]).name == "scan.10_0_0_1-2.tcp_discovery.xml"
-    assert (tmp_path / "interrupted" / "scan.10_0_0_1.tcp_discovery.xml").read_text(encoding="utf-8") == "partial"
+    assert Path(second[0]).name == "scan.10_0_0_1-2.tcp_discovery.interrupted.xml"
+    assert (tmp_path / "interrupted" / "scan.10_0_0_1.tcp_discovery.interrupted.xml"
+            ).read_text(encoding="utf-8") == "partial"
+
+
+def test_interrupted_outputs_are_never_offered_for_docking(tmp_path):
+    """중단본은 도킹 목록에 아예 오르지 않는다.
+
+    부분 결과를 인입하면 못 본 포트가 미탐이 되고, 재시도가 잘린 자리의 filtered 가
+    오탐이 된다. 발견 관리에서 그 둘은 되돌리기 가장 어렵다."""
+    scanner = _load_scanner()
+    out = tmp_path / "scans"
+    (out / scanner.INTERRUPTED_DIR_NAME).mkdir(parents=True)
+    (out / scanner.INTERRUPTED_DIR_NAME / "scan.10_0_0_1.tcp_discovery.interrupted.xml").write_text(
+        "<nmaprun/>", encoding="utf-8")
+
+    assert scanner.collect_result_units(out) == []
+    held = scanner.interrupted_outputs(out)
+    assert [p.name for p in held] == ["scan.10_0_0_1.tcp_discovery.interrupted.xml"]
+
+
+def test_interrupted_marker_is_recognised_by_name_and_by_folder():
+    scanner = _load_scanner()
+    assert scanner.is_interrupted_output("scan.10_0_0_1.tcp_discovery.interrupted.xml")
+    assert scanner.is_interrupted_output("out/interrupted/scan.x.tcp_identify.xml")
+    assert scanner.is_interrupted_output(r"C:\out\interrupted\scan.x.xml")
+    assert not scanner.is_interrupted_output("out/scan.10_0_0_1.tcp_discovery.xml")
+    # 'interrupted' 가 이름의 일부일 뿐인 온전한 결과는 막지 않는다.
+    assert not scanner.is_interrupted_output("out/interrupted_hosts_report.xml")
 
 
 def test_repeated_interruption_keeps_the_stage_suffix_the_server_reads(tmp_path):
-    """반복 중단 번호를 단계 접미사 '뒤'에 붙이면 서버가 단계를 못 읽는다.
-
-    그러면 발견 단계 sweep 이 '식별까지 관측한 실행'으로 취급돼, -sV 를 돌리지도 않은
-    포트 표 이름(ssh)이 앞서 관측한 진짜 식별(OpenSSH 8.9p1)을 덮어쓴다. 번호는 단계 앞에.
-    """
-    from scanops.api.scans import STAGE_FILE_RE
+    """몇 번을 중단해도 이름의 중단본 표식이 유지된다 — 서버가 그걸로 거절한다."""
+    from scanops.api.scans import is_interrupted_upload
 
     scanner = _load_scanner()
     base = tmp_path / "scan.10_0_0_1.tcp_discovery"
     for index in range(3):
         Path(str(base) + ".xml").write_text(f"partial {index}", encoding="utf-8")
         moved = Path(scanner.mark_interrupted_outputs(base)[0])
-        match = STAGE_FILE_RE.match(moved.name)
-        assert match, f"서버가 단계를 못 읽는 이름: {moved.name}"
-        assert match.group("stage") == "tcp_discovery"
+        # 몇 번을 중단하든 서버가 중단본으로 알아본다(= 가져오기 거절).
+        assert is_interrupted_upload(moved.name), f"서버가 못 알아보는 이름: {moved.name}"
 
     names = sorted(p.name for p in (tmp_path / "interrupted").glob("*.xml"))
     assert names == [
-        "scan.10_0_0_1-2.tcp_discovery.xml",
-        "scan.10_0_0_1-3.tcp_discovery.xml",
-        "scan.10_0_0_1.tcp_discovery.xml",
+        "scan.10_0_0_1-2.tcp_discovery.interrupted.xml",
+        "scan.10_0_0_1-3.tcp_discovery.interrupted.xml",
+        "scan.10_0_0_1.tcp_discovery.interrupted.xml",
     ]
 
 
@@ -2241,7 +2264,9 @@ def test_interrupted_stage_is_recorded_before_the_stop_propagates(tmp_path, monk
     run = plan["runs"][-1]
     assert run["interrupted"] is True and run["returncode"] == 130
     assert [Path(f).parent.name for f in run["files"]] == ["interrupted"]
-    assert [Path(f).name for f in run["files"]] == ["scan.10.0.0.1.tcp_discovery.xml"]
+    assert [Path(f).name for f in run["files"]] == [
+        "scan.10.0.0.1.tcp_discovery.interrupted.xml",
+    ]
     assert json.loads(state_path.read_text(encoding="utf-8"))["runs"][-1]["interrupted"] is True
     # 재개는 성공으로 보지 않으므로 이 단계를 다시 돌린다.
     assert not scanner.stage_succeeded(plan, 0, "tcp_discovery")

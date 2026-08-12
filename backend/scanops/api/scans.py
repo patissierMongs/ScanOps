@@ -75,6 +75,13 @@ AUTO_STAGE_LABELS = {
     "udp_identify": "주요 UDP 서비스 식별",
 }
 STAGE_FILE_RE = re.compile(r"^(?P<base>.+)\.(?P<stage>tcp_discovery|tcp_identify|udp_identify)\.xml$", re.I)
+# 중단본 표식 — 스캐너(scanops_scanner.INTERRUPTED_*)와 같은 문자열이어야 한다.
+INTERRUPTED_DIR_NAME = "interrupted"
+INTERRUPTED_MARK = ".interrupted"
+INTERRUPTED_REJECT = (
+    "중단된 스캔 결과는 가져올 수 없습니다. 부분 결과라 못 본 포트가 미탐이 되고, "
+    "끊긴 자리의 filtered 가 오탐이 됩니다. 스캔을 다시 완주한 뒤 가져오세요."
+)
 IMPORT_CONTRACT_SCHEMA = 1
 IMPORT_CONTRACT_MAX_HOSTS = 65536
 
@@ -355,6 +362,20 @@ def _port_scope(port_spec: str, proto: str) -> set[int] | None:
             except ValueError:
                 continue
     return ports
+
+
+def is_interrupted_upload(filename: str | None) -> bool:
+    """중단본 표식이 붙은 파일인가(`*.interrupted.xml` 또는 `interrupted/` 아래).
+
+    중단된 스캔은 열린 포트를 다 보지 못한 상태다. 관측으로 받아들이면 못 본 포트가
+    **미탐**이 되고, 재시도가 잘린 자리의 filtered 를 믿으면 **오탐**이 된다. 스캐너가
+    애초에 올리지 않지만, 사람이 파일을 끌어다 놓는 경로가 남아 있으므로 서버에서도 막는다.
+    """
+    normalized = (filename or "").replace("\\", "/").lower()
+    name = normalized.rsplit("/", 1)[-1]
+    if f"{INTERRUPTED_MARK}." in name:
+        return True
+    return f"/{INTERRUPTED_DIR_NAME}/" in f"/{normalized}"
 
 
 def _stage_file_info(filename: str | None) -> tuple[str, str] | None:
@@ -1717,6 +1738,9 @@ async def import_xml(
     user: User = Depends(require_role("auditor")),
     db: Session = Depends(get_db),
 ):
+    if is_interrupted_upload(file.filename):
+        record(db, user, "SCAN_IMPORT", target=file.filename or "", detail="중단본 거절", ok=False)
+        raise HTTPException(status_code=400, detail=INTERRUPTED_REJECT)
     xml_bytes = await read_limited(file, _settings.upload_max_bytes)
     try:
         result = _import_single_xml(db, user, file.filename or "scan.xml", xml_bytes)
@@ -1752,6 +1776,11 @@ async def import_xml_bundle(
         lower_name = name.lower()
         if not (lower_name.endswith(".xml") or lower_name.endswith(".manifest.json")):
             continue
+        # 폴더째 가져오기는 `interrupted/` 까지 재귀로 딸려 온다. 조용히 섞이면
+        # 부분 결과가 온전한 결과와 같은 무게로 인입된다.
+        if is_interrupted_upload(name):
+            record(db, user, "SCAN_IMPORT", target=name, detail="중단본 거절", ok=False)
+            raise HTTPException(status_code=400, detail=INTERRUPTED_REJECT)
         data = await read_limited(f, _settings.upload_max_bytes)
         total_bytes += len(data)
         if total_bytes > _settings.upload_bundle_max_bytes:

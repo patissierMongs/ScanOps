@@ -31,6 +31,8 @@ IMPORT_CONTRACT_MAX_HOSTS = 65536
 STATS_EVERY_DEFAULT = "10s"
 # 중단된 실행의 산출물을 모아 두는 하위 폴더 — 결과 폴더에는 온전한 결과만 남긴다.
 INTERRUPTED_DIR_NAME = "interrupted"
+# 중단본 파일명 표식. 폴더만으로는 파일 하나를 옮기는 순간 구분이 사라진다.
+INTERRUPTED_MARK = ".interrupted"
 # 정지 신호 후 nmap 이 진행분을 파일로 쓸 때까지 기다리는 시간. GUI 의 강제 종료 타이머보다
 # 짧아야 부분 결과 저장과 state 기록이 끝난 뒤에 강제 종료가 온다.
 NMAP_STOP_GRACE_SECONDS = 5.0
@@ -1027,6 +1029,29 @@ def interrupted_dir(base: Path) -> Path:
     return Path(base).parent / INTERRUPTED_DIR_NAME
 
 
+def interrupted_name(stem: str) -> str:
+    """중단본 파일명 — 이름 자체에 표식을 박는다.
+
+    중단된 스캔은 **인입하지 않는다.** 열린 포트를 다 못 봤는데 관측으로 받으면 미탐이
+    되고, 재시도가 끊긴 자리의 filtered 를 그대로 믿으면 오탐이 된다. 그런데 '안 넣는다'를
+    폴더 위치로만 지키면 파일 하나를 손으로 끌어다 놓는 순간 뚫린다. 그래서 폴더와
+    파일명 두 곳에 표식을 남기고, 스캐너·브라우저·서버 세 곳에서 각각 막는다.
+
+    표식은 맨 뒤에 붙어 단계 접미사(.tcp_discovery.xml)를 깨뜨린다 — 의도한 것이다.
+    중단본은 어떤 경로로도 '단계 계약을 갖춘 온전한 결과'로 읽히면 안 된다.
+    """
+    return f"{stem}{INTERRUPTED_MARK}"
+
+
+def is_interrupted_output(path: str | Path) -> bool:
+    """중단본인가 — 파일명 표식 또는 `interrupted/` 폴더 안."""
+    normalized = str(path).replace("\\", "/")
+    name = normalized.rsplit("/", 1)[-1].lower()
+    if f"{INTERRUPTED_MARK}." in name or name.endswith(INTERRUPTED_MARK):
+        return True
+    return f"/{INTERRUPTED_DIR_NAME}/" in f"/{normalized.lower()}"
+
+
 def numbered_stage_name(stem: str, index: int) -> str:
     """반복 중단 번호를 붙인 이름 — 단계 접미사는 **맨 뒤에 그대로 남긴다**.
 
@@ -1045,10 +1070,10 @@ def interrupted_base(base: Path) -> Path:
     """중단 산출물의 목적지 basename(하위 폴더 안). 같은 단계를 여러 번 중단하면 번호를 올려
     이전 중단본을 덮어쓰지 않는다(부분 결과 보존)."""
     stem = Path(base).name
-    candidate = interrupted_dir(base) / stem
+    candidate = interrupted_dir(base) / interrupted_name(stem)
     index = 2
     while existing_outputs(candidate):
-        candidate = interrupted_dir(base) / numbered_stage_name(stem, index)
+        candidate = interrupted_dir(base) / interrupted_name(numbered_stage_name(stem, index))
         index += 1
     return candidate
 
@@ -1759,11 +1784,14 @@ def stage_of(name: str) -> str:
 
 
 def collect_result_units(output_dir: Path) -> list[dict]:
-    """업로드할 결과 단위 목록.
+    """업로드할 결과 단위 목록 — **온전히 끝난 실행만**.
 
-    - manifest 가 있는 실행: manifest 가 추천하는 XML 만 한 단위로 묶는다(닫힘 계약 유지).
-    - `interrupted/` 안의 XML: manifest 가 없다(중단 시점엔 아직 안 만들어짐). 각각 단위로 올리되
-      계약 없이 가므로 서버가 관측 전용으로 받는다 — 닫힘 판정 권한은 없다.
+    manifest 가 있는 실행의 XML 만 한 단위로 묶는다(닫힘 계약 유지).
+
+    중단본(`interrupted/`)은 올리지 않는다. 중간에 끊긴 스캔은 열린 포트를 다 보지 못한
+    상태라 그대로 받으면 **미탐**이 되고, 재시도가 잘린 자리의 filtered 를 관측으로 믿으면
+    **오탐**이 된다. 발견 관리에서 그 둘은 되돌리기 가장 어려운 오류이므로, 부분 결과는
+    사람이 파일을 보고 판단할 재료로만 남기고 자동 인입 경로에서는 뺀다.
     """
     output_dir = Path(output_dir)
     units: list[dict] = []
@@ -1793,17 +1821,15 @@ def collect_result_units(output_dir: Path) -> list[dict]:
             "xml": xml_paths,
         })
 
-    interrupted = output_dir / INTERRUPTED_DIR_NAME
-    if interrupted.is_dir():
-        for xml_path in sorted(interrupted.glob("*.xml")):
-            units.append({
-                "kind": "interrupted",
-                "name": xml_path.name,
-                "status": "interrupted",
-                "manifest": None,
-                "xml": [xml_path],
-            })
     return units
+
+
+def interrupted_outputs(output_dir: Path) -> list[Path]:
+    """올리지 않고 남겨 둔 중단본. 개수를 사람에게 알려 주려고만 쓴다."""
+    folder = Path(output_dir) / INTERRUPTED_DIR_NAME
+    if not folder.is_dir():
+        return []
+    return sorted(p for p in folder.glob("*.xml") if is_interrupted_output(p))
 
 
 def _multipart_body(files: list[tuple[str, str, bytes]]) -> tuple[bytes, str]:
@@ -1858,6 +1884,11 @@ def sync_results(base_url: str, token: str, output_dir: Path, timeout: float,
     스캔 이력이 불어나고 닫힘 판정이 다시 돈다.
     """
     units = collect_result_units(output_dir)
+    held = interrupted_outputs(output_dir)
+    if held:
+        # 조용히 빼면 '올렸겠거니' 하고 넘어간다. 몇 건을 왜 안 올렸는지 말해 준다.
+        print(f"results: 중단본 {len(held)}건은 올리지 않습니다 "
+              f"({INTERRUPTED_DIR_NAME}/ — 부분 결과라 오탐·미탐을 만듭니다)")
     if not units:
         print(f"results: 올릴 결과가 없습니다 ({output_dir})")
         return 0
@@ -1878,10 +1909,9 @@ def sync_results(base_url: str, token: str, output_dir: Path, timeout: float,
             print(f"  skipped: {label} — 이미 가져온 결과 {skipped}건")
             continue
         mode = result.get("closure_mode", "")
-        note = " (관측 전용 — 닫힘 판정 없음)" if unit["kind"] == "interrupted" else ""
         extra = f" · 건너뜀 {skipped}" if skipped else ""
         print(f"  uploaded: {label} → 신규 {counts.get('new', 0)} / 갱신 {counts.get('updated', 0)}"
-              f" · {mode}{note}{extra}")
+              f" · {mode}{extra}")
     return failures
 
 

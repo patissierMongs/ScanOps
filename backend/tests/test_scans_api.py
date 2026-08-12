@@ -2208,3 +2208,39 @@ def test_a_sweep_never_overwrites_observed_identity_even_if_the_filename_hides_t
     assert len(after) == 1
     assert after[0]["display_identity"] == "OpenSSH 8.9p1"
     assert after[0]["product"] == "OpenSSH" and after[0]["version"] == "8.9p1"
+
+
+def test_interrupted_scan_results_are_rejected_on_import(client):
+    """중단된 스캔은 어떤 경로로도 발견 관리에 들어오지 않는다.
+
+    부분 결과는 열린 포트를 다 보지 못한 상태다. 관측으로 받으면 못 본 포트가 미탐이
+    되고, 재시도가 잘린 자리의 filtered 를 믿으면 오탐이 된다. 스캐너가 올리지 않지만
+    사람이 파일을 끌어다 놓는 경로가 남아 있으므로 서버에서도 막는다."""
+    h = _auth(client)
+    swept = _run_xml("nmap -sS -p T:1-65535 127.0.0.1", _SWEPT_SSH)
+
+    single = client.post(
+        "/api/scans/import", headers=h,
+        files={"file": ("scan.10_0_0_1.tcp_discovery.interrupted.xml", swept, "text/xml")},
+    )
+    assert single.status_code == 400
+    assert "중단된 스캔" in single.json()["detail"]
+
+    bundle = client.post(
+        "/api/scans/import-bundle", headers=h,
+        files=[("files", ("interrupted/scan.10_0_0_1.tcp_identify.xml", swept, "text/xml"))],
+    )
+    assert bundle.status_code == 400
+    assert "중단된 스캔" in bundle.json()["detail"]
+
+    assert client.get("/api/findings", headers=h).json() == []
+
+
+def test_a_complete_result_named_like_a_report_still_imports(client):
+    """'interrupted' 가 이름 일부일 뿐인 온전한 결과까지 막으면 안 된다."""
+    h = _auth(client)
+    identified = _run_xml("nmap -sS -sV -p 22 127.0.0.1", _IDENTIFIED_SSH)
+    r = client.post("/api/scans/import", headers=h,
+                    files={"file": ("interrupted_hosts_report.xml", identified, "text/xml")})
+    assert r.status_code == 200, r.text
+    assert len(client.get("/api/findings", headers=h).json()) == 1
