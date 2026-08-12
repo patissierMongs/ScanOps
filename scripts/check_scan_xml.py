@@ -68,7 +68,11 @@ def inspect(path: Path) -> dict:
 def verdict(info: dict) -> tuple[str, str]:
     """(판정, 이유). 판정은 '버림' / '재실행 권장' / '사용 가능' 셋뿐이다."""
     if info["truncated"]:
-        return "버림", "XML 이 중간에 끊겨 파싱되지 않습니다 — 다시 스캔하세요."
+        # nmap 이 XML 을 끝맺지 못한 채 죽은 경우다. 완료된 호스트만 살리려면 파일 끝에
+        # </nmaprun> 을 붙여 복구할 수도 있지만, 그건 nmap 이 쓰지 않은 문서를 우리가
+        # 만들어 내는 일이라 자동으로 하지 않는다 — 하려면 사람이 관측 전용으로 판단해서.
+        return "버림", ("XML 이 중간에서 끊겨 파싱되지 않습니다(nmap 이 끝맺지 못함). "
+                       "완료된 호스트가 하나도 없으면 건질 것이 없습니다 — 다시 스캔하세요.")
     if not info["finished"]:
         return "버림", "<finished> 가 없습니다 — nmap 이 결과를 마무리하지 못했습니다."
     if info["exit"] != "success":

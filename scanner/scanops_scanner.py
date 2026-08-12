@@ -2510,6 +2510,12 @@ def print_scan_summary(plan: dict, failed: list[dict], status: str) -> None:
         print("error: 사용할 수 있는 스캔 결과가 없습니다(모든 단계 실패).", file=sys.stderr)
 
 
+def _stage_xml_truncated(base: Path) -> bool:
+    """단계 산출물 XML 이 존재하는데 파싱되지 않는가(= 끝맺지 못한 채 끊김)."""
+    xml = Path(str(base) + ".xml")
+    return xml.exists() and not xml_parse_ok(xml)
+
+
 def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", tcp_ports: list[int] | None = None,
                    targets: list[str] | None = None) -> int:
     cmd = build_command(plan, idx, stage_id, tcp_ports, targets)
@@ -2526,7 +2532,15 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
         # 중단도 '일어난 일'이라 기록한다. 기록하지 않으면 중간까지 스캔한 부분 결과가
         # state 에 없는 유령 파일로 남고, 재개 후 온전한 결과에 덮어써진다.
         interrupted, rc = True, 130
-    files = mark_interrupted_outputs(base) if interrupted else existing_outputs(base)
+    # nmap 이 XML 을 끝맺지 못한 채 죽으면(NSE 도중 크래시 등) `</nmaprun>` 이 없어 파싱조차
+    # 안 된다. 그런 파일이 결과 폴더에 남아 있으면 사람이 '결과가 나왔네' 하고 가져오려다
+    # 오류를 만나고, 무엇보다 완주한 결과와 섞인다. 중단본과 같은 취급으로 격리한다 —
+    # 사용자가 정한 규칙(부분 결과는 인입하지 않는다)이 원인과 무관하게 성립해야 한다.
+    truncated = not interrupted and _stage_xml_truncated(base)
+    if truncated:
+        problems.insert(0, "nmap 이 XML 을 끝맺지 못했습니다(파일이 중간에서 끊김).")
+    files = (mark_interrupted_outputs(base)
+             if interrupted or truncated else existing_outputs(base))
     run = {
         "index": idx,
         "batch_index": idx,

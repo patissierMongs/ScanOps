@@ -1901,8 +1901,12 @@ def test_manifest_contract_omits_corrupt_followup_and_exactly_matches_import_lis
 
     manifest = json.loads((out / "corrupt-followup.manifest.json").read_text(encoding="utf-8"))
     discovery = out / "corrupt-followup.127.0.0.1.tcp_discovery.xml"
-    corrupt_identify = out / "corrupt-followup.127.0.0.1.tcp_identify.xml"
-    assert corrupt_identify.exists()  # diagnostic artifact remains on disk
+    # 손상된 산출물은 진단용으로 남기되 결과 폴더가 아니라 격리 폴더에 둔다 — 완주한 결과와
+    # 섞이면 '폴더째 가져오기'가 부분 결과를 집어가고, 사람 눈에도 구분이 안 된다.
+    corrupt_identify = (out / "interrupted"
+                        / "corrupt-followup.127.0.0.1.tcp_identify.interrupted.xml")
+    assert corrupt_identify.exists()
+    assert not (out / "corrupt-followup.127.0.0.1.tcp_identify.xml").exists()
     assert manifest["import_xml_files"] == [str(discovery)]
     units = manifest["import_contract"]["units"]
     assert [unit["xml_basename"] for unit in units] == [discovery.name]
@@ -2755,7 +2759,8 @@ def test_gui_keeps_gentle_intensity_when_a_preset_drives_the_scan(tmp_path):
     assert command[command.index("--intensity") + 1] == "gentle"
 
 
-def _gui_for(gui_module, *, scan_type_label: str, batch_size: str, ports: str = ""):
+def _gui_for(gui_module, *, scan_type_label: str, batch_size: str, ports: str = "",
+             output_name: str = "equivalence"):
     """GUI 위젯 값만 채운 인스턴스 — _command() 가 실제로 무엇을 내보내는지 본다."""
     class Value:
         def __init__(self, value): self.value = value
@@ -2765,7 +2770,9 @@ def _gui_for(gui_module, *, scan_type_label: str, batch_size: str, ports: str = 
     gui._base_command = lambda: ["python", "scanops_scanner.py"]
     gui._targets = lambda: ["10.0.0.0/27"]
     gui._mode = lambda: "auto"
-    for name, value in {"nmap_path": "", "output_dir": "out", "output_name": "",
+    # 이름을 고정한다. 비워 두면 CLI 가 scan_YYYYMMDD_HHMMSS 로 자동 생성해서, 두 명령을
+    # 서로 다른 초에 만들면 -oA 경로만 달라져 비교가 무너진다(제품 차이가 아니다).
+    for name, value in {"nmap_path": "", "output_dir": "out", "output_name": output_name,
                         "exclude": "", "exclude_ports": "", "target_file": "",
                         "resume_path": ""}.items():
         setattr(gui, name, Value(value))
@@ -2919,3 +2926,64 @@ def test_a_quiet_successful_stage_keeps_its_closure_authority(tmp_path, monkeypa
     assert scanner.unclean_runs(plan) == []
     contract = scanner.import_contract_unit(plan, run, Path(str(base) + ".xml"))
     assert contract["authoritative"] is True
+
+
+def test_an_xml_that_nmap_never_finished_writing_is_quarantined(tmp_path, monkeypatch, capsys):
+    """nmap 이 NSE 도중 죽으면 `</nmaprun>` 이 없는 XML 이 남는다 — 파싱조차 안 된다.
+
+    그 파일이 결과 폴더에 남아 있으면 완주한 결과와 섞이고, 사람이 가져오려다 오류만 만난다.
+    원인(사용자 중지 / nmap 크래시)이 달라도 '부분 결과는 인입하지 않는다'는 규칙은 같아야
+    하므로 중단본과 같은 곳으로 격리한다."""
+    scanner = _load_scanner()
+    plan = {
+        "tool": "scanops_scanner", "nmap": "nmap", "name": "scan", "output_dir": str(tmp_path),
+        "workflow": "auto", "batches": [["10.0.0.1"]], "cursor": 0, "runs": [],
+        "stats_every": "10s", "host_timeout": "", "exclude": [], "raw_targets": ["10.0.0.1"],
+        "scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "",
+        "batch_size": 0, "max_hosts": 65536,
+    }
+    base = scanner.output_base(plan, 0, "udp_identify")
+    # 실제 증상 그대로: taskprogress 줄에서 파일이 끝난다(닫는 태그 없음).
+    truncated = ('<?xml version="1.0"?>\n<nmaprun scanner="nmap">\n'
+                 '<taskprogress task="NSE" percent="99.43"')
+    fake = _noisy_nmap(tmp_path, "NSE Timing: About 99.43% done;\n")
+    monkeypatch.setattr(scanner, "build_command", lambda *a, **k: fake)
+    Path(str(base) + ".xml").write_text(truncated, encoding="utf-8")
+
+    rc = scanner.run_nmap_stage(plan, 0, tmp_path / "scan.state.json", "udp_identify")
+    assert rc == 0                                   # nmap 은 0 으로 끝났다고 말한다
+    run = plan["runs"][-1]
+
+    # 1) 결과 폴더에는 남지 않는다 — 완주한 결과와 섞이지 않게.
+    assert not list(tmp_path.glob("*.xml"))
+    moved = sorted((tmp_path / scanner.INTERRUPTED_DIR_NAME).glob("*.xml"))
+    assert [p.name for p in moved] == ["scan.10.0.0.1.udp_identify.interrupted.xml"]
+    # 2) 온전하지 않은 단계로 기록되어 닫힘 권한이 없고 재개 대상으로 남는다.
+    assert run["clean"] is False
+    assert any("끝맺지 못했습니다" in line for line in run["nmap_problems"])
+    assert not scanner.stage_succeeded(plan, 0, "udp_identify")
+    # 3) 사람이 왜 그런지 알 수 있어야 한다.
+    assert "interrupted" in capsys.readouterr().err.lower() or run["nmap_problems"]
+
+
+def test_a_complete_xml_is_left_in_the_results_folder(tmp_path, monkeypatch):
+    """정상 XML 까지 격리하면 결과가 사라진다 — 반대 방향도 고정한다."""
+    scanner = _load_scanner()
+    plan = {
+        "tool": "scanops_scanner", "nmap": "nmap", "name": "scan", "output_dir": str(tmp_path),
+        "workflow": "auto", "batches": [["10.0.0.1"]], "cursor": 0, "runs": [],
+        "stats_every": "10s", "host_timeout": "", "exclude": [], "raw_targets": ["10.0.0.1"],
+        "scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "",
+        "batch_size": 0, "max_hosts": 65536,
+    }
+    base = scanner.output_base(plan, 0, "udp_identify")
+    fake = _noisy_nmap(tmp_path, "Nmap done: 1 IP address\n")
+    monkeypatch.setattr(scanner, "build_command", lambda *a, **k: fake)
+    Path(str(base) + ".xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
+
+    scanner.run_nmap_stage(plan, 0, tmp_path / "scan.state.json", "udp_identify")
+    assert plan["runs"][-1]["clean"] is True
+    assert [p.name for p in tmp_path.glob("*.xml")] == ["scan.10.0.0.1.udp_identify.xml"]
+    assert not (tmp_path / scanner.INTERRUPTED_DIR_NAME).exists()
