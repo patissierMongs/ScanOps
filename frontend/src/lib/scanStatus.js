@@ -4,6 +4,8 @@ export const SCAN_STATUS = {
   canceled: { label: "중지됨", cls: "medium" },
   interrupted: { label: "중단됨(서버 재시작)", cls: "high" },
   failed: { label: "실패", cls: "high" },
+  // 결과는 쓸 수 있지만 nmap 이 끝까지 정상 종료하지 못한 실행 — 닫힘 판정에서 제외된다.
+  partial: { label: "부분 완료", cls: "medium" },
   done: { label: "완료", cls: "low" },
 };
 

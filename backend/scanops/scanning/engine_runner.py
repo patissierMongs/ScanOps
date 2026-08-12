@@ -207,6 +207,37 @@ def _stop_path(out_dir) -> Path:
     return Path(out_dir) / "stop-requested"
 
 
+# nmap 이 '끝까지 정상적으로 돌지 못했다'고 알리는 표식. XML 에는 남지 않고 로그로만 나온다.
+# 단독 스캐너(scanops_scanner.NMAP_UNCLEAN_MARKERS)와 같은 목록이어야 두 경로의 판정이 같다.
+UNCLEAN_MARKERS = ("NSOCK ERROR", "Trying to delete NSI", "QUITTING!")
+_UNCLEAN_KEEP = 5
+_UNCLEAN_TAIL_BYTES = 256 * 1024
+
+
+def log_problems(log_path: Path) -> list[str]:
+    """실행 로그에서 정상 종료를 부정하는 줄을 찾는다.
+
+    rc=0 이고 XML 이 exit="success" 여도 NSE/소켓이 정리되지 못한 채 끝날 수 있다.
+    그 사실은 로그에만 있으므로 여기서 보지 않으면 볼 곳이 없다 — 그대로 두면 '못 본
+    포트'가 '닫힌 포트'로 기록된다.
+    """
+    try:
+        data = Path(log_path).read_bytes()[-_UNCLEAN_TAIL_BYTES:]
+    except OSError:
+        return []
+    # nmap 이 Windows API 에서 받아 뱉는 오류 문구는 ANSI 코드페이지라 UTF-8 로 못 읽는다.
+    # 표식 자체는 ASCII 이므로 replace 로 읽어도 탐지에는 지장이 없다.
+    text = data.decode("utf-8", "replace")
+    found: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and any(marker in stripped for marker in UNCLEAN_MARKERS):
+            found.append(stripped[:200])
+            if len(found) >= _UNCLEAN_KEEP:
+                break
+    return found
+
+
 def _read_state(out_dir) -> dict:
     p = _rs_path(out_dir)
     if p.exists():

@@ -2354,3 +2354,41 @@ def test_scan_delete_needs_admin_and_refuses_while_running(client):
     assert stopped.status_code == 409 and "중지" in stopped.json()["detail"]
     assert client.delete(f"/api/scans/{done_id}", headers=admin).status_code == 200
     assert client.delete(f"/api/scans/{done_id}", headers=admin).status_code == 404
+
+
+def test_engine_log_problems_finds_what_the_xml_never_records():
+    """rc=0 · exit="success" 인 실행에서도 NSE/소켓 실패는 로그에만 남는다."""
+    import tempfile
+    from pathlib import Path as _Path
+    from scanops.scanning import engine_runner
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log = _Path(tmp) / "engine.log"
+        log.write_bytes(
+            "Service scan Timing: About 100.00% done\n"
+            "NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed (IOD#4)\n"
+            "Trying to delete NSI, but could not find 1 of the purportedly pending events\n"
+            .encode("utf-8"))
+        problems = engine_runner.log_problems(log)
+        assert len(problems) == 2 and "NSOCK ERROR" in problems[0]
+
+        # 조용히 성공한 실행까지 의심하면 닫힘이 영영 안 된다.
+        quiet = _Path(tmp) / "quiet.log"
+        quiet.write_bytes(b"Nmap done: 9 IP addresses (9 hosts up)\n")
+        assert engine_runner.log_problems(quiet) == []
+        # 로그가 없어도 터지지 않는다.
+        assert engine_runner.log_problems(_Path(tmp) / "missing.log") == []
+
+
+def test_windows_ansi_error_text_does_not_hide_the_marker():
+    """오류 문구가 ANSI 코드페이지라 UTF-8 로 못 읽혀도 표식 탐지는 살아 있어야 한다."""
+    import tempfile
+    from pathlib import Path as _Path
+    from scanops.scanning import engine_runner
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log = _Path(tmp) / "engine.log"
+        log.write_bytes(
+            b"NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed "
+            + "액세스 권한에 의해 금지된 방법".encode("cp949") + b" (10013)\n")
+        assert engine_runner.log_problems(log)

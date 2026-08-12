@@ -1159,15 +1159,26 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
     if not engine_runner.is_done(out_dir):
         _fail(scan_id, "engine_incomplete")
         return
+    # nmap 이 rc=0 으로 끝나고 XML 에 exit="success" 를 적었어도, NSE/소켓이 정리되지 못한 채
+    # 끝났다면 관측이 불완전하다. 그 사실은 로그에만 남는다 — 여기서 보지 않으면 '못 본 포트'가
+    # '닫힌 포트'로 기록된다(미탐). 결과는 살리되 닫힘 권한만 뺀다.
+    problems = engine_runner.log_problems(out_dir / "engine.log")
     db = SessionLocal()
     try:
         scan = db.get(ScanRun, scan_id)
         if scan is not None:
-            _commit_engine_ingest(db, scan, out_dir, scope_keys, force_scanned_hosts)
-            scan.status = "done"
+            _commit_engine_ingest(
+                db, scan, out_dir,
+                set() if problems else scope_keys,      # 빈 집합 = 닫힘 후보 없음
+                force_scanned_hosts,
+            )
+            scan.status = "partial" if problems else "done"
             scan.finished_at = datetime.now(timezone.utc)
-            scan.failure_code = ""
-            scan.failure_message = ""
+            scan.failure_code = "nmap_unclean_exit" if problems else ""
+            scan.failure_message = (
+                "nmap 이 끝까지 정상 종료하지 못했습니다 — 관측이 불완전해 닫힘 판정에서 "
+                f"제외했습니다. ({problems[0][:120]})" if problems else ""
+            )
             db.commit()
     except Exception:
         logger.exception("failed to ingest staged scan %s result", scan_id)
