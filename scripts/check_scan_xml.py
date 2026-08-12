@@ -24,7 +24,8 @@ _NSE_UDP_PORTS = {53, 111, 123, 137, 161, 500, 5060}
 def inspect(path: Path) -> dict:
     out = {"path": path, "parse": True, "finished": False, "exit": "",
            "hosts": 0, "open_ports": 0, "hosts_with_scripts": 0,
-           "nse_candidates": 0, "truncated": False}
+           "nse_candidates": 0, "truncated": False, "protocols": set(),
+           "stage": ""}
     try:
         root = ET.parse(path).getroot()
     except ET.ParseError:
@@ -35,6 +36,12 @@ def inspect(path: Path) -> dict:
     if finished:
         out["finished"] = True
         out["exit"] = finished[0].get("exit") or ""
+    out["stage"] = next(
+        (name for name in ("tcp_discovery", "tcp_identify", "udp_identify")
+         if path.name.lower().endswith(f".{name}.xml")), "")
+    out["protocols"] = {
+        (info.get("protocol") or "").lower() for info in root.findall("./scaninfo")
+    }
     hosts = root.findall("host")
     out["hosts"] = len(hosts)
     for host in hosts:
@@ -66,6 +73,15 @@ def verdict(info: dict) -> tuple[str, str]:
         return "버림", "<finished> 가 없습니다 — nmap 이 결과를 마무리하지 못했습니다."
     if info["exit"] != "success":
         return "버림", f'nmap 이 exit="{info["exit"]}" 로 끝났습니다.'
+    # 서버는 닫힘 권한을 주기 전에 '단계가 광고한 프로토콜'과 XML 이 실제로 스캔한 프로토콜이
+    # 같은지 본다. UDP 식별 XML 에 TCP scaninfo 가 섞여 있으면 가져오기가 거절된다.
+    # (스캔 기법이 UDP 단계로 새던 옛 버전으로 만든 XML 의 지문이다.)
+    if info["stage"] == "udp_identify" and info["protocols"] - {"udp"}:
+        mixed = ",".join(sorted(info["protocols"]))
+        return ("가져오기 거절",
+                f"UDP 식별 XML 인데 scaninfo 에 {mixed} 가 섞여 있습니다 — 서버가 "
+                "'UDP 식별 manifest와 XML protocol이 일치하지 않습니다' 로 거절합니다. "
+                "옛 버전에서 스캔 기법이 UDP 단계로 새어 만들어진 XML 입니다. 다시 스캔하세요.")
     if info["nse_candidates"] and not info["hosts_with_scripts"]:
         return ("재실행 권장",
                 "포트 상태는 온전하지만 NSE 스크립트 결과가 하나도 없습니다 "
@@ -86,8 +102,9 @@ def main(argv: list[str]) -> int:
     for path in files:
         info = inspect(path)
         mark, why = verdict(info)
-        worst = max(worst, {"사용 가능": 0, "재실행 권장": 1, "버림": 2}[mark])
-        print(f"[{mark:6}] {path.name}")
+        worst = max(worst, {"사용 가능": 0, "재실행 권장": 1,
+                            "가져오기 거절": 2, "버림": 2}[mark])
+        print(f"[{mark}] {path.name}")
         print(f"          호스트 {info['hosts']} · 열린 포트 {info['open_ports']} · "
               f"스크립트 있는 호스트 {info['hosts_with_scripts']}")
         print(f"          {why}")
