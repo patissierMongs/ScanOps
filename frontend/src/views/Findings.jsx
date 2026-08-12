@@ -9,6 +9,9 @@ import {
   primaryServiceIdentity, secondaryServiceIdentity,
 } from "../lib/columns.js";
 import { deadlinePatchValue } from "../lib/findingPatch.js";
+import {
+  COLOR_ELEMENTS, COLOR_KEY, cellTone, loadColorFlags,
+} from "../lib/findingColors.js";
 import { dday, STATUS_CLASS, RISK_LABEL } from "../lib/format.js";
 
 const COLS_KEY = "scanops_cols";
@@ -41,6 +44,12 @@ export default function Findings({ user }) {
   const composing = useRef(false);
   const [imeTick, setImeTick] = useState(0);   // 조합 종료 시점에 질의를 한 번 깨우는 용도
   const [risk, setRisk] = useState("");
+  // 색상 인디케이터 — 무엇을 색으로 알릴지 사람마다 다르다. 요소별로 켜고 끄고, 선택은 남긴다.
+  const [colorFlags, setColorFlags] = useState(() => loadColorFlags(localStorage));
+  useEffect(() => {
+    try { localStorage.setItem(COLOR_KEY, JSON.stringify(colorFlags)); } catch { /* 저장 실패는 무시 */ }
+  }, [colorFlags]);
+  const toggleColor = (key) => setColorFlags((prev) => ({ ...prev, [key]: !prev[key] }));
   const [status, setStatus] = useState("");
   const [overdueOnly, setOverdueOnly] = useState(false);
   const [hideNormal, setHideNormal] = useState(true);
@@ -252,6 +261,16 @@ export default function Findings({ user }) {
             <input type="checkbox" checked={overdueOnly} onChange={(e) => setOverdueOnly(e.target.checked)} />
             마감초과만
           </label>
+          <div className="color-toggles" role="group" aria-label="색상 표시">
+            <span className="muted">색상</span>
+            {COLOR_ELEMENTS.map((el) => (
+              <label key={el.key} className="row" style={{ gap: 4 }}>
+                <input type="checkbox" checked={!!colorFlags[el.key]}
+                       onChange={() => toggleColor(el.key)} />
+                {el.label}
+              </label>
+            ))}
+          </div>
           <button className="sm" onClick={clearFilters} disabled={!filterCount && !sort.key}
                   title="검색어·컬럼 필터·위험/상태·정렬을 모두 초기화">
             필터 제거{filterCount ? ` (${filterCount})` : ""}
@@ -311,15 +330,20 @@ export default function Findings({ user }) {
                 </td></tr>
               ) : view.map((f) => {
                 const dl = dday(f.deadline);
-                // 금지/마감초과 → 연한 빨강, 처리중 → 연한 노랑(빨강 우선).
-                const bg = (f.risk_level === "banned" || dl.over) ? "var(--high-bg)"
-                         : f.status === "처리중" ? "var(--medium-bg)" : null;
+                // 금지/마감초과 → 연한 빨강, 처리중 → 연한 노랑(빨강 우선). 각 요소는 토글로 끌 수 있다.
+                const bg = (colorFlags.risk && f.risk_level === "banned") || (colorFlags.deadline && dl.over)
+                  ? "var(--high-bg)"
+                  : (colorFlags.status && f.status === "처리중") ? "var(--medium-bg)" : null;
                 return (
                   <tr key={f.id} className="click" style={bg ? { background: bg } : null}>
                     <td onClick={(e) => e.stopPropagation()}>
                       <input type="checkbox" checked={selected.has(f.id)} onChange={() => toggleSel(f.id)} />
                     </td>
-                    {cols.map((k) => <td key={k} onClick={() => openDrawer(f)}>{renderCell(f, k, displayModes)}</td>)}
+                    {cols.map((k) => (
+                      <td key={k} className={cellTone(f, k, colorFlags)} onClick={() => openDrawer(f)}>
+                        {renderCell(f, k, displayModes)}
+                      </td>
+                    ))}
                     <td onClick={() => openDrawer(f)}>
                       <span className={"dday " + dl.cls} style={{ color: dl.over ? "var(--high)" : undefined }}>{dl.text}</span>
                     </td>

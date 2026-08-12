@@ -421,3 +421,45 @@ test("interrupted output that never uploads is not counted as a failure", async 
   assert.equal(summary.interruptedXmlCount, 3);
   assert.equal(summary.hasFailures, false);
 });
+
+test("scan history shows scope, not the raw command line", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /<th>스캔 범위<\/th>/);
+  assert.match(scans, /<ScanScope summary=\{s\.summary\}/);
+  // 원문 명령은 사라지지 않고 상세로 내려간다.
+  assert.match(scans, /scan-detail-command/);
+  assert.doesNotMatch(scans, /whiteSpace: "normal", color: "var\(--muted\)" \}\}>\{s\.command\}/);
+});
+
+test("deleting a scan is admin-only and says what else it removes", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /const canDelete = user\.role === "admin"/);
+  assert.match(scans, /window\.confirm\(/);
+  assert.match(scans, /발견 관리에서 함께 삭제됩니다/);
+  assert.match(scans, /method: "DELETE"/);
+});
+
+test("web scan can exclude ports, and the estimate sees the same value", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /id="scan-exclude-ports"/);
+  // 실행 두 경로와 예상치 호출이 모두 같은 값을 실어 보낸다.
+  assert.equal((scans.match(/exclude_ports: excludePorts/g) || []).length, 3);
+});
+
+test("findings colour indicators are per-element and persist", async () => {
+  const findings = source("../src/views/Findings.jsx");
+  assert.match(findings, /COLOR_ELEMENTS/);
+  assert.match(findings, /localStorage\.setItem\(COLOR_KEY/);
+  const colors = source("../src/lib/findingColors.js");
+  for (const key of ["risk", "deadline", "status", "guess"]) {
+    assert.ok(colors.includes(`key: "${key}"`), `${key} 토글이 없습니다`);
+  }
+  const { cellTone, loadColorFlags, COLOR_DEFAULTS } = await import("../src/lib/findingColors.js");
+  assert.deepEqual(loadColorFlags({ getItem: () => "{oops" }), COLOR_DEFAULTS);
+  const banned = { risk_level: "banned", status: "미조치", identification: "확인" };
+  assert.equal(cellTone(banned, "risk_level", { risk: true }), "tone-high");
+  assert.equal(cellTone(banned, "risk_level", { risk: false }), "");   // 끄면 색이 없다
+  const guessed = { identification: "추측" };
+  assert.equal(cellTone(guessed, "display_identity", { guess: true }), "tone-guess");
+  assert.equal(cellTone(guessed, "display_identity", { guess: false }), "");
+});

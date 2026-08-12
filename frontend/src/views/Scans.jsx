@@ -61,6 +61,7 @@ export default function Scans({ user }) {
   const [progress, setProgress] = useState({});   // { [scanId]: { percent, etc, remaining, elapsed, hosts_up } }
   const [targets, setTargets] = useState("");
   const [exclude, setExclude] = useState("");
+  const [excludePorts, setExcludePorts] = useState("");
   const [name, setName] = useState("");
   const [opt, setOpt] = useState({ workflow: "auto", options: [], ports: "", nse: [], command: "" });
   const [batchSize, setBatchSize] = useState(256);
@@ -81,6 +82,8 @@ export default function Scans({ user }) {
   const [expanded, setExpanded] = useState(() => new Set());
   const toast = useToast();
   const canRun = user.role === "admin" || user.role === "auditor";
+  // 삭제는 발견(다른 사람이 달아 둔 상태·담당자·메모 포함)까지 지우므로 admin 만.
+  const canDelete = user.role === "admin";
 
   function load() {
     api("/scans").then(async (list) => {
@@ -175,13 +178,13 @@ export default function Scans({ user }) {
   })();
 
   // 실행 전 예상 — 타겟/제외/옵션/포트/배치크기가 바뀌면 디바운스로 /estimate 호출.
-  const estKey = JSON.stringify({ t: targetList, x: excludeList, w: opt.workflow, o: opt.options, p: opt.ports, b: batchSize, s: staged });
+  const estKey = JSON.stringify({ t: targetList, x: excludeList, xp: excludePorts, w: opt.workflow, o: opt.options, p: opt.ports, b: batchSize, s: staged });
   useEffect(() => {
     if (!canRun || !targetList.length) { setEst(null); return; }
     setEst(null);
     let alive = true;
     const id = setTimeout(() => {
-      api("/scans/estimate", { method: "POST", json: { targets: targetList, exclude: excludeList, workflow: opt.workflow, options: opt.options, ports: opt.ports, batch_size: batchSize, staged } })
+      api("/scans/estimate", { method: "POST", json: { targets: targetList, exclude: excludeList, exclude_ports: excludePorts, workflow: opt.workflow, options: opt.options, ports: opt.ports, batch_size: batchSize, staged } })
         .then((e) => { if (alive) setEst(e); })
         .catch(() => { if (alive) setEst(null); });
     }, 400);
@@ -268,8 +271,8 @@ export default function Scans({ user }) {
     setBusy(true);
     const endpoint = staged ? "/scans/run-staged" : "/scans/run";
     const body = staged
-      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, batch_size: batchSize, discovery }
-      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, batch_size: batchSize };
+      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize, discovery }
+      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize };
     api(endpoint, { method: "POST", json: body })
       .then((s) => { toast(`${staged ? "단계 " : ""}스캔 시작됨 · #${s.id} (백그라운드 — 진행은 아래 표)`); setTargets(""); setExclude(""); setName(""); load(); })
       .catch((e2) => toast(e2.message, { type: "err" }))
@@ -279,6 +282,23 @@ export default function Scans({ user }) {
   function stopScan(id) {
     api(`/scans/${id}/stop`, { method: "POST" })
       .then(() => { toast(`#${id} 중지 요청 — 다음날 [이어하기]로 재개 가능`); load(); })
+      .catch((e) => toast(e.message, { type: "err" }));
+  }
+
+  function deleteScan(scan) {
+    // 되돌릴 수 없는 삭제라 무엇이 함께 지워지는지 먼저 말한다.
+    const ok = window.confirm(
+      `스캔 #${scan.id} "${scan.name || "이름 없음"}" 을 삭제할까요?\n\n`
+      + "이 스캔에서만 발견된 항목은 발견 관리에서 함께 삭제됩니다.\n"
+      + "다른 스캔에서도 관측된 발견은 남습니다. 되돌릴 수 없습니다.",
+    );
+    if (!ok) return;
+    api(`/scans/${scan.id}`, { method: "DELETE" })
+      .then((r) => {
+        toast(`#${scan.id} 삭제됨 — 발견 ${r.findings_deleted}건 함께 삭제`);
+        setExpanded((prev) => { const next = new Set(prev); next.delete(scan.id); return next; });
+        load();
+      })
       .catch((e) => toast(e.message, { type: "err" }));
   }
 
@@ -381,6 +401,18 @@ export default function Scans({ user }) {
                 공백·쉼표·줄바꿈으로 구분합니다. 제외 대상은 스캔과 닫힘 판정 범위에서 빠집니다.
                 {rawMode && " 직접 명령의 --exclude 와 합쳐 하나의 옵션으로 전달됩니다."}
               </div>
+
+              <label className="cb-label" htmlFor="scan-exclude-ports" style={{ marginTop: 12 }}>
+                제외할 포트 (선택)
+              </label>
+              <input id="scan-exclude-ports" aria-describedby="scan-exclude-ports-help"
+                     style={{ width: "100%" }} placeholder="예: 9100, 515, 631"
+                     value={excludePorts} onChange={(e) => setExcludePorts(e.target.value)} />
+              <div id="scan-exclude-ports-help" className="muted scan-hint">
+                포트 지정과 같은 문법입니다(<code>9100</code>, <code>1-1024</code>,
+                {" "}<code>U:53</code>). 프린터 같은 장비가 스캔에 반응해 문제를 일으키는 포트를 뺄 때
+                씁니다. 모든 단계에서 빠집니다.
+              </div>
             </section>
 
             {/* 옵션 빌더는 raw 모드에서도 마운트 유지(숨김만) — opt.command 가 최신이라 '채우기'가 정확하게 동작 */}
@@ -440,7 +472,7 @@ export default function Scans({ user }) {
         <div style={{ overflowX: "auto" }}>
           <table className="tbl">
             <thead><tr>
-              <th>ID</th><th>이름</th><th>명령</th><th>상태</th>
+              <th>ID</th><th>이름</th><th>스캔 범위</th><th>상태</th>
               <th style={{ minWidth: 220 }}>진행</th><th>호스트</th><th>포트</th><th>작업</th>
             </tr></thead>
             <tbody>
@@ -455,7 +487,7 @@ export default function Scans({ user }) {
                   <tr>
                     <td className="mono">{s.id}</td>
                     <td>{s.name}<div><span className="tag">{kind.label}</span></div></td>
-                    <td className="mono" style={{ fontSize: 11, maxWidth: 300, whiteSpace: "normal", color: "var(--muted)" }}>{s.command}</td>
+                    <td style={{ maxWidth: 260, whiteSpace: "normal" }}><ScanScope summary={s.summary} /></td>
                     <td style={{ whiteSpace: "normal", minWidth: 150 }}>
                       <span className={`pill ${st.cls}`}>{st.label}</span>
                       {s.failure_message && <div className="scan-failure">{s.failure_message}</div>}
@@ -476,6 +508,9 @@ export default function Scans({ user }) {
                               aria-controls={`scan-detail-${s.id}`} onClick={() => toggleDetails(s)}>
                         {expanded.has(s.id) ? "상세 닫기" : "상세"}
                       </button>
+                      {canDelete && !isActive(s.status) && (
+                        <button className="sm danger" onClick={() => deleteScan(s)}>삭제</button>
+                      )}
                     </td>
                   </tr>
                   {expanded.has(s.id) && (
@@ -490,6 +525,31 @@ export default function Scans({ user }) {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+// 이력 표의 '스캔 범위' — 명령줄 대신 어디를·어떤 포트를·무슨 프로토콜로 봤는지만.
+// 원문 명령은 [상세]에 그대로 남는다(필요한 사람은 거기서 본다).
+function ScanScope({ summary }) {
+  if (!summary) return <span className="muted">—</span>;
+  const partial = summary.excluded_ports || summary.excluded_hosts;
+  return (
+    <div className="scan-scope">
+      <div className="scan-scope-target">{summary.targets}</div>
+      <div className="scan-scope-line">
+        {(summary.protocols || []).map((p) => (
+          <span key={p} className={`tag proto-${p.toLowerCase()}`}>{p}</span>
+        ))}
+        <span className={`scan-scope-ports${partial ? " is-partial" : ""}`}>{summary.ports}</span>
+      </div>
+      {partial && (
+        <div className="scan-scope-excluded">
+          {summary.excluded_ports && <>포트 제외 <code>{summary.excluded_ports}</code></>}
+          {summary.excluded_ports && summary.excluded_hosts && " · "}
+          {summary.excluded_hosts && <>대상 제외 <code>{summary.excluded_hosts}</code></>}
+        </div>
+      )}
     </div>
   );
 }
@@ -587,6 +647,12 @@ function ScanDetails({ scan, detail }) {
         <div className="scan-failure-detail">
           <b>실패 원인</b> {failureMessage}
           {failureCode && <code>{failureCode}</code>}
+        </div>
+      )}
+      {scan.command && (
+        <div className="scan-detail-command">
+          <b>실행한 명령</b>
+          <code className="mono">{scan.command}</code>
         </div>
       )}
     </div>

@@ -11,6 +11,7 @@ import ipaddress
 import json
 import logging
 import re
+import shutil
 import threading
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -21,10 +22,12 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import SessionLocal, get_db
-from ..models import ACTIVE_FINDING_STATES, Finding, ScanRun, User
+from ..models import ACTIVE_FINDING_STATES, Finding, FindingEvent, ScanRun, User
 from ..schemas import IngestSummary, KnownResultsIn, RawCommandIn, ScanOut, ScanRunIn
 from ..uploads import read_limited
-from ..scanning import chunker, engine_runner, nmap_runner, scan_options, scope, taxonomy
+from ..scanning import (
+    chunker, engine_runner, nmap_runner, scan_options, scan_summary, scope, taxonomy,
+)
 from ..scanning.presets import PRESETS
 from ..scanning.ingest import ingest
 from ..scanning.nmap_parse import parse_xml, probed_identity, scan_start, up_hosts
@@ -1684,7 +1687,80 @@ def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, d
 
 @router.get("", response_model=list[ScanOut])
 def list_scans(_: User = Depends(current_user), db: Session = Depends(get_db)):
-    return db.query(ScanRun).order_by(ScanRun.id.desc()).all()
+    rows = db.query(ScanRun).order_by(ScanRun.id.desc()).all()
+    return [
+        ScanOut.model_validate(row).model_copy(update={
+            "summary": scan_summary.summarize_command(row.command, row.targets),
+        })
+        for row in rows
+    ]
+
+
+@router.delete("/{scan_id}")
+def delete_scan(
+    scan_id: int,
+    user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """스캔 이력 1건 삭제 — 그 스캔이 유일한 근거인 발견도 함께 지운다.
+
+    '함께 지운다'의 범위를 좁게 잡는다. 발견은 여러 스캔에 걸쳐 살아 있는 물건이라,
+    이 스캔에서 '다시 관측'되기만 한 발견까지 지우면 사람이 달아 둔 상태·담당자·메모와
+    그 이전 이력까지 사라진다. 그래서 **첫 관측도 마지막 관측도 이 스캔인 발견**만 지우고,
+    살아남는 발견은 이 스캔을 가리키던 참조만 끊는다(유령 ID 방지).
+
+    실행 중인 스캔은 거절한다 — 워커가 아직 같은 행과 파일을 쓰고 있다.
+    """
+    scan = db.get(ScanRun, scan_id)
+    if scan is None:
+        raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
+    if scan.status in {"running", "canceling"}:
+        raise HTTPException(
+            status_code=409,
+            detail="실행 중인 스캔은 삭제할 수 없습니다. 먼저 중지하세요.",
+        )
+
+    owned = db.query(Finding).filter(
+        Finding.first_scan_id == scan_id, Finding.last_scan_id == scan_id,
+    ).all()
+    owned_ids = [f.id for f in owned]
+    for start in range(0, len(owned_ids), 500):
+        chunk = owned_ids[start:start + 500]
+        db.query(FindingEvent).filter(FindingEvent.finding_id.in_(chunk)).delete(
+            synchronize_session=False)
+        db.query(Finding).filter(Finding.id.in_(chunk)).delete(synchronize_session=False)
+    # 살아남는 발견/이벤트가 사라진 스캔을 가리키지 않게 한다.
+    kept_events = db.query(FindingEvent).filter(FindingEvent.scan_id == scan_id).update(
+        {FindingEvent.scan_id: None}, synchronize_session=False)
+    db.query(Finding).filter(Finding.first_scan_id == scan_id).update(
+        {Finding.first_scan_id: None}, synchronize_session=False)
+    db.query(Finding).filter(Finding.last_scan_id == scan_id).update(
+        {Finding.last_scan_id: None}, synchronize_session=False)
+
+    _remove_scan_artifacts(scan)
+    db.delete(scan)
+    record(db, user, "SCAN_DELETE", target=str(scan_id),
+           detail=f"발견 {len(owned_ids)}건 삭제")
+    db.commit()
+    return {"scan_id": scan_id, "findings_deleted": len(owned_ids),
+            "events_detached": int(kept_events or 0)}
+
+
+def _remove_scan_artifacts(scan: ScanRun) -> None:
+    """스캔이 남긴 파일 정리. 실패해도 삭제 자체는 진행한다(행이 남으면 더 헷갈린다)."""
+    for value in (scan.raw_xml_path, scan.log_path):
+        if not value:
+            continue
+        try:
+            Path(value).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("failed to remove scan artifact %s", value, exc_info=True)
+    out_dir = _settings.scans_dir / f"scan_{scan.id}"
+    if out_dir.is_dir():
+        try:
+            shutil.rmtree(out_dir)
+        except OSError:
+            logger.warning("failed to remove scan directory %s", out_dir, exc_info=True)
 
 
 @router.get("/options")

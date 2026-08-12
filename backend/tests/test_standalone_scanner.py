@@ -2753,3 +2753,62 @@ def test_gui_keeps_gentle_intensity_when_a_preset_drives_the_scan(tmp_path):
     command = gui._command(dry_run=True)
     assert "--preset" in command and "주간 전수" in command
     assert command[command.index("--intensity") + 1] == "gentle"
+
+
+def _gui_for(gui_module, *, scan_type_label: str, batch_size: str, ports: str = ""):
+    """GUI 위젯 값만 채운 인스턴스 — _command() 가 실제로 무엇을 내보내는지 본다."""
+    class Value:
+        def __init__(self, value): self.value = value
+        def get(self): return self.value
+
+    gui = object.__new__(gui_module.ScannerGui)
+    gui._base_command = lambda: ["python", "scanops_scanner.py"]
+    gui._targets = lambda: ["10.0.0.0/27"]
+    gui._mode = lambda: "auto"
+    for name, value in {"nmap_path": "", "output_dir": "out", "output_name": "",
+                        "exclude": "", "exclude_ports": "", "target_file": "",
+                        "resume_path": ""}.items():
+        setattr(gui, name, Value(value))
+    gui.ports = Value(ports)
+    gui.scan_type_label = Value(scan_type_label)
+    for flag in ("tcp_only", "udp", "udp_all_targets", "nse_default",
+                 "no_scripts", "open_only", "include_closed", "zip_outputs"):
+        setattr(gui, flag, Value(False))
+    gui.batch_size = Value(batch_size)
+    gui.preset_name = Value(gui_module.NO_PRESET_LABEL)
+    return gui
+
+
+def test_choosing_tcp_syn_in_auto_mode_runs_exactly_the_default_scan():
+    """자동 스캔에서 '관리자 권한 - TCP SYN' 을 고른 실행과 기본값 실행이 같은 스캔인가.
+
+    자동 워크플로의 TCP 단계는 이미 -sS 이고 UDP 식별 단계는 스캔 기법 지정을 받지 않는다.
+    따라서 --scan-type syn 은 실행되는 nmap 명령을 바꾸지 않아야 한다 — 사용자가 '명시적으로
+    골랐더니 다른 스캔이 됐다'를 겪으면 안 되므로 인자 순서와 단계 순서까지 고정한다."""
+    gui_module = _load_gui()
+    scanner = _load_scanner()
+
+    default_cmd = _gui_for(gui_module, scan_type_label="프로필 기본", batch_size="16")._command(dry_run=False)
+    syn_cmd = _gui_for(gui_module, scan_type_label="관리자 권한 - TCP SYN", batch_size="16")._command(dry_run=False)
+    # CLI 수준에서는 --scan-type syn 하나만 늘어난다.
+    assert [t for t in syn_cmd if t not in default_cmd] == ["--scan-type", "syn"]
+
+    def plan_of(command):
+        args = scanner.parser().parse_args(["--dry-run", "--nmap", "nmap", *command[2:]])
+        scanner.apply_cli_options(args)
+        return scanner.create_plan(args)
+
+    default_plan, syn_plan = plan_of(default_cmd), plan_of(syn_cmd)
+    assert [len(b) for b in default_plan["batches"]] == [16, 16]
+    assert [len(b) for b in syn_plan["batches"]] == [16, 16]
+
+    extra = {
+        "tcp_identify": dict(tcp_ports=[22, 80], targets=["10.0.0.1"]),
+        "udp_identify": dict(targets=["10.0.0.1"]),
+    }
+    for index in range(len(default_plan["batches"])):
+        for stage_id, _label in scanner.AUTO_STAGES:      # 단계 순서도 같은 목록에서 온다
+            kwargs = extra.get(stage_id, {})
+            assert (scanner.build_command(default_plan, index, stage_id, **kwargs)
+                    == scanner.build_command(syn_plan, index, stage_id, **kwargs)), \
+                f"batch{index} {stage_id} 명령이 달라졌습니다"

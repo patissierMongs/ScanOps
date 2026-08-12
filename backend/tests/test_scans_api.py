@@ -2249,3 +2249,108 @@ def test_a_complete_result_named_like_a_report_still_imports(client):
                     files={"file": ("interrupted_hosts_report.xml", identified, "text/xml")})
     assert r.status_code == 200, r.text
     assert len(client.get("/api/findings", headers=h).json()) == 1
+
+
+def test_scan_summary_says_전체_instead_of_a_port_count(client):
+    """이력 표는 명령줄이 아니라 요약을 보여준다 — 전체는 '전체'라고 적는다."""
+    from scanops.scanning.scan_summary import summarize_command
+
+    full = summarize_command(
+        "nmap -sS -p T:1-65535 --stats-every 10s 10.0.0.0/24", "10.0.0.0/24")
+    assert full["ports"] == "전체" and full["protocols"] == ["TCP"]
+    assert full["targets"] == "10.0.0.0/24"
+
+    # 전체에서 일부만 뺀 경우는 개수가 아니라 그 사실이 중요하다.
+    partial = summarize_command(
+        "nmap -sS -p 1-65535 --exclude-ports 9100,515 --exclude 10.0.0.9 10.0.0.0/24",
+        "10.0.0.0/24")
+    assert partial["ports"] == "전체 (일부 제외)"
+    assert partial["excluded_ports"] == "9100,515"
+    assert partial["targets"] == "10.0.0.0/24 (일부 제외)"
+
+    both = summarize_command("nmap -sS -sU -p T:22,80,U:53 10.0.0.1", "10.0.0.1")
+    assert both["protocols"] == ["TCP", "UDP"] and both["ports"] == "22,80"
+
+    top = summarize_command("nmap -sT --top-ports 1000 10.0.0.1", "10.0.0.1")
+    assert top["ports"] == "상위 1000개"
+
+    many = summarize_command("nmap -sS -p 1-65535 10.0.0.1 10.0.0.2 10.0.0.3",
+                             "10.0.0.1 10.0.0.2 10.0.0.3")
+    assert many["targets"] == "10.0.0.1 외 2건"
+
+
+def test_scan_list_carries_the_summary(client):
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    h = _auth(client)
+    db = SessionLocal()
+    db.add(ScanRun(name="t", targets="10.0.0.0/24", status="done",
+                   command="nmap -sS -p T:1-65535 --exclude-ports 9100 10.0.0.0/24"))
+    db.commit(); db.close()
+
+    rows = client.get("/api/scans", headers=h).json()
+    assert rows[0]["summary"]["ports"] == "전체 (일부 제외)"
+    assert rows[0]["summary"]["protocols"] == ["TCP"]
+    assert rows[0]["command"]          # 원문은 상세에서 볼 수 있게 남아 있다
+
+
+def test_deleting_a_scan_removes_only_the_findings_it_alone_proves(client):
+    """스캔 삭제는 그 스캔이 유일한 근거인 발견만 지운다.
+
+    여러 스캔에 걸쳐 살아 있는 발견까지 지우면 사람이 달아 둔 상태·메모와 이전 이력이
+    함께 사라진다. 살아남는 발견은 사라진 스캔을 가리키지 않도록 참조만 끊는다."""
+    from scanops.db import SessionLocal
+    from scanops.models import Finding, FindingEvent, ScanRun
+
+    make_user("boss", "boss-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'boss', 'boss-pass-1234')}"}
+
+    db = SessionLocal()
+    old, new = ScanRun(name="old", status="done"), ScanRun(name="new", status="done")
+    db.add_all([old, new]); db.commit()
+    only_new = Finding(finding_key="127.0.0.1|1234|tcp", host_ip="127.0.0.1", port=1234,
+                       proto="tcp", state="open", first_scan_id=new.id, last_scan_id=new.id)
+    spanning = Finding(finding_key="127.0.0.1|22|tcp", host_ip="127.0.0.1", port=22,
+                       proto="tcp", state="open", first_scan_id=old.id, last_scan_id=new.id)
+    db.add_all([only_new, spanning]); db.commit()
+    db.add(FindingEvent(finding_id=spanning.id, scan_id=new.id, type="NEW_OPEN"))
+    db.commit()
+    new_id, spanning_id = new.id, spanning.id
+    db.close()
+
+    r = client.delete(f"/api/scans/{new_id}", headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["findings_deleted"] == 1
+
+    db = SessionLocal()
+    try:
+        assert db.get(ScanRun, new_id) is None
+        rows = db.query(Finding).all()
+        assert [f.port for f in rows] == [22]              # 걸쳐 있던 발견은 남는다
+        kept = db.get(Finding, spanning_id)
+        assert kept.last_scan_id is None                    # 사라진 스캔을 가리키지 않는다
+        assert all(e.scan_id is None for e in db.query(FindingEvent).all())
+    finally:
+        db.close()
+
+
+def test_scan_delete_needs_admin_and_refuses_while_running(client):
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    auditor = _auth(client)
+    db = SessionLocal()
+    running, done = ScanRun(name="r", status="running"), ScanRun(name="d", status="done")
+    db.add_all([running, done]); db.commit()
+    running_id, done_id = running.id, done.id
+    db.close()
+
+    assert client.delete(f"/api/scans/{done_id}", headers=auditor).status_code == 403
+
+    make_user("boss2", "boss-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'boss2', 'boss-pass-1234')}"}
+    stopped = client.delete(f"/api/scans/{running_id}", headers=admin)
+    assert stopped.status_code == 409 and "중지" in stopped.json()["detail"]
+    assert client.delete(f"/api/scans/{done_id}", headers=admin).status_code == 200
+    assert client.delete(f"/api/scans/{done_id}", headers=admin).status_code == 404

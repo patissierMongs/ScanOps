@@ -355,3 +355,30 @@ button.scan-run { padding: 9px 22px; font-size: 14px; }
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line-soft); font-size: 12.5px;
 }
+
+/* ---------- 스캔 이력: 명령줄 대신 '스캔 범위' 요약 ---------- */
+.scan-scope { display: flex; flex-direction: column; gap: 3px; }
+.scan-scope-target { font-family: var(--mono); font-size: 12px; }
+.scan-scope-line { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.scan-scope-ports { font-size: 11.5px; color: var(--ink-soft); }
+/* 전체가 아니라 '전체에서 일부 뺀' 스캔 — 개수보다 그 사실이 중요하므로 색으로 알린다. */
+.scan-scope-ports.is-partial { color: oklch(0.5 0.13 65); background: var(--medium-bg);
+  padding: 1px 7px; border-radius: 6px; font-weight: 600; }
+.scan-scope-excluded { font-size: 11px; color: var(--muted); }
+.scan-scope-excluded code { font-size: 10.5px; }
+.tag.proto-tcp { color: var(--accent-ink); background: var(--accent-bg); border-color: transparent; }
+.tag.proto-udp { color: oklch(0.45 0.12 300); background: oklch(0.95 0.04 300); border-color: transparent; }
+.scan-detail-command { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.scan-detail-command code { font-size: 11px; color: var(--muted); word-break: break-all; }
+button.sm.danger { color: var(--high); border-color: var(--high-bg); }
+button.sm.danger:hover { background: var(--high-bg); }
+
+/* ---------- 발견 관리: 요소별 색상 인디케이터(파스텔) ---------- */
+.color-toggles { display: flex; align-items: center; gap: 10px; font-size: 12px;
+  padding: 3px 9px; border: 1px solid var(--line); border-radius: 8px; }
+.color-toggles .muted { font-size: 11px; }
+.tbl td.tone-high { background: var(--high-bg); }
+.tbl td.tone-medium { background: var(--medium-bg); }
+.tbl td.tone-low { background: var(--low-bg); }
+/* 포트 번호 관례로 짐작한 식별 — 관측값과 같은 무게로 읽히면 안 되므로 주황 계열 파스텔. */
+.tbl td.tone-guess { background: oklch(0.955 0.04 60); color: oklch(0.45 0.11 60); }

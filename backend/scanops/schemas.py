@@ -111,6 +111,9 @@ class ScanOut(BaseModel):
     stages_json: list | None = None
     failure_code: str = ""
     failure_message: str = ""
+    # 이력 표가 명령줄 대신 보여주는 요약(어디를·어떤 포트를·TCP/UDP). 서버가 실행된 argv 에서
+    # 뽑으므로 표와 상세가 같은 근거를 본다. 원문 명령은 command 로 상세에서만 펼친다.
+    summary: dict | None = None
 
 
 class IngestSummary(BaseModel):
