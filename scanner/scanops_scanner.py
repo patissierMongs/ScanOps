@@ -12,6 +12,7 @@ import datetime as dt
 import hashlib
 import ipaddress
 import json
+import locale
 import os
 import re
 import shlex
@@ -1113,15 +1114,55 @@ def mark_interrupted_outputs(base: Path) -> list[str]:
     return renamed
 
 
-def run_nmap_process(cmd: list[str]) -> int:
+# nmap 이 '끝까지 정상적으로 돌지 못했다'고 알리는 표식. 이 줄들은 XML 에 남지 않고
+# stdout 으로만 나오므로, 출력을 보지 않으면 rc=0 · exit="success" 인 XML 만 보고
+# 온전한 결과로 착각하게 된다 — 그게 곧 미탐이다.
+#   NSOCK ERROR       : 소켓 자체를 열지 못함(예: UDP 500 bind 실패)
+#   Trying to delete NSI: nmap 이 자기 이벤트를 정리하지 못한 상태로 끝남
+#   QUITTING!         : 치명적 오류로 중단
+NMAP_UNCLEAN_MARKERS = ("NSOCK ERROR", "Trying to delete NSI", "QUITTING!")
+_UNCLEAN_KEEP = 5          # state 에 남길 표본 줄 수(로그 전체를 담지 않는다)
+
+
+def decode_output(raw: bytes, fallback: str = "") -> str:
+    """nmap 한 줄을 사람이 읽을 수 있는 문자열로.
+
+    출력에는 두 인코딩이 섞인다. 우리가 찍는 한글은 UTF-8 이고, nmap 이 Windows API 에서
+    받아 그대로 뱉는 오류 문구(WSAEACCES 10013 등)는 시스템 ANSI 코드페이지다. 한쪽으로
+    고정하면 반대쪽 줄이 통째로 깨져, 정작 원인을 알려주는 문장을 못 읽는다.
+    """
+    if isinstance(raw, str):
+        return raw
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode(fallback or locale.getpreferredencoding(False) or "utf-8", "replace")
+
+
+def run_nmap_process(cmd: list[str], problems: list[str] | None = None) -> int:
     """nmap 한 번 실행. 정지 신호를 받으면 곧바로 죽이지 않고 잠깐 기다린다.
 
     터미널 Ctrl+C 와 GUI [중지]는 프로세스 그룹 전체에 신호를 보내므로 nmap 도 같은 신호를
     이미 받은 상태다. nmap 은 그때 진행분을 -oA 파일로 마저 쓰고 종료하는데, 여기서 바로
     kill 하면 그 부분 결과가 통째로 사라진다. 유예 후에도 살아 있으면 단계적으로 종료한다.
+
+    출력은 그대로 흘려보내면서(운영자가 진행을 봐야 한다) 정상 종료를 부정하는 표식만
+    problems 에 모은다. 표식이 XML 에 없기 때문에 여기서 보지 않으면 볼 곳이 없다.
     """
-    proc = subprocess.Popen(cmd, shell=False)
+    # 이진 모드라 line buffering 은 쓸 수 없다(경고만 나고 무시된다). 기본 버퍼링에서도
+    # readline 은 개행이 도착하는 즉시 반환하므로 진행 표시가 밀리지 않는다.
+    proc = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
     try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = decode_output(raw)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if problems is not None and len(problems) < _UNCLEAN_KEEP:
+                stripped = line.strip()
+                if any(marker in stripped for marker in NMAP_UNCLEAN_MARKERS):
+                    problems.append(stripped[:200])
         return proc.wait()
     except KeyboardInterrupt:
         try:
@@ -1318,7 +1359,10 @@ def run_stage_name(stage_id: str) -> str:
 def stage_succeeded(plan: dict, batch_index: int, stage_id: str) -> bool:
     for run in plan.get("runs", []):
         run_batch = run.get("batch_index", run.get("index"))
-        if run_batch == batch_index and run.get("stage_id", "") == stage_id and run.get("returncode") == 0 and not run.get("skipped"):
+        if (run_batch == batch_index and run.get("stage_id", "") == stage_id
+                and run.get("returncode") == 0 and not run.get("skipped")
+                # 예전 state 에는 clean 키가 없다 — 그때는 종전대로 성공으로 본다.
+                and run.get("clean", True)):
             # 성공으로 기록됐어도 '.xml 산출물'이 사라졌으면 재스캔되도록 성공으로 보지 않는다(QA-041).
             # manifest 가 광고하는 것은 .xml 이므로, .nmap/.gnmap 형제가 남아있어도 .xml 이 없으면 vanished 로
             # 본다 — 그렇지 않으면 .xml 만 지워졌을 때 재실행이 안 돼 importable 결과가 영구 손실된다(QA-051).
@@ -2172,6 +2216,9 @@ def import_contract_unit(plan: dict, run: dict, xml_path: Path) -> dict:
     authoritative = bool(
         run.get("returncode") == 0
         and not run.get("skipped")
+        # NSE/소켓이 정리되지 못한 채 끝난 단계는 관측이 불완전하다. 그 상태로 닫힘 권한을
+        # 주면 '못 본 포트'가 '닫힌 포트'로 기록된다 — 되돌리기 가장 어려운 미탐.
+        and run.get("clean", True)
         and not plan.get("host_timeout")
         and stage_id in {"single", "tcp_discovery", "udp_identify"}
         and targets_complete
@@ -2298,6 +2345,17 @@ def failed_runs(plan: dict) -> list[dict]:
     return [r for r in latest_runs(plan) if not r.get("skipped") and r.get("returncode") not in (0, None)]
 
 
+def unclean_runs(plan: dict) -> list[dict]:
+    """rc=0 으로 끝났지만 nmap 이 정상 종료를 부정하는 출력을 낸 단계들.
+
+    실패(rc≠0)와 따로 센다. 이쪽은 '실패했다'가 아니라 '성공처럼 보이지만 관측이
+    불완전하다'라서, 조용히 지나가면 못 본 포트가 닫힌 포트로 기록된다."""
+    return [
+        run for run in latest_runs(plan)
+        if not run.get("skipped") and run.get("returncode") == 0 and not run.get("clean", True)
+    ]
+
+
 def importable_xml(plan: dict, include_discovery_fallback: bool = False) -> list[str]:
     """Importable XML, including completed authoritative units with zero observed hosts.
 
@@ -2382,8 +2440,11 @@ def finalize_plan(plan: dict, state_path: Path, zip_outputs: bool) -> int:
     # discovery 만 성공한 경우(identify 산출물 0)에도 성공한 discovery XML 을 구제 fallback 으로 인정한다.
     # 살아있는 호스트와 열린 포트를 찾고도 'failed'(exit 1, "모든 단계 실패")로 버려지던 문제를 막는다(QA-038).
     importable = importable_xml(plan, include_discovery_fallback=True)
+    # 정상 종료를 부정하는 출력을 낸 단계도 'done' 으로 마감하지 않는다. 결과는 쓸 수 있지만
+    # 온전하지 않으므로, 이력에서 그 사실이 보여야 사람이 다시 돌릴지 판단할 수 있다.
+    incomplete = bool(failed) or bool(unclean_runs(plan))
     if importable:
-        status = "partial" if failed else "done"
+        status = "partial" if incomplete else "done"
     else:
         status = "failed" if failed else "done"
     plan["status"] = status
@@ -2419,6 +2480,15 @@ def print_scan_summary(plan: dict, failed: list[dict], status: str) -> None:
             f"실패(rc={run.get('returncode')}) — 부분 결과만 반영됩니다.",
             file=sys.stderr,
         )
+    for run in unclean_runs(plan):
+        name = run.get("stage_name") or run.get("stage_id") or "scan"
+        print(
+            f"warning: {name} 이(가) 끝까지 정상 종료하지 못했습니다 — 관측이 불완전해 "
+            "닫힘 판정에서 제외합니다(--resume 으로 다시 시도할 수 있습니다).",
+            file=sys.stderr,
+        )
+        for line in run.get("nmap_problems", [])[:3]:
+            print(f"  nmap: {line}", file=sys.stderr)
     if not failed and f["live_hosts"] == 0 and f["open_tcp"] == 0 and f["open_udp"] == 0:
         if f["importable"]:
             print(
@@ -2449,8 +2519,9 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     stage_label = f" {run_stage_name(stage_id)}" if stage_id else ""
     print(f"[{idx + 1}/{len(plan['batches'])}]{stage_label} {display_command(cmd)}", flush=True)
     interrupted = False
+    problems: list[str] = []
     try:
-        rc = run_nmap_process(cmd)
+        rc = run_nmap_process(cmd, problems)
     except KeyboardInterrupt:
         # 중단도 '일어난 일'이라 기록한다. 기록하지 않으면 중간까지 스캔한 부분 결과가
         # state 에 없는 유령 파일로 남고, 재개 후 온전한 결과에 덮어써진다.
@@ -2465,6 +2536,10 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
         "finished_at": now_iso(),
         "returncode": rc,
         "interrupted": interrupted,
+        # nmap 이 rc=0 으로 끝나도 정상 종료를 부정하는 출력을 냈다면 이 단계는 온전하지 않다.
+        # 그 사실을 여기에 남겨야 닫힘 권한(import_contract_unit)과 재개 판정이 함께 움직인다.
+        "clean": not problems,
+        "nmap_problems": problems,
         "command": cmd,
         "scan_targets": scan_targets,
         "scan_targets_complete": targets_complete,

@@ -2253,7 +2253,7 @@ def test_interrupted_stage_is_recorded_before_the_stop_propagates(tmp_path, monk
     base = scanner.output_base(plan, 0, "tcp_discovery")
     state_path = tmp_path / "scan.state.json"
 
-    def fake_run(cmd):
+    def fake_run(cmd, problems=None):
         Path(str(base) + ".xml").write_text("<nmaprun/>", encoding="utf-8")
         raise KeyboardInterrupt()
 
@@ -2842,3 +2842,80 @@ def test_ike_version_is_not_in_the_default_udp_scripts():
     assert "ike-version" not in scanner.UDP_NSE_SCRIPTS
     # 필요한 사람이 직접 고를 수는 있어야 한다(프로토콜 표에는 남는다).
     assert scanner.NSE_PROTO["ike-version"] == "udp"
+
+
+def _noisy_nmap(tmp_path, lines: str):
+    """nmap 대역 — 지정한 줄을 찍고 rc=0 으로 끝난다(실제 nmap 의 그 상황 재현)."""
+    script = tmp_path / "fake_nmap.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.stdout.write({lines!r})\n"
+        "sys.exit(0)\n", encoding="utf-8")
+    return [sys.executable, str(script)]
+
+
+def test_a_stage_that_never_finished_cleanly_loses_closure_authority(tmp_path, monkeypatch, capsys):
+    """rc=0 · exit="success" 인데 NSE/소켓이 정리되지 못한 채 끝난 단계.
+
+    그 사실은 XML 이 아니라 stdout 에만 남는다. 출력을 보지 않으면 온전한 결과로 착각해
+    '못 본 포트'를 '닫힌 포트'로 기록하게 된다 — 되돌리기 가장 어려운 미탐."""
+    import sys as _sys
+    scanner = _load_scanner()
+    plan = {
+        "tool": "scanops_scanner", "nmap": "nmap", "name": "scan", "output_dir": str(tmp_path),
+        "workflow": "auto", "batches": [["10.0.0.1"]], "cursor": 0, "runs": [],
+        "stats_every": "10s", "host_timeout": "", "exclude": [], "raw_targets": ["10.0.0.1"],
+        "scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "",
+        "batch_size": 0, "max_hosts": 65536,
+    }
+    state_path = tmp_path / "scan.state.json"
+    noisy = ("Service scan Timing: About 100.00% done\n"
+             "NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed (IOD#4)\n"
+             "Trying to delete NSI, but could not find 1 of the purportedly pending events\n")
+    fake = _noisy_nmap(tmp_path, noisy)
+    monkeypatch.setattr(scanner, "build_command", lambda *a, **k: fake)
+    base = scanner.output_base(plan, 0, "udp_identify")
+    Path(str(base) + ".xml").write_text("<nmaprun/>", encoding="utf-8")
+
+    rc = scanner.run_nmap_stage(plan, 0, state_path, "udp_identify")
+    assert rc == 0                                   # nmap 은 성공으로 끝났다고 말한다
+    run = plan["runs"][-1]
+    assert run["clean"] is False
+    assert any("NSOCK ERROR" in line for line in run["nmap_problems"])
+    # 출력은 운영자에게 그대로 흘러가야 한다(진행을 봐야 하므로).
+    assert "NSOCK ERROR" in capsys.readouterr().out
+
+    # 1) 닫힘 권한 없음 — 이것이 미탐을 막는 지점
+    contract = scanner.import_contract_unit(plan, run, Path(str(base) + ".xml"))
+    assert contract["authoritative"] is False and contract["closure_targets"] == []
+    # 2) 재개 대상으로 남는다
+    assert not scanner.stage_succeeded(plan, 0, "udp_identify")
+    # 3) 마감 상태가 done 이 아니다
+    assert scanner.unclean_runs(plan) == [run]
+
+
+def test_a_quiet_successful_stage_keeps_its_closure_authority(tmp_path, monkeypatch):
+    """반대로, 조용히 성공한 단계까지 의심하면 닫힘이 영영 안 된다."""
+    scanner = _load_scanner()
+    plan = {
+        "tool": "scanops_scanner", "nmap": "nmap", "name": "scan", "output_dir": str(tmp_path),
+        "workflow": "auto", "batches": [["10.0.0.1"]], "cursor": 0, "runs": [],
+        "stats_every": "10s", "host_timeout": "", "exclude": [], "raw_targets": ["10.0.0.1"],
+        "scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "",
+        "batch_size": 0, "max_hosts": 65536,
+    }
+    fake = _noisy_nmap(tmp_path, "Nmap scan report for 10.0.0.1\nNmap done: 1 IP address\n")
+    monkeypatch.setattr(scanner, "build_command", lambda *a, **k: fake)
+    base = scanner.output_base(plan, 0, "udp_identify")
+    Path(str(base) + ".xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats>'
+        '<finished exit="success"/><hosts up="1" down="0" total="1"/>'
+        "</runstats></nmaprun>", encoding="utf-8")
+
+    scanner.run_nmap_stage(plan, 0, tmp_path / "s.state.json", "udp_identify")
+    run = plan["runs"][-1]
+    assert run["clean"] is True and run["nmap_problems"] == []
+    assert scanner.stage_succeeded(plan, 0, "udp_identify")
+    assert scanner.unclean_runs(plan) == []
+    contract = scanner.import_contract_unit(plan, run, Path(str(base) + ".xml"))
+    assert contract["authoritative"] is True
