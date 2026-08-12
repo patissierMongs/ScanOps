@@ -56,8 +56,16 @@ DEFAULT_NSE_SCRIPTS = (
 # UDP 식별용(3단계): UDP 기본 포트(53·111·123·137·161·500·5060 등)에 실제 매칭되는 스크립트만.
 # rpcinfo 는 UDP 111(포트맵퍼)에서 RPC/NFS(2049) 프로그램 매핑 → 정체 파악에 유효.
 # 부작용 제외: dhcp-discover(리스 요청)·snmp-interfaces(장황·느림)·ntp-monlist(증폭).
+#
+# ike-version 도 기본에서 뺀다. 이 스크립트는 **출발지 포트 500 을 직접 bind** 하는데,
+# Windows 는 IKEEXT(IPsec 키 관리) 서비스가 UDP 500 을 잡고 있어 bind 가 WSAEACCES(10013)
+# 로 실패한다. 그러면 호스트마다
+#   NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed (IOD#..)
+# 가 쏟아지고 NSE 가 99% 근처에서 정리되지 못한 채(Trying to delete NSI ...) 끝난다.
+# Windows 스캔 호스트에서는 얻는 정보가 0 이면서 UDP 식별 단계 전체를 불안정하게 만든다.
+# IKE 확인이 필요하면 --scripts 로 명시하거나 리눅스 스캔 호스트에서 돌린다.
 UDP_NSE_SCRIPTS = (
-    "snmp-info,snmp-sysdescr,nbstat,ike-version,dns-nsid,ntp-info,sip-methods,rpcinfo"
+    "snmp-info,snmp-sysdescr,nbstat,dns-nsid,ntp-info,sip-methods,rpcinfo"
 )
 # 발견 단계 호스트 디스커버리: ICMP 막은 서버도 흔한 서비스 포트로 잡고, 죽은 IP 는 건너뛴다
 # (-Pn 전수보다 듬성한 대역에서 빠르고 누락 적음). -sS 라 raw 소켓(관리자) 전제.

@@ -120,7 +120,10 @@ NSE_SCRIPTS = [
     {"key": "rdp-ntlm-info", "group": "RDP", "nmap_default": True, "proto": "tcp", "desc": "RDP NTLM 컴퓨터/도메인(NTLM_Computer)"},
     {"key": "snmp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "udp", "desc": "SNMP 시스템 정보"},
     {"key": "snmp-sysdescr", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "udp", "desc": "SNMP sysDescr"},
-    {"key": "ike-version", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "udp", "desc": "IKE(VPN) 버전"},
+    # 출발지 포트 500 을 직접 bind 하는 스크립트라, Windows 스캔 호스트에서는 IKEEXT 서비스가
+    # UDP 500 을 이미 잡고 있어 bind 가 WSAEACCES(10013) 로 실패한다. NSOCK 오류가 호스트마다
+    # 쏟아지고 NSE 가 정리되지 못한 채 끝나므로 기본에서 뺀다(필요하면 직접 선택).
+    {"key": "ike-version", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "IKE(VPN) 버전 ⚠ Windows 스캔 호스트에서는 UDP 500 충돌 — 기본 제외"},
     {"key": "sip-methods", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "both", "desc": "SIP 지원 메서드"},
     {"key": "ntp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "udp", "desc": "NTP 서버 정보(monlist 아님, 양성 readvar)"},
     {"key": "ntp-monlist", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "NTP monlist(증폭 취약 점검용)"},

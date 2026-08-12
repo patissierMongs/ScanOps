@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import locale
 import os
 import queue
 import re
@@ -27,6 +28,26 @@ except ImportError as _exc:  # noqa: F841 — headless 환경: 순수 로직만 
 SCRIPT = Path(__file__).with_name("scanops_scanner.py")
 PRESET_FILE = Path(__file__).with_name("scanops_presets.json")
 DEFAULT_OUTPUT = "scanops_scans"
+
+# nmap 출력은 두 가지 인코딩이 섞여 온다. 우리 CLI 가 찍는 한글 안내는 UTF-8 이고,
+# nmap 이 Windows API 에서 받아 그대로 뱉는 오류 문구(WSAEACCES 10013 등)는 시스템 ANSI
+# 코드페이지(한국어 Windows = CP949)다. 한쪽으로 고정하면 반대쪽 줄이 통째로 깨진다.
+# 그래서 UTF-8 을 먼저 엄격하게 시도하고, 실패한 줄만 OS 코드페이지로 되읽는다.
+_OS_ENCODING = locale.getpreferredencoding(False) or "utf-8"
+
+
+def decode_output(raw: bytes, fallback: str = "") -> str:
+    """nmap/CLI 한 줄을 사람이 읽을 수 있는 문자열로. 어느 쪽 인코딩이든 글자를 잃지 않는다.
+
+    fallback 은 이 컴퓨터의 ANSI 코드페이지가 기본이다(테스트가 명시적으로 넘긴다)."""
+    if isinstance(raw, str):
+        return raw
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode(fallback or _OS_ENCODING, "replace")
+
+
 NO_PRESET_LABEL = "프리셋 사용 안 함"
 # CLI 가 정지 신호 후 nmap 의 부분 결과 저장 + state 기록을 마칠 시간(NMAP_STOP_GRACE_SECONDS)보다
 # 넉넉히 뒤에 강제 종료해야 '중지'가 결과 유실로 바뀌지 않는다.
@@ -589,12 +610,13 @@ class ScannerGui:
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
+        # 바이트로 읽고 우리가 직접 디코드한다. PYTHONIOENCODING/PYTHONUTF8 은 파이썬 자식에게만
+        # 통하는데 파이프 반대쪽엔 nmap(C 프로그램)이 있다. nmap 이 Windows API 에서 받아 그대로
+        # 뱉는 오류 문구(예: WSAEACCES 10013)는 시스템 ANSI 코드페이지(한국어 Windows 면 CP949)라,
+        # UTF-8 로 고정 디코드하면 그 줄만 물음표·깨진 문자로 보인다(decode_output 참고).
         kwargs = {
             "stdout": subprocess.PIPE,
             "stderr": subprocess.STDOUT,
-            "text": True,
-            "encoding": "utf-8",
-            "errors": "replace",
             "bufsize": 1,
             "env": env,
         }
@@ -605,8 +627,8 @@ class ScannerGui:
         try:
             self.proc = subprocess.Popen(cmd, **kwargs)
             assert self.proc.stdout is not None
-            for line in self.proc.stdout:
-                self.output_queue.put(("line", line))
+            for raw in self.proc.stdout:
+                self.output_queue.put(("line", decode_output(raw)))
             self.output_queue.put(("done", self.proc.wait()))
         except OSError as exc:
             self.output_queue.put(("line", f"error: {exc}\n"))

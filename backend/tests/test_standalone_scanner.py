@@ -2812,3 +2812,33 @@ def test_choosing_tcp_syn_in_auto_mode_runs_exactly_the_default_scan():
             assert (scanner.build_command(default_plan, index, stage_id, **kwargs)
                     == scanner.build_command(syn_plan, index, stage_id, **kwargs)), \
                 f"batch{index} {stage_id} 명령이 달라졌습니다"
+
+
+def test_nmap_windows_error_text_is_not_mangled_into_question_marks():
+    """nmap 출력은 인코딩이 섞여 온다 — 한쪽으로 고정하면 반대쪽 줄이 깨진다.
+
+    우리 CLI 가 찍는 한글 안내는 UTF-8 이지만, nmap 이 Windows API 에서 받아 그대로 뱉는
+    오류 문구(WSAEACCES 10013 등)는 시스템 ANSI 코드페이지다. UTF-8 로 고정 디코드하면
+    그 줄만 물음표·깨진 문자가 되어, 정작 원인을 알려주는 문장을 읽을 수 없다."""
+    gui = _load_gui()
+
+    assert gui.decode_output("열린 포트 3개\n".encode("utf-8")) == "열린 포트 3개\n"
+
+    windows_error = "액세스 권한에 의해 금지된 방법으로 소켓에 액세스했습니다. (10013)"
+    decoded = gui.decode_output(windows_error.encode("cp949"), fallback="cp949")
+    assert decoded == windows_error
+    assert "�" not in decoded and "?" not in decoded
+
+    # 어느 인코딩으로도 못 읽는 바이트가 와도 줄을 통째로 잃지 않는다.
+    assert gui.decode_output(b"\xff\xfe nmap", fallback="cp949").endswith("nmap")
+
+
+def test_ike_version_is_not_in_the_default_udp_scripts():
+    """UDP 500 을 직접 bind 하는 스크립트는 기본에서 뺀다.
+
+    Windows 는 IKEEXT 서비스가 UDP 500 을 잡고 있어 bind 가 WSAEACCES(10013) 로 실패하고,
+    호스트마다 NSOCK 오류가 쏟아지며 NSE 가 정리되지 못한 채 끝난다(얻는 정보는 0)."""
+    scanner = _load_scanner()
+    assert "ike-version" not in scanner.UDP_NSE_SCRIPTS
+    # 필요한 사람이 직접 고를 수는 있어야 한다(프로토콜 표에는 남는다).
+    assert scanner.NSE_PROTO["ike-version"] == "udp"
