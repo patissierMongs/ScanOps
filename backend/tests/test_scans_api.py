@@ -2178,7 +2178,12 @@ def test_probed_identity_reads_the_run_arguments():
 
     assert probed_identity(_run_xml("nmap -sS -sV -p 22 10.0.0.1", _IDENTIFIED_SSH)) is True
     assert probed_identity(_run_xml("nmap -A -p 22 10.0.0.1", _IDENTIFIED_SSH)) is True
+    # -s 뒤의 스캔 타입 문자는 붙여 쓸 수 있다. -sSV 를 sweep 으로 보면 진짜 식별이 반영되지 않는다.
+    assert probed_identity(_run_xml("nmap -sSV -p 22 10.0.0.1", _IDENTIFIED_SSH)) is True
+    assert probed_identity(_run_xml("nmap -sSUV -p 22 10.0.0.1", _IDENTIFIED_SSH)) is True
     assert probed_identity(_run_xml("nmap -sS -p T:1-65535 10.0.0.1", _SWEPT_SSH)) is False
+    assert probed_identity(_run_xml("nmap -sSU -p 22 10.0.0.1", _SWEPT_SSH)) is False
+    assert probed_identity(_run_xml("nmap -sn 10.0.0.0/24", _SWEPT_SSH)) is False
     # args 가 없는 XML 은 판단하지 않는다 — 여기서 '식별 아님'으로 몰면 정상 인입이 멈춘다.
     assert probed_identity(_scan_xml(1, "", _IDENTIFIED_SSH)) is None
 

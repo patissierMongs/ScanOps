@@ -207,10 +207,19 @@ def probed_identity(source) -> bool | None:
     args = (root.get("args") or "").strip()
     if not args:
         return None
-    tokens = args.split()
-    # -sV / -A 는 버전 탐지를 켠다. -sV 는 다른 스캔 타입과 붙여 쓰지 않으므로 정확히 비교한다.
-    return any(token in ("-sV", "-A") or token.startswith("--version")
-               for token in tokens)
+    return any(_enables_version_detection(token) for token in args.split())
+
+
+def _enables_version_detection(token: str) -> bool:
+    """이 nmap 인자 하나가 버전 탐지를 켜는가.
+
+    `-s` 뒤의 스캔 타입 문자는 붙여 쓸 수 있다(`-sSV`, `-sSUV`). 그래서 `-sV` 만 정확히
+    비교하면 `nmap -sSV` 로 돌린 XML 이 'sweep' 으로 잘못 분류되고, 진짜 식별 결과가
+    관측으로 반영되지 않는다. `-sSU`(버전 탐지 없음)와는 V 유무로 갈린다.
+    """
+    if token == "-A" or token.startswith("--version"):
+        return True
+    return token.startswith("-s") and not token.startswith("--") and "V" in token[2:]
 
 
 def up_hosts(source) -> set[str]:
