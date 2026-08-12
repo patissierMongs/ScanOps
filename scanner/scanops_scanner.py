@@ -94,6 +94,9 @@ AUTO_STAGES = [
     ("tcp_identify", "발견된 TCP 포트 용도/서비스 식별"),
     ("udp_identify", "주요 UDP 서비스 식별"),
 ]
+# 파일명 끝의 단계 접미사. 서버가 이 이름으로 단계를 읽으므로(STAGE_FILE_RE)
+# 산출물 이름을 손댈 때는 접미사가 맨 뒤에 남아야 한다.
+STAGE_IDS = frozenset(stage_id for stage_id, _ in AUTO_STAGES)
 
 PRESETS: dict[str, list[str]] = {
     "basic": ["-Pn", "-sV", "-T4"],
@@ -1024,13 +1027,28 @@ def interrupted_dir(base: Path) -> Path:
     return Path(base).parent / INTERRUPTED_DIR_NAME
 
 
+def numbered_stage_name(stem: str, index: int) -> str:
+    """반복 중단 번호를 붙인 이름 — 단계 접미사는 **맨 뒤에 그대로 남긴다**.
+
+    `...tcp_discovery-2.xml` 처럼 뒤에 붙이면 서버가 파일명에서 단계를 못 읽는다
+    (STAGE_FILE_RE 는 `.<stage>.xml` 로 끝나야 매칭). 그러면 발견 단계 sweep 이
+    '식별까지 관측한 스캔'으로 취급돼, -sV 를 돌리지도 않은 포트 표 추측이 앞서
+    관측한 진짜 식별(OpenSSH 8.9 …)을 덮어쓴다. 번호는 단계 앞에 넣는다.
+    """
+    head, sep, stage = stem.rpartition(".")
+    if sep and stage in STAGE_IDS:
+        return f"{head}-{index}.{stage}"
+    return f"{stem}-{index}"
+
+
 def interrupted_base(base: Path) -> Path:
     """중단 산출물의 목적지 basename(하위 폴더 안). 같은 단계를 여러 번 중단하면 번호를 올려
     이전 중단본을 덮어쓰지 않는다(부분 결과 보존)."""
-    candidate = interrupted_dir(base) / Path(base).name
+    stem = Path(base).name
+    candidate = interrupted_dir(base) / stem
     index = 2
     while existing_outputs(candidate):
-        candidate = interrupted_dir(base) / f"{Path(base).name}-{index}"
+        candidate = interrupted_dir(base) / numbered_stage_name(stem, index)
         index += 1
     return candidate
 

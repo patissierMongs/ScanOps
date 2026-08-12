@@ -27,7 +27,7 @@ from ..uploads import read_limited
 from ..scanning import chunker, engine_runner, nmap_runner, scan_options, scope, taxonomy
 from ..scanning.presets import PRESETS
 from ..scanning.ingest import ingest
-from ..scanning.nmap_parse import parse_xml, scan_start, up_hosts
+from ..scanning.nmap_parse import parse_xml, probed_identity, scan_start, up_hosts
 from .audit import record
 from .deps import current_user, require_role
 
@@ -1447,7 +1447,10 @@ def _prepare_import_xml(xml_bytes: bytes, filename: str | None = None) -> tuple:
         scan_date = scan_start(xml_bytes)
         stage = (_stage_file_info(filename) or ("", ""))[1]
         findings = parse_xml(xml_bytes)
-        if stage == "tcp_discovery":
+        # 두 근거 중 하나라도 'sweep' 이라고 하면 식별 미관측으로 받는다. 파일명은 단계
+        # 계약이라 정확하지만 이름이 바뀌면 뚫리고, XML 인자는 이름과 무관하게 남는다.
+        sweep_only = stage == "tcp_discovery" or probed_identity(xml_bytes) is False
+        if sweep_only:
             findings = [{**finding, "identity_observed": False} for finding in findings]
         scanned_hosts = up_hosts(xml_bytes)
         if stage:

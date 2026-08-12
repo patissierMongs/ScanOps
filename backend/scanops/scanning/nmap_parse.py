@@ -191,6 +191,28 @@ def scan_start(source) -> datetime | None:
         return None
 
 
+def probed_identity(source) -> bool | None:
+    """이 XML 이 '서비스 식별까지 관측한 실행'인가. 판단 불가면 None.
+
+    포트 열림만 본 sweep(`-sS` 만)도 nmap 은 포트 표(nmap-services)의 이름을 `service
+    name=` 에 채워 넣는다. 그걸 관측으로 받아들이면, 앞서 `-sV` 로 확인한 진짜 식별
+    (OpenSSH 8.9)이 포트 번호 관례(ssh)로 덮인다. 파일명(단계 접미사)만으로 판정하면
+    이름이 조금만 달라져도 — 중단본 번호, 사용자가 손으로 바꾼 이름 — 조용히 뚫린다.
+    그래서 XML 이 스스로 들고 있는 실행 인자로도 본다.
+
+    `args` 가 없는 XML(수기 생성 등)은 판단하지 않고 None 을 돌려준다 — 여기서 함부로
+    '식별 아님'으로 몰면 정상적인 식별 인입이 갱신을 멈춘다.
+    """
+    root = _root_of(source)
+    args = (root.get("args") or "").strip()
+    if not args:
+        return None
+    tokens = args.split()
+    # -sV / -A 는 버전 탐지를 켠다. -sV 는 다른 스캔 타입과 붙여 쓰지 않으므로 정확히 비교한다.
+    return any(token in ("-sV", "-A") or token.startswith("--version")
+               for token in tokens)
+
+
 def up_hosts(source) -> set[str]:
     """이번 스캔에서 살아있던(up) 호스트 IP 집합 — 닫힘 판정 범위에 사용."""
     root = _root_of(source)

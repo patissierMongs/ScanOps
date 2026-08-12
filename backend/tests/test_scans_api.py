@@ -2142,3 +2142,69 @@ def test_observation_only_manifest_rejects_finding_outside_effective_batch(clien
         assert db.query(Finding).count() == 0
     finally:
         db.close()
+
+
+def _run_xml(args: str, ports: str, start: int = 1_700_000_000,
+             host: str = "127.0.0.1") -> bytes:
+    """`<nmaprun args=...>` 까지 갖춘 XML — 실행 인자로 sweep/식별을 구분하는 경로용."""
+    return f"""<?xml version="1.0"?>
+<nmaprun start="{start}" args="{args}">
+  <scaninfo type="syn" protocol="tcp" services="22"/>
+  <host>
+    <status state="up"/>
+    <address addr="{host}" addrtype="ipv4"/>
+    <ports>
+      {ports}
+    </ports>
+  </host>
+</nmaprun>
+""".encode()
+
+
+_IDENTIFIED_SSH = (
+    '<port protocol="tcp" portid="22"><state state="open"/>'
+    '<service name="ssh" method="probed" conf="10" product="OpenSSH" version="8.9p1"/>'
+    "</port>"
+)
+_SWEPT_SSH = (
+    '<port protocol="tcp" portid="22"><state state="open"/>'
+    '<service name="ssh" method="table" conf="3"/>'
+    "</port>"
+)
+
+
+def test_probed_identity_reads_the_run_arguments():
+    from scanops.scanning.nmap_parse import probed_identity
+
+    assert probed_identity(_run_xml("nmap -sS -sV -p 22 10.0.0.1", _IDENTIFIED_SSH)) is True
+    assert probed_identity(_run_xml("nmap -A -p 22 10.0.0.1", _IDENTIFIED_SSH)) is True
+    assert probed_identity(_run_xml("nmap -sS -p T:1-65535 10.0.0.1", _SWEPT_SSH)) is False
+    # args 가 없는 XML 은 판단하지 않는다 — 여기서 '식별 아님'으로 몰면 정상 인입이 멈춘다.
+    assert probed_identity(_scan_xml(1, "", _IDENTIFIED_SSH)) is None
+
+
+def test_a_sweep_never_overwrites_observed_identity_even_if_the_filename_hides_the_stage(client):
+    """포트만 훑은 실행이 앞서 관측한 식별을 포트 표 이름으로 덮지 않는다.
+
+    발견 단계 sweep 도 nmap 은 `service name="ssh"`(포트 표)를 채워 넣는다. 단계는 보통
+    파일명으로 읽지만, 중단본 번호나 사람이 바꾼 이름이면 그 단서가 사라진다. 그때도
+    XML 자신의 실행 인자(-sV 없음)로 sweep 임을 알아야 한다."""
+    h = _auth(client)
+
+    identified = _run_xml("nmap -sS -sV --version-all -p 22 127.0.0.1", _IDENTIFIED_SSH)
+    r = client.post("/api/scans/import", headers=h,
+                    files={"file": ("scan_a.tcp_identify.xml", identified, "text/xml")})
+    assert r.status_code == 200, r.text
+    before = client.get("/api/findings", headers=h).json()
+    assert [f["display_identity"] for f in before] == ["OpenSSH 8.9p1"]
+
+    # 파일명에서 단계를 못 읽는 형태(중단본 번호가 뒤에 붙은 옛 이름)로 sweep 을 넣는다.
+    swept = _run_xml("nmap -sS -p T:1-65535 127.0.0.1", _SWEPT_SSH)
+    r2 = client.post("/api/scans/import", headers=h,
+                     files={"file": ("scan_a.tcp_discovery-2.xml", swept, "text/xml")})
+    assert r2.status_code == 200, r2.text
+
+    after = client.get("/api/findings", headers=h).json()
+    assert len(after) == 1
+    assert after[0]["display_identity"] == "OpenSSH 8.9p1"
+    assert after[0]["product"] == "OpenSSH" and after[0]["version"] == "8.9p1"

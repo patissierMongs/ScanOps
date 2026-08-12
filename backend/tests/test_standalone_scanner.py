@@ -2178,8 +2178,42 @@ def test_interrupted_outputs_move_to_their_own_folder_and_never_overwrite(tmp_pa
     # 재개 후 다시 중단해도 앞선 부분 결과를 덮어쓰지 않는다.
     Path(str(base) + ".xml").write_text("second partial", encoding="utf-8")
     second = scanner.mark_interrupted_outputs(base)
-    assert Path(second[0]).name == "scan.10_0_0_1.tcp_discovery-2.xml"
+    assert Path(second[0]).name == "scan.10_0_0_1-2.tcp_discovery.xml"
     assert (tmp_path / "interrupted" / "scan.10_0_0_1.tcp_discovery.xml").read_text(encoding="utf-8") == "partial"
+
+
+def test_repeated_interruption_keeps_the_stage_suffix_the_server_reads(tmp_path):
+    """반복 중단 번호를 단계 접미사 '뒤'에 붙이면 서버가 단계를 못 읽는다.
+
+    그러면 발견 단계 sweep 이 '식별까지 관측한 실행'으로 취급돼, -sV 를 돌리지도 않은
+    포트 표 이름(ssh)이 앞서 관측한 진짜 식별(OpenSSH 8.9p1)을 덮어쓴다. 번호는 단계 앞에.
+    """
+    from scanops.api.scans import STAGE_FILE_RE
+
+    scanner = _load_scanner()
+    base = tmp_path / "scan.10_0_0_1.tcp_discovery"
+    for index in range(3):
+        Path(str(base) + ".xml").write_text(f"partial {index}", encoding="utf-8")
+        moved = Path(scanner.mark_interrupted_outputs(base)[0])
+        match = STAGE_FILE_RE.match(moved.name)
+        assert match, f"서버가 단계를 못 읽는 이름: {moved.name}"
+        assert match.group("stage") == "tcp_discovery"
+
+    names = sorted(p.name for p in (tmp_path / "interrupted").glob("*.xml"))
+    assert names == [
+        "scan.10_0_0_1-2.tcp_discovery.xml",
+        "scan.10_0_0_1-3.tcp_discovery.xml",
+        "scan.10_0_0_1.tcp_discovery.xml",
+    ]
+
+
+def test_stage_suffix_numbering_leaves_unstaged_names_alone():
+    """단계 접미사가 없는 이름(단일 워크플로)은 예전처럼 뒤에 번호를 붙인다."""
+    scanner = _load_scanner()
+    assert scanner.numbered_stage_name("scan.10_0_0_1", 2) == "scan.10_0_0_1-2"
+    assert scanner.numbered_stage_name("scan.10_0_0_1.tcp_identify", 4) == "scan.10_0_0_1-4.tcp_identify"
+    # 단계처럼 생겼지만 단계가 아닌 꼬리는 건드리지 않는다.
+    assert scanner.numbered_stage_name("scan.10_0_0_1.backup", 2) == "scan.10_0_0_1.backup-2"
 
 
 def test_interrupted_stage_is_recorded_before_the_stop_propagates(tmp_path, monkeypatch):
