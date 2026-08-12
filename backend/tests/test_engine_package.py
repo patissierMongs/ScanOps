@@ -1284,12 +1284,13 @@ def test_offline_wheelhouse_resolves_only_for_documented_windows_pythons(tmp_pat
 
     installer = (ROOT / "packaging" / "install.ps1").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    # install.ps1 은 3.12 만 받는다. README 도 그 전제를 그대로 적어야 한다(둘이 어긋나면
-    # 운영자가 3.13 을 깔아 놓고 설치가 거절되는 이유를 못 찾는다).
-    assert "Python 3.12 (x64)" in installer
-    assert "Python 3.12 (x64)" in readme
-    # all-in-one 은 두 런타임을 모두 지원하므로 그 사실도 문서에 있어야 한다.
-    assert "--python 3.13" in readme
+    # install.ps1 이 받는 런타임과 README 가 적은 전제는 같아야 한다(둘이 어긋나면
+    # 운영자가 설치를 거절당하고도 이유를 못 찾는다).
+    assert "Python 3.13 / 3.12 (x64)" in readme
+    for version in ("3.13", "3.12"):
+        assert f'"{version}"' in installer
+    # all-in-one 은 두 런타임을 모두 담을 수 있으므로 그 사실도 문서에 있어야 한다.
+    assert "--python 3.12" in readme
 
 
 def test_non_ascii_windows_powershell_installer_has_utf8_bom():
@@ -1395,13 +1396,16 @@ def _load_allinone():
 
 
 def test_allinone_default_keeps_the_established_output_contract():
-    """인자 없이 부르는 기존 경로(package_runtime_smoke)가 이름/스테이지를 그대로 쓴다."""
+    """인자 없이 부르는 기존 경로(package_runtime_smoke)가 이름/스테이지를 그대로 쓴다.
+
+    기본 런타임은 3.13 이다. 산출물 '이름'은 계약이라 그대로 두고 안에 담기는 런타임만
+    옮겼다 — smoke/CI 가 ScanOps_allinone.zip 을 이름으로 집어가기 때문."""
     module = _load_allinone()
-    assert module.PYTHON == "3.12" and module.ABI == "cp312"
+    assert module.PYTHON == "3.13" and module.ABI == "cp313"
     assert module.OUT.name == "ScanOps_allinone.zip"
     assert module.STAGE.name == "_allinone_stage"
 
-    module.configure("3.12")
+    module.configure("3.13")
     assert module.OUT.name == "ScanOps_allinone.zip"
     assert module.STAGE.name == "_allinone_stage"
 
@@ -1409,16 +1413,16 @@ def test_allinone_default_keeps_the_established_output_contract():
 def test_allinone_configure_binds_runtime_abi_and_output_per_version():
     module = _load_allinone()
 
-    module.configure("3.13")
-    assert module.ABI == "cp313"
-    assert module.PYVER.startswith("3.13.")
+    module.configure("3.12")
+    assert module.ABI == "cp312"
+    assert module.PYVER.startswith("3.12.")
     assert module.PYVER in module.EMBED_URL and "embed-amd64" in module.EMBED_URL
     # 버전별 산출물/스테이지가 서로 덮어쓰지 않아야 한다.
-    assert module.OUT.name == "ScanOps_allinone_py313.zip"
-    assert module.STAGE.name == "_allinone_stage_py313"
+    assert module.OUT.name == "ScanOps_allinone_py312.zip"
+    assert module.STAGE.name == "_allinone_stage_py312"
 
-    module.configure("3.12")
-    assert module.ABI == "cp312" and module.OUT.name == "ScanOps_allinone.zip"
+    module.configure("3.13")
+    assert module.ABI == "cp313" and module.OUT.name == "ScanOps_allinone.zip"
 
     with pytest.raises(SystemExit):
         module.configure("3.11")

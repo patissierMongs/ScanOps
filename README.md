@@ -25,17 +25,30 @@ cd frontend && npm install && npm run dev
 ```
 
 ## 에어갭(오프라인) 배포
-일반 오프라인 ZIP은 `install.ps1` 이 요구하는 **Python 3.12 (x64)** 와 **nmap**이 필요합니다.
-Python을 설치할 수 없는 Windows x64 서버는 Python 런타임이 포함된 all-in-one ZIP을 사용하세요.
-all-in-one 은 **3.12 / 3.13** 두 런타임으로 만들 수 있습니다.
+일반 오프라인 ZIP은 `install.ps1` 이 요구하는 **Python 3.13 / 3.12 (x64)** 와 **nmap**이 필요합니다
+(3.13 을 먼저 찾습니다). Python을 설치할 수 없는 Windows x64 서버는 Python 런타임이 포함된
+all-in-one ZIP을 사용하세요 — 기본 런타임은 **3.13** 입니다.
 
 ```powershell
-python packaging\build_allinone.py                  # 3.12 → ..\ScanOps_allinone.zip
-python packaging\build_allinone.py --python 3.13    # 3.13 → ..\ScanOps_allinone_py313.zip
+python packaging\build_allinone.py                  # 3.13 → ..\ScanOps_allinone.zip
+python packaging\build_allinone.py --python 3.12    # 3.12 → ..\ScanOps_allinone_py312.zip
 ```
 두 번들 모두 압축만 풀고 `START.bat` 을 실행하면 됩니다(대상에 Python 설치 불필요). 앱 의존성
 버전은 두 번들이 동일하며, 런타임과 바이너리 휠(cp312/cp313)만 다릅니다. 스캔 실행에만 nmap이
 따로 필요하고, XML 가져오기는 nmap 없이도 동작합니다.
+
+빌드는 실행에 쓰이지 않는 것만 덜어냅니다(대화형/개발용 표준 라이브러리, 이 앱이 쓰지 않는
+SQLAlchemy 방언, 의존성이 함께 배포한 자기 테스트 코드). **기능을 없애는 절단은 하지 않습니다** —
+예를 들어 OpenSSL 은 로그인 해시(`hashlib.pbkdf2_hmac`)가 3.12+ 부터 순수 파이썬 대체 구현 없이
+`_hashlib` 만 쓰므로 빼면 아무도 로그인하지 못합니다. 덜어낸 이름을 앱이나 의존성이 실제로
+import 하면 빌드가 그 자리에서 멈추고(`verify_stdlib_drop`), 같은 검사가 CI 에서도 돕니다
+(`backend/tests/test_bundle_slim.py` — 덜어낸 모듈을 전부 막은 인터프리터로 로그인·조회·xlsx
+내보내기까지 실제로 태워 봅니다). `--max-mb` 로 산출물 크기 상한을 강제할 수 있습니다.
+
+크기 참고(3.13, 슬림 적용): **약 15 MB**. 이 중 임베디드 CPython 런타임만 약 9.8 MB
+(`python313.dll` 2.5 · 표준 라이브러리 2.9 · OpenSSL 2.2 · `sqlite3.dll` 0.85)이고, 나머지는
+`pydantic_core` 2.0 · SQLAlchemy 1.6 · 프론트 dist 0.5 입니다. 이 구성으로 10 MB 밑은 나오지
+않습니다 — 위 항목은 모두 서버가 부팅하고 로그인하는 데 필요합니다.
 ```powershell
 # 1) 프론트 빌드(Node.js 20.19+ 또는 22.12+, 인터넷 되는 PC에서 1회) → frontend/dist 생성
 cd frontend && npm install && npm run build
