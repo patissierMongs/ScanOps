@@ -61,6 +61,36 @@ class ScanRunIn(BaseModel):
     udp_all_targets: bool = False  # auto: UDP 식별을 discovery live host 가 아닌 원본 타깃 전체로(-Pn)
 
 
+class KnownResultsIn(BaseModel):
+    """도킹 전 중복 확인 — 스캐너가 가진 결과 지문 목록."""
+    fingerprints: list[str] = []
+
+
+class ScanPresetItem(BaseModel):
+    """저장되는 스캔 프리셋 한 건 — nmap 플래그가 아니라 '옵션 키'로 담는다.
+
+    웹 UI 토글과 단독 스캐너가 같은 값을 서로 해석할 수 있어야 동기화가 성립한다.
+    workflow 는 auto / single(웹의 manual 과 동의어).
+    name 은 /item/{name} 경로가 대상을 정하므로 그 경로에서는 생략할 수 있다."""
+    name: str = ""
+    description: str = ""
+    workflow: str = "single"
+    options: list[str] = []
+    ports: str = ""
+    nse: list[str] = []
+    updated_at: str = ""
+
+
+class ScanPresetSync(BaseModel):
+    presets: list[ScanPresetItem] = []
+
+
+class ScanPresetReplace(BaseModel):
+    """목록 전체 교체 — 읽은 시점의 revision 을 함께 보내야 한다(중간 변경 시 409)."""
+    revision: str
+    presets: list[ScanPresetItem] = []
+
+
 class RawCommandIn(BaseModel):
     name: str = ""
     command: str          # 사용자가 직접 입력한 nmap 명령(출력 플래그는 서버가 -oA 로 강제 교체)

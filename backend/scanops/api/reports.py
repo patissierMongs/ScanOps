@@ -27,7 +27,8 @@ def _row(f: Finding) -> list:
     comp = "; ".join(f"{c.get('std')}:{c.get('ref')}" for c in (f.compliance_json or []))
     return [
         f.finding_key, f.host_ip, f.hostname, f.port, f.proto, f.state,
-        display_identity(server=f.server, product=f.product, version=f.version, service=f.service),
+        display_identity(server=f.server, product=f.product, version=f.version, service=f.service,
+                         identification=f.identification),
         f.server, f.service, f.product, f.version, f.identification, f.category, f.usage,
         RISK_LABELS_KO.get(f.risk_level, f.risk_level),
         f.status, f.dept,

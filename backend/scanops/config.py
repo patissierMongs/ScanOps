@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     def secret_file(self) -> Path:
         return self.data_dir / "secret.key"
 
+    @property
+    def preset_file(self) -> Path:
+        """스캔 프리셋 파일 — 단독 스캐너 폴더의 같은 형식 파일과 도킹 동기화한다."""
+        return self.data_dir / "scan_presets.json"
+
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.scans_dir.mkdir(parents=True, exist_ok=True)

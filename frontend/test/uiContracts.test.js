@@ -75,11 +75,37 @@ test("mobile navigation and password dialog retain keyboard contracts", () => {
 });
 
 test("search Enter handlers ignore Korean IME composition", () => {
-  for (const file of ["../src/views/Findings.jsx", "../src/views/History.jsx"]) {
-    const view = source(file);
-    assert.match(view, /nativeEvent\.isComposing \|\| e\.keyCode === 229/);
-    assert.match(view, /if \(e\.key === "Enter"\) load\(\)/);
-  }
+  // Enter 로 검색하는 화면은 조합 중 Enter(한글 확정)를 검색으로 오인하면 안 된다.
+  const view = source("../src/views/History.jsx");
+  assert.match(view, /nativeEvent\.isComposing \|\| e\.keyCode === 229/);
+  assert.match(view, /if \(e\.key === "Enter"\) load\(\)/);
+});
+
+test("findings search debounces on typing without firing mid-composition", () => {
+  const view = source("../src/views/Findings.jsx");
+  // 입력하는 대로 검색하므로 Enter 는 필요 없지만, 조합 중에는 질의가 나가면 안 된다.
+  // 'ㄴ' → '나' → '남' 단계마다 검색하면 엉뚱한 결과가 스쳐 가고 서버도 헛돈다.
+  assert.match(view, /onCompositionStart: \(\) => \{ composing\.current = true; \}/);
+  assert.match(view, /onCompositionEnd: \(\) => \{ composing\.current = false; setImeTick/);
+  assert.match(view, /if \(composing\.current\) return;/);
+  assert.match(view, /setTimeout\(\(\) => \{ setPage\(0\); load\(0\); \}, 250\)/);
+  // 조합이 끝나면 그때 한 번은 반드시 나가야 한다.
+  assert.match(view, /\[queryString\.toString\(\), imeTick\]/);
+  // 검색창과 컬럼 필터 모두 같은 보호를 받는다.
+  assert.ok(view.split("{...imeProps}").length - 1 >= 3, "search + column filters must share the IME guard");
+});
+
+test("findings table offers per-column filters, sorting, and a filter reset", () => {
+  const view = source("../src/views/Findings.jsx");
+  const css = source("../src/styles.css");
+  assert.match(view, /className="filter-row"/);
+  assert.match(view, /onClick=\{\(\) => toggleSort\(k\)\}/);
+  // 오름차순 → 내림차순 → 해제 순환이어야 원래 순서로 돌아올 수 있다.
+  assert.match(view, /s\.dir === "asc" \? \{ key, dir: "desc" \} : \{ key: "", dir: "asc" \}/);
+  assert.match(view, /필터 제거/);
+  assert.match(view, /setMatch\("contains"\)/);
+  assert.match(view, /setMatch\("exact"\)/);
+  assert.match(css, /\.tbl thead tr\.filter-row/);
 });
 
 test("table panels contain overflowing columns at every shell breakpoint", () => {
@@ -130,7 +156,9 @@ test("standalone folder import sends each preflighted XML/manifest group", () =>
   assert.match(scans, /uploadMany\("\/scans\/import-bundle", group\.files\)/);
   assert.match(scans, /accept="\.xml,\.manifest\.json"/);
   assert.match(scans, /formatImportSummary\(summary\)/);
-  assert.match(scans, /폴더째 가져오기\(XML\+manifest\)/);
+  // 라벨은 짧게 두고 'manifest 까지 함께 읽는다'는 설명은 보조 문구로 — 폴더 경로 자체는 남아야 한다.
+  assert.match(scans, /폴더째 가져오기/);
+  assert.match(scans, /manifest 까지 함께 읽습니다/);
 });
 
 test("scan details expose persisted timeline and safe failure fields", () => {
@@ -232,7 +260,7 @@ test("scan type controls cannot submit connect with SYN or UDP", () => {
   assert.match(udp, /n\.add\("udp"\)/);
   assert.match(udp, /n\.add\("syn"\)/);
   assert.match(udp, /n\.delete\("connect"\)/);
-  assert.match(scanOptions, /const nextSel = normalizeSelections\(p\.keys \|\| \[\]\)/);
+  assert.match(scanOptions, /const nextSel = normalizeSelections\(p\.options \|\| \[\]\)/);
   assert.match(scanOptions, /next\.has\("connect"\)[\s\S]*?next\.delete\("defeat_rst"\)/);
 });
 
@@ -260,6 +288,34 @@ test("port presets and protocol toggles keep staged request combinations valid",
   );
   assert.match(preset, /nextSel\.has\("connect"\)[\s\S]*?nextPorts = tcpOnlyPortSpec\(nextPorts\)/);
   assert.match(preset, /hasExplicitUdpPorts\(nextPorts\)[\s\S]*?nextSel\.add\("udp"\)/);
+});
+
+test("scan presets live on the server so the standalone scanner can sync the same file", () => {
+  const scanOptions = source("../src/ui/ScanOptions.jsx");
+  // localStorage 에 남으면 단독 스캐너 동기화 대상에서 빠진다 — 읽기/쓰기 모두 서버 API 로.
+  assert.match(scanOptions, /api\("\/scan-presets"\)/);
+  assert.doesNotMatch(scanOptions, /localStorage\.setItem\(LEGACY_PRESET_KEY/);
+
+  // 파일 형식의 workflow 어휘는 단독 스캐너 기준(single) — 웹의 manual 과 상호 변환한다.
+  assert.match(scanOptions, /const toStoredWorkflow = \(workflow\) => \(workflow === "auto" \? "auto" : "single"\)/);
+  assert.match(scanOptions, /const toUiWorkflow = \(workflow\) => \(workflow === "auto" \? "auto" : "manual"\)/);
+  assert.match(scanOptions, /setWorkflow\(toUiWorkflow\(p\.workflow\)\)/);
+  assert.match(scanOptions, /workflow: toStoredWorkflow\(workflow\)/);
+});
+
+test("preset writes touch one name so a stale list cannot erase other people's presets", () => {
+  const scanOptions = source("../src/ui/ScanOptions.jsx");
+  // 목록 전체를 되보내면 이 화면이 목록을 읽은 뒤 추가된 프리셋이 조용히 사라진다.
+  assert.doesNotMatch(scanOptions, /json: \{ presets: \[/);
+  assert.match(scanOptions, /`\/scan-presets\/item\/\$\{encodeURIComponent\(trimmed\)\}`[\s\S]*?method: "PUT"/);
+  assert.match(scanOptions, /`\/scan-presets\/item\/\$\{encodeURIComponent\(presetId\)\}`, \{ method: "DELETE" \}/);
+  // 이관은 create_only — 서버에 이미 있는 동명 프리셋을 덮어쓰지 않는다.
+  assert.match(scanOptions, /\?create_only=true`/);
+
+  // '같은 이름인가'는 서버 규칙(연속 공백 접기 + casefold)만 안다. 클라이언트가 재구현하면
+  // 'Weekly  Full' 과 'weekly full' 을 다르게 보고 서버는 중복이라 거절하는 불일치가 생긴다.
+  assert.doesNotMatch(scanOptions, /name\.trim\(\)\.toLowerCase\(\)/);
+  assert.match(scanOptions, /setPresetId\(saved\.name \|\| trimmed\)/);
 });
 
 test("timing controls and presets resolve to one backend-visible timing", () => {
@@ -303,4 +359,65 @@ test("staged preview mirrors discovery, protocol sweeps, and per-host service pr
   assert.match(staged, /"<호스트 1대>"/);
   assert.match(source("../src/views/Scans.jsx"), /targets=\{targetList\} excludes=\{previewExcludes\} staged=\{staged\}/);
   assert.match(scanOptions, /단계별 명령 템플릿/);
+});
+
+test("scan screen shows target and run first, with everything else folded away", () => {
+  const scans = source("../src/views/Scans.jsx");
+  const css = source("../src/styles.css");
+  // 세부 설정은 기본 접힘 — 체크박스 80여 개와 명령 미리보기가 실행 버튼 앞을 가로막으면
+  // 화면을 처음 보는 사람은 무엇을 해야 하는지 읽어낼 수 없다.
+  assert.match(scans, /const \[showAdvanced, setShowAdvanced\] = useState\(false\)/);
+  assert.match(scans, /className="scan-advanced" style=\{\{ display: showAdvanced \? "block" : "none" \}\}/);
+  // 옵션 빌더는 접혀 있어도 마운트를 유지해야 raw 모드의 '채우기'가 최신 명령을 얻는다.
+  assert.doesNotMatch(scans, /showAdvanced && <ScanOptions/);
+  // 세부 설정을 펼치지 않아도 무엇을 하려는지 한 줄로 확인하고 실행할 수 있어야 한다.
+  assert.match(scans, /const planSummary = \(\(\) => \{/);
+  assert.match(scans, /className="scan-summary"/);
+  assert.match(css, /\.scan-summary\s*\{/);
+  // 가져오기는 '스캔한다'와 다른 작업이라 실행 버튼 옆이 아니라 따로 둔다.
+  assert.match(scans, /className="scan-import-row"/);
+});
+
+test("folder import drops interrupted scan output before uploading it", async () => {
+  const { prepareImportGroups, isInterruptedPath } = await import("../src/lib/scanImports.js");
+
+  assert.ok(isInterruptedPath("scans/interrupted/scan.x.tcp_discovery.interrupted.xml"));
+  assert.ok(isInterruptedPath("scan.x.tcp_identify.interrupted.xml"));
+  assert.ok(isInterruptedPath("scans/interrupted/scan.x.xml"));
+  // 'interrupted' 가 이름의 일부일 뿐인 온전한 결과는 막지 않는다.
+  assert.equal(isInterruptedPath("scans/interrupted_hosts_report.xml"), false);
+  assert.equal(isInterruptedPath("scans/scan.x.tcp_discovery.xml"), false);
+
+  const file = (path) => ({
+    webkitRelativePath: path,
+    name: path.split("/").at(-1),
+    text: async () => "",
+  });
+  const plan = await prepareImportGroups([
+    file("scans/scan.a.tcp_discovery.xml"),
+    file("scans/interrupted/scan.a.tcp_identify.interrupted.xml"),
+  ]);
+
+  const uploaded = plan.groups.flatMap((group) => group.files.map((f) => f.name));
+  assert.deepEqual(uploaded, ["scans/scan.a.tcp_discovery.xml"]);
+  assert.equal(plan.interruptedXmlCount, 1);
+});
+
+test("import summary says how many interrupted scans it left out", async () => {
+  const { formatImportSummary } = await import("../src/lib/scanImports.js");
+  const message = formatImportSummary({
+    imported: 1, groupCount: 1, succeededGroups: 1, fileCount: 1,
+    selectedXmlCount: 1, interruptedXmlCount: 2, counts: {}, closureModes: [],
+  });
+  assert.match(message, /중단된 스캔 2개 제외/);
+});
+
+test("interrupted output that never uploads is not counted as a failure", async () => {
+  const { runImportGroups } = await import("../src/lib/scanImports.js");
+  const summary = await runImportGroups(
+    { groups: [], selectedXmlCount: 0, skippedXmlCount: 0, interruptedXmlCount: 3 },
+    async () => ({}),
+  );
+  assert.equal(summary.interruptedXmlCount, 3);
+  assert.equal(summary.hasFailures, false);
 });

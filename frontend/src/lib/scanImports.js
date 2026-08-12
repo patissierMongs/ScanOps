@@ -1,5 +1,21 @@
 const XML_SUFFIX = ".xml";
 const MANIFEST_SUFFIX = ".manifest.json";
+// 중단본 표식 — 스캐너/서버와 같은 문자열이어야 한다(scanops_scanner.INTERRUPTED_*).
+const INTERRUPTED_DIR = "interrupted";
+const INTERRUPTED_MARK = ".interrupted";
+
+/**
+ * 중단된 스캔의 산출물인가. 폴더째 가져오기는 `interrupted/` 까지 재귀로 딸려 오는데,
+ * 부분 결과를 온전한 결과와 같이 넣으면 못 본 포트가 미탐이 되고 끊긴 자리의 filtered 가
+ * 오탐이 된다. 서버도 같은 규칙으로 거절하지만, 여기서 걸러야 사용자가 '무엇이 빠졌는지'를
+ * 업로드 전에 본다.
+ */
+export function isInterruptedPath(path) {
+  const normalized = String(path || "").toLowerCase();
+  const basename = normalized.split("/").at(-1) || "";
+  if (basename.includes(`${INTERRUPTED_MARK}.`)) return true;
+  return normalized.split("/").slice(0, -1).includes(INTERRUPTED_DIR);
+}
 
 
 function selectedPath(file) {
@@ -85,16 +101,22 @@ function manifestClaims(text, manifestPath) {
  * standalone run. No upload starts until every manifest and claim has been checked.
  */
 export async function prepareImportGroups(fileList) {
-  const entries = [...fileList]
+  const selected = [...fileList]
     .map((file) => ({ file, name: selectedPath(file) }))
     .filter((entry) => {
       const lower = entry.name.toLowerCase();
       return lower.endsWith(XML_SUFFIX) || lower.endsWith(MANIFEST_SUFFIX);
     })
     .sort((a, b) => a.name.localeCompare(b.name));
+  const interrupted = selected.filter((entry) => isInterruptedPath(entry.name));
+  const entries = selected.filter((entry) => !isInterruptedPath(entry.name));
   const xmls = entries.filter((entry) => entry.name.toLowerCase().endsWith(XML_SUFFIX));
   const manifests = entries.filter((entry) => entry.name.toLowerCase().endsWith(MANIFEST_SUFFIX));
-  if (!xmls.length) throw new Error("가져올 .xml 파일이 없습니다");
+  if (!xmls.length) {
+    throw new Error(interrupted.length
+      ? `가져올 .xml 파일이 없습니다 (중단된 스캔 ${interrupted.length}건은 부분 결과라 제외했습니다)`
+      : "가져올 .xml 파일이 없습니다");
+  }
 
   const xmlByPath = new Map();
   for (const entry of xmls) {
@@ -161,6 +183,9 @@ export async function prepareImportGroups(fileList) {
     selectedXmlCount: xmls.length,
     skippedXmlCount: skipped.length,
     skippedXmlNames: skipped.map((entry) => entry.name),
+    interruptedXmlCount: interrupted.filter(
+      (entry) => entry.name.toLowerCase().endsWith(XML_SUFFIX),
+    ).length,
   };
 }
 
@@ -188,6 +213,8 @@ export async function runImportGroups(plan, uploadGroup) {
     selectedXmlCount: number(plan.selectedXmlCount),
     skippedXmlCount: number(plan.skippedXmlCount),
     skippedXmlNames: [...(plan.skippedXmlNames || [])],
+    // 중단본 제외는 hasFailures 로 세지 않는다 — 실패가 아니라 설계된 보호다.
+    interruptedXmlCount: number(plan.interruptedXmlCount),
     counts: {},
     closureModes: [],
     errors: [],
@@ -243,6 +270,10 @@ export function formatImportSummary(summary) {
   message += ` · 신규 ${number(counts.new)} / 닫힘 ${number(counts.closed)}`;
   if (closure) message += ` · ${closure}`;
   if (summary.skippedXmlCount) message += ` · 미참조 XML ${number(summary.skippedXmlCount)}개 건너뜀`;
+  // 중단본 제외는 실패가 아니라 의도된 보호다 — 다만 조용히 빠지면 '왜 안 들어왔지'가 된다.
+  if (summary.interruptedXmlCount) {
+    message += ` · 중단된 스캔 ${number(summary.interruptedXmlCount)}개 제외(부분 결과)`;
+  }
   if (summary.errors?.length) message += ` · 실패: ${summary.errors.join(" | ")}`;
   return message;
 }

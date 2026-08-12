@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import { downloadFile } from "../lib/download.js";
 import { useToast } from "../ui/Toast.jsx";
@@ -13,6 +13,13 @@ import { dday, STATUS_CLASS, RISK_LABEL } from "../lib/format.js";
 
 const COLS_KEY = "scanops_cols";
 const CUSTOM_KEY = "scanops_custom_presets";
+// 한 번에 그리는 행 수. 발견이 수천 건이어도 DOM 이 그만큼 커지지 않게 서버 페이지로 끊는다.
+const PAGE_SIZE = 200;
+// 브라우저 로컬 날짜(YYYY-MM-DD) — 마감초과 판정 기준을 서버 UTC 가 아니라 사용자 기준으로 맞춘다.
+const localToday = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 const loadJSON = (k, fb) => { try { return JSON.parse(localStorage.getItem(k)) ?? fb; } catch { return fb; } };
 
 export default function Findings({ user }) {
@@ -23,7 +30,16 @@ export default function Findings({ user }) {
   const [customPresets, setCustomPresets] = useState(() => loadJSON(CUSTOM_KEY, []));
 
   const [findings, setFindings] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
   const [q, setQ] = useState("");
+  const [match, setMatch] = useState("contains");   // contains(일부 포함) | exact(정확히)
+  const [colFilters, setColFilters] = useState({});  // {컬럼키: 검색어}
+  const [sort, setSort] = useState({ key: "", dir: "asc" });
+  const [page, setPage] = useState(0);
+  // 한글 IME 조합 중인지 — 조합 단계마다 질의가 나가지 않게 막는 플래그.
+  const composing = useRef(false);
+  const [imeTick, setImeTick] = useState(0);   // 조합 종료 시점에 질의를 한 번 깨우는 용도
   const [risk, setRisk] = useState("");
   const [status, setStatus] = useState("");
   const [overdueOnly, setOverdueOnly] = useState(false);
@@ -38,23 +54,78 @@ export default function Findings({ user }) {
 
   function persistCols(next) { setCols(next); localStorage.setItem(COLS_KEY, JSON.stringify(next)); setPresetId(""); }
 
-  function load() {
-    const qs = new URLSearchParams({ state: "open" });
+  // 검색·필터·정렬·페이지는 모두 서버가 처리한다. 화면이 보는 값과 내보내기가 어긋나지 않게
+  // 서버가 '표시값' 기준으로 판정하며, 큰 원문(fingerprint)은 그 컬럼을 켰을 때만 실어 보낸다.
+  const queryString = useMemo(() => {
+    const qs = new URLSearchParams({ state: "open", match, cols: cols.join(",") });
     if (risk) qs.set("risk", risk);
     if (status) qs.set("status", status);
     if (q.trim()) qs.set("q", q.trim());
-    api(`/findings?${qs.toString()}`)
-      .then(setFindings)
-      .catch((e) => toast(e.message, { type: "err" }));
-  }
-  useEffect(() => { load(); }, [risk, status]);
+    const active = Object.fromEntries(Object.entries(colFilters).filter(([, v]) => v.trim()));
+    if (Object.keys(active).length) qs.set("filters", JSON.stringify(active));
+    if (sort.key) { qs.set("sort", sort.key); qs.set("dir", sort.dir); }
+    // 이 두 토글도 서버가 걸러야 한다. 페이지를 자른 뒤 화면에서 걸러내면 조건에 맞는 행이
+    // 뒷 페이지에 남아 첫 페이지가 빈 것처럼 보이고, 건수·내보내기도 화면과 어긋난다.
+    if (hideNormal) qs.set("hide_normal", "true");
+    if (overdueOnly) qs.set("overdue_only", "true");
+    // 마감초과 판정은 사용자 로컬 날짜 기준이어야 화면의 'N일 초과' 표시와 일치한다.
+    if (overdueOnly) qs.set("today", localToday());
+    return qs;
+  }, [match, cols, risk, status, q, colFilters, sort, hideNormal, overdueOnly]);
 
-  const view = useMemo(() => {
-    let v = findings;
-    if (hideNormal) v = v.filter((f) => f.status !== "정상처리");
-    if (overdueOnly) v = v.filter((f) => dday(f.deadline).over);
-    return v;
-  }, [findings, overdueOnly, hideNormal]);
+  function load(targetPage = page) {
+    const qs = new URLSearchParams(queryString);
+    qs.set("limit", String(PAGE_SIZE));
+    qs.set("offset", String(targetPage * PAGE_SIZE));
+    setLoading(true);
+    api(`/findings?${qs.toString()}`, { raw: true })
+      .then(({ body, total: count }) => { setFindings(body); setTotal(count); })
+      .catch((e) => toast(e.message, { type: "err" }))
+      .finally(() => setLoading(false));
+  }
+
+  // 입력 중 매 글자마다 서버를 때리지 않도록 살짝 늦춘다(검색어·컬럼 필터).
+  // 한글 조합 중에는 아예 보내지 않는다 — 'ㄴ', '나', '남'… 조합 단계마다 질의하면
+  // 엉뚱한 결과가 스쳐 지나가고 서버도 헛돈다. 조합이 끝나면 그때 한 번 나간다.
+  useEffect(() => {
+    if (composing.current) return;
+    const timer = setTimeout(() => { setPage(0); load(0); }, 250);
+    return () => clearTimeout(timer);
+  }, [queryString.toString(), imeTick]);
+  useEffect(() => { load(page); }, [page]);
+
+  // 필터는 전부 서버가 페이지를 자르기 전에 적용한다 — 여기서 다시 거르면 페이지와 어긋난다.
+  const view = findings;
+
+  const filterCount = Object.values(colFilters).filter((v) => v.trim()).length
+    + (q.trim() ? 1 : 0) + (risk ? 1 : 0) + (status ? 1 : 0) + (overdueOnly ? 1 : 0);
+
+  function clearFilters() {
+    setQ("");
+    setColFilters({});
+    setRisk("");
+    setStatus("");
+    setOverdueOnly(false);
+    setSort({ key: "", dir: "asc" });
+    setPage(0);
+  }
+
+  function toggleSort(key) {
+    // 오름차순 → 내림차순 → 정렬 없음 순환. '정렬 없음'이 있어야 원래 순서로 돌아올 수 있다.
+    setSort((s) => (s.key !== key ? { key, dir: "asc" }
+      : s.dir === "asc" ? { key, dir: "desc" } : { key: "", dir: "asc" }));
+    setPage(0);
+  }
+
+  function setColFilter(key, value) {
+    setColFilters((f) => ({ ...f, [key]: value }));
+  }
+
+  // 한글 조합(IME) 안전 입력 핸들러 — 조합 중에는 질의를 막고, 끝나면 한 번만 깨운다.
+  const imeProps = {
+    onCompositionStart: () => { composing.current = true; },
+    onCompositionEnd: () => { composing.current = false; setImeTick((n) => n + 1); },
+  };
 
   // ---- 컬럼 빌더 ----
   function applyPreset(id) {
@@ -78,10 +149,10 @@ export default function Findings({ user }) {
     localStorage.setItem("scanops_colmodes", JSON.stringify(next));
   }
   function exportCols(fmt) {
-    const qs = new URLSearchParams({ cols: cols.join(","), fmt, state: "open" });
-    if (risk) qs.set("risk", risk);
-    if (status) qs.set("status", status);
-    if (q.trim()) qs.set("q", q.trim());
+    // 화면에서 걸러 본 그대로 내보낸다 — 같은 파라미터를 같은 서버 뷰에 넘긴다.
+    const qs = new URLSearchParams(queryString);
+    qs.set("cols", cols.join(","));
+    qs.set("fmt", fmt);
     downloadFile(`/findings/export?${qs.toString()}`)
       .then(() => toast(`${fmt.toUpperCase()} 내보냄 · ${cols.length}컬럼`))
       .catch((e) => toast(e.message, { type: "err" }));
@@ -155,12 +226,14 @@ export default function Findings({ user }) {
 
       <div className="panel">
         <div className="row" style={{ marginBottom: 12 }}>
-          <input style={{ flex: 1, minWidth: 180 }}
-                 placeholder="검색 (모든 필드 · IP·포트·호스트명·서비스·배너·비고·부서·담당자 등)" value={q}
-                 onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => {
-                   if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-                   if (e.key === "Enter") load();
-                 }} />
+          <input style={{ flex: 1, minWidth: 180 }} placeholder="모든 컬럼 검색" value={q}
+                 {...imeProps} onChange={(e) => setQ(e.target.value)} />
+          <div className="seg" title="일부 포함: 검색어가 들어간 값 / 정확히: 값 전체가 검색어와 같음">
+            <button type="button" className={match === "contains" ? "on" : ""}
+                    onClick={() => setMatch("contains")}>일부 포함</button>
+            <button type="button" className={match === "exact" ? "on" : ""}
+                    onClick={() => setMatch("exact")}>정확히</button>
+          </div>
           <select value={risk} onChange={(e) => setRisk(e.target.value)}>
             <option value="">위험 전체</option>
             <option value="banned">금지</option>
@@ -179,6 +252,10 @@ export default function Findings({ user }) {
             <input type="checkbox" checked={overdueOnly} onChange={(e) => setOverdueOnly(e.target.checked)} />
             마감초과만
           </label>
+          <button className="sm" onClick={clearFilters} disabled={!filterCount && !sort.key}
+                  title="검색어·컬럼 필터·위험/상태·정렬을 모두 초기화">
+            필터 제거{filterCount ? ` (${filterCount})` : ""}
+          </button>
           {canEdit && (
             <button className="sm" disabled={selected.size === 0}
                     onClick={() => setRescanDrawer({ targets: selFindings })}>
@@ -198,14 +275,40 @@ export default function Findings({ user }) {
             <thead>
               <tr>
                 <th><input type="checkbox" checked={view.length > 0 && selected.size === view.length} onChange={selectAll} /></th>
-                {cols.map((k) => <th key={k}>{COLUMN_MAP[k]?.label || k}</th>)}
-                <th>마감</th>
+                {cols.map((k) => (
+                  <th key={k} className="sortable" onClick={() => toggleSort(k)}
+                      title="클릭: 오름차순 → 내림차순 → 정렬 해제">
+                    {COLUMN_MAP[k]?.label || k}
+                    <span className="sort-mark">{sort.key === k ? (sort.dir === "asc" ? "▲" : "▼") : "↕"}</span>
+                  </th>
+                ))}
+                <th className="sortable" onClick={() => toggleSort("deadline")} title="클릭: 오름차순 → 내림차순 → 정렬 해제">
+                  마감<span className="sort-mark">{sort.key === "deadline" ? (sort.dir === "asc" ? "▲" : "▼") : "↕"}</span>
+                </th>
+                {canEdit && <th></th>}
+              </tr>
+              {/* 컬럼별 필터 — 각 컬럼 바로 아래에서 그 컬럼만 좁힌다. 위 검색창은 모든 컬럼 대상. */}
+              <tr className="filter-row">
+                <th></th>
+                {cols.map((k) => (
+                  <th key={k}>
+                    <input value={colFilters[k] || ""} placeholder="필터"
+                           aria-label={`${COLUMN_MAP[k]?.label || k} 필터`} {...imeProps}
+                           onChange={(e) => setColFilter(k, e.target.value)} />
+                  </th>
+                ))}
+                <th>
+                  <input value={colFilters.deadline || ""} placeholder="필터" aria-label="마감 필터"
+                         {...imeProps} onChange={(e) => setColFilter("deadline", e.target.value)} />
+                </th>
                 {canEdit && <th></th>}
               </tr>
             </thead>
             <tbody>
               {view.length === 0 ? (
-                <tr><td className="empty" colSpan={cols.length + 3}>발견 없음</td></tr>
+                <tr><td className="empty" colSpan={cols.length + 3}>
+                  {loading ? "불러오는 중…" : filterCount ? "조건에 맞는 발견 없음 — [필터 제거]로 초기화" : "발견 없음"}
+                </td></tr>
               ) : view.map((f) => {
                 const dl = dday(f.deadline);
                 // 금지/마감초과 → 연한 빨강, 처리중 → 연한 노랑(빨강 우선).
@@ -232,6 +335,16 @@ export default function Findings({ user }) {
               })}
             </tbody>
           </table>
+        </div>
+
+        <div className="row" style={{ marginTop: 10, alignItems: "center" }}>
+          <span className="muted" style={{ fontSize: 12 }}>
+            {total === 0 ? "0건" : `${total.toLocaleString()}건 중 ${(page * PAGE_SIZE + 1).toLocaleString()}–${Math.min((page + 1) * PAGE_SIZE, total).toLocaleString()}`}
+            {loading ? " · 불러오는 중…" : ""}
+          </span>
+          <div style={{ flex: 1 }} />
+          <button className="sm" disabled={page === 0 || loading} onClick={() => setPage((p) => Math.max(0, p - 1))}>이전</button>
+          <button className="sm" disabled={(page + 1) * PAGE_SIZE >= total || loading} onClick={() => setPage((p) => p + 1)}>다음</button>
         </div>
       </div>
 

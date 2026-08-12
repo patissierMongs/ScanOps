@@ -42,6 +42,7 @@ def _build_body(dept: str, rows: list[Finding]) -> str:
         risk = RISK_LABELS_KO.get(r.risk_level, r.risk_level)
         identity = display_identity(
             server=r.server, product=r.product, version=r.version, service=r.service,
+            identification=r.identification,
         )
         if r.service and identity != r.service:
             identity += f" (서비스: {r.service})"

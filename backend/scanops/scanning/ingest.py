@@ -63,6 +63,7 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
                 product=f.get("product", ""),
                 version=f.get("version", ""),
                 service=f.get("service", ""),
+                identification=f.get("identification", ""),
             )
             prefix = f"{identity} " if identity else ""
             _event(

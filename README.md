@@ -25,17 +25,45 @@ cd frontend && npm install && npm run dev
 ```
 
 ## 에어갭(오프라인) 배포
-일반 오프라인 ZIP은 `install.ps1` 이 요구하는 **Python 3.12 (x64)** 와 **nmap**이 필요합니다.
-Python을 설치할 수 없는 Windows x64 서버는 Python 런타임이 포함된 all-in-one ZIP을 사용하세요.
-all-in-one 은 **3.12 / 3.13** 두 런타임으로 만들 수 있습니다.
+일반 오프라인 ZIP은 `install.ps1` 이 요구하는 **Python 3.13 / 3.12 (x64)** 와 **nmap**이 필요합니다
+(3.13 을 먼저 찾습니다). Python을 설치할 수 없는 Windows x64 서버는 Python 런타임이 포함된
+all-in-one ZIP을 사용하세요 — 기본 런타임은 **3.13** 입니다.
 
 ```powershell
-python packaging\build_allinone.py                  # 3.12 → ..\ScanOps_allinone.zip
-python packaging\build_allinone.py --python 3.13    # 3.13 → ..\ScanOps_allinone_py313.zip
+python packaging\build_allinone.py                  # 3.13 → ..\ScanOps_allinone.zip
+python packaging\build_allinone.py --python 3.12    # 3.12 → ..\ScanOps_allinone_py312.zip
 ```
 두 번들 모두 압축만 풀고 `START.bat` 을 실행하면 됩니다(대상에 Python 설치 불필요). 앱 의존성
 버전은 두 번들이 동일하며, 런타임과 바이너리 휠(cp312/cp313)만 다릅니다. 스캔 실행에만 nmap이
 따로 필요하고, XML 가져오기는 nmap 없이도 동작합니다.
+
+빌드는 실행에 쓰이지 않는 것만 덜어냅니다(대화형/개발용 표준 라이브러리, 이 앱이 쓰지 않는
+SQLAlchemy 방언, 의존성이 함께 배포한 자기 테스트 코드). **기능을 없애는 절단은 하지 않습니다** —
+예를 들어 OpenSSL 은 로그인 해시(`hashlib.pbkdf2_hmac`)가 3.12+ 부터 순수 파이썬 대체 구현 없이
+`_hashlib` 만 쓰므로 빼면 아무도 로그인하지 못합니다. 덜어낸 이름을 앱이나 의존성이 실제로
+import 하면 빌드가 그 자리에서 멈추고(`verify_stdlib_drop`), 같은 검사가 CI 에서도 돕니다
+(`backend/tests/test_bundle_slim.py` — 덜어낸 모듈을 전부 막은 인터프리터로 로그인·조회·xlsx
+내보내기까지 실제로 태워 봅니다). `--max-mb` 로 산출물 크기 상한을 강제할 수 있습니다.
+
+크기 참고(3.13, 슬림 적용): **약 15 MB**. 이 중 임베디드 CPython 런타임만 약 9.8 MB
+(`python313.dll` 2.5 · 표준 라이브러리 2.9 · OpenSSL 2.2 · `sqlite3.dll` 0.85)이고, 나머지는
+`pydantic_core` 2.0 · SQLAlchemy 1.6 · 프론트 dist 0.5 입니다. 이 구성으로 한 파일 10 MB 밑은
+나오지 않습니다 — 위 항목은 모두 서버가 부팅하고 로그인하는 데 필요합니다.
+
+### 반출 한도에 맞춰 조각으로 나누기
+파일 하나의 크기 제한(USB·메일·반출 심사)이 있으면 **지우지 말고 나눕니다.**
+
+```powershell
+python packaging\build_allinone.py --split-mb 10 --max-mb 10
+# -> ScanOps_allinone.zip.001 (10.0 MB), .002 (5.0 MB), JOIN.bat, .sha256
+```
+- 받는 쪽에서 **반디집/7-Zip 은 `.001` 을 그대로 열면** 됩니다(나머지 조각은 같은 폴더에 두세요).
+- 그런 도구가 없는 서버는 함께 들어 있는 **`JOIN.bat`** 을 실행하면 Windows 기본 `copy /b` 로
+  되붙이고 SHA-256 까지 확인합니다. 값이 다르면 합친 파일을 지우고 멈춥니다 — USB 복사가
+  중간에 잘린 채로 압축을 풀다 마는 사고를 막기 위해서입니다.
+- 형식은 zip 분할 볼륨(`.z01`)이 아니라 단순 바이트 분할입니다. 분할 볼륨은 전용 도구가 없으면
+  손쓸 방법이 없지만, 바이트 분할은 도구가 없어도 `copy /b` 로 되돌릴 수 있습니다.
+- `--max-mb` 는 **조각 하나의** 한도로 판정합니다(분할하지 않으면 전체 크기).
 ```powershell
 # 1) 프론트 빌드(Node.js 20.19+ 또는 22.12+, 인터넷 되는 PC에서 1회) → frontend/dist 생성
 cd frontend && npm install && npm run build
@@ -58,6 +86,18 @@ python scanner\scanops_scanner.py --targets-file targets.txt --ports 1-1024 --ba
 python scanner\scanops_scanner.py --resume scanops_scans\weekly.state.json
 ```
 자세한 사용법은 [`scanner/README.md`](./scanner/README.md) 참고.
+
+### 스캔 프리셋 (웹 ↔ 단독 스캐너 동기화)
+자주 쓰는 스캔 구성은 이름을 붙여 프리셋으로 저장한다. 프리셋 본문은 nmap 플래그가 아니라
+**웹 UI 와 같은 옵션 키**로 저장되므로 웹 스캐너와 단독 스캐너가 같은 파일을 해석할 수 있다.
+- 웹: 스캔 화면의 `프리셋 선택… / 현재 구성 저장` → 서버 `data/scan_presets.json` 에 저장(auditor 이상).
+- 단독 스캐너: `--save-preset`/`--preset` → 스캐너 폴더의 `scanops_presets.json` 에 저장.
+- 동기화: 단독 스캐너가 웹서버에 도킹해 **먼저 이름 충돌(같은 이름·다른 내용)을 확인**하고,
+  하나라도 있으면 양쪽 모두 그대로 둔 채 충돌 목록만 보고한다(종료 코드 3). 충돌이 없으면 합집합으로
+  맞춰 **같은 내용의 프리셋 파일이 두 곳에 존재**하게 된다.
+```powershell
+python scanner\scanops_scanner.py --sync --server http://<서버IP>:8770 --username auditor1
+```
 
 ## 역할
 - **admin** — 사용자 관리 + 전체 권한 + 감사 로그 열람

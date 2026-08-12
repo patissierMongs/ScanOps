@@ -123,6 +123,36 @@ backend/scanops/
 - `POST /api/notifications`(부서별 통보 생성), `GET /api/notifications`
 - `GET /api/reports/audit`(xlsx 감사 리포트), `GET /api/dashboard`(요약 지표)
 - `GET/POST /api/rules`(위험 규칙), `GET/POST /api/users`(admin)
+- `GET /api/scan-presets`(목록 + `revision` + 항목별 `name_key`),
+  `PUT|DELETE /api/scan-presets/item/{name}`(한 건 추가·교체·삭제),
+  `PUT /api/scan-presets`(목록 전체 교체 — `revision` 일치 필수),
+  `POST /api/scan-presets/sync`(단독 스캐너 도킹 동기화)
+  - 프리셋은 nmap 플래그가 아니라 **옵션 키**로 저장한다 — 웹 UI 토글과 단독 스캐너가 같은 값을
+    서로 해석할 수 있어야 동기화가 성립하고, 임의 플래그 주입도 차단된다.
+  - 서버는 `data/scan_presets.json`, 단독 스캐너는 자기 폴더의 `scanops_presets.json` 에 **같은 형식**으로
+    보관한다. `sync` 는 같은 이름·다른 내용을 충돌로 보고, **하나라도 있으면 부분 병합 없이 전부 취소**한다.
+  - **동시 쓰기** — 프리셋이 파일 하나에 모여 있어 read-modify-write 가 겹치면 한쪽 저장이 통째로
+    사라진다. 그래서 낱개 편집은 다른 항목을 읽지도 않는 `/item/{name}` 로 하고, 목록 전체 교체만
+    `revision` 일치를 요구해 중간 변경 시 409 로 거절한다. `sync` 는 서버 잠금 안에서
+    읽기→병합→쓰기를 한 번에 처리한다.
+  - **`revision` ≠ `fingerprint`** — `fingerprint` 는 '같은 스캔인가'를 묻는 값이라 description·
+    updated_at·이름 표기를 일부러 뺀다(설명만 다른 프리셋까지 동기화 충돌로 보면 계속 사람 손을
+    요구하게 된다). `revision` 은 반대로 '이 쓰기가 파괴할 수 있는 모든 것'을 덮어야 하므로 정규화된
+    저장 문서를 통째로 해시한다. 둘을 같은 값으로 쓰면 설명만 바꾼 수정이 revision 을 못 움직여
+    낡은 전체 교체가 그 수정을 조용히 되돌린다.
+  - **결과 도킹** — `--sync` 는 프리셋만이 아니라 `--output-dir` 의 스캔 결과도 올려 **자동 인입**한다.
+    업로드 전에 `POST /api/scans/known-results` 로 이미 가져온 지문을 빼므로, 도킹을 반복해도 같은
+    결과로 스캔 이력이 불어나거나 닫힘 판정이 다시 돌지 않는다. 지문은 XML 내용만으로 계산해
+    `ScanRun.source_fingerprint` 에 남기므로 폴더를 복사해 와도 같은 결과로 인식된다.
+    중단본은 **올리지 않는다.** 중간에 끊긴 스캔은 열린 포트를 다 보지 못한 상태라, 인입하면
+    못 본 포트가 미탐이 되고 재시도가 잘린 자리의 `filtered` 를 관측으로 믿으면 오탐이 된다.
+    폴더(`interrupted/`)와 파일명(`.interrupted`) 두 곳에 표식을 남기고 — 폴더만으로는 파일
+    하나를 옮기는 순간 구분이 사라지므로 — 스캐너(목록에서 제외)·웹(업로드 전 필터)·서버
+    (표식 붙은 업로드 거절) 세 경계에서 각각 막는다. 필요하면 `--resume` 으로 완주시켜 올린다.
+  - **이름 정규화의 단일 기준** — 연속 공백 접기 + `casefold()` 는 서버 규칙이며, 응답이 항목마다
+    `name_key` 를 실어 보낸다. 클라이언트가 자기 방식으로(`trim().toLowerCase()` 등) 다시 판정하면
+    `Weekly  Full` 과 `weekly full` 을 다르게 보고 서버는 중복이라 거절하는 불일치가 생긴다.
+    이름은 URL 경로 조각으로도 쓰이므로 `/`·`\` 를 받지 않는다.
 
 ## 6. 보안 원칙
 

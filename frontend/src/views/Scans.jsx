@@ -7,6 +7,28 @@ import ScanOptions from "../ui/ScanOptions.jsx";
 import { scanKind, scanStatus, shouldLoadStages } from "../lib/scanStatus.js";
 
 const isActive = (s) => s === "running" || s === "canceling";
+
+// 실행 방식 3종 — 무엇을 고르는 것인지가 카드 본문으로 읽히게 한다.
+const SCAN_MODES = [
+  {
+    id: "staged", title: "단계별 정밀 (권장)",
+    desc: "살아있는 호스트 → 열린 포트 → 그 포트의 서비스 순으로 좁혀 갑니다. 넓은 대역에 가장 빠르고 정확합니다.",
+    on: (staged, rawMode) => staged && !rawMode,
+    pick: ({ setStaged, setRawMode }) => { setRawMode(false); setStaged(true); },
+  },
+  {
+    id: "single", title: "한 번에 실행",
+    desc: "옵션을 직접 조합해 nmap 을 한 번만 돌립니다. 대상이 적고 무엇을 볼지 이미 아는 경우에.",
+    on: (staged, rawMode) => !staged && !rawMode,
+    pick: ({ setStaged, setRawMode }) => { setRawMode(false); setStaged(false); },
+  },
+  {
+    id: "raw", title: "명령 직접 입력 (고급)",
+    desc: "nmap 명령을 그대로 씁니다. 단발 실행이라 이어하기는 안 됩니다.",
+    on: (_staged, rawMode) => rawMode,
+    pick: ({ setRawMode, setRawEdited }) => { setRawMode(true); setRawEdited(false); },
+  },
+];
 // 중단됨(interrupted): 서버 재시작으로 워커가 사라진 실행 — 자동 복구는 안 하고 수동 이어하기만.
 const canResume = (s) => s === "canceled" || s === "failed" || s === "interrupted";
 
@@ -48,6 +70,7 @@ export default function Scans({ user }) {
   const [rawMode, setRawMode] = useState(false);   // 직접 명령 입력 모드
   const [rawCmd, setRawCmd] = useState("");
   const [rawEdited, setRawEdited] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);   // 세부 설정 — 기본은 접힘
   const [est, setEst] = useState(null);
   const [busy, setBusy] = useState(false);
   const fileInputRef = useRef(null);
@@ -127,6 +150,29 @@ export default function Scans({ user }) {
   const targetList = splitScanTokens(targets);
   const excludeList = splitScanTokens(exclude);
   const previewExcludes = est?.exclude ?? excludeList;
+
+  // "지금 실행 버튼을 누르면 무슨 일이 일어나는가"를 한 줄로. nmap 플래그가 아니라 사람 말로 쓴다 —
+  // 세부 설정을 펼치지 않아도 무엇을 하려는지 확인하고 실행할 수 있어야 한다.
+  const planSummary = (() => {
+    if (rawMode) {
+      return rawCmd.trim()
+        ? { headline: "입력한 nmap 명령을 그대로 1회 실행", detail: "이어하기는 지원되지 않습니다." }
+        : { headline: "실행할 명령을 입력하세요", detail: "" };
+    }
+    if (!targetList.length) {
+      return { headline: "스캔할 대상을 입력하세요", detail: "IP 하나, 대역(10.0.12.0/24), 범위(10.0.12.1-30) 모두 됩니다." };
+    }
+    const how = staged ? "단계별 정밀 스캔" : "한 번에 실행";
+    const hosts = est ? `${est.host_count.toLocaleString()}개 호스트` : `대상 ${targetList.length}개`;
+    const eta = est?.basis === "history" && est?.est_seconds != null
+      ? ` · 예상 ~${fmtDur(est.est_seconds)}`
+      : (est ? " · 예상시간은 첫 배치가 끝나면 나옵니다" : "");
+    const skipped = previewExcludes.length ? ` · 제외 ${previewExcludes.length}개` : "";
+    return {
+      headline: `${hosts} · ${how}${eta}`,
+      detail: `${est ? `${est.batch_count}개 배치로 나눠 실행` : "계산 중"}${skipped} — 중간에 멈춰도 이어할 수 있습니다.`,
+    };
+  })();
 
   // 실행 전 예상 — 타겟/제외/옵션/포트/배치크기가 바뀌면 디바운스로 /estimate 호출.
   const estKey = JSON.stringify({ t: targetList, x: excludeList, w: opt.workflow, o: opt.options, p: opt.ports, b: batchSize, s: staged });
@@ -246,45 +292,26 @@ export default function Scans({ user }) {
     <div className="content">
       {canRun && (
         <div className="panel">
-          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+          {/* 화면을 열었을 때 보이는 것은 '대상 + 실행' 뿐이다. 나머지(실행 방식·제외·옵션·배치)는
+              기본값으로 잘 도는 값이라 접어 두고, 바꾸고 싶을 때만 펼친다. 예전에는 체크박스 80여 개와
+              명령 미리보기가 실행 버튼 앞을 가로막아 무엇을 해야 하는지 읽히지 않았다. */}
+          <div className="scan-head">
             <h3 style={{ margin: 0 }}>스캔 실행</h3>
-            <div className="row" style={{ gap: 14 }}>
-              <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}
-                     title="켜면 발견→TCP→UDP→서비스 단계를 한 번에 몰아 돌리지 않고, 단계로 나눠 분산 순차 실행합니다(앞 단계 결과를 다음 단계 입력으로). 아래 '실행될 명령어'에 단계별 명령이 표시됩니다.">
-                <input type="checkbox" checked={staged} disabled={rawMode}
-                       onChange={(e) => setStaged(e.target.checked)} />
-                단계 분리 (발견→포트→서비스 · 분산 실행)
-              </label>
-              <label className="row" style={{ gap: 6, fontSize: 13, cursor: "pointer" }}>
-                <input type="checkbox" checked={rawMode}
-                       onChange={(e) => { setRawMode(e.target.checked); setRawEdited(false); }} />
-                명령 직접 입력 (고급)
-              </label>
-            </div>
-          </div>
-          <div className="row" style={{ marginBottom: 12, marginTop: 10 }}>
-            <input placeholder="이름(선택)" value={name} onChange={(e) => setName(e.target.value)} />
-            {!rawMode && (
-              <input style={{ flex: 1, minWidth: 240 }} placeholder="타겟 (예: 10.0.12.0/24 10.0.13.5)"
-                     value={targets} onChange={(e) => setTargets(e.target.value)} />
-            )}
-          </div>
-          {/* 직접 명령 모드에서도 보여준다: 숨긴 채 값만 보내면 무엇이 제외되는지 알 수 없고,
-              반대로 값을 버리면 '입력했는데 제외가 안 되는' 예전 동작으로 돌아간다. */}
-          <div style={{ marginBottom: 12 }}>
-            <label className="cb-label" htmlFor="scan-exclude">제외할 IPv4/CIDR/범위 (선택)</label>
-            <textarea id="scan-exclude" aria-describedby="scan-exclude-help" rows={2}
-                      style={{ width: "100%", resize: "vertical" }}
-                      placeholder="예: 10.0.12.1, 10.0.13.0/28, 10.0.12.20-30"
-                      value={exclude} onChange={(e) => setExclude(e.target.value)} />
-            <div id="scan-exclude-help" className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>
-              공백·쉼표·줄바꿈으로 구분합니다. 제외 대상은 스캔과 닫힘 판정 범위에서 빠집니다.
-              {rawMode && " 직접 명령의 --exclude 와 합쳐 하나의 옵션으로 전달됩니다."}
-            </div>
+            <span className="muted">열린 포트를 찾아 무엇이 돌고 있는지 확인하고, 결과를 발견 관리로 넘깁니다.</span>
           </div>
 
+          {!rawMode && (
+            <label className="scan-target-field">
+              <span className="cb-label">어디를 스캔할까요?</span>
+              <textarea rows={2} value={targets} onChange={(e) => setTargets(e.target.value)}
+                        placeholder="예: 10.0.12.0/24   10.0.13.5   10.0.14.1-30"
+                        style={{ width: "100%", resize: "vertical" }} />
+              <span className="muted scan-hint">IP·대역을 공백이나 줄바꿈으로 나열합니다.</span>
+            </label>
+          )}
+
           {rawMode && (
-            <div style={{ marginBottom: 12 }}>
+            <div className="scan-target-field">
               <div className="row" style={{ justifyContent: "space-between" }}>
                 <span className="cb-label">nmap 명령 — 직접 편집 (출력 플래그는 서버가 -oA 로 강제 교체)</span>
                 <button type="button" className="sm" onClick={() => { setRawCmd(opt.workflow === "manual" ? (opt.command || "") : ""); setRawEdited(false); }}>
@@ -295,67 +322,114 @@ export default function Scans({ user }) {
                         onChange={(e) => { setRawCmd(e.target.value); setRawEdited(true); }}
                         placeholder="nmap -sV -p 22,80,443 10.0.12.0/24"
                         style={{ width: "100%", resize: "vertical", fontSize: 12.5 }} />
-              <div className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
-                직접 명령은 단발 실행입니다 — 배치 청킹/이어가기는 미지원(중지만 가능). 셸 메타문자(; | &amp; $ ` 등)는 차단되고,
-                허용 대역(scope)이 설정돼 있으면 그 밖의 IP 는 거절됩니다.
-              </div>
+              <span className="muted scan-hint">
+                단발 실행입니다 — 이어하기는 안 됩니다. 셸 메타문자는 차단되고, 허용 대역(scope) 밖 IP 는 거절됩니다.
+              </span>
             </div>
           )}
 
-          {/* 옵션 빌더는 raw 모드에서도 마운트 유지(숨김만) — opt.command 가 최신이라 '채우기'가 정확하게 동작 */}
-          <div style={{ display: rawMode ? "none" : "block" }}>
-            <ScanOptions targets={targetList} excludes={previewExcludes} staged={staged}
-                         discovery={discovery} onState={setOpt} />
-
-            <div style={{ marginTop: 12 }}>
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <span className="cb-label">배치 크기 — 중지·이어가기 단위 (넓은 대역을 이만큼씩 쪼개 스캔)</span>
-                <span className="mono">{batchSize} 호스트 / 배치</span>
-              </div>
-              <input type="range" min={16} max={1024} step={16} value={batchSize}
-                     onChange={(e) => setBatchSize(Number(e.target.value))} style={{ width: "100%" }} />
-              <div className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
-                {est
-                  ? `${est.host_count} 호스트 / ${est.batch_count} 배치` +
-                    (est.basis === "history" && est.est_seconds != null
-                      ? ` · 예상 ~${fmtDur(est.est_seconds)} (과거 동일설정 ${est.sample_count}건 기준·근사)`
-                      : " · 예상시간: 동일설정 이력 없음 → 실행 후 배치 기준으로 정밀 추정")
-                  : (targetList.length ? "예상 계산 중…" : "타겟을 입력하면 호스트·배치 수와 예상시간을 보여줍니다")}
-              </div>
-            </div>
-
-            {staged && (
-              <div className="row" style={{ marginTop: 12, alignItems: "center", gap: 8 }}>
-                <span className="cb-label">발견 단계</span>
-                <select value={discovery} onChange={(e) => setDiscovery(e.target.value)}>
-                  <option value="sn">핑 스윕 (-sn)</option>
-                  <option value="pn">생략 (-Pn · ICMP 차단망)</option>
-                </select>
-                <span className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
-                  내부적으로 발견→TCP 찾기→(UDP)→열린 포트에만 서비스 probe. 진행은 단계 타임라인으로.
-                </span>
-              </div>
-            )}
+          {/* 지금 누르면 무슨 일이 일어나는지 한 줄로. nmap 플래그가 아니라 사람 말로 쓴다. */}
+          <div className="scan-summary">
+            <b>{planSummary.headline}</b>
+            <span className="muted">{planSummary.detail}</span>
           </div>
 
-          <div className="row" style={{ marginTop: 14 }}>
-            <button className="primary" disabled={busy || (rawMode ? !rawCmd.trim() : !targetList.length)} onClick={runScan}>
+          <div className="scan-run-row">
+            <button className="primary scan-run" disabled={busy || (rawMode ? !rawCmd.trim() : !targetList.length)}
+                    onClick={runScan}
+                    title={rawMode ? "명령을 입력하면 실행할 수 있습니다" : "대상을 입력하면 실행할 수 있습니다"}>
               {busy ? "시작 중…" : "스캔 실행"}
             </button>
-            <button ref={fileButtonRef} type="button" className="linkbtn inline-action" disabled={busy}
-                    onClick={() => openImport(fileInputRef, fileButtonRef)}>
-              XML 가져오기(여러 개)
+            <button type="button" className="sm" aria-expanded={showAdvanced}
+                    onClick={() => setShowAdvanced((v) => !v)}>
+              {showAdvanced ? "세부 설정 접기" : "세부 설정"}
             </button>
-            <button ref={folderButtonRef} type="button" className="linkbtn inline-action" disabled={busy}
+            <span className="muted" style={{ fontSize: 12 }}>
+              백그라운드로 돕니다. 진행은 아래 [스캔 이력]에서 보고, 중지·이어하기 할 수 있습니다.
+            </span>
+          </div>
+
+          {/* ── 세부 설정 (기본 접힘) ── */}
+          <div className="scan-advanced" style={{ display: showAdvanced ? "block" : "none" }}>
+            <section className="scan-step">
+              <div className="cb-label">실행 방식</div>
+              <div className="scan-mode-cards">
+                {SCAN_MODES.map((mode) => (
+                  <button key={mode.id} type="button" aria-pressed={mode.on(staged, rawMode)}
+                          onClick={() => mode.pick({ setStaged, setRawMode, setRawEdited })}
+                          className={"scan-mode-card" + (mode.on(staged, rawMode) ? " on" : "")}>
+                    <b>{mode.title}</b>
+                    <small>{mode.desc}</small>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="scan-step">
+              <label className="cb-label" htmlFor="scan-name">이름 (선택)</label>
+              <input id="scan-name" placeholder="이력에서 알아보기 쉽게" value={name}
+                     onChange={(e) => setName(e.target.value)} style={{ width: "100%" }} />
+            </section>
+
+            <section className="scan-step">
+              <label className="cb-label" htmlFor="scan-exclude">제외할 IPv4/CIDR/범위 (선택)</label>
+              <textarea id="scan-exclude" aria-describedby="scan-exclude-help" rows={2}
+                        style={{ width: "100%", resize: "vertical" }}
+                        placeholder="예: 10.0.12.1, 10.0.13.0/28, 10.0.12.20-30"
+                        value={exclude} onChange={(e) => setExclude(e.target.value)} />
+              <div id="scan-exclude-help" className="muted scan-hint">
+                공백·쉼표·줄바꿈으로 구분합니다. 제외 대상은 스캔과 닫힘 판정 범위에서 빠집니다.
+                {rawMode && " 직접 명령의 --exclude 와 합쳐 하나의 옵션으로 전달됩니다."}
+              </div>
+            </section>
+
+            {/* 옵션 빌더는 raw 모드에서도 마운트 유지(숨김만) — opt.command 가 최신이라 '채우기'가 정확하게 동작 */}
+            <div style={{ display: rawMode ? "none" : "block" }}>
+              <ScanOptions targets={targetList} excludes={previewExcludes} staged={staged}
+                           discovery={discovery} onState={setOpt} />
+
+              <section className="scan-step" style={{ marginTop: 14 }}>
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <span className="cb-label">배치 크기 — 중지·이어가기 단위</span>
+                  <span className="mono">{batchSize} 호스트 / 배치</span>
+                </div>
+                <input type="range" min={16} max={1024} step={16} value={batchSize}
+                       onChange={(e) => setBatchSize(Number(e.target.value))} style={{ width: "100%" }} />
+                <div className="muted scan-hint">넓은 대역을 이만큼씩 쪼개 스캔합니다.</div>
+              </section>
+
+              {staged && (
+                <section className="scan-step">
+                  <span className="cb-label">발견 단계</span>
+                  <select value={discovery} onChange={(e) => setDiscovery(e.target.value)}>
+                    <option value="sn">핑 스윕 (-sn)</option>
+                    <option value="pn">생략 (-Pn · ICMP 차단망)</option>
+                  </select>
+                  <div className="muted scan-hint">
+                    ICMP 를 막는 망이면 '생략'을 고릅니다. 대신 죽은 IP 도 전부 스캔해 느려집니다.
+                  </div>
+                </section>
+              )}
+            </div>
+          </div>
+
+          {/* 가져오기는 '스캔한다'와 다른 작업이다 — 실행 버튼 옆이 아니라 따로 둔다. */}
+          <div className="scan-import-row">
+            <span className="muted">이미 스캔한 결과가 있나요?</span>
+            <button ref={fileButtonRef} type="button" className="sm" disabled={busy}
+                    onClick={() => openImport(fileInputRef, fileButtonRef)}>
+              XML 가져오기
+            </button>
+            <button ref={folderButtonRef} type="button" className="sm" disabled={busy}
                     onClick={() => openImport(folderInputRef, folderButtonRef)}>
-              폴더째 가져오기(XML+manifest)
+              폴더째 가져오기
             </button>
             <input ref={fileInputRef} type="file" accept=".xml,.manifest.json" multiple hidden tabIndex={-1}
                    disabled={busy} onChange={onImport} onCancel={restoreImportFocus} />
             <input ref={folderInputRef} type="file" hidden tabIndex={-1}
                    disabled={busy} onChange={onImport} onCancel={restoreImportFocus} />
-            <span className="muted" style={{ fontSize: 12 }}>
-              자동 스캔은 발견·식별·UDP 확인을 배치 안에서 순서대로 실행합니다. 실행 중엔 [중지], 중단분은 [이어하기]로 재개합니다.
+            <span className="muted" style={{ fontSize: 11.5 }}>
+              단독 스캐너 결과 폴더를 그대로 고르면 manifest 까지 함께 읽습니다.
             </span>
           </div>
         </div>

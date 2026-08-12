@@ -19,6 +19,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -27,6 +29,14 @@ VERSION = "0.2.0"
 IMPORT_CONTRACT_SCHEMA = 1
 IMPORT_CONTRACT_MAX_HOSTS = 65536
 STATS_EVERY_DEFAULT = "10s"
+# 중단된 실행의 산출물을 모아 두는 하위 폴더 — 결과 폴더에는 온전한 결과만 남긴다.
+INTERRUPTED_DIR_NAME = "interrupted"
+# 중단본 파일명 표식. 폴더만으로는 파일 하나를 옮기는 순간 구분이 사라진다.
+INTERRUPTED_MARK = ".interrupted"
+# 정지 신호 후 nmap 이 진행분을 파일로 쓸 때까지 기다리는 시간. GUI 의 강제 종료 타이머보다
+# 짧아야 부분 결과 저장과 state 기록이 끝난 뒤에 강제 종료가 온다.
+NMAP_STOP_GRACE_SECONDS = 5.0
+NMAP_KILL_GRACE_SECONDS = 3.0
 # 기본 미적용. 전 포트 스캔은 필터링된 망에서 고정 시간 상한을 정상적으로 넘을 수 있고,
 # nmap 은 timeout 된 호스트의 결과를 버린 채 성공 종료할 수 있다. 필요한 환경만 명시적으로 opt-in.
 HOST_TIMEOUT_DEFAULT = "0"
@@ -86,6 +96,9 @@ AUTO_STAGES = [
     ("tcp_identify", "발견된 TCP 포트 용도/서비스 식별"),
     ("udp_identify", "주요 UDP 서비스 식별"),
 ]
+# 파일명 끝의 단계 접미사. 서버가 이 이름으로 단계를 읽으므로(STAGE_FILE_RE)
+# 산출물 이름을 손댈 때는 접미사가 맨 뒤에 남아야 한다.
+STAGE_IDS = frozenset(stage_id for stage_id, _ in AUTO_STAGES)
 
 PRESETS: dict[str, list[str]] = {
     "basic": ["-Pn", "-sV", "-T4"],
@@ -104,6 +117,97 @@ PRESETS: dict[str, list[str]] = {
     ],
 }
 
+# ── 저장 프리셋(사용자 정의) ──
+# 위의 PRESETS 는 코드에 박힌 내장 프로필이고, 이 아래는 사용자가 만들어 파일로 보관하며
+# ScanOps 웹서버와 동기화하는 프리셋이다. 파일은 **이 스크립트와 같은 폴더**에 둔다.
+PRESET_SCHEMA = 1
+PRESET_FILE_NAME = "scanops_presets.json"
+PRESET_MAX_NAME_LEN = 60
+PRESET_MAX_DESC_LEN = 200
+PRESET_MAX_COUNT = 200
+PRESET_WORKFLOW_ALIASES = {"manual": "single", "single": "single", "auto": "auto"}
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+# 이름은 서버 API 의 URL 경로 조각(PUT /api/scan-presets/item/{name})으로도 쓰인다.
+# 경로 구분자가 섞이면 어느 프리셋을 가리키는지 양쪽이 다르게 읽을 수 있다.
+PRESET_NAME_FORBIDDEN = ("/", "\\")
+
+# 웹 UI 의 스캔 옵션 레지스트리(backend/scanops/scanning/scan_options.py SCAN_OPTIONS) 사본.
+# 프리셋은 nmap 플래그가 아니라 이 '키'로 오가므로, 양쪽이 같은 키→플래그 표를 가져야 한다.
+# 표가 어긋나면 같은 프리셋이 서로 다른 스캔이 되므로 backend 테스트가 동일성을 강제한다.
+OPTION_FLAGS: dict[str, list[str]] = {
+    "syn": ["-sS"],
+    "connect": ["-sT"],
+    "udp": ["-sU"],
+    "ack": ["-sA"],
+    "fin": ["-sF"],
+    "null": ["-sN"],
+    "xmas": ["-sX"],
+    "disc_ports": [DISCOVERY_PS],
+    "noping": ["-Pn"],
+    "ping_only": ["-sn"],
+    "dns_no": ["-n"],
+    "version": ["-sV"],
+    "version_light": ["--version-light"],
+    "version_all": ["--version-all"],
+    "scripts": ["-sC"],
+    "os": ["-O"],
+    "traceroute": ["--traceroute"],
+    "aggressive": ["-A"],
+    "open_only": ["--open"],
+    "reason": ["--reason"],
+    "verbose": ["-v"],
+    "t0": ["-T0"],
+    "t1": ["-T1"],
+    "t2": ["-T2"],
+    "t3": ["-T3"],
+    "fast": ["-T4"],
+    "t5": ["-T5"],
+    "max_retries": ["--max-retries", "2"],
+    "min_hostgroup": ["--min-hostgroup", "64"],
+    "max_parallel": ["--max-parallelism", "100"],
+    "defeat_rst": ["--defeat-rst-ratelimit"],
+    "max_scan_delay": ["--max-scan-delay", "5ms"],
+    "fragment": ["-f"],
+}
+# 타이밍은 택1 — 프리셋에 여러 개가 들어와도 마지막 하나만 실제 플래그로 나간다.
+OPTION_TIMING_KEYS = ("t0", "t1", "t2", "t3", "fast", "t5")
+# NSE 화이트리스트(웹 NSE_SCRIPTS 사본) — key: 식별 단계 적용 프로토콜.
+NSE_PROTO: dict[str, str] = {
+    "http-headers": "tcp", "http-server-header": "tcp", "http-title": "tcp",
+    "ssl-cert": "tcp", "ssl-enum-ciphers": "tcp", "tls-alpn": "tcp",
+    "ssh-hostkey": "tcp", "ssh-auth-methods": "tcp", "ssh2-enum-algos": "tcp",
+    "nbstat": "udp", "smb-os-discovery": "tcp", "smb-protocols": "tcp",
+    "oracle-tns-version": "tcp", "ms-sql-info": "both", "ldap-rootdse": "tcp",
+    "rdp-ntlm-info": "tcp", "snmp-info": "udp", "snmp-sysdescr": "udp",
+    "ike-version": "udp", "sip-methods": "both", "ntp-info": "udp",
+    "ntp-monlist": "udp", "rpcinfo": "both", "fingerprint-strings": "tcp",
+    "banner": "tcp", "ftp-anon": "tcp", "ftp-syst": "tcp",
+    "telnet-encryption": "tcp", "dns-recursion": "both", "dns-nsid": "both",
+    "vnc-info": "tcp", "vnc-title": "tcp",
+}
+# 프리셋의 '기본 NSE' — 이 스캐너가 실제로 쓰는 TCP/UDP 기본 세트의 합집합에서 파생시킨다.
+# 상수를 따로 적으면 기본값을 바꿀 때 조용히 어긋나므로 파생으로 묶어 둔다.
+DEFAULT_PRESET_NSE = [
+    key for key in NSE_PROTO
+    if key in set(DEFAULT_NSE_SCRIPTS.split(",")) | set(UDP_NSE_SCRIPTS.split(","))
+]
+
+# 웹 UI 가 기본으로 켜 두는 옵션 집합(scan_options.DEFAULT_KEYS 사본). --workflow auto 를
+# 프리셋으로 저장할 때의 본문이 되므로, 같은 프리셋이 웹에서도 같은 스캔이 된다.
+DEFAULT_AUTO_PRESET_OPTIONS = [
+    "syn", "udp", "disc_ports", "version", "version_all",
+    "open_only", "reason", "fast", "max_retries", "min_hostgroup",
+    "max_parallel", "defeat_rst",
+]
+# 내장 프로필 중 '옵션 키로 손실 없이 표현되는' 것만 프리셋으로 저장할 수 있다.
+# quick/light 는 --top-ports 를 쓰는데 웹 옵션 레지스트리에 대응 키가 없어 제외한다.
+PROFILE_PRESET_OPTIONS = {
+    "basic": ["noping", "version", "fast"],
+    "phase1": ["syn", "udp", "noping", "dns_no", "version", "open_only", "reason",
+               "fast", "max_retries", "min_hostgroup", "max_parallel", "defeat_rst"],
+}
+PROFILE_PRESET_PORTS = {"phase1": PRECISION_PORTS}
+PROFILE_PRESET_NSE = {"phase1"}
 # 저강도(gentle) — 15년 전 도입한 백본처럼 control-plane 이 약한 장비를 상대할 때의 기본값.
 # -T3(표준)을 기준으로 속도·병렬·재시도에 상한을 더 걸어 "-T3 보다 조금 더 느린" 강도를 만든다.
 GENTLE_TIMING = "-T3"
@@ -128,6 +232,7 @@ RANGE_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})-(\d{1,3})$")
 IPV4_RANGE_TOKEN_RE = re.compile(r"^[\d-]+(?:\.[\d-]+){3}$")
 VALUE_FLAGS = {"-p", "--top-ports"}
 SCAN_TYPE_FLAGS = {"-sS", "-sT"}
+TIMING_FLAG_RE = re.compile(r"^-T[0-5]$")
 
 
 def configure_pipe_encoding() -> None:
@@ -639,8 +744,29 @@ def tcp_only_ports(port_spec: str) -> str:
     return ",".join(parts)
 
 
+def set_timing(flags: list[str], timing: str) -> list[str]:
+    """타이밍 플래그 교체 — 프리셋이 -T2 를 요구하면 단계 기본 -T4 를 대체한다(택1).
+    자리를 그대로 두고 값만 바꿔 명령 미리보기가 불필요하게 흔들리지 않게 한다."""
+    if not timing:
+        return flags
+    out: list[str] = []
+    replaced = False
+    for flag in flags:
+        if TIMING_FLAG_RE.fullmatch(flag):
+            if not replaced:
+                out.append(timing)
+                replaced = True
+            continue
+        out.append(flag)
+    if not replaced:
+        out.append(timing)
+    return out
+
+
 def build_base_flags(args: argparse.Namespace) -> list[str]:
-    flags = list(PRESETS[args.profile])
+    # 저장 프리셋을 쓰면 내장 프로필 대신 프리셋의 옵션 키에서 플래그를 만든다(웹과 같은 어휘).
+    preset_options = getattr(args, "preset_options", None)
+    flags = option_flags(preset_options) if preset_options is not None else list(PRESETS[args.profile])
     flags = set_scan_type(flags, args.scan_type)
 
     if getattr(args, "tcp_only", False):
@@ -768,14 +894,43 @@ def auto_udp_ports(plan: dict) -> str:
     return f"U:{UDP_DEFAULT_PORTS}"
 
 
+def stage_scripts(scripts: str, stage_id: str) -> str:
+    """단계에 실제로 걸리는 NSE 만 남긴다.
+
+    - 발견(tcp_discovery)에는 NSE 를 붙이지 않는다. 이 단계의 목적은 '열린 포트를 빨리 좁히는 것'이라
+      스크립트를 얹으면 이득 없이 느려진다(웹 자동 스캔의 발견 단계도 동일).
+    - 식별 단계는 portrule 이 맞는 프로토콜만: TCP 식별에 snmp/nbstat, UDP 식별에 http-* 를 보내도
+      매칭되지 않아 시간만 쓴다. 화이트리스트에 없는 이름은 사용자가 명시한 것이므로 그대로 통과시킨다.
+    """
+    if stage_id == "tcp_discovery":
+        return ""
+    protocol = "udp" if stage_id == "udp_identify" else "tcp"
+    keep = [s for s in (scripts or "").split(",")
+            if s and NSE_PROTO.get(s, "both") in (protocol, "both")]
+    return ",".join(keep)
+
+
 def apply_auto_modifiers(flags: list[str], plan: dict, stage_id: str = "") -> list[str]:
-    flags = set_scan_type(list(flags), plan.get("scan_type", ""))
+    # UDP 식별 단계에는 TCP 스캔 기법을 절대 얹지 않는다. -sS 가 섞이면 그 한 번의 실행이
+    # TCP+UDP 동시 스캔이 되어 UDP 단계의 포트 범위/시간 계산이 통째로 어긋난다.
+    if stage_id != "udp_identify":
+        flags = set_scan_type(list(flags), plan.get("scan_type", ""))
+    else:
+        flags = list(flags)
+    # 프리셋이 타이밍을 지정하면 단계 기본 -T4 를 대체한다(느린 망/민감 장비용 프리셋이
+    # 자동 워크플로에서 조용히 무시되지 않게).
+    flags = set_timing(flags, plan.get("timing", ""))
     scripts = plan.get("scripts", "")
     if plan.get("no_scripts"):
         flags = strip_flags(flags, set(), {"--script"})
         flags = strip_flags(flags, set(), {"--script-timeout"})
     elif scripts:
-        flags = replace_value_flag(flags, "--script", scripts)
+        selected = stage_scripts(scripts, stage_id)
+        if selected:
+            flags = replace_value_flag(flags, "--script", selected)
+        else:
+            flags = strip_flags(flags, set(), {"--script"})
+            flags = strip_flags(flags, set(), {"--script-timeout"})
     if plan.get("include_closed"):
         flags = strip_flags(flags, {"--open"})
     # discovery 단계엔 --open 을 절대 추가하지 않는다: 열린 TCP 0개인 up 호스트(UDP 전용)가 XML 에서
@@ -862,6 +1017,115 @@ def existing_outputs(base: Path) -> list[str]:
         if p.exists():
             files.append(str(p))
     return files
+
+
+def interrupted_dir(base: Path) -> Path:
+    """중단 산출물을 모으는 하위 폴더 — 결과 폴더 안의 `interrupted/`.
+
+    파일명 표식만으로는 결과 폴더가 온전한 결과와 부분 결과로 뒤섞인다. 폴더를 나누면
+    (1) 가져올 것과 아닌 것이 눈으로 바로 갈리고, (2) `폴더째 가져오기`가 온전한 결과만
+    집어가며, (3) 중단본만 따로 보관·삭제·검토하기 쉽다.
+    """
+    return Path(base).parent / INTERRUPTED_DIR_NAME
+
+
+def interrupted_name(stem: str) -> str:
+    """중단본 파일명 — 이름 자체에 표식을 박는다.
+
+    중단된 스캔은 **인입하지 않는다.** 열린 포트를 다 못 봤는데 관측으로 받으면 미탐이
+    되고, 재시도가 끊긴 자리의 filtered 를 그대로 믿으면 오탐이 된다. 그런데 '안 넣는다'를
+    폴더 위치로만 지키면 파일 하나를 손으로 끌어다 놓는 순간 뚫린다. 그래서 폴더와
+    파일명 두 곳에 표식을 남기고, 스캐너·브라우저·서버 세 곳에서 각각 막는다.
+
+    표식은 맨 뒤에 붙어 단계 접미사(.tcp_discovery.xml)를 깨뜨린다 — 의도한 것이다.
+    중단본은 어떤 경로로도 '단계 계약을 갖춘 온전한 결과'로 읽히면 안 된다.
+    """
+    return f"{stem}{INTERRUPTED_MARK}"
+
+
+def is_interrupted_output(path: str | Path) -> bool:
+    """중단본인가 — 파일명 표식 또는 `interrupted/` 폴더 안."""
+    normalized = str(path).replace("\\", "/")
+    name = normalized.rsplit("/", 1)[-1].lower()
+    if f"{INTERRUPTED_MARK}." in name or name.endswith(INTERRUPTED_MARK):
+        return True
+    return f"/{INTERRUPTED_DIR_NAME}/" in f"/{normalized.lower()}"
+
+
+def numbered_stage_name(stem: str, index: int) -> str:
+    """반복 중단 번호를 붙인 이름 — 단계 접미사는 **맨 뒤에 그대로 남긴다**.
+
+    `...tcp_discovery-2.xml` 처럼 뒤에 붙이면 서버가 파일명에서 단계를 못 읽는다
+    (STAGE_FILE_RE 는 `.<stage>.xml` 로 끝나야 매칭). 그러면 발견 단계 sweep 이
+    '식별까지 관측한 스캔'으로 취급돼, -sV 를 돌리지도 않은 포트 표 추측이 앞서
+    관측한 진짜 식별(OpenSSH 8.9 …)을 덮어쓴다. 번호는 단계 앞에 넣는다.
+    """
+    head, sep, stage = stem.rpartition(".")
+    if sep and stage in STAGE_IDS:
+        return f"{head}-{index}.{stage}"
+    return f"{stem}-{index}"
+
+
+def interrupted_base(base: Path) -> Path:
+    """중단 산출물의 목적지 basename(하위 폴더 안). 같은 단계를 여러 번 중단하면 번호를 올려
+    이전 중단본을 덮어쓰지 않는다(부분 결과 보존)."""
+    stem = Path(base).name
+    candidate = interrupted_dir(base) / interrupted_name(stem)
+    index = 2
+    while existing_outputs(candidate):
+        candidate = interrupted_dir(base) / interrupted_name(numbered_stage_name(stem, index))
+        index += 1
+    return candidate
+
+
+def mark_interrupted_outputs(base: Path) -> list[str]:
+    """중단된 실행의 산출물을 `interrupted/` 하위 폴더로 옮긴다.
+
+    이렇게 해야 (1) 결과 폴더에는 온전한 결과만 남고, (2) `--resume` 이 같은 basename 으로
+    다시 돌 때 온전한 결과가 부분 결과를 덮어쓰지 않는다. state/manifest 파일명과 위치는
+    `--resume` 경로가 깨지지 않도록 그대로 둔다.
+    """
+    sources = existing_outputs(base)
+    if not sources:
+        return []
+    target = interrupted_base(base)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return sources           # 폴더를 못 만들어도 부분 결과 자체는 계속 기록한다
+    renamed: list[str] = []
+    for source in sources:
+        destination = Path(str(target) + Path(source).suffix)
+        try:
+            os.replace(source, destination)
+        except OSError:
+            renamed.append(source)
+            continue
+        renamed.append(str(destination))
+    return renamed
+
+
+def run_nmap_process(cmd: list[str]) -> int:
+    """nmap 한 번 실행. 정지 신호를 받으면 곧바로 죽이지 않고 잠깐 기다린다.
+
+    터미널 Ctrl+C 와 GUI [중지]는 프로세스 그룹 전체에 신호를 보내므로 nmap 도 같은 신호를
+    이미 받은 상태다. nmap 은 그때 진행분을 -oA 파일로 마저 쓰고 종료하는데, 여기서 바로
+    kill 하면 그 부분 결과가 통째로 사라진다. 유예 후에도 살아 있으면 단계적으로 종료한다.
+    """
+    proc = subprocess.Popen(cmd, shell=False)
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        try:
+            proc.wait(timeout=NMAP_STOP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=NMAP_KILL_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        raise
 
 
 def open_ports_from_xml(path: Path, protocol: str = "tcp") -> list[int]:
@@ -1093,6 +1357,601 @@ def write_json(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
+# ── 사용자 정의 프리셋: 파일 저장 · 서버 도킹 동기화 ──
+# 파일 형식은 ScanOps 웹서버(backend/scanops/scanning/preset_store.py)와 동일하다.
+# 같은 내용의 파일이 스캐너 폴더와 서버 data/ 양쪽에 존재하며 --sync 로 합집합을 맞춘다.
+
+def default_preset_path() -> Path:
+    """프리셋 파일 기본 위치 — 이 스크립트와 같은 폴더(단독 스캐너 폴더에 따로 보관)."""
+    return Path(__file__).resolve().with_name(PRESET_FILE_NAME)
+
+
+def preset_name_key(name: str) -> str:
+    """충돌 판정용 이름 키 — 앞뒤/연속 공백과 대소문자 차이는 같은 이름으로 본다."""
+    return " ".join(str(name or "").split()).casefold()
+
+
+def normalize_preset_workflow(value: str) -> str:
+    workflow = PRESET_WORKFLOW_ALIASES.get(str(value or "single").strip().lower())
+    if workflow is None:
+        raise ValueError(f"프리셋 workflow 는 auto 또는 single 이어야 합니다: {value!r}")
+    return workflow
+
+
+def _preset_text(value, label: str, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if CONTROL_CHAR_RE.search(text):
+        raise ValueError(f"프리셋 {label}에 사용할 수 없는 문자가 있습니다.")
+    if len(text) > limit:
+        raise ValueError(f"프리셋 {label}은 {limit}자 이내여야 합니다.")
+    return text
+
+
+def _preset_keys(values, label: str, allowed: dict) -> list[str]:
+    if isinstance(values, str) or not isinstance(values, (list, tuple)):
+        raise ValueError(f"프리셋 {label}은 문자열 목록이어야 합니다.")
+    selected = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError(f"프리셋 {label}은 문자열 목록이어야 합니다.")
+        if value not in allowed:
+            raise ValueError(f"알 수 없는 프리셋 {label} 항목: {value!r}")
+        if value not in selected:
+            selected.append(value)
+    # 레지스트리 순서로 고정 → 선택 순서가 달라도 같은 프리셋은 같은 지문을 갖는다.
+    return [key for key in allowed if key in set(selected)]
+
+
+def normalize_preset(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("프리셋 항목이 객체가 아닙니다.")
+    name = _preset_text(raw.get("name"), "이름", PRESET_MAX_NAME_LEN)
+    if not name:
+        raise ValueError("프리셋 이름이 비어 있습니다.")
+    if any(token in name for token in PRESET_NAME_FORBIDDEN):
+        raise ValueError("프리셋 이름에 / 또는 \\ 를 쓸 수 없습니다.")
+    return {
+        "name": name,
+        "description": _preset_text(raw.get("description"), "설명", PRESET_MAX_DESC_LEN),
+        "workflow": normalize_preset_workflow(raw.get("workflow")),
+        "options": _preset_keys(raw.get("options") or [], "options", OPTION_FLAGS),
+        "ports": validate_ports(str(raw.get("ports") or "")),
+        "nse": _preset_keys(raw.get("nse") or [], "nse", NSE_PROTO),
+        "updated_at": _preset_text(raw.get("updated_at"), "updated_at", 40) or now_iso(),
+    }
+
+
+def normalize_presets(raw_presets) -> list[dict]:
+    if isinstance(raw_presets, dict):
+        raw_presets = raw_presets.get("presets")
+    if raw_presets is None:
+        return []
+    if not isinstance(raw_presets, (list, tuple)):
+        raise ValueError("presets 는 목록이어야 합니다.")
+    if len(raw_presets) > PRESET_MAX_COUNT:
+        raise ValueError(f"프리셋은 최대 {PRESET_MAX_COUNT}개까지 저장할 수 있습니다.")
+    out: list[dict] = []
+    seen: set = set()
+    for raw in raw_presets:
+        preset = normalize_preset(raw)
+        key = preset_name_key(preset["name"])
+        if key in seen:
+            raise ValueError(f"프리셋 이름이 중복됩니다: {preset['name']}")
+        seen.add(key)
+        out.append(preset)
+    return sorted(out, key=lambda p: preset_name_key(p["name"]))
+
+
+def preset_fingerprint(preset: dict) -> str:
+    """내용 지문 — 설명/시각 같은 메타는 빼고 '실제 스캔 동작'만 비교한다.
+    설명만 다른 두 프리셋까지 충돌로 보면 동기화가 계속 사람 손을 요구하게 된다."""
+    body = {
+        "workflow": preset["workflow"],
+        "options": sorted(preset["options"]),
+        "ports": preset["ports"],
+        "nse": sorted(preset["nse"]),
+    }
+    blob = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def diff_presets(local: list[dict], remote: list[dict]) -> dict:
+    """같은 이름 + 다른 내용 = 충돌. 하나라도 있으면 어느 쪽도 바꾸지 않는다."""
+    local_by = {preset_name_key(p["name"]): p for p in local}
+    remote_by = {preset_name_key(p["name"]): p for p in remote}
+    conflicts = [
+        {"name": local_by[key]["name"], "remote_name": remote_by[key]["name"]}
+        for key in sorted(set(local_by) & set(remote_by))
+        if preset_fingerprint(local_by[key]) != preset_fingerprint(remote_by[key])
+    ]
+    # 같은 스캔인데 설명/이름 표기만 다른 항목. 충돌은 아니지만(그렇게 보면 동기화가 계속
+    # 사람 손을 요구한다) 병합이 서버 값으로 맞추므로, 로컬 표기가 바뀐다는 사실은 보고한다.
+    metadata_changed = [
+        {"name": local_by[key]["name"], "remote_name": remote_by[key]["name"]}
+        for key in sorted(set(local_by) & set(remote_by))
+        if preset_fingerprint(local_by[key]) == preset_fingerprint(remote_by[key])
+        and (local_by[key]["description"] != remote_by[key]["description"]
+             or local_by[key]["name"] != remote_by[key]["name"])
+    ]
+    return {
+        "conflicts": conflicts,
+        "metadata_changed": metadata_changed,
+        "only_local": [local_by[key] for key in sorted(set(local_by) - set(remote_by))],
+        "only_remote": [remote_by[key] for key in sorted(set(remote_by) - set(local_by))],
+    }
+
+
+def merge_presets(local: list[dict], remote: list[dict]) -> list[dict]:
+    merged = {preset_name_key(p["name"]): p for p in local}
+    merged.update({preset_name_key(p["name"]): p for p in remote})
+    return sorted(merged.values(), key=lambda p: preset_name_key(p["name"]))
+
+
+def load_presets(path: Path) -> list[dict]:
+    path = Path(path)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"프리셋 파일을 해석할 수 없습니다: {path} ({exc})")
+    if not isinstance(data, dict):
+        raise ValueError(f"프리셋 파일 형식이 올바르지 않습니다: {path}")
+    schema = data.get("schema", PRESET_SCHEMA)
+    if not isinstance(schema, int) or schema > PRESET_SCHEMA:
+        raise ValueError(
+            f"프리셋 파일 스키마({schema})가 이 버전보다 새것입니다. 스캐너를 업데이트하세요: {path}"
+        )
+    return normalize_presets(data.get("presets"))
+
+
+def save_presets(path: Path, presets: list[dict]) -> list[dict]:
+    path = Path(path)
+    normalized = normalize_presets(presets)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, {"schema": PRESET_SCHEMA, "updated_at": now_iso(), "presets": normalized})
+    return normalized
+
+
+def find_preset(presets: list[dict], name: str) -> dict | None:
+    key = preset_name_key(name)
+    return next((p for p in presets if preset_name_key(p["name"]) == key), None)
+
+
+def option_flags(options: list[str]) -> list[str]:
+    """옵션 키 → nmap 플래그(레지스트리 순서, 결정적). 타이밍은 마지막 하나만 남긴다."""
+    selected = set(options)
+    timing = [key for key in OPTION_TIMING_KEYS if key in selected]
+    if len(timing) > 1:
+        selected -= set(timing[:-1])
+    flags: list[str] = []
+    for key, values in OPTION_FLAGS.items():
+        if key in selected:
+            flags.extend(values)
+    return flags
+
+
+def preset_summary(preset: dict) -> str:
+    ports = preset["ports"] or "(프로필 기본)"
+    nse = f"{len(preset['nse'])}종" if preset["nse"] else "없음"
+    return (f"{preset['name']}  [{preset['workflow']}] ports={ports} "
+            f"options={len(preset['options'])}개 nse={nse}")
+
+
+def preset_from_args(args: argparse.Namespace, name: str) -> dict:
+    """현재 CLI 구성을 프리셋 한 건으로 만든다.
+
+    프리셋 본문은 옵션 키로만 표현된다. --profile quick/light 는 `--top-ports` 를 쓰는데
+    이 값은 웹 옵션 레지스트리에 없어 키로 표현할 수 없으므로 정직하게 거절하고
+    --options/--ports 로 다시 표현하도록 안내한다.
+    """
+    options = parse_option_keys(getattr(args, "options", ""))
+    workflow = normalize_preset_workflow(args.workflow)
+    if not options:
+        if workflow == "auto":
+            options = list(DEFAULT_AUTO_PRESET_OPTIONS)
+            # 'TCP만'은 옵션 키가 아니라 별도 스위치다. 프리셋 본문에서는 udp 를 빼는 것으로 표현해야
+            # 이 프리셋을 다시 불렀을 때도 UDP 단계가 꺼진다(웹의 자동 스캔과 같은 규칙).
+            if getattr(args, "tcp_only", False):
+                options = [key for key in options if key != "udp"]
+        elif args.profile in PROFILE_PRESET_OPTIONS:
+            options = list(PROFILE_PRESET_OPTIONS[args.profile])
+        else:
+            raise ValueError(
+                f"--profile {args.profile} 는 --top-ports 를 사용해 옵션 키로 표현할 수 없습니다. "
+                "--options 와 --ports 로 구성을 지정한 뒤 저장하세요."
+            )
+    ports = validate_ports(args.ports)
+    if not ports:
+        if args.all_ports:
+            ports = "T:1-65535"
+        elif not getattr(args, "options", "") and workflow == "single":
+            ports = PROFILE_PRESET_PORTS.get(args.profile, "")
+    if getattr(args, "no_scripts", False):
+        nse: list[str] = []
+    else:
+        nse = parse_nse_keys(args.scripts)
+        if not nse and (args.nse_default or workflow == "auto"
+                        or args.profile in PROFILE_PRESET_NSE):
+            nse = list(DEFAULT_PRESET_NSE)
+    return normalize_preset({
+        "name": name,
+        "description": getattr(args, "preset_description", "") or "",
+        "workflow": workflow,
+        "options": options,
+        "ports": ports,
+        "nse": nse,
+    })
+
+
+def parse_option_keys(value: str) -> list[str]:
+    keys = [token for token in re.split(r"[,\s]+", str(value or "").strip()) if token]
+    unknown = [key for key in keys if key not in OPTION_FLAGS]
+    if unknown:
+        raise ValueError(
+            f"알 수 없는 스캔 옵션 키: {unknown}. 사용 가능: {', '.join(OPTION_FLAGS)}"
+        )
+    return keys
+
+
+def parse_nse_keys(value: str) -> list[str]:
+    keys = [token for token in re.split(r"[,\s]+", str(value or "").strip()) if token]
+    unknown = [key for key in keys if key not in NSE_PROTO]
+    if unknown:
+        raise ValueError(f"알 수 없는 NSE 스크립트: {unknown}")
+    return keys
+
+
+def apply_preset_to_args(args: argparse.Namespace, preset: dict) -> None:
+    """프리셋 → CLI args. 명령줄에서 직접 준 --ports 는 프리셋보다 우선한다.
+
+    자동 워크플로는 단계별 고정 플래그를 쓰므로 프리셋에서 반영되는 것은 스캔 방식(-sS/-sT),
+    타이밍(-T*), 포트, NSE, 열린 포트 표시, UDP 단계 사용 여부다. 나머지 상세 옵션은
+    단일 실행(single)에서만 그대로 나간다 — README 에 같은 내용을 적어 두었다.
+    """
+    options = list(preset["options"])
+    args.workflow = "auto" if preset["workflow"] == "auto" else "single"
+    args.preset_options = options
+    if not args.ports and preset["ports"]:
+        args.ports = preset["ports"]
+    if "connect" in options:
+        args.scan_type = "connect"
+    elif "syn" in options:
+        args.scan_type = "syn"
+    args.udp = "udp" in options
+    if args.workflow == "auto" and "udp" not in options:
+        # 웹의 자동 스캔도 udp 옵션이 없으면 UDP 단계를 끈다 — 같은 프리셋이 같은 단계를 돌게 맞춘다.
+        args.tcp_only = True
+    if "open_only" in options:
+        args.open_only = True
+    args.preset_timing = next(
+        (OPTION_FLAGS[key][0] for key in OPTION_TIMING_KEYS if key in options), "",
+    )
+    if preset["nse"]:
+        args.scripts = ",".join(preset["nse"])
+        args.no_scripts = False
+    else:
+        args.no_scripts = True
+        args.scripts = ""
+
+
+# ── 서버 도킹(동기화) ──
+
+def _sync_request(url: str, token: str, payload: dict | None, timeout: float) -> dict:
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(url, data=body, method="POST" if body else "GET")
+    request.add_header("Authorization", f"Bearer {token}")
+    if body is not None:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("detail", "")
+        except Exception:
+            pass
+        raise ValueError(f"서버 응답 오류 {exc.code}: {detail or exc.reason}")
+    except urllib.error.URLError as exc:
+        raise ValueError(f"서버에 연결할 수 없습니다: {url} ({exc.reason})")
+    except (ValueError, TimeoutError) as exc:
+        raise ValueError(f"서버 응답을 해석할 수 없습니다: {exc}")
+
+
+def server_login(base_url: str, username: str, password: str, timeout: float) -> str:
+    body = json.dumps({"username": username, "password": password}).encode("utf-8")
+    request = urllib.request.Request(f"{base_url}/api/auth/login", data=body, method="POST")
+    request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))["token"]
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"서버 로그인 실패({exc.code}). 계정/비밀번호를 확인하세요.")
+    except urllib.error.URLError as exc:
+        raise ValueError(f"서버에 연결할 수 없습니다: {base_url} ({exc.reason})")
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"서버 로그인 응답을 해석할 수 없습니다: {exc}")
+
+
+def dock(args: argparse.Namespace, preset_path: Path) -> int:
+    """도킹 — 프리셋 동기화 + 스캔 결과 업로드를 한 번에.
+
+    프리셋 충돌은 결과 업로드를 막지 않는다(둘은 독립적인 데이터다). 다만 충돌이 있었으면
+    사람이 볼 수 있도록 종료 코드로 남긴다.
+    """
+    base_url, token = _dock_endpoint(args)
+    what = getattr(args, "sync_only", "") or "all"
+    preset_rc = 0
+    if what in ("all", "presets"):
+        preset_rc = sync_presets(args, preset_path, base_url=base_url, token=token)
+    result_failures = 0
+    if what in ("all", "results"):
+        result_failures = sync_results(
+            base_url, token, Path(args.output_dir), args.sync_timeout,
+            resend=getattr(args, "resend_results", False),
+        )
+    if result_failures:
+        return 1
+    return preset_rc
+
+
+def _dock_endpoint(args: argparse.Namespace) -> tuple[str, str]:
+    """--server/--token(또는 로그인)에서 도킹 대상과 토큰을 확정한다."""
+    base_url = (args.server or "").strip().rstrip("/")
+    if not base_url:
+        raise ValueError("--server 로 ScanOps 웹 주소를 지정하세요. 예: --server http://10.0.0.5:8770")
+    if not base_url.lower().startswith(("http://", "https://")):
+        raise ValueError(f"--server 는 http:// 또는 https:// 로 시작해야 합니다: {base_url}")
+    token = (args.token or os.environ.get("SCANOPS_TOKEN", "")).strip()
+    if token:
+        return base_url, token
+    # 비밀번호는 환경변수로도 받는다 — argv 는 같은 호스트의 다른 사용자에게 보인다.
+    password = args.password or os.environ.get("SCANOPS_PASSWORD", "")
+    if not (args.username and password):
+        raise ValueError(
+            "--token 또는 --username/--password 로 인증하세요"
+            "(환경변수 SCANOPS_TOKEN·SCANOPS_PASSWORD 도 가능). "
+            "도킹은 auditor 이상 권한이 필요합니다."
+        )
+    return base_url, server_login(base_url, args.username, password, args.sync_timeout)
+
+
+def sync_presets(args: argparse.Namespace, preset_path: Path,
+                 base_url: str = "", token: str = "") -> int:
+    """단독 스캐너 프리셋 ↔ 웹 서버 프리셋 동기화(도킹).
+
+    1) 서버 목록을 읽어 이름 충돌(같은 이름·다른 내용)이 있는지 먼저 확인한다.
+    2) 충돌이 하나라도 있으면 **양쪽 모두 그대로 두고** 충돌 목록만 보고한다(코드 3).
+    3) 충돌이 없으면 서버가 합집합을 저장하고, 그 최종 목록을 로컬 파일에도 그대로 쓴다.
+    """
+    if not (base_url and token):
+        base_url, token = _dock_endpoint(args)
+
+    local = load_presets(preset_path)
+    remote_doc = _sync_request(f"{base_url}/api/scan-presets", token, None, args.sync_timeout)
+    remote = normalize_presets(remote_doc.get("presets"))
+    delta = diff_presets(local, remote)
+    print(f"local={len(local)}건 server={len(remote)}건 "
+          f"서버로 보낼 것={len(delta['only_local'])}건 서버에서 받을 것={len(delta['only_remote'])}건")
+    if delta["conflicts"]:
+        print("error: 같은 이름인데 내용이 다른 프리셋이 있어 동기화를 중단했습니다(양쪽 모두 변경 없음).",
+              file=sys.stderr)
+        for conflict in delta["conflicts"]:
+            print(f"  conflict: {conflict['name']}", file=sys.stderr)
+        print("한쪽 이름을 바꾸거나 내용을 같게 맞춘 뒤 다시 실행하세요.", file=sys.stderr)
+        return 3
+
+    result = _sync_request(f"{base_url}/api/scan-presets/sync", token,
+                           {"presets": local}, args.sync_timeout)
+    if result.get("status") == "conflict":
+        # 확인과 병합 사이에 서버가 바뀐 경우(다른 사용자가 저장). 로컬도 건드리지 않는다.
+        print("error: 동기화 직전에 서버 프리셋이 변경되어 충돌이 발생했습니다(양쪽 모두 변경 없음).",
+              file=sys.stderr)
+        for conflict in result.get("conflicts", []):
+            print(f"  conflict: {conflict.get('name')}", file=sys.stderr)
+        return 3
+    merged = normalize_presets(result.get("presets"))
+    save_presets(preset_path, merged)
+    print(f"synced: {len(merged)}건 → {preset_path}")
+    # 안내는 **실제로 쓴 결과**(merged)와 시작 시점의 로컬을 비교해 만든다. 위쪽 확인용 delta 는
+    # 첫 GET 기준이라, 그 뒤 다른 사용자가 서버 설명을 바꿔 병합 응답에 실려 오면 로컬 파일은
+    # 덮이는데 안내는 비어 있게 된다(GET→POST 사이 TOCTOU).
+    for changed in diff_presets(local, merged)["metadata_changed"]:
+        # 스캔 동작은 같아 충돌이 아니지만 로컬 설명/표기가 서버 값으로 바뀐다 — 조용히 넘기지 않는다.
+        print(f"note: '{changed['name']}' 의 설명/이름 표기를 서버 값('{changed['remote_name']}')으로 맞췄습니다.")
+    print(f"서버에 추가됨: {', '.join(result.get('added_to_server') or []) or '없음'}")
+    print(f"스캐너에 추가됨: {', '.join(result.get('added_to_client') or []) or '없음'}")
+    return 0
+
+
+# ── 스캔 결과 도킹(업로드) ──
+
+def result_fingerprint(xml_payloads: list[bytes]) -> str:
+    """가져온 결과 단위의 내용 지문 — 서버 scans.result_fingerprint 와 같은 규칙.
+
+    파일 내용만으로 계산하므로 폴더를 복사해 다른 경로에서 도킹해도 같은 결과로 인식된다.
+    """
+    parts = sorted(hashlib.sha256(payload).hexdigest() for payload in xml_payloads)
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def stage_of(name: str) -> str:
+    for stage_id, _label in AUTO_STAGES:
+        if name.lower().endswith(f".{stage_id}.xml"):
+            return stage_id
+    return ""
+
+
+def collect_result_units(output_dir: Path) -> list[dict]:
+    """업로드할 결과 단위 목록 — **온전히 끝난 실행만**.
+
+    manifest 가 있는 실행의 XML 만 한 단위로 묶는다(닫힘 계약 유지).
+
+    중단본(`interrupted/`)은 올리지 않는다. 중간에 끊긴 스캔은 열린 포트를 다 보지 못한
+    상태라 그대로 받으면 **미탐**이 되고, 재시도가 잘린 자리의 filtered 를 관측으로 믿으면
+    **오탐**이 된다. 발견 관리에서 그 둘은 되돌리기 가장 어려운 오류이므로, 부분 결과는
+    사람이 파일을 보고 판단할 재료로만 남기고 자동 인입 경로에서는 뺀다.
+    """
+    output_dir = Path(output_dir)
+    units: list[dict] = []
+    claimed: set[Path] = set()
+    for manifest_path in sorted(output_dir.glob("*.manifest.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(manifest, dict) or manifest.get("tool") != "scanops_scanner":
+            continue
+        xml_paths = []
+        for value in manifest.get("import_xml_files") or []:
+            path = Path(value)
+            if not path.is_absolute():
+                path = output_dir / path.name
+            if path.exists():
+                xml_paths.append(path)
+        if not xml_paths:
+            continue
+        claimed.update(xml_paths)
+        units.append({
+            "kind": "manifest",
+            "name": manifest_path.stem.replace(".manifest", ""),
+            "status": manifest.get("status", ""),
+            "manifest": manifest_path,
+            "xml": xml_paths,
+        })
+
+    return units
+
+
+def interrupted_outputs(output_dir: Path) -> list[Path]:
+    """올리지 않고 남겨 둔 중단본. 개수를 사람에게 알려 주려고만 쓴다."""
+    folder = Path(output_dir) / INTERRUPTED_DIR_NAME
+    if not folder.is_dir():
+        return []
+    return sorted(p for p in folder.glob("*.xml") if is_interrupted_output(p))
+
+
+def _multipart_body(files: list[tuple[str, str, bytes]]) -> tuple[bytes, str]:
+    """multipart/form-data 본문을 표준 라이브러리만으로 조립(스캐너는 의존성이 없다)."""
+    boundary = "----scanops" + hashlib.sha256(
+        b"".join(payload for _f, _n, payload in files) + str(len(files)).encode()
+    ).hexdigest()[:24]
+    out = bytearray()
+    for field, filename, payload in files:
+        out += f"--{boundary}\r\n".encode()
+        out += (f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
+                "Content-Type: application/octet-stream\r\n\r\n").encode()
+        out += payload
+        out += b"\r\n"
+    out += f"--{boundary}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+
+def _upload_unit(base_url: str, token: str, unit: dict, timeout: float,
+                 skip_known: bool = True) -> dict:
+    files: list[tuple[str, str, bytes]] = [
+        ("files", path.name, path.read_bytes()) for path in unit["xml"]
+    ]
+    if unit["manifest"] is not None:
+        files.append(("files", unit["manifest"].name, unit["manifest"].read_bytes()))
+    body, content_type = _multipart_body(files)
+    # 중복 판정은 서버가 한다 — import 단위를 나누는 것도 서버이므로, 여기서 자체 지문으로
+    # 걸러내면 배치 스캔처럼 단위가 갈라지는 순간 판정이 어긋나 같은 결과가 다시 인입된다.
+    url = f"{base_url}/api/scans/import-bundle" + ("?skip_known=true" if skip_known else "")
+    request = urllib.request.Request(url, data=body, method="POST")
+    request.add_header("Authorization", f"Bearer {token}")
+    request.add_header("Content-Type", content_type)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("detail", "")
+        except Exception:
+            pass
+        raise ValueError(f"업로드 실패 {exc.code}: {detail or exc.reason}")
+    except urllib.error.URLError as exc:
+        raise ValueError(f"서버에 연결할 수 없습니다: {base_url} ({exc.reason})")
+
+
+def sync_results(base_url: str, token: str, output_dir: Path, timeout: float,
+                 resend: bool = False) -> int:
+    """결과 폴더의 스캔 결과를 서버로 올린다(자동 인입).
+
+    서버에 이미 있는 지문은 빼고 새 결과만 보낸다 — 그러지 않으면 도킹할 때마다 같은 결과로
+    스캔 이력이 불어나고 닫힘 판정이 다시 돈다.
+    """
+    units = collect_result_units(output_dir)
+    held = interrupted_outputs(output_dir)
+    if held:
+        # 조용히 빼면 '올렸겠거니' 하고 넘어간다. 몇 건을 왜 안 올렸는지 말해 준다.
+        print(f"results: 중단본 {len(held)}건은 올리지 않습니다 "
+              f"({INTERRUPTED_DIR_NAME}/ — 부분 결과라 오탐·미탐을 만듭니다)")
+    if not units:
+        print(f"results: 올릴 결과가 없습니다 ({output_dir})")
+        return 0
+    print(f"results: {len(units)}건 전송 (이미 가져온 것은 서버가 건너뜁니다)")
+
+    failures = 0
+    for unit in units:
+        label = f"{unit['name']} [{unit['status'] or unit['kind']}]"
+        try:
+            result = _upload_unit(base_url, token, unit, timeout, skip_known=not resend)
+        except ValueError as exc:
+            print(f"  error: {label} — {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        counts = result.get("counts") or {}
+        imported, skipped = result.get("imported", 0), result.get("skipped", 0)
+        if imported == 0 and skipped:
+            print(f"  skipped: {label} — 이미 가져온 결과 {skipped}건")
+            continue
+        mode = result.get("closure_mode", "")
+        extra = f" · 건너뜀 {skipped}" if skipped else ""
+        print(f"  uploaded: {label} → 신규 {counts.get('new', 0)} / 갱신 {counts.get('updated', 0)}"
+              f" · {mode}{extra}")
+    return failures
+
+
+def run_preset_command(args: argparse.Namespace) -> int | None:
+    """프리셋 관리 하위 명령. 스캔을 실행하지 않고 끝나면 종료 코드를, 아니면 None 을 준다."""
+    preset_path = Path(args.preset_file) if args.preset_file else default_preset_path()
+    if args.list_presets:
+        presets = load_presets(preset_path)
+        print(f"preset file: {preset_path}")
+        if not presets:
+            print("(저장된 프리셋 없음)")
+        for preset in presets:
+            print("  " + preset_summary(preset))
+        return 0
+    if args.delete_preset:
+        presets = load_presets(preset_path)
+        target = find_preset(presets, args.delete_preset)
+        if target is None:
+            raise ValueError(f"삭제할 프리셋이 없습니다: {args.delete_preset}")
+        save_presets(preset_path, [p for p in presets if p is not target])
+        print(f"deleted: {target['name']} → {preset_path}")
+        return 0
+    if args.save_preset:
+        presets = load_presets(preset_path)
+        preset = preset_from_args(args, args.save_preset)
+        existing = find_preset(presets, preset["name"])
+        if existing is not None and not args.overwrite_preset:
+            raise ValueError(
+                f"같은 이름의 프리셋이 이미 있습니다: {existing['name']}. "
+                "덮어쓰려면 --overwrite-preset 을 함께 쓰세요."
+            )
+        presets = [p for p in presets if p is not existing] + [preset]
+        save_presets(preset_path, presets)
+        print(f"saved: {preset_summary(preset)} → {preset_path}")
+        return 0
+    if args.sync:
+        return dock(args, preset_path)
+    return None
+
+
 def create_plan(args: argparse.Namespace) -> dict:
     nmap = find_nmap(args.nmap)
     if not nmap:
@@ -1142,6 +2001,9 @@ def create_plan(args: argparse.Namespace) -> dict:
         "manifest_path": str(out_dir / f"{name}.manifest.json"),
         "workflow": args.workflow,
         "profile": args.profile,
+        "preset": getattr(args, "preset", "") or "",
+        "preset_options": getattr(args, "preset_options", None),
+        "timing": getattr(args, "preset_timing", "") or "",
         "stats_every": validate_stats_every(args.stats_every),
         "host_timeout": validate_host_timeout(host_timeout_raw),
         "base_flags": build_base_flags(args),
@@ -1578,7 +2440,14 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     started = now_iso()
     stage_label = f" {run_stage_name(stage_id)}" if stage_id else ""
     print(f"[{idx + 1}/{len(plan['batches'])}]{stage_label} {display_command(cmd)}", flush=True)
-    rc = subprocess.call(cmd, shell=False)
+    interrupted = False
+    try:
+        rc = run_nmap_process(cmd)
+    except KeyboardInterrupt:
+        # 중단도 '일어난 일'이라 기록한다. 기록하지 않으면 중간까지 스캔한 부분 결과가
+        # state 에 없는 유령 파일로 남고, 재개 후 온전한 결과에 덮어써진다.
+        interrupted, rc = True, 130
+    files = mark_interrupted_outputs(base) if interrupted else existing_outputs(base)
     run = {
         "index": idx,
         "batch_index": idx,
@@ -1587,14 +2456,19 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
         "started_at": started,
         "finished_at": now_iso(),
         "returncode": rc,
+        "interrupted": interrupted,
         "command": cmd,
         "scan_targets": scan_targets,
         "scan_targets_complete": targets_complete,
         "output_base": str(base),
-        "files": existing_outputs(base),
+        "files": files,
     }
     plan["runs"].append(run)
     write_json(state_path, plan)
+    if interrupted:
+        if files:
+            print("\ninterrupted outputs: " + ", ".join(Path(f).name for f in files), file=sys.stderr)
+        raise KeyboardInterrupt()
     return rc
 
 
@@ -1774,6 +2648,36 @@ def parser() -> argparse.ArgumentParser:
         help="auto runs discovery -> TCP identification -> UDP identification. single runs one profile.",
     )
     p.add_argument("--profile", choices=sorted(PRESETS), default="basic", help="Built-in scan profile for --workflow single.")
+    p.add_argument("--options", default="",
+                   help="Comma-separated ScanOps option keys (same vocabulary as the web UI), e.g. "
+                        "syn,udp,version,version_all,fast. Replaces the built-in profile flags.")
+
+    presets = p.add_argument_group(
+        "saved presets",
+        "Presets are stored next to this script in scanops_presets.json and can be synced with a "
+        "ScanOps web server so both sides hold the same file.",
+    )
+    presets.add_argument("--preset", default="", help="Run a saved preset by name.")
+    presets.add_argument("--preset-file", default="",
+                         help="Preset file path. Defaults to scanops_presets.json beside this script.")
+    presets.add_argument("--list-presets", action="store_true", help="List saved presets and exit.")
+    presets.add_argument("--save-preset", metavar="NAME", default="",
+                         help="Save the current --workflow/--options/--ports/--scripts configuration as a preset and exit.")
+    presets.add_argument("--preset-description", default="", help="Description stored with --save-preset.")
+    presets.add_argument("--overwrite-preset", action="store_true", help="Allow --save-preset to replace an existing name.")
+    presets.add_argument("--delete-preset", metavar="NAME", default="", help="Delete a saved preset and exit.")
+    presets.add_argument("--sync", action="store_true",
+                         help="Dock to a ScanOps web server: sync presets and upload scan results (auto-ingested). Exits without scanning.")
+    presets.add_argument("--sync-only", choices=["all", "presets", "results"], default="all",
+                         help="Limit what --sync does. Default all (presets + scan results).")
+    presets.add_argument("--resend-results", action="store_true",
+                         help="Upload every scan result again, even ones the server already imported.")
+    presets.add_argument("--server", default="", help="ScanOps web base URL for --sync. Example: http://10.0.0.5:8770")
+    presets.add_argument("--token", default="", help="ScanOps API token for --sync. Falls back to the SCANOPS_TOKEN env var.")
+    presets.add_argument("--username", default="", help="ScanOps account for --sync when no token is given.")
+    presets.add_argument("--password", default="",
+                         help="ScanOps password for --sync. Prefer the SCANOPS_PASSWORD env var: a command line is visible to other users on the same host.")
+    presets.add_argument("--sync-timeout", type=float, default=15.0, help="Per-request timeout for --sync, in seconds.")
     p.add_argument("--ports", "-p", default="", help="Port spec. Overrides profile ports/top-ports.")
     p.add_argument("--all-ports", action="store_true", help="Shortcut for -p T:1-65535.")
     p.add_argument("--scan-type", choices=["connect", "syn"], default="", help="Override TCP scan type.")
@@ -1813,9 +2717,53 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def apply_cli_options(args: argparse.Namespace) -> None:
+    """--preset / --options 를 args 에 반영. 둘 다 없으면 기존 --profile 동작 그대로."""
+    args.preset_options = None
+    args.preset_timing = ""
+    preset_path = Path(args.preset_file) if args.preset_file else default_preset_path()
+    if args.preset:
+        # 프리셋이 소유하는 항목을 명령줄에서 같이 주면 어느 쪽이 이겼는지 알 수 없다 → 정직하게 거절.
+        # --ports/--tcp-only/--open-only/--include-closed 는 프리셋 위에 얹는 보정이라 허용한다.
+        owned = [
+            name for name, value, default in (
+                ("--options", args.options, ""),
+                ("--profile", args.profile, "basic"),
+                ("--scan-type", args.scan_type, ""),
+                ("--udp", args.udp, False),
+                ("--scripts", args.scripts, ""),
+                ("--nse-default", args.nse_default, False),
+                ("--no-scripts", args.no_scripts, False),
+            ) if value != default
+        ]
+        if owned:
+            raise ValueError(
+                f"--preset 이 결정하는 항목을 명령줄에서 같이 지정했습니다: {', '.join(owned)}. "
+                "프리셋을 수정하거나 --preset 없이 실행하세요."
+            )
+        preset = find_preset(load_presets(preset_path), args.preset)
+        if preset is None:
+            raise ValueError(
+                f"저장된 프리셋이 없습니다: {args.preset} (--list-presets 로 확인, 파일: {preset_path})"
+            )
+        apply_preset_to_args(args, preset)
+    elif args.options:
+        # --options 는 '이름 없는 프리셋'이다. 저장 후 --preset 으로 부른 것과 한 글자도 다르지 않게
+        # 같은 경로로 처리한다(스캔 기법·UDP 단계 사용 여부·NSE 유도 규칙이 갈라지지 않도록).
+        apply_preset_to_args(args, preset_from_args(args, "(--options)"))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        done = run_preset_command(args)
+        if done is not None:
+            return done
+        if args.resume and args.exclude:
+            raise ValueError("--resume에서는 --exclude를 변경할 수 없습니다. state에 저장된 제외 대상을 사용합니다.")
+        if args.resume and (args.preset or args.options):
+            raise ValueError("--resume 은 저장된 state 의 구성을 그대로 이어갑니다. --preset/--options 를 함께 쓸 수 없습니다.")
+        apply_cli_options(args)
         if args.resume and (args.exclude or args.exclude_ports):
             raise ValueError(
                 "--resume에서는 --exclude/--exclude-ports를 변경할 수 없습니다. state에 저장된 제외 설정을 사용합니다."

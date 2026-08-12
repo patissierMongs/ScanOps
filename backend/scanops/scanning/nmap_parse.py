@@ -191,6 +191,37 @@ def scan_start(source) -> datetime | None:
         return None
 
 
+def probed_identity(source) -> bool | None:
+    """이 XML 이 '서비스 식별까지 관측한 실행'인가. 판단 불가면 None.
+
+    포트 열림만 본 sweep(`-sS` 만)도 nmap 은 포트 표(nmap-services)의 이름을 `service
+    name=` 에 채워 넣는다. 그걸 관측으로 받아들이면, 앞서 `-sV` 로 확인한 진짜 식별
+    (OpenSSH 8.9)이 포트 번호 관례(ssh)로 덮인다. 파일명(단계 접미사)만으로 판정하면
+    이름이 조금만 달라져도 — 중단본 번호, 사용자가 손으로 바꾼 이름 — 조용히 뚫린다.
+    그래서 XML 이 스스로 들고 있는 실행 인자로도 본다.
+
+    `args` 가 없는 XML(수기 생성 등)은 판단하지 않고 None 을 돌려준다 — 여기서 함부로
+    '식별 아님'으로 몰면 정상적인 식별 인입이 갱신을 멈춘다.
+    """
+    root = _root_of(source)
+    args = (root.get("args") or "").strip()
+    if not args:
+        return None
+    return any(_enables_version_detection(token) for token in args.split())
+
+
+def _enables_version_detection(token: str) -> bool:
+    """이 nmap 인자 하나가 버전 탐지를 켜는가.
+
+    `-s` 뒤의 스캔 타입 문자는 붙여 쓸 수 있다(`-sSV`, `-sSUV`). 그래서 `-sV` 만 정확히
+    비교하면 `nmap -sSV` 로 돌린 XML 이 'sweep' 으로 잘못 분류되고, 진짜 식별 결과가
+    관측으로 반영되지 않는다. `-sSU`(버전 탐지 없음)와는 V 유무로 갈린다.
+    """
+    if token == "-A" or token.startswith("--version"):
+        return True
+    return token.startswith("-s") and not token.startswith("--") and "V" in token[2:]
+
+
 def up_hosts(source) -> set[str]:
     """이번 스캔에서 살아있던(up) 호스트 IP 집합 — 닫힘 판정 범위에 사용."""
     root = _root_of(source)

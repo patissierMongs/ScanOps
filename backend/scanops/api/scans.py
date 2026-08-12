@@ -22,12 +22,12 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import SessionLocal, get_db
 from ..models import ACTIVE_FINDING_STATES, Finding, ScanRun, User
-from ..schemas import IngestSummary, RawCommandIn, ScanOut, ScanRunIn
+from ..schemas import IngestSummary, KnownResultsIn, RawCommandIn, ScanOut, ScanRunIn
 from ..uploads import read_limited
 from ..scanning import chunker, engine_runner, nmap_runner, scan_options, scope, taxonomy
 from ..scanning.presets import PRESETS
 from ..scanning.ingest import ingest
-from ..scanning.nmap_parse import parse_xml, scan_start, up_hosts
+from ..scanning.nmap_parse import parse_xml, probed_identity, scan_start, up_hosts
 from .audit import record
 from .deps import current_user, require_role
 
@@ -75,6 +75,13 @@ AUTO_STAGE_LABELS = {
     "udp_identify": "주요 UDP 서비스 식별",
 }
 STAGE_FILE_RE = re.compile(r"^(?P<base>.+)\.(?P<stage>tcp_discovery|tcp_identify|udp_identify)\.xml$", re.I)
+# 중단본 표식 — 스캐너(scanops_scanner.INTERRUPTED_*)와 같은 문자열이어야 한다.
+INTERRUPTED_DIR_NAME = "interrupted"
+INTERRUPTED_MARK = ".interrupted"
+INTERRUPTED_REJECT = (
+    "중단된 스캔 결과는 가져올 수 없습니다. 부분 결과라 못 본 포트가 미탐이 되고, "
+    "끊긴 자리의 filtered 가 오탐이 됩니다. 스캔을 다시 완주한 뒤 가져오세요."
+)
 IMPORT_CONTRACT_SCHEMA = 1
 IMPORT_CONTRACT_MAX_HOSTS = 65536
 
@@ -355,6 +362,20 @@ def _port_scope(port_spec: str, proto: str) -> set[int] | None:
             except ValueError:
                 continue
     return ports
+
+
+def is_interrupted_upload(filename: str | None) -> bool:
+    """중단본 표식이 붙은 파일인가(`*.interrupted.xml` 또는 `interrupted/` 아래).
+
+    중단된 스캔은 열린 포트를 다 보지 못한 상태다. 관측으로 받아들이면 못 본 포트가
+    **미탐**이 되고, 재시도가 잘린 자리의 filtered 를 믿으면 **오탐**이 된다. 스캐너가
+    애초에 올리지 않지만, 사람이 파일을 끌어다 놓는 경로가 남아 있으므로 서버에서도 막는다.
+    """
+    normalized = (filename or "").replace("\\", "/").lower()
+    name = normalized.rsplit("/", 1)[-1]
+    if f"{INTERRUPTED_MARK}." in name:
+        return True
+    return f"/{INTERRUPTED_DIR_NAME}/" in f"/{normalized}"
 
 
 def _stage_file_info(filename: str | None) -> tuple[str, str] | None:
@@ -1447,7 +1468,10 @@ def _prepare_import_xml(xml_bytes: bytes, filename: str | None = None) -> tuple:
         scan_date = scan_start(xml_bytes)
         stage = (_stage_file_info(filename) or ("", ""))[1]
         findings = parse_xml(xml_bytes)
-        if stage == "tcp_discovery":
+        # 두 근거 중 하나라도 'sweep' 이라고 하면 식별 미관측으로 받는다. 파일명은 단계
+        # 계약이라 정확하지만 이름이 바뀌면 뚫리고, XML 인자는 이름과 무관하게 남는다.
+        sweep_only = stage == "tcp_discovery" or probed_identity(xml_bytes) is False
+        if sweep_only:
             findings = [{**finding, "identity_observed": False} for finding in findings]
         scanned_hosts = up_hosts(xml_bytes)
         if stage:
@@ -1497,6 +1521,16 @@ def _fail_import(db: Session, scan_id: int, artifact_paths: list[Path]) -> None:
             )
 
 
+def result_fingerprint(xml_payloads: list[bytes]) -> str:
+    """가져온 결과 단위의 내용 지문.
+
+    같은 XML 을 다시 도킹하면 같은 값이 나오도록 파일 내용만으로 계산한다(파일명·경로 무관).
+    묶음은 구성 파일 지문을 정렬해 합치므로 단계 순서가 달라도 같은 값이다.
+    """
+    parts = sorted(hashlib.sha256(payload).hexdigest() for payload in xml_payloads)
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
 def _import_single_xml(
     db: Session,
     user: User,
@@ -1507,7 +1541,8 @@ def _import_single_xml(
     # Full parsing precedes every persistent side effect. A malformed upload therefore
     # cannot leave a ScanRun row, raw XML file, finding mutation, or success audit record.
     sdate, findings, scanned_hosts, tcp_scope, udp_scope = _prepare_import_xml(xml_bytes, name)
-    scan = ScanRun(name=f"가져오기: {name}", status="running", created_by=user.id)
+    scan = ScanRun(name=f"가져오기: {name}", status="running", created_by=user.id,
+                   source_fingerprint=result_fingerprint([xml_bytes]))
     db.add(scan)
     db.commit()
     if sdate is not None:
@@ -1553,7 +1588,9 @@ def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, d
     dates = [values[0] for values in prepared.values() if values[0] is not None]
     sdate = min(dates) if dates else None
     display = Path(base.replace("\\", "/")).name
-    scan = ScanRun(name=f"가져오기: {display} 자동 스캔 묶음", status="running", created_by=user.id)
+    scan = ScanRun(name=f"가져오기: {display} 자동 스캔 묶음", status="running", created_by=user.id,
+                   source_fingerprint=result_fingerprint(
+                       [item["bytes"] for item in stages.values()]))
     scan.command = "자동 스캔 XML 묶음 · TCP 발견 → TCP 식별 → UDP 식별"
     db.add(scan)
     db.commit()
@@ -1671,12 +1708,39 @@ def get_scan(scan_id: int, _: User = Depends(current_user), db: Session = Depend
     return scan
 
 
+@router.post("/known-results")
+def known_results(
+    body: KnownResultsIn,
+    _: User = Depends(require_role("auditor")),
+    db: Session = Depends(get_db),
+) -> dict:
+    """이미 가져온 결과의 지문을 알려 준다 — 단독 스캐너 도킹의 중복 인입 방지용.
+
+    스캐너가 매번 폴더 전체를 올리면 같은 결과로 스캔 이력이 불어나고 닫힘 판정이 다시 돈다.
+    올리기 전에 이 목록을 빼면 새 결과만 전송된다. 지문은 XML 내용만으로 계산하므로 파일을
+    다른 경로로 복사해 와도 같은 결과로 인식된다.
+    """
+    wanted = {f for f in body.fingerprints if isinstance(f, str) and f}
+    if not wanted:
+        return {"known": []}
+    if len(wanted) > 5000:
+        raise HTTPException(status_code=400, detail="한 번에 확인할 수 있는 지문은 5000개까지입니다.")
+    # 실패로 끝난 인입은 '가져온 것'이 아니다 — 그렇게 세면 재시도가 영구히 막힌다.
+    rows = db.query(ScanRun.source_fingerprint).filter(
+        ScanRun.source_fingerprint.in_(wanted), ScanRun.status == "done",
+    ).all()
+    return {"known": sorted({row[0] for row in rows if row[0]})}
+
+
 @router.post("/import", response_model=IngestSummary)
 async def import_xml(
     file: UploadFile = File(...),
     user: User = Depends(require_role("auditor")),
     db: Session = Depends(get_db),
 ):
+    if is_interrupted_upload(file.filename):
+        record(db, user, "SCAN_IMPORT", target=file.filename or "", detail="중단본 거절", ok=False)
+        raise HTTPException(status_code=400, detail=INTERRUPTED_REJECT)
     xml_bytes = await read_limited(file, _settings.upload_max_bytes)
     try:
         result = _import_single_xml(db, user, file.filename or "scan.xml", xml_bytes)
@@ -1693,9 +1757,17 @@ async def import_xml(
 @router.post("/import-bundle")
 async def import_xml_bundle(
     files: list[UploadFile] = File(...),
+    skip_known: bool = False,
     user: User = Depends(require_role("auditor")),
     db: Session = Depends(get_db),
 ):
+    """XML 묶음 가져오기.
+
+    skip_known=true(단독 스캐너 도킹)면 이미 같은 내용을 가져온 단위는 건너뛴다. **중복 판정은
+    서버가 한다** — import 단위를 나누는 것도 서버(_stage_file_info 기준 base 묶음)이므로,
+    클라이언트가 자기 방식으로 묶어 지문을 내면 배치 스캔처럼 단위가 갈라지는 순간 판정이
+    어긋나 같은 결과가 다시 인입된다.
+    """
     payloads = []
     manifests = []
     total_bytes = 0
@@ -1704,6 +1776,11 @@ async def import_xml_bundle(
         lower_name = name.lower()
         if not (lower_name.endswith(".xml") or lower_name.endswith(".manifest.json")):
             continue
+        # 폴더째 가져오기는 `interrupted/` 까지 재귀로 딸려 온다. 조용히 섞이면
+        # 부분 결과가 온전한 결과와 같은 무게로 인입된다.
+        if is_interrupted_upload(name):
+            record(db, user, "SCAN_IMPORT", target=name, detail="중단본 거절", ok=False)
+            raise HTTPException(status_code=400, detail=INTERRUPTED_REJECT)
         data = await read_limited(f, _settings.upload_max_bytes)
         total_bytes += len(data)
         if total_bytes > _settings.upload_bundle_max_bytes:
@@ -1751,7 +1828,20 @@ async def import_xml_bundle(
     total = _zero_counts()
     imported = []
     failed = []
+    skipped = []
     for unit in sorted(units, key=lambda u: str(u["sort"]).lower()):
+        if skip_known:
+            payload_bytes = ([unit["item"]["bytes"]] if unit["kind"] == "single"
+                             else [member["bytes"] for member in unit["stages"].values()])
+            fingerprint = result_fingerprint(payload_bytes)
+            # **성공한 인입만** 이미 가져온 것으로 본다. _fail_import 는 실패해도 지문을 남긴 채
+            # status="failed" 로 행을 보존하므로, 상태를 보지 않으면 일시적인 디스크/DB 오류 한 번이
+            # 그 결과를 영구히 건너뛰게 만든다 — 스캐너에는 "이미 가져온 결과"로 보여 유실이 조용하다.
+            if db.query(ScanRun.id).filter(
+                ScanRun.source_fingerprint == fingerprint, ScanRun.status == "done",
+            ).first():
+                skipped.append(str(unit["sort"]))
+                continue
         try:
             if unit["kind"] == "bundle":
                 result = _import_stage_bundle(db, user, unit["base"], unit["stages"])
@@ -1772,11 +1862,13 @@ async def import_xml_bundle(
             logger.exception("failed to import XML bundle unit")
             failed.append({"name": str(unit["sort"]), "error": "XML 가져오기에 실패했습니다."})
             record(db, user, "SCAN_IMPORT", target=str(unit["sort"]), detail="실패", ok=False)
-    if not imported and failed:
+    if not imported and failed and not skipped:
         raise HTTPException(status_code=400, detail=f"XML 파싱 실패: {failed[0]['error']}")
     return {
         "imported": len(imported),
         "failed": len(failed),
+        "skipped": len(skipped),
+        "skipped_units": skipped,
         "file_count": len(payloads),
         "counts": total,
         "scans": imported,
