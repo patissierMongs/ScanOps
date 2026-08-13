@@ -1159,11 +1159,13 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
     if not engine_runner.is_done(out_dir):
         _fail(scan_id, "engine_incomplete")
         return
-    # 닫힘 권한은 XML 완결성으로 판정한다 — 단독 스캐너와 같은 계약이다.
-    # rc=0 · stages_done 에 job 이 있어도 nmap 이 XML 을 끝맺지 못했을 수 있고, 엔진 파서는
-    # 그 파일을 ParseError → 빈 목록으로 넘긴다. 그 상태로 닫으면 '못 본 포트'가 '닫힌 포트'가
-    # 되고, 닫힘은 status 까지 '정상처리'로 바꾸므로 되돌리기 가장 어려운 미탐이 된다.
-    unfinished = engine_runner.unfinished_xml(out_dir)
+    # 닫힘 권한은 산출물 완결성으로 판정한다 — 단독 스캐너와 같은 계약이다.
+    # rc=0 · stages_done 에 job 이 있어도 nmap 이 XML 을 끝맺지 못했거나 아예 만들지 못했을 수
+    # 있다. 그 상태로 닫으면 '못 본 포트'가 '닫힌 포트'가 되고, 닫힘은 status 까지 '정상처리'로
+    # 바꾸므로 되돌리기 가장 어려운 미탐이 된다. 그래서 '있는 파일'이 아니라 '만들기로 한 집합'과
+    # 대조하고, 열림을 정하는 산출물(authority)과 상세만 채우는 산출물(enrichment)을 가른다.
+    report = engine_runner.artifact_report(out_dir, saved_spec, force_scanned_hosts)
+    unfinished = report["authority_missing"] + report["authority_broken"]
     # NSE/소켓 오류는 이와 다른 축이다. 스크립트 소켓 하나가 bind 에 실패해도(WSAEACCES 10013)
     # nmap 은 포트 결과를 온전히 내고 rc=0 으로 끝난다. 그런 실행에서 닫힘 권한을 빼면 사라진
     # 서비스가 영영 닫히지 않아 오탐이 쌓인다 — 사실만 남기고 권한은 건드리지 않는다.
@@ -1188,10 +1190,12 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
             else:
                 # done 인데 failure_* 를 쓰는 자리가 아니다. 이 코드는 '실패'가 아니라
                 # '부가 증거가 덜 찼다'는 참고이며, UI 도 실패 원인과 다른 라벨로 그린다.
-                scan.failure_code = "nse_degraded" if problems else ""
+                degraded = report["enrichment_broken"] or problems
+                scan.failure_code = "nse_degraded" if degraded else ""
                 scan.failure_message = (
-                    "NSE/소켓 오류가 있었습니다 — 포트 결과는 온전하지만 스크립트 결과는 일부 "
-                    f"빠졌을 수 있습니다. ({problems[0][:120]})" if problems else ""
+                    "NSE/소켓 오류 또는 서비스 상세 산출물 손상이 있었습니다 — 포트 결과는 "
+                    f"온전하지만 스크립트 결과는 일부 빠졌을 수 있습니다. ({str(degraded[0])[:120]})"
+                    if degraded else ""
                 )
             db.commit()
     except Exception:

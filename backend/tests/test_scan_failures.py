@@ -659,6 +659,8 @@ def test_resume_finalizes_completed_engine_output_without_rerunning_nmap(
         "exclude": [],
         "out_dir": str(tmp_path / "ignored"),
         "stages": {
+            # -Pn 이면 엔진이 discovery nmap 을 돌리지 않는다(산출물도 없다).
+            "discovery": {"mode": "pn"},
             "tcp": {"enabled": False, "ports": ""},
             "udp": {"enabled": False, "ports": ""},
         },
@@ -982,7 +984,8 @@ def test_socket_errors_in_the_engine_log_do_not_cancel_closure_candidates(
     scan_id = _scan_with_spec(tmp_path, {
         "targets": ["127.0.0.1"], "exclude": [],
         "out_dir": str(tmp_path / "ignored"),
-        "stages": {"tcp": {"enabled": False, "ports": ""},
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": False, "ports": ""},
                    "udp": {"enabled": True, "ports": "161"}},
         "scanops": {"scope_keys": [scope_key]},
     })
@@ -997,6 +1000,10 @@ def test_socket_errors_in_the_engine_log_do_not_cancel_closure_candidates(
         "NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed (IOD#4) (10013)\n"
         "Nmap done: 1 IP address (1 host up) scanned in 5.43 seconds\n",
         encoding="utf-8")
+    # 포트 관측 자체는 온전히 끝났다 — 소켓 오류는 그 사실을 부정하지 않는다.
+    (out_dir / "stage-udp-b0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
 
     seen: list[set] = []
 
@@ -1034,7 +1041,8 @@ def test_a_truncated_engine_xml_never_grants_closure(client, monkeypatch, tmp_pa
     scan_id = _scan_with_spec(tmp_path, {
         "targets": ["127.0.0.1"], "exclude": [],
         "out_dir": str(tmp_path / "ignored"),
-        "stages": {"tcp": {"enabled": True, "ports": "443"},
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "443"},
                    "udp": {"enabled": False, "ports": ""}},
         "scanops": {"scope_keys": [scope_key]},
     })
@@ -1077,7 +1085,8 @@ def test_a_completed_engine_xml_keeps_its_closure_scope(client, monkeypatch, tmp
     scan_id = _scan_with_spec(tmp_path, {
         "targets": ["127.0.0.1"], "exclude": [],
         "out_dir": str(tmp_path / "ignored"),
-        "stages": {"tcp": {"enabled": True, "ports": "443"},
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "443"},
                    "udp": {"enabled": False, "ports": ""}},
         "scanops": {"scope_keys": [scope_key]},
     })

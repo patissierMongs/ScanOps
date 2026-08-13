@@ -1471,3 +1471,98 @@ def test_allinone_verify_site_reports_missing_dependency(tmp_path):
 
     with pytest.raises(SystemExit, match="빠진 패키지"):
         module.verify_site(site)
+
+
+# ── 산출물 완결성 → 닫힘 권한 (실제 Pipeline 으로 검증) ────────────────────────
+#
+# helper 에 임의 입력을 넣는 테스트는 자기 모델만 검증한다. 그래서 여기서는 fake nmap 이
+# 실제 산출물을 만들고 **진짜 Pipeline** 이 돌게 한 뒤, 그 out_dir 을 워커의 판정에 넣는다.
+
+_FINISHED_XML = ('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                 '<address addr="127.0.0.1" addrtype="ipv4"/>'
+                 '<ports><port protocol="tcp" portid="443"><state state="open"/>'
+                 '<service name="https" method="probed"/></port></ports></host>'
+                 '<runstats><finished exit="success"/>'
+                 '<hosts up="1" down="0" total="1"/></runstats></nmaprun>')
+# 실제 사고 파일과 같은 모양 — nmap 이 </nmaprun> 을 쓰지 못하고 죽었다.
+_TRUNCATED_XML = '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+
+
+def _run_pipeline(tmp_path, monkeypatch, *, broken: dict | None = None,
+                  omit: set | None = None, spec_extra: dict | None = None):
+    """fake nmap 으로 실제 Pipeline 을 돌린다.
+
+    broken: {단계이름 조각: True} 인 산출물은 잘린 XML 로 쓴다.
+    omit:   그 이름 조각을 가진 산출물은 아예 만들지 않는다(nmap 이 파일을 못 만든 경우).
+    """
+    broken, omit = broken or {}, omit or set()
+    spec_dict = {
+        "targets": ["127.0.0.1"], "exclude": [], "out_dir": str(tmp_path),
+        "batch_size": 256,
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "443"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": True, "nse": []}},
+    }
+    spec_dict.update(spec_extra or {})
+
+    def fake_run(nmap, args, out_base, **_kwargs):
+        name = Path(out_base).name
+        if any(frag in name for frag in omit):
+            return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
+        body = _TRUNCATED_XML if any(f in name for f in broken) else _FINISHED_XML
+        Path(str(out_base) + ".xml").write_text(body, encoding="utf-8")
+        return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
+
+    monkeypatch.setattr(nmaprun, "run", fake_run)
+    Pipeline(JobSpec.from_dict(spec_dict), _Sink(), "nmap").run()
+    return spec_dict
+
+
+@pytest.mark.parametrize(("case", "kwargs", "authority_ok"), [
+    ("정상",                {},                                  True),
+    # discovery 는 -Pn 이면 nmap 을 안 돌린다 → 이 경계는 sn 모드에서만 존재한다.
+    ("discovery 잘림",      {"broken": {"stage0-discovery": 1},
+                             "spec_extra": {"stages": {
+                                 "discovery": {"mode": "sn"},
+                                 "tcp": {"enabled": True, "ports": "443"},
+                                 "udp": {"enabled": False, "ports": ""},
+                                 "service": {"enabled": True, "nse": []}}}},  False),
+    ("sweep 잘림",          {"broken": {"stage-tcp-b": 1}},       False),
+    ("sweep 파일 부재",     {"omit": {"stage-tcp-b"}},            False),
+    ("stage3 잘림(전체스캔)", {"broken": {"stage3-": 1}},          True),
+])
+def test_artifact_report_separates_authority_from_enrichment(
+    tmp_path, monkeypatch, case, kwargs, authority_ok,
+):
+    """전체 스캔에서 authority(discovery·sweep)와 enrichment(stage3)의 완결성은 따로 센다.
+
+    앞의 셋은 '못 본 것을 없다고 하는' 미탐 경로라 닫힘 권한을 뺏어야 하고,
+    마지막은 포트 관측이 이미 끝난 실행이라 권한을 뺏으면 사라진 서비스가 영영 안 닫힌다.
+    한쪽만 고정하면 반대 방향으로 넘어진다."""
+    spec = _run_pipeline(tmp_path, monkeypatch, **kwargs)
+    report = engine_runner.artifact_report(tmp_path, spec, force_scanned_hosts=False)
+    bad = report["authority_missing"] + report["authority_broken"]
+    assert (not bad) is authority_ok, f"{case}: {report}"
+    if case == "stage3 잘림(전체스캔)":
+        assert report["enrichment_broken"], "잘린 stage3 는 증거 저하로 남아야 한다"
+    if case == "sweep 파일 부재":
+        assert report["authority_missing"] == ["stage-tcp-b0.xml"]
+
+
+def test_a_rescan_treats_stage3_as_authority(tmp_path, monkeypatch):
+    """재스캔에는 sweep 이 없고 stage3 가 유일한 근거다 — 그때는 stage3 가 authority."""
+    extra = {"rescan_units": [{"ip": "127.0.0.1", "port": 443, "proto": "tcp"}],
+             "stages": {"service": {"enabled": True, "nse": []}}}
+    bad_dir = tmp_path / "broken"
+    bad_dir.mkdir()
+    spec = _run_pipeline(bad_dir, monkeypatch, broken={"stage3-": 1}, spec_extra=extra)
+    report = engine_runner.artifact_report(bad_dir, spec, force_scanned_hosts=True)
+    assert report["authority_broken"] == ["stage3-127_0_0_1-tcp443.xml"]
+
+    # 반대 경계 — 온전한 재스캔은 권한을 유지한다(과잉 보수 방지).
+    good_dir = tmp_path / "good"
+    good_dir.mkdir()
+    spec = _run_pipeline(good_dir, monkeypatch, spec_extra=extra)
+    ok = engine_runner.artifact_report(good_dir, spec, force_scanned_hosts=True)
+    assert not (ok["authority_missing"] + ok["authority_broken"])

@@ -208,11 +208,20 @@ def _stop_path(out_dir) -> Path:
     return Path(out_dir) / "stop-requested"
 
 
-# 닫힘 권한이 걸린 산출물. 엔진 파서(collect_results)는 XML 이 없거나 ParseError 면 그 파일을
-# 빈 목록으로 취급하고 넘어가는데, 그 상태로 닫힘을 진행하면 '못 본 포트'가 '닫힌 포트'가 된다.
-# nmap 이 XML 을 끝맺지 못한 채 죽어도 rc=0 · stages_done=["tcp","job"] 로 마감될 수 있으므로,
-# 완결성은 실행 결과가 아니라 XML 자체에서 확인해야 한다.
-_AUTHORITY_XML_GLOBS = ("stage-tcp-b*.xml", "stage-udp-b*.xml", "stage3-*.xml")
+# ── 산출물 완결성 → 닫힘 권한 ────────────────────────────────────────────────
+#
+# 엔진 파서(collect_results)는 XML 이 없거나 ParseError 면 그 파일을 빈 목록으로 취급하고
+# 넘어간다. 그 상태로 닫힘을 진행하면 '못 본 포트'가 '닫힌 포트'가 되고, 닫힘은 상태까지
+# '정상처리'로 바꾸므로 되돌리기 가장 어려운 미탐이 된다.
+#
+# 그래서 **있는 파일만 훑지 않고 "이번 실행이 만들기로 한 집합"과 대조**한다. rc=0 이고
+# stages_done 에 job 이 있어도 파일이 아예 없을 수 있는데, glob 만으로는 그게 안 보인다.
+#
+# 역할을 둘로 가른다 — 섞으면 한쪽 오류가 반대쪽 오류를 만든다.
+#   authority  : 무엇이 열려 있는지를 정하는 산출물(discovery·sweep). 부재/잘림 → 닫힘 권한 박탈
+#   enrichment : 서비스 상세(stage3). 부재/잘림 → 증거만 불완전, 닫힘 권한은 유지
+# 단 재스캔(rescan_units·targets_ports)에는 sweep 이 없고 stage3 가 유일한 근거이므로
+# 그때는 stage3 가 authority 다.
 
 
 def _xml_run_finished(path: Path) -> bool:
@@ -226,13 +235,60 @@ def _xml_run_finished(path: Path) -> bool:
     return len(finished) == 1 and finished[0].get("exit") == "success"
 
 
-def unfinished_xml(out_dir) -> list[str]:
-    """닫힘 권한을 줄 수 없는 산출물 이름들 — 하나라도 있으면 이 실행은 닫히면 안 된다."""
+def _rescan_authority_xml(out: Path, spec: dict) -> list[Path]:
+    """재스캔의 기대 산출물 — pipeline._rescan_units/_service 의 이름 규칙을 따른다."""
+    expected: list[Path] = []
+    for unit in spec.get("rescan_units") or []:
+        try:
+            ip = str(unit["ip"]).replace(".", "_")
+            port, proto = int(unit["port"]), str(unit.get("proto") or "tcp")
+        except (KeyError, TypeError, ValueError):
+            continue
+        expected.append(out / f"stage3-{ip}-{proto}{port}.xml")   # tag=f"{proto}{port}"
+    for ip in (spec.get("targets_ports") or {}):
+        expected.append(out / f"stage3-{str(ip).replace('.', '_')}-tcp.xml")
+    return expected
+
+
+def expected_authority_xml(out_dir, spec: dict, force_scanned_hosts: bool = False) -> list[Path]:
+    """이번 실행이 만들기로 한 authority 산출물."""
     out = Path(out_dir)
-    return [path.name
-            for pattern in _AUTHORITY_XML_GLOBS
-            for path in sorted(out.glob(pattern))
-            if not _xml_run_finished(path)]
+    if force_scanned_hosts:
+        return _rescan_authority_xml(out, spec)
+    # discovery 를 먼저 세운다. 이게 깨졌으면 live 자체가 오염이라 아래 계산은 의미가 없다 —
+    # 그래도 목록에 들어가 있으므로 완결성 검사에서 걸려 권한이 박탈된다.
+    # 단 -Pn(mode="pn")·비활성 이면 엔진이 nmap 을 돌리지 않고 타깃을 그대로 live 로 쓴다
+    # (pipeline._discovery). 만들지도 않는 파일을 기대하면 정상 실행이 전부 partial 이 된다.
+    disc = (spec.get("stages") or {}).get("discovery") or {}
+    runs_discovery = disc.get("enabled", True) and disc.get("mode", "sn") != "pn"
+    expected = [out / "stage0-discovery.xml"] if runs_discovery else []
+    state = _read_state(out)
+    live = [h for h in (state.get("live") or []) if isinstance(h, str)]
+    if not live:
+        # 생존 0 이면 엔진이 sweep 을 아예 돌리지 않는다(pipeline.run).
+        return expected
+    batch = max(1, int(spec.get("batch_size") or 256))
+    count = -(-len(live) // batch)          # ceil — pipeline._batches 와 같은 분할
+    stages = spec.get("stages") or {}
+    for proto in ("tcp", "udp"):
+        if (stages.get(proto) or {}).get("enabled", True):
+            expected += [out / f"stage-{proto}-b{i}.xml" for i in range(count)]
+    return expected
+
+
+def artifact_report(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dict:
+    """기대 산출물 대비 실제 산출물. authority 가 하나라도 어긋나면 닫으면 안 된다."""
+    out = Path(out_dir)
+    expected = expected_authority_xml(out, spec, force_scanned_hosts)
+    missing = [p.name for p in expected if not p.exists()]
+    broken = [p.name for p in expected if p.exists() and not _xml_run_finished(p)]
+    enrichment_broken: list[str] = []
+    if not force_scanned_hosts:
+        # 전체 스캔에서 stage3 는 enrichment 다. 잘려도 sweep 의 안전한 권한을 뺏지 않는다.
+        enrichment_broken = [p.name for p in sorted(out.glob("stage3-*.xml"))
+                             if not _xml_run_finished(p)]
+    return {"authority_missing": missing, "authority_broken": broken,
+            "enrichment_broken": enrichment_broken}
 
 
 # nmap 이 NSE/소켓을 매끄럽게 돌리지 못했다고 알리는 표식. XML 에는 남지 않고 로그로만 나온다.
