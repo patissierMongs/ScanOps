@@ -193,7 +193,10 @@ class Pipeline:
             args.append("--version-light")
         args += ["--open", "--reason", sp.timing, "--max-retries",
                  str(retries if retries is not None else sp.max_retries), "-p", pspec]
-        if sp.nse:
+        # NSE 는 TCP probe 에만. 발견에 반영되는 스크립트가 전부 TCP 이고(UDP 쪽 출력은 저장만 되고
+        # 읽는 코드가 없다), 출발지 포트를 bind 하는 UDP 스크립트는 스캔 호스트의 서비스와 충돌해
+        # (ike-version↔IKEEXT 의 UDP 500) NSE 정리 실패로 그 실행을 통째로 못 믿게 만든다.
+        if sp.nse and proto == "tcp":
             args += ["--script", ",".join(sp.nse),
                      "--script-timeout", DEFAULT_NSE_SCRIPT_TIMEOUT]
         args += self._exclude_args()

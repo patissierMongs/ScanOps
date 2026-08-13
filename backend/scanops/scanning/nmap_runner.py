@@ -222,7 +222,11 @@ def build_auto_command(nmap: str, stage: str, targets: list[str], out_basename: 
         port_spec = auto_udp_port_spec(ports)
         if not port_spec:
             raise ValueError("자동 스캔 UDP 단계에 사용할 UDP 포트가 없습니다.")
-        flags = [*AUTO_UDP_IDENTIFY_FLAGS, *_script_args(nse, "udp"), "-p", port_spec]
+        # UDP 식별 단계에는 NSE 를 붙이지 않는다(단독 스캐너의 AUTO_UDP_IDENTIFY_FLAGS 와 동일 규칙):
+        # 발견에 반영되는 NSE 가 전부 TCP 스크립트라 얻는 게 없는데, 출발지 포트를 bind 하는 UDP
+        # 스크립트가 스캔 호스트의 서비스와 충돌하면(ike-version↔IKEEXT 의 UDP 500) NSE 가 정리되지
+        # 못한 채 끝나 단계 전체가 닫힘 권한을 잃는다. 포트 상태·서비스 식별은 -sV 가 담당한다.
+        flags = [*AUTO_UDP_IDENTIFY_FLAGS, "-p", port_spec]
     else:
         raise ValueError(f"알 수 없는 자동 스캔 단계: {stage}")
     return [nmap, *STATS_FLAGS, *flags, "-oA", str(out_basename), *targets]

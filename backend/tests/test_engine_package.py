@@ -1041,10 +1041,11 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
         "--max-retries", "2", "-p", "T:54842,54844", "--script", "banner",
         "--script-timeout", "10s", "--exclude", excluded, ip,
     ]
+    # UDP probe 에는 NSE 를 붙이지 않는다: 발견에 반영되는 스크립트가 전부 TCP 인데, 출발지 포트를
+    # bind 하는 UDP 스크립트는 스캔 호스트의 서비스와 충돌해 NSE 정리 실패로 실행을 못 믿게 만든다.
     assert udp["args"] == [
         "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
-        "--max-retries", "2", "-p", "U:63848", "--script", "banner",
-        "--script-timeout", "10s", "--exclude", excluded, ip,
+        "--max-retries", "2", "-p", "U:63848", "--exclude", excluded, ip,
     ]
     state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
     assert ip in state["service_done"] and "job" in state["stages_done"]

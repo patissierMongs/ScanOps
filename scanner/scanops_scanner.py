@@ -47,27 +47,31 @@ PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 제외: ssl-enum-ciphers·ntp-monlist·dns-recursion·vnc-title
 # DB 찌르는 스크립트(oracle-tns-version·ms-sql-info 등)는 장애 위험(티베로 등 호환DB 다운)으로 기본 제외.
 # fingerprint-strings: -sV 가 식별 못 한 포트의 원시 응답을 찍어 사람이 판단 → 미식별 포트 조사용.
-# TCP 식별용(2단계): TCP portrule 스크립트만. UDP portrule(snmp/nbstat/ike 등)은 UDP_NSE_SCRIPTS 로 분리.
+# TCP 식별용(2단계): TCP portrule 스크립트만. UDP 식별 단계는 NSE 를 아예 쓰지 않는다(아래 주석).
 DEFAULT_NSE_SCRIPTS = (
     "http-headers,http-server-header,http-title,ssl-cert,"
     "tls-alpn,ssh-hostkey,smb-os-discovery,smb-protocols,"
     "rdp-ntlm-info,sip-methods,rpcinfo,banner,"
     "ftp-anon,ftp-syst,telnet-encryption,dns-nsid,vnc-info,fingerprint-strings"
 )
-# UDP 식별용(3단계): UDP 기본 포트(53·111·123·137·161·500·5060 등)에 실제 매칭되는 스크립트만.
-# rpcinfo 는 UDP 111(포트맵퍼)에서 RPC/NFS(2049) 프로그램 매핑 → 정체 파악에 유효.
-# 부작용 제외: dhcp-discover(리스 요청)·snmp-interfaces(장황·느림)·ntp-monlist(증폭).
+# UDP 식별 단계(3단계)에는 NSE 를 붙이지 않는다 — 얻는 게 없고 잃을 게 있다.
 #
-# ike-version 도 기본에서 뺀다. 이 스크립트는 **출발지 포트 500 을 직접 bind** 하는데,
-# Windows 는 IKEEXT(IPsec 키 관리) 서비스가 UDP 500 을 잡고 있어 bind 가 WSAEACCES(10013)
-# 로 실패한다. 그러면 호스트마다
+# 얻는 게 없다: 서버 파서가 발견에 반영하는 NSE 는 _REMARK_PATTERNS/_tls_evidence/
+# fingerprint 세 경로뿐인데(ssl-cert·smb-os-discovery·rdp-ntlm-info·http-*·
+# fingerprint-strings), 전부 TCP 스크립트다. UDP 쪽 스크립트(snmp-*·nbstat·ntp-info·
+# dns-nsid·sip-methods·rpcinfo) 출력은 nse_json 에 원문으로 저장만 되고 읽는 코드가 없다.
+# nbstat 은 패턴표에 있지만 host script 라 <hostscript> 로 나가고, 파서는 <port>/<script>
+# 만 읽으므로 실제로는 걸리지 않는다.
+#
+# 잃을 게 있다: 출발지 포트를 직접 bind 하는 UDP 스크립트는 Windows 스캔 호스트에서 그 포트를
+# 이미 점유한 서비스와 충돌한다(ike-version↔IKEEXT 의 UDP 500 이 확인된 사례).
 #   NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed (IOD#..)
-# 가 쏟아지고 NSE 가 99% 근처에서 정리되지 못한 채(Trying to delete NSI ...) 끝난다.
-# Windows 스캔 호스트에서는 얻는 정보가 0 이면서 UDP 식별 단계 전체를 불안정하게 만든다.
-# IKE 확인이 필요하면 --scripts 로 명시하거나 리눅스 스캔 호스트에서 돌린다.
-UDP_NSE_SCRIPTS = (
-    "snmp-info,snmp-sysdescr,nbstat,dns-nsid,ntp-info,sip-methods,rpcinfo"
-)
+# 가 호스트마다 쏟아지고 NSE 가 99% 근처에서 정리되지 못한 채(Trying to delete NSI ...)
+# 끝난다. 그렇게 끝난 단계는 닫힘 권한을 잃어(관측 전용) 사라진 UDP 서비스가 영영 안 닫히고,
+# nmap 이 XML 을 끝맺지 못하면 그 단계 결과가 통째로 격리된다.
+#
+# 포트 상태와 -sV 서비스 식별은 NSE 가 아니라 포트스캔에서 나오므로 이 결정으로 미탐·오탐
+# 판정은 달라지지 않는다. UDP NSE 가 필요하면 정밀 프로파일(phase1)이나 --scripts 로 명시한다.
 # 발견 단계 호스트 디스커버리: ICMP 막은 서버도 흔한 서비스 포트로 잡고, 죽은 IP 는 건너뛴다
 # (-Pn 전수보다 듬성한 대역에서 빠르고 누락 적음). -sS 라 raw 소켓(관리자) 전제.
 # probe 조합: -PE(ICMP echo) + -PS(SYN) + -PA(ACK). SYN엔 침묵해도 ICMP/ACK엔 답하는 호스트를
@@ -98,7 +102,6 @@ AUTO_TCP_IDENTIFY_FLAGS = [
 AUTO_UDP_IDENTIFY_FLAGS = [
     "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
     "--max-retries", "2", "-p", f"U:{UDP_DEFAULT_PORTS}",
-    "--script", UDP_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
 AUTO_STAGES = [
     ("tcp_discovery", "TCP 전체 포트 발견"),
@@ -122,7 +125,7 @@ PRESETS: dict[str, list[str]] = {
         "-T4", "--max-retries", "2", "--min-hostgroup", "64",
         "--max-parallelism", "100", "--defeat-rst-ratelimit",
         "-p", PRECISION_PORTS,
-        "--script", DEFAULT_NSE_SCRIPTS + "," + UDP_NSE_SCRIPTS,
+        "--script", DEFAULT_NSE_SCRIPTS,
     ],
 }
 
@@ -194,11 +197,11 @@ NSE_PROTO: dict[str, str] = {
     "telnet-encryption": "tcp", "dns-recursion": "both", "dns-nsid": "both",
     "vnc-info": "tcp", "vnc-title": "tcp",
 }
-# 프리셋의 '기본 NSE' — 이 스캐너가 실제로 쓰는 TCP/UDP 기본 세트의 합집합에서 파생시킨다.
-# 상수를 따로 적으면 기본값을 바꿀 때 조용히 어긋나므로 파생으로 묶어 둔다.
+# 프리셋의 '기본 NSE' — 이 스캐너가 실제로 쓰는 기본 세트에서 파생시킨다. 상수를 따로 적으면
+# 기본값을 바꿀 때 조용히 어긋나므로 파생으로 묶어 둔다. UDP 식별 단계는 NSE 를 쓰지 않으므로
+# TCP 기본 세트가 곧 전체다(웹의 scan_options.NSE_DEFAULT_KEYS 와 같은 집합이어야 한다).
 DEFAULT_PRESET_NSE = [
-    key for key in NSE_PROTO
-    if key in set(DEFAULT_NSE_SCRIPTS.split(",")) | set(UDP_NSE_SCRIPTS.split(","))
+    key for key in NSE_PROTO if key in set(DEFAULT_NSE_SCRIPTS.split(","))
 ]
 
 # 웹 UI 가 기본으로 켜 두는 옵션 집합(scan_options.DEFAULT_KEYS 사본). --workflow auto 를
@@ -908,12 +911,15 @@ def stage_scripts(scripts: str, stage_id: str) -> str:
 
     - 발견(tcp_discovery)에는 NSE 를 붙이지 않는다. 이 단계의 목적은 '열린 포트를 빨리 좁히는 것'이라
       스크립트를 얹으면 이득 없이 느려진다(웹 자동 스캔의 발견 단계도 동일).
-    - 식별 단계는 portrule 이 맞는 프로토콜만: TCP 식별에 snmp/nbstat, UDP 식별에 http-* 를 보내도
-      매칭되지 않아 시간만 쓴다. 화이트리스트에 없는 이름은 사용자가 명시한 것이므로 그대로 통과시킨다.
+    - UDP 식별에도 붙이지 않는다. 발견에 반영되는 NSE 가 전부 TCP 스크립트라 얻는 게 없는 반면,
+      출발지 포트 충돌로 NSE 정리가 실패하면 단계 전체가 닫힘 권한을 잃는다(AUTO_UDP_IDENTIFY_FLAGS
+      위 주석). 프로토콜별로 갈리는 규칙이 아니라 단계 규칙이므로 여기 한 곳에서 끊는다.
+    - TCP 식별은 portrule 이 맞는 것만: snmp/nbstat 같은 UDP 전용을 보내도 매칭되지 않아 시간만 쓴다.
+      화이트리스트에 없는 이름은 사용자가 명시한 것이므로 그대로 통과시킨다.
     """
-    if stage_id == "tcp_discovery":
+    if stage_id in ("tcp_discovery", "udp_identify"):
         return ""
-    protocol = "udp" if stage_id == "udp_identify" else "tcp"
+    protocol = "tcp"
     keep = [s for s in (scripts or "").split(",")
             if s and NSE_PROTO.get(s, "both") in (protocol, "both")]
     return ",".join(keep)

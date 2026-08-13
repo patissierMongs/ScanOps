@@ -2097,8 +2097,9 @@ def test_preset_scripts_are_filtered_per_stage_like_the_web_workflow():
 
     tcp = scanner.build_auto_flags(plan, "tcp_identify", [80])
     assert tcp[tcp.index("--script") + 1] == "http-title,custom-script"
+    # UDP 식별 단계는 프리셋이 스크립트를 지정해도 붙이지 않는다 — 단계 규칙이라 예외가 없다.
     udp = scanner.build_auto_flags(plan, "udp_identify")
-    assert udp[udp.index("--script") + 1] == "snmp-info,custom-script"
+    assert "--script" not in udp and "--script-timeout" not in udp
 
 
 def test_preset_timing_replaces_the_stage_default(tmp_path):
@@ -2840,15 +2841,35 @@ def test_nmap_windows_error_text_is_not_mangled_into_question_marks():
     assert gui.decode_output(b"\xff\xfe nmap", fallback="cp949").endswith("nmap")
 
 
-def test_ike_version_is_not_in_the_default_udp_scripts():
-    """UDP 500 을 직접 bind 하는 스크립트는 기본에서 뺀다.
+def test_the_udp_identify_stage_carries_no_nse_at_all():
+    """UDP 식별 단계는 NSE 를 붙이지 않는다.
 
-    Windows 는 IKEEXT 서비스가 UDP 500 을 잡고 있어 bind 가 WSAEACCES(10013) 로 실패하고,
-    호스트마다 NSOCK 오류가 쏟아지며 NSE 가 정리되지 못한 채 끝난다(얻는 정보는 0)."""
+    얻는 게 없다 — 발견에 반영되는 NSE(_REMARK_PATTERNS·_tls_evidence·fingerprint)는 전부 TCP
+    스크립트라 UDP 쪽 출력은 nse_json 에 저장만 되고 읽는 코드가 없다.
+    잃을 게 있다 — 출발지 포트를 bind 하는 스크립트가 스캔 호스트의 서비스와 충돌하면
+    (ike-version↔IKEEXT 의 UDP 500) NSE 가 정리되지 못한 채 끝나고, 그 단계는 닫힘 권한을 잃는다.
+
+    포트 상태·서비스 식별은 -sV 가 담당하므로 이 결정으로 미탐·오탐 판정은 달라지지 않는다."""
     scanner = _load_scanner()
-    assert "ike-version" not in scanner.UDP_NSE_SCRIPTS
-    # 필요한 사람이 직접 고를 수는 있어야 한다(프로토콜 표에는 남는다).
+    flags = scanner.AUTO_UDP_IDENTIFY_FLAGS
+    assert "--script" not in flags and "--script-timeout" not in flags
+    assert "-sV" in flags, "식별 근거는 NSE 가 아니라 -sV 에서 나온다"
+    # 목록 자체는 남는다 — 필요한 사람이 정밀 프로파일이나 --scripts 로 직접 고를 수 있어야 한다.
     assert scanner.NSE_PROTO["ike-version"] == "udp"
+    assert scanner.NSE_PROTO["snmp-sysdescr"] == "udp"
+
+
+def test_standalone_and_web_agree_on_the_default_nse_set():
+    """단독 스캐너 프리셋의 기본 NSE 와 웹의 기본 선택이 같은 집합이어야 한다.
+
+    양쪽이 어긋나면 '같은 프리셋'이 웹과 단독에서 다른 스캔이 된다. UDP 전용 스크립트를
+    기본에서 뺄 때 한쪽만 고치는 실수를 여기서 잡는다."""
+    from scanops.scanning import scan_options
+    scanner = _load_scanner()
+    assert set(scanner.DEFAULT_PRESET_NSE) == set(scan_options.NSE_DEFAULT_KEYS)
+    # 기본 집합에는 UDP 전용이 하나도 없다(UDP 단계가 NSE 를 쓰지 않으므로 켜도 돌 곳이 없다).
+    assert not [k for k in scan_options.NSE_DEFAULT_KEYS
+                if scan_options._NSE_PROTO.get(k) == "udp"]
 
 
 def _noisy_nmap(tmp_path, lines: str):
