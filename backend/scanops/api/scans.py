@@ -1159,24 +1159,40 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
     if not engine_runner.is_done(out_dir):
         _fail(scan_id, "engine_incomplete")
         return
-    # NSE/소켓 오류는 로그에만 남는다. 다만 이것이 '포트를 못 봤다'는 뜻은 아니다 —
-    # 스크립트 소켓 하나가 bind 에 실패해도(WSAEACCES 10013) nmap 은 포트 결과를 온전히 내고
-    # rc=0 으로 끝난다. 그런 실행에서 닫힘 권한을 빼면 사라진 서비스가 영영 닫히지 않아
-    # 오탐이 쌓인다. 그래서 닫힘 후보는 그대로 두고, '스크립트 결과가 덜 찼다'는 사실만 남긴다.
-    # 포트 관측 완결성은 is_done(위)과 인입 계약의 객관적 조건이 따로 지킨다.
+    # 닫힘 권한은 XML 완결성으로 판정한다 — 단독 스캐너와 같은 계약이다.
+    # rc=0 · stages_done 에 job 이 있어도 nmap 이 XML 을 끝맺지 못했을 수 있고, 엔진 파서는
+    # 그 파일을 ParseError → 빈 목록으로 넘긴다. 그 상태로 닫으면 '못 본 포트'가 '닫힌 포트'가
+    # 되고, 닫힘은 status 까지 '정상처리'로 바꾸므로 되돌리기 가장 어려운 미탐이 된다.
+    unfinished = engine_runner.unfinished_xml(out_dir)
+    # NSE/소켓 오류는 이와 다른 축이다. 스크립트 소켓 하나가 bind 에 실패해도(WSAEACCES 10013)
+    # nmap 은 포트 결과를 온전히 내고 rc=0 으로 끝난다. 그런 실행에서 닫힘 권한을 빼면 사라진
+    # 서비스가 영영 닫히지 않아 오탐이 쌓인다 — 사실만 남기고 권한은 건드리지 않는다.
     problems = engine_runner.log_problems(out_dir / "engine.log")
     db = SessionLocal()
     try:
         scan = db.get(ScanRun, scan_id)
         if scan is not None:
-            _commit_engine_ingest(db, scan, out_dir, scope_keys, force_scanned_hosts)
-            scan.status = "done"
-            scan.finished_at = datetime.now(timezone.utc)
-            scan.failure_code = "nse_degraded" if problems else ""
-            scan.failure_message = (
-                "NSE/소켓 오류가 있었습니다 — 포트 결과는 온전하지만 스크립트 결과는 일부 "
-                f"빠졌을 수 있습니다. ({problems[0][:120]})" if problems else ""
+            _commit_engine_ingest(
+                db, scan, out_dir,
+                set() if unfinished else scope_keys,   # 빈 집합 = 닫힘 후보 없음
+                force_scanned_hosts,
             )
+            scan.status = "partial" if unfinished else "done"
+            scan.finished_at = datetime.now(timezone.utc)
+            if unfinished:
+                scan.failure_code = "nmap_xml_incomplete"
+                scan.failure_message = (
+                    "nmap 이 결과 XML 을 끝맺지 못했습니다 — 관측이 불완전해 닫힘 판정에서 "
+                    f"제외했습니다. ({', '.join(unfinished[:3])})"
+                )
+            else:
+                # done 인데 failure_* 를 쓰는 자리가 아니다. 이 코드는 '실패'가 아니라
+                # '부가 증거가 덜 찼다'는 참고이며, UI 도 실패 원인과 다른 라벨로 그린다.
+                scan.failure_code = "nse_degraded" if problems else ""
+                scan.failure_message = (
+                    "NSE/소켓 오류가 있었습니다 — 포트 결과는 온전하지만 스크립트 결과는 일부 "
+                    f"빠졌을 수 있습니다. ({problems[0][:120]})" if problems else ""
+                )
             db.commit()
     except Exception:
         logger.exception("failed to ingest staged scan %s result", scan_id)

@@ -1018,3 +1018,93 @@ def test_socket_errors_in_the_engine_log_do_not_cancel_closure_candidates(
     # 사실 자체는 사라지지 않는다: 스크립트 결과를 다 믿지 말라는 신호로 남는다.
     assert scan.failure_code == "nse_degraded"
     assert "포트 결과는 온전" in scan.failure_message
+
+
+def test_a_truncated_engine_xml_never_grants_closure(client, monkeypatch, tmp_path):
+    """rc=0 · stages_done=["job"] 이어도 XML 이 끝맺히지 않았으면 닫으면 안 된다.
+
+    엔진 파서(collect_results)는 XML 이 없거나 ParseError 면 그 파일을 빈 목록으로 넘긴다.
+    그래서 nmap 이 XML 을 끝맺지 못한 채 죽어도 job 은 done 으로 마감되고, 이어지는 인입은
+    '관측 0건'을 정상적인 미관측으로 받아 scope 안의 열린 Finding 을 닫는다. 닫힘은 상태까지
+    '정상처리'로 바꾸므로 되돌리기 가장 어려운 미탐이 된다 — 단독 스캐너와 같은 계약
+    (파싱 가능 + <finished exit="success">)을 웹 경로에도 건다."""
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    scope_key = "127.0.0.1|443|tcp"
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["127.0.0.1"], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"),
+        "stages": {"tcp": {"enabled": True, "ports": "443"},
+                   "udp": {"enabled": False, "ports": ""}},
+        "scanops": {"scope_keys": [scope_key]},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["tcp", "job"], "live": ["127.0.0.1"], "open_map": {}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
+        encoding="utf-8")
+    # 실제 사고 파일과 같은 모양 — nmap 이 </nmaprun> 을 쓰지 못하고 죽었다.
+    (out_dir / "stage-tcp-b0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>', encoding="utf-8")
+
+    seen: list[set] = []
+
+    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts):
+        seen.append(set(scope_keys))
+        scan.host_count, scan.port_count = 1, 0
+        db.flush()
+        return {}
+
+    monkeypatch.setattr(scans_api, "_commit_engine_ingest", capture)
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    assert seen == [set()], "잘린 XML 은 닫힘 후보를 하나도 넘기지 않는다"
+    scan = _read_scan(scan_id)
+    assert scan.status == "partial"
+    assert scan.failure_code == "nmap_xml_incomplete"
+    assert "stage-tcp-b0.xml" in scan.failure_message
+
+
+def test_a_completed_engine_xml_keeps_its_closure_scope(client, monkeypatch, tmp_path):
+    """반대 경계 — 끝맺힌 XML 은 닫힘 후보를 그대로 유지한다(과잉 보수 방지)."""
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    scope_key = "127.0.0.1|443|tcp"
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["127.0.0.1"], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"),
+        "stages": {"tcp": {"enabled": True, "ports": "443"},
+                   "udp": {"enabled": False, "ports": ""}},
+        "scanops": {"scope_keys": [scope_key]},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["tcp", "job"], "live": ["127.0.0.1"], "open_map": {}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
+        encoding="utf-8")
+    (out_dir / "stage-tcp-b0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
+
+    seen: list[set] = []
+
+    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts):
+        seen.append(set(scope_keys))
+        scan.host_count, scan.port_count = 1, 0
+        db.flush()
+        return {}
+
+    monkeypatch.setattr(scans_api, "_commit_engine_ingest", capture)
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    assert seen == [{scope_key}]
+    scan = _read_scan(scan_id)
+    assert scan.status == "done" and scan.failure_code == ""

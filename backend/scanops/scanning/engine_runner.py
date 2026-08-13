@@ -20,6 +20,7 @@ import math
 import os
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from ..config import get_settings
@@ -207,8 +208,35 @@ def _stop_path(out_dir) -> Path:
     return Path(out_dir) / "stop-requested"
 
 
-# nmap 이 '끝까지 정상적으로 돌지 못했다'고 알리는 표식. XML 에는 남지 않고 로그로만 나온다.
-# 단독 스캐너(scanops_scanner.NMAP_UNCLEAN_MARKERS)와 같은 목록이어야 두 경로의 판정이 같다.
+# 닫힘 권한이 걸린 산출물. 엔진 파서(collect_results)는 XML 이 없거나 ParseError 면 그 파일을
+# 빈 목록으로 취급하고 넘어가는데, 그 상태로 닫힘을 진행하면 '못 본 포트'가 '닫힌 포트'가 된다.
+# nmap 이 XML 을 끝맺지 못한 채 죽어도 rc=0 · stages_done=["tcp","job"] 로 마감될 수 있으므로,
+# 완결성은 실행 결과가 아니라 XML 자체에서 확인해야 한다.
+_AUTHORITY_XML_GLOBS = ("stage-tcp-b*.xml", "stage-udp-b*.xml", "stage3-*.xml")
+
+
+def _xml_run_finished(path: Path) -> bool:
+    """단독 스캐너 xml_run_completed 와 같은 계약(호스트 수 대조는 엔진이 배치별로 쪼개
+    실행하므로 제외). 파싱되고 <runstats><finished exit="success"> 가 정확히 하나여야 한다."""
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return False
+    finished = root.findall("./runstats/finished")
+    return len(finished) == 1 and finished[0].get("exit") == "success"
+
+
+def unfinished_xml(out_dir) -> list[str]:
+    """닫힘 권한을 줄 수 없는 산출물 이름들 — 하나라도 있으면 이 실행은 닫히면 안 된다."""
+    out = Path(out_dir)
+    return [path.name
+            for pattern in _AUTHORITY_XML_GLOBS
+            for path in sorted(out.glob(pattern))
+            if not _xml_run_finished(path)]
+
+
+# nmap 이 NSE/소켓을 매끄럽게 돌리지 못했다고 알리는 표식. XML 에는 남지 않고 로그로만 나온다.
+# 단독 스캐너(scanops_scanner.NMAP_NSE_PROBLEM_MARKERS)와 같은 목록이어야 두 경로가 같이 움직인다.
 UNCLEAN_MARKERS = ("NSOCK ERROR", "Trying to delete NSI", "QUITTING!")
 _UNCLEAN_KEEP = 5
 _UNCLEAN_TAIL_BYTES = 256 * 1024

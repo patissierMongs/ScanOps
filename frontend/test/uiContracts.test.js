@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 
 import { cellValue, PRESETS, primaryServiceIdentity } from "../src/lib/columns.js";
 import { deadlinePatchValue } from "../src/lib/findingPatch.js";
-import { SCAN_STATUS, scanKind, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
+import { SCAN_STATUS, scanKind, scanNotice, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
 import { splitScanTokens } from "../src/lib/scanTargets.js";
 import { toastAnnouncement, toastDuration } from "../src/lib/toast.js";
 
@@ -464,4 +464,30 @@ test("findings colour indicators are per-element and persist", async () => {
   const guessed = { identification: "추측" };
   assert.equal(cellTone(guessed, "display_identity", { guess: true }), "tone-guess");
   assert.equal(cellTone(guessed, "display_identity", { guess: false }), "");
+});
+
+test("a completed scan's degraded-evidence note is not rendered as a failure reason", () => {
+  // 포트 관측은 온전한데 NSE 소켓 오류만 있었던 실행. 백엔드가 이 둘을 분리해 두었는데
+  // 화면에서 다시 '실패 원인'으로 합치면 의미가 도로 뭉개진다.
+  const degraded = scanNotice({
+    failure_code: "nse_degraded",
+    failure_message: "NSE/소켓 오류가 있었습니다 — 포트 결과는 온전하지만 …",
+  });
+  assert.equal(degraded.tone, "notice");
+  assert.equal(degraded.title, "참고 — 부가 정보 불완전");
+
+  // 진짜 실패는 그대로 실패로 보여야 한다.
+  const failed = scanNotice({
+    failure_code: "nmap_xml_incomplete",
+    failure_message: "nmap 이 결과 XML 을 끝맺지 못했습니다 …",
+  });
+  assert.equal(failed.tone, "failure");
+  assert.equal(failed.title, "실패 원인");
+
+  assert.equal(scanNotice({}), null);
+  // 뷰는 라벨을 직접 쓰지 않고 이 계약을 통해서만 그린다.
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /scanNotice\(\{/);
+  assert.doesNotMatch(scans, /<b>실패 원인<\/b>/);
+  assert.match(source("../src/styles.css"), /\.scan-failure-detail\.notice/);
 });

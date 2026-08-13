@@ -4,7 +4,7 @@ import { formatImportSummary, prepareImportGroups, runImportGroups } from "../li
 import { splitScanTokens } from "../lib/scanTargets.js";
 import { useToast } from "../ui/Toast.jsx";
 import ScanOptions from "../ui/ScanOptions.jsx";
-import { scanKind, scanStatus, shouldLoadStages } from "../lib/scanStatus.js";
+import { scanKind, scanNotice, scanStatus, shouldLoadStages } from "../lib/scanStatus.js";
 
 const isActive = (s) => s === "running" || s === "canceling";
 
@@ -632,8 +632,10 @@ function StageTimeline({ s }) {
 
 function ScanDetails({ scan, detail }) {
   const kind = detail?.kind === "staged" ? "단계 엔진" : scanKind(scan).label;
-  const failureMessage = detail?.failure_message || scan.failure_message;
-  const failureCode = detail?.failure_code || scan.failure_code;
+  const notice = scanNotice({
+    failure_message: detail?.failure_message || scan.failure_message,
+    failure_code: detail?.failure_code || scan.failure_code,
+  });
   return (
     <div className="scan-detail">
       <div className="row">
@@ -643,10 +645,10 @@ function ScanDetails({ scan, detail }) {
       {detail?.stages?.length
         ? <StageTimeline s={detail} />
         : <div className="muted">{detail?.timeline_available === false ? "저장된 단계 이벤트가 없습니다." : "단계 정보를 불러오는 중…"}</div>}
-      {failureMessage && (
-        <div className="scan-failure-detail">
-          <b>실패 원인</b> {failureMessage}
-          {failureCode && <code>{failureCode}</code>}
+      {notice && (
+        <div className={`scan-failure-detail ${notice.tone}`}>
+          <b>{notice.title}</b> {notice.message}
+          {notice.code && <code>{notice.code}</code>}
         </div>
       )}
       {scan.command && (

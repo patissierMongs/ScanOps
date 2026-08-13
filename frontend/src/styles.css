@@ -219,6 +219,8 @@ input::placeholder { color: oklch(0.72 0.01 262); }
 .scan-failure { margin-top: 5px; color: var(--high); font-size: 11.5px; line-height: 1.35; }
 .scan-detail { padding: 10px 12px; background: var(--surface-2); border-radius: 8px; white-space: normal; }
 .scan-failure-detail { margin-top: 8px; padding: 8px 10px; color: var(--high); background: var(--high-bg); border-radius: 7px; }
+/* 완료된 스캔의 참고 문구 — 실패와 같은 붉은색으로 그리면 '포트 관측은 온전하다'는 사실이 묻힌다. */
+.scan-failure-detail.notice { color: var(--medium); background: var(--medium-bg); }
 .scan-failure-detail code { margin-left: 8px; color: var(--ink-soft); }
 .pre { background: var(--surface-2); border: 1px solid var(--line); padding: 13px; border-radius: 10px; white-space: pre-wrap; font-family: var(--mono); font-size: 12px; margin-top: 12px; }
 

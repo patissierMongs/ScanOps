@@ -13,6 +13,22 @@ export function scanStatus(status) {
   return SCAN_STATUS[status] || { label: status || "알 수 없음", cls: "info" };
 }
 
+// 완료된 스캔에도 남는 참고 코드 — '실패'가 아니라 '부가 증거가 덜 찼다'는 뜻이다.
+// 포트 관측은 온전하므로 실패와 같은 자리에 같은 말로 그리면 방금 분리한 의미가 도로 합쳐진다.
+const NOTICE_CODES = {
+  nse_degraded: "참고 — 부가 정보 불완전",
+};
+
+export function scanNotice(source = {}) {
+  const message = source.failure_message;
+  if (!message) return null;
+  const code = source.failure_code || "";
+  const title = NOTICE_CODES[code];
+  return title
+    ? { tone: "notice", title, message, code }
+    : { tone: "failure", title: "실패 원인", message, code };
+}
+
 export function scanKind(scan = {}) {
   if (scan.kind === "staged") return { key: "staged", label: "단계 엔진" };
   const name = String(scan.name || "");
