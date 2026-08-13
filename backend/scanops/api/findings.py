@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import get_db
 from ..identity import display_identity
+from ..observation import current_reason
 from ..models import (
     ACTIVE_FINDING_STATES, FINDING_STATUSES, RISK_LABELS_KO,
     Finding, FindingEvent, ScanRun, User,
@@ -71,7 +72,9 @@ COLUMNS: list[tuple[str, str, object]] = [
     # 같은 open 이라도 응답을 받아 확인한 것과 무응답으로 추정한 것은 다르다.
     # 상태만 내보내면 받는 사람은 그 차이를 알 방법이 없다.
     ("state_evidence", "상태 근거", lambda f: f.state_evidence),
-    ("reason", "근거 원문", lambda f: f.reason),
+    # 현재 상태를 뒷받침하지 않는 원문(닫힌 행에 남은 예전 syn-ack)은 내보내지 않는다 —
+    # '근거 원문'이라는 이름 옆에 두면 읽는 사람이 현재 상태의 근거로 읽는다.
+    ("reason", "근거 원문", lambda f: current_reason(f.state, f.reason)),
     ("display_identity", "표시 식별", lambda f: display_identity(
         server=f.server, product=f.product, version=f.version, service=f.service,
         identification=f.identification,

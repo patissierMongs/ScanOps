@@ -466,7 +466,13 @@ def _key_parts(key: str) -> tuple[str, int, str]:
 
 def _port_el(finding: dict) -> ET.Element:
     port = ET.Element("port", protocol=finding.get("proto") or "tcp", portid=str(finding.get("port") or "0"))
-    ET.SubElement(port, "state", state=finding.get("state") or "open")
+    # reason 을 빠뜨리면 다운로드·재인입되는 감사 산출물에서만 근거가 '미관측'으로 조용히
+    # 바뀐다 — 화면에는 보이는데 증거 파일에는 없는 상태가 된다. nmap 자체 XML 도 --reason
+    # 표시 옵션과 무관하게 <state reason=".."> 를 늘 보존한다.
+    state_attrs = {"state": finding.get("state") or "open"}
+    if finding.get("reason"):
+        state_attrs["reason"] = str(finding["reason"])
+    ET.SubElement(port, "state", **state_attrs)
     svc_attrs = {
         k: str(v)
         for k, v in {

@@ -24,6 +24,16 @@ export function stateWithEvidence(finding) {
   return `${state} (${evidence})`;
 }
 
+// 부재로 닫힌 행에는 열려 있던 시절의 reason 이 provenance 로 남아 있다. 그걸 현재 상태
+// 옆에 그대로 보여 주면 'closed · syn-ack' 이 되어 읽는 사람이 둘을 잇는다.
+const STALE_EVIDENCE = new Set(["부재로 판정", "미관측"]);
+
+/** 현재 상태를 뒷받침하는 근거 원문만. 아니면 빈 문자열(서버 observation.current_reason 과 같은 규칙). */
+export function currentReason(finding) {
+  if (STALE_EVIDENCE.has(finding?.state_evidence || "")) return "";
+  return finding?.reason || "";
+}
+
 export function observedIdentity(finding) {
   const productVersion = [finding?.product, finding?.version].filter(Boolean).join(" ");
   return finding?.server || productVersion || "";

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
-  cellValue, needsConfirmation, PRESETS, primaryServiceIdentity, stateWithEvidence,
+  cellValue, currentReason, needsConfirmation, PRESETS, primaryServiceIdentity,
+  stateWithEvidence,
 } from "../src/lib/columns.js";
 import { deadlinePatchValue } from "../src/lib/findingPatch.js";
 import { SCAN_STATUS, scanKind, scanNotice, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
@@ -520,4 +521,23 @@ test("an inferred-open port never reads on screen as a confirmed observation", (
   const view = source("../src/views/Findings.jsx");
   assert.match(view, /stateWithEvidence\(finding\)/);
   assert.match(view, /needsConfirmation\(finding\)/);
+});
+
+test("a closed finding never wears the reason it had while it was open", () => {
+  // 부재 기반 닫힘은 state 만 바꾸고 reason 은 열려 있던 시절의 syn-ack 을 그대로 둔다.
+  // 해석만 고치고 원문을 옆에 그대로 두면 'closed · syn-ack' 이 되어 오독이 남는다.
+  const closed = { state: "closed", state_evidence: "부재로 판정", reason: "syn-ack" };
+
+  assert.equal(stateWithEvidence(closed), "closed (부재로 판정)");
+  assert.equal(currentReason(closed), "");
+  assert.equal(needsConfirmation(closed), false);
+
+  // 닫힘을 응답으로 실제 확인한 경우에는 원문이 그대로 남는다.
+  const refused = { state: "closed", state_evidence: "응답 확인", reason: "conn-refused" };
+  assert.equal(currentReason(refused), "conn-refused");
+
+  // 상세는 이 규칙을 통해서만 원문을 그린다.
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /currentReason\(finding\)/);
+  assert.doesNotMatch(view, /\{finding\.reason\}/);
 });

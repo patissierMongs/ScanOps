@@ -7,7 +7,7 @@ import ScanOptions from "../ui/ScanOptions.jsx";
 import {
   COLUMN_MAP, PRESETS, DEFAULT_PRESET_ID, cellValue,
   primaryServiceIdentity, secondaryServiceIdentity,
-  needsConfirmation, stateWithEvidence,
+  currentReason, needsConfirmation, stateWithEvidence,
 } from "../lib/columns.js";
 import { deadlinePatchValue } from "../lib/findingPatch.js";
 import {
@@ -577,7 +577,7 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
         {/* 관측 근거 — '이 포트가 열려 있다고 어떻게 판단했나'. 용도 근거(무엇인가)와 다른 축이다. */}
         <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
           관측 근거: {stateWithEvidence(finding)}
-          {finding.reason ? <span className="mono"> · {finding.reason}</span> : null}
+          {currentReason(finding) ? <span className="mono"> · {currentReason(finding)}</span> : null}
         </div>
 
         {/* 용도 근거 — '왜 열렸나/무엇인가' 추정 근거(역DNS·서비스·NSE 추출 등). 관리자 통보의 핵심. */}

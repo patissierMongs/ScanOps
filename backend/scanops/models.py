@@ -166,7 +166,7 @@ class Finding(Base):
         """이 상태를 응답으로 확인했는지, 무응답으로 추정했는지(nmap --reason 해석)."""
         from .observation import state_evidence
 
-        return state_evidence(self.reason)
+        return state_evidence(self.state, self.reason)
 
     @property
     def needs_confirmation(self) -> bool:
