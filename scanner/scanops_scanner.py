@@ -638,9 +638,18 @@ def validate_stats_every(value: str) -> str:
     return value
 
 
-def validate_host_timeout(value: str) -> str:
-    """호스트당 상한. 빈 값/0 이면 미적용. 그 외는 nmap 시간 형식(15m 등)."""
-    value = (value if value is not None else "").strip()
+def validate_host_timeout(value: object) -> str:
+    """호스트당 상한. 빈 값/0 이면 미적용. 그 외는 nmap 시간 형식(15m 등).
+
+    None 은 '끄기'가 아니라 거절이다. 이 값은 저강도(gentle)가 노후 장비를 지키려고 켜 두는
+    안전 제어라, 손상됐거나 미래 버전이 쓴 state 의 `"host_timeout": null` 을 조용히 ""(미적용)
+    으로 바꾸면 보호하려던 장비를 무한정 붙잡게 된다. 끄고 싶으면 ""/0 을 명시해야 한다.
+    (지정 없음 센티널인 None 은 create_plan 이 강도별 기본값으로 먼저 바꾼 뒤 여기 들어온다.)"""
+    if not isinstance(value, str):
+        raise ValueError(
+            f"--host-timeout 값이 문자열이 아닙니다: {value!r}. "
+            "끄려면 0 또는 빈 값을 명시하세요.")
+    value = value.strip()
     if value in ("", "0"):
         return ""
     if not STATS_RE.match(value):
@@ -2132,6 +2141,14 @@ def load_plan(path: str, nmap_override: str = "", dry_run: bool = False,
     plan["exclude_ports"] = resumed_value(plan, "exclude_ports", "", validate_exclude_ports)
     plan["intensity"] = resumed_value(plan, "intensity", "normal", validate_intensity)
     plan["max_rate"] = resumed_value(plan, "max_rate", "", validate_max_rate)
+    # host_timeout 도 같은 안전 제어다 — 저강도가 노후 장비를 지키려고 켜 두는 호스트당 상한이라,
+    # 검증에서 빠지면 `"host_timeout": null` 한 줄로 -T3·속도상한은 남은 채 상한만 조용히 풀린다.
+    # 구버전 호환 기본값은 방금 확정한 강도에서 계산해야 gentle 재개가 30m 을 잃지 않는다(GH-48).
+    plan["host_timeout"] = resumed_value(
+        plan, "host_timeout",
+        validate_host_timeout(
+            GENTLE_HOST_TIMEOUT_DEFAULT if plan["intensity"] == "gentle" else HOST_TIMEOUT_DEFAULT),
+        validate_host_timeout)
     raw_targets = plan.get("raw_targets")
     if raw_targets is None:
         raw_targets = saved_batch_targets

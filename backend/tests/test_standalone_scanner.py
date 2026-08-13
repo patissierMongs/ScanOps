@@ -2543,6 +2543,58 @@ def test_gentle_intensity_survives_resume(tmp_path):
     assert command[command.index("--exclude-ports") + 1] == "3030"
 
 
+def _resume_with_host_timeout(scanner, tmp_path, intensity: str, mutate):
+    """host_timeout 을 손댄 state 로 재개해 discovery 명령을 만든다(GH-48 회귀 도우미)."""
+    plan = scanner.create_plan(scanner.parser().parse_args([
+        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
+        "--intensity", intensity, "10.0.0.1",
+    ]))
+    mutate(plan)
+    state = tmp_path / f"{intensity}.state.json"
+    state.write_text(json.dumps(plan), encoding="utf-8")
+    loaded = scanner.load_plan(str(state), "nmap", True, "")
+    command = scanner.build_command(loaded, 0, "tcp_discovery")
+    return (command[command.index("--host-timeout") + 1]
+            if "--host-timeout" in command else "")
+
+
+def test_saved_host_timeout_null_is_rejected_not_treated_as_off(tmp_path):
+    """state 의 `"host_timeout": null` 이 호스트당 상한을 조용히 풀면 안 된다 (GH-48).
+
+    저강도는 노후 장비를 지키려고 호스트당 30분 상한을 기본으로 켠다. 그런데 재개 경로가
+    이 필드를 검증하지 않으면, 손상되거나 미래 버전이 쓴 state 한 줄로 -T3·속도상한은
+    남은 채 상한만 사라진다 — 보호하려던 장비를 무한정 붙잡게 된다. intensity·max_rate 와
+    같은 fail-closed 규칙을 적용한다."""
+    import pytest
+    scanner = _load_scanner()
+    with pytest.raises(ValueError, match="host-timeout"):
+        _resume_with_host_timeout(
+            scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", None))
+    # 문자열이 아닌 값도 같은 이유로 거절한다(숫자 30 을 '30초'로 넘겨짚지 않는다).
+    with pytest.raises(ValueError, match="host-timeout"):
+        _resume_with_host_timeout(
+            scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", 30))
+    with pytest.raises(ValueError, match="host-timeout"):
+        _resume_with_host_timeout(
+            scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", "곧"))
+
+
+def test_host_timeout_default_on_resume_follows_the_saved_intensity(tmp_path):
+    """키가 '아예 없는' 구버전 state 만 기본값으로 호환한다 — 그 기본값은 강도를 따른다."""
+    scanner = _load_scanner()
+    assert _resume_with_host_timeout(
+        scanner, tmp_path, "gentle", lambda p: p.pop("host_timeout")) == "30m"
+    assert _resume_with_host_timeout(
+        scanner, tmp_path, "normal", lambda p: p.pop("host_timeout")) == ""
+    # 명시적 opt-out 은 계약대로 유지된다(사람이 골랐다면 존중한다).
+    assert _resume_with_host_timeout(
+        scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", "")) == ""
+    assert _resume_with_host_timeout(
+        scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", "0")) == ""
+    # 저장된 정상 값은 그대로 살아난다.
+    assert _resume_with_host_timeout(scanner, tmp_path, "gentle", lambda p: None) == "30m"
+
+
 # ── GUI 계약 ───────────────────────────────────────────────────────────────────
 
 def test_gui_exposes_gentle_auto_mode_and_port_exclusion():
