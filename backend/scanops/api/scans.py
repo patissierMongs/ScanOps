@@ -1190,7 +1190,8 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
             else:
                 # done 인데 failure_* 를 쓰는 자리가 아니다. 이 코드는 '실패'가 아니라
                 # '부가 증거가 덜 찼다'는 참고이며, UI 도 실패 원인과 다른 라벨로 그린다.
-                degraded = report["enrichment_broken"] or problems
+                degraded = (report["enrichment_missing"] or report["enrichment_broken"]
+                            or problems)
                 scan.failure_code = "nse_degraded" if degraded else ""
                 scan.failure_message = (
                     "NSE/소켓 오류 또는 서비스 상세 산출물 손상이 있었습니다 — 포트 결과는 "

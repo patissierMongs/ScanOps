@@ -1566,3 +1566,57 @@ def test_a_rescan_treats_stage3_as_authority(tmp_path, monkeypatch):
     spec = _run_pipeline(good_dir, monkeypatch, spec_extra=extra)
     ok = engine_runner.artifact_report(good_dir, spec, force_scanned_hosts=True)
     assert not (ok["authority_missing"] + ok["authority_broken"])
+
+
+# 결과가 빈 XML — 확인 패스(confirm)를 유발하는 1차 산출물.
+_EMPTY_FINISHED_XML = ('<?xml version="1.0"?><nmaprun>'
+                       '<runstats><finished exit="success"/>'
+                       '<hosts up="1" down="0" total="1"/></runstats></nmaprun>')
+
+
+def test_a_rescan_confirm_pass_is_part_of_closure_authority(tmp_path, monkeypatch):
+    """재스캔의 확인 패스 산출물이 없으면 닫으면 안 된다.
+
+    운영 재스캔 spec 은 `service.confirm=True` 다(engine_runner.build_job_spec). 1차 probe 가
+    빈손이면 Pipeline 이 `stage3-<ip>-<proto><port>-confirm.xml` 을 한 번 더 만든다. 그 파일을
+    기대 목록에서 빼면, 확인 패스가 통째로 날아가도 '관측 0건'이 정상으로 통과해 기존
+    Finding 이 closed/정상처리 가 된다."""
+    extra = {"rescan_units": [{"ip": "127.0.0.1", "port": 443, "proto": "tcp"}],
+             "stages": {"service": {"enabled": True, "nse": [], "confirm": True}}}
+
+    def run_with(out_dir, omit_confirm: bool):
+        def fake_run(nmap, args, out_base, **_kwargs):
+            name = Path(out_base).name
+            if omit_confirm and name.endswith("-confirm"):
+                return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
+            # 1차는 '완결됐지만 결과 0건' → 엔진이 확인 패스를 돈다.
+            body = _EMPTY_FINISHED_XML if not name.endswith("-confirm") else _FINISHED_XML
+            Path(str(out_base) + ".xml").write_text(body, encoding="utf-8")
+            return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
+
+        monkeypatch.setattr(nmaprun, "run", fake_run)
+        spec = {"targets": ["127.0.0.1"], "exclude": [], "out_dir": str(out_dir), **extra}
+        Pipeline(JobSpec.from_dict(spec), _Sink(), "nmap").run()
+        return engine_runner.artifact_report(out_dir, spec, force_scanned_hosts=True)
+
+    gone = tmp_path / "no-confirm"
+    gone.mkdir()
+    report = run_with(gone, omit_confirm=True)
+    assert report["authority_missing"] == ["stage3-127_0_0_1-tcp443-confirm.xml"], report
+
+    # 반대 경계 — 확인 패스가 온전하면 권한을 유지한다(과잉 보수 방지).
+    ok_dir = tmp_path / "with-confirm"
+    ok_dir.mkdir()
+    ok = run_with(ok_dir, omit_confirm=False)
+    assert not (ok["authority_missing"] + ok["authority_broken"]), ok
+
+
+def test_a_missing_service_probe_artifact_is_recorded_as_degraded(tmp_path, monkeypatch):
+    """전체 스캔에서 stage3 가 아예 안 만들어진 것도 증거 저하로 남아야 한다.
+
+    닫힘 권한은 sweep 이 쥐고 있으므로 뺏지 않는다. 다만 아무 표시도 안 남기면 서비스·NSE
+    증거가 빠진 사실이 '정상 완료'로 숨는다."""
+    spec = _run_pipeline(tmp_path, monkeypatch, omit={"stage3-"})
+    report = engine_runner.artifact_report(tmp_path, spec, force_scanned_hosts=False)
+    assert not (report["authority_missing"] + report["authority_broken"]), report
+    assert report["enrichment_missing"] == ["stage3-127_0_0_1-tcp.xml"], report

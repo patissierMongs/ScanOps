@@ -235,18 +235,72 @@ def _xml_run_finished(path: Path) -> bool:
     return len(finished) == 1 and finished[0].get("exit") == "success"
 
 
+def _stage3_path(out: Path, ip: str, tag: str, confirm: bool = False) -> Path:
+    """pipeline._probe_protocol 의 이름 규칙."""
+    return out / f"stage3-{str(ip).replace('.', '_')}-{tag}{'-confirm' if confirm else ''}.xml"
+
+
+def _probe_found_nothing(path: Path) -> bool:
+    """1차 probe 가 빈손이었는가 — 엔진이 확인 패스를 도는 조건(pipeline._probe_host)."""
+    try:
+        return not parse_xml(path.read_bytes())
+    except Exception:                       # 못 읽으면 이미 broken 으로 잡힌다
+        return False
+
+
+def _stage3_expected(out: Path, ip: str, tag: str, confirm_enabled: bool) -> list[Path]:
+    """base + (필요하면) 확인 패스.
+
+    확인 패스는 **1차가 빈손일 때만** 돈다(`sp.confirm and not found`). 그래서 base 를 실제로
+    읽어 같은 조건을 재현한다 — 무조건 기대하면 1차에서 찾은 정상 실행이 전부 부재 판정된다.
+    """
+    base = _stage3_path(out, ip, tag)
+    expected = [base]
+    if (confirm_enabled and base.exists() and _xml_run_finished(base)
+            and _probe_found_nothing(base)):
+        expected.append(_stage3_path(out, ip, tag, confirm=True))
+    return expected
+
+
 def _rescan_authority_xml(out: Path, spec: dict) -> list[Path]:
-    """재스캔의 기대 산출물 — pipeline._rescan_units/_service 의 이름 규칙을 따른다."""
+    """재스캔의 기대 산출물 — pipeline._rescan_units/_service 의 이름 규칙을 따른다.
+
+    재스캔에는 sweep 이 없어 stage3 가 유일한 근거다. 그래서 확인 패스 산출물도 authority 다
+    — 운영 재스캔 spec 은 build_job_spec 이 service.confirm=True 로 만든다.
+    """
+    confirm = bool(((spec.get("stages") or {}).get("service") or {}).get("confirm", False))
     expected: list[Path] = []
     for unit in spec.get("rescan_units") or []:
         try:
-            ip = str(unit["ip"]).replace(".", "_")
+            ip = str(unit["ip"])
             port, proto = int(unit["port"]), str(unit.get("proto") or "tcp")
         except (KeyError, TypeError, ValueError):
             continue
-        expected.append(out / f"stage3-{ip}-{proto}{port}.xml")   # tag=f"{proto}{port}"
+        expected += _stage3_expected(out, ip, f"{proto}{port}", confirm)   # tag=f"{proto}{port}"
     for ip in (spec.get("targets_ports") or {}):
-        expected.append(out / f"stage3-{str(ip).replace('.', '_')}-tcp.xml")
+        expected += _stage3_expected(out, ip, "tcp", confirm)
+    return expected
+
+
+def expected_enrichment_xml(out_dir, spec: dict) -> list[Path]:
+    """전체 스캔에서 서비스 probe 가 만들기로 한 stage3 집합.
+
+    있는 파일만 훑으면 'probe 는 돌았는데 XML 을 못 만든' 경우가 증거 손실인 채로 정상 완료로
+    숨는다. open_map(=sweep 이 연 포트)과 service 설정에서 기대 집합을 세운다.
+    """
+    out = Path(out_dir)
+    svc = ((spec.get("stages") or {}).get("service") or {})
+    if not svc.get("enabled", True):
+        return []
+    confirm = bool(svc.get("confirm", False))
+    open_map = _read_state(out).get("open_map") or {}
+    expected: list[Path] = []
+    for ip, protos in sorted((open_map or {}).items()):
+        if not isinstance(protos, dict):
+            continue
+        for proto in ("tcp", "udp"):
+            if protos.get(proto):
+                expected += _stage3_expected(out, ip, proto, confirm)
     return expected
 
 
@@ -282,12 +336,21 @@ def artifact_report(out_dir, spec: dict, force_scanned_hosts: bool = False) -> d
     expected = expected_authority_xml(out, spec, force_scanned_hosts)
     missing = [p.name for p in expected if not p.exists()]
     broken = [p.name for p in expected if p.exists() and not _xml_run_finished(p)]
+    enrichment_missing: list[str] = []
     enrichment_broken: list[str] = []
     if not force_scanned_hosts:
-        # 전체 스캔에서 stage3 는 enrichment 다. 잘려도 sweep 의 안전한 권한을 뺏지 않는다.
-        enrichment_broken = [p.name for p in sorted(out.glob("stage3-*.xml"))
-                             if not _xml_run_finished(p)]
+        # 전체 스캔에서 stage3 는 enrichment 다. 어긋나도 sweep 의 안전한 권한을 뺏지 않지만,
+        # 증거가 빠졌다는 사실은 남겨야 한다 — 안 그러면 손실이 정상 완료로 숨는다.
+        expected_enrich = expected_enrichment_xml(out, spec)
+        enrichment_missing = [p.name for p in expected_enrich if not p.exists()]
+        seen = {p.name for p in expected_enrich}
+        enrichment_broken = sorted(
+            {p.name for p in expected_enrich if p.exists() and not _xml_run_finished(p)}
+            # 기대 집합 밖의 산출물(확인 패스 등)도 깨졌으면 증거 저하로 센다.
+            | {p.name for p in out.glob("stage3-*.xml")
+               if p.name not in seen and not _xml_run_finished(p)})
     return {"authority_missing": missing, "authority_broken": broken,
+            "enrichment_missing": enrichment_missing,
             "enrichment_broken": enrichment_broken}
 
 
