@@ -60,6 +60,10 @@ def _migrate() -> None:
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN owner VARCHAR(128) DEFAULT ''")
         if "reopened" not in cols:  # 재발 태그 컬럼
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN reopened INTEGER DEFAULT 0")
+        if cols and "reason" not in cols:  # nmap --reason 근거(syn-ack/no-response…)
+            # 소급 backfill 은 불가능하다 — 이 값은 여태 저장한 적이 없다. 기본 '' 는
+            # '미관측'이며, 다음 스캔이 관측할 때 채워진다. no-response 로 넘겨짚지 않는다.
+            conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN reason VARCHAR(32) DEFAULT ''")
         server_added = "server" not in cols
         if server_added:  # NSE HTTP Server 구조화 값
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN server VARCHAR(256) DEFAULT ''")

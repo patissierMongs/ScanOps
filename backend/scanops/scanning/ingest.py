@@ -94,7 +94,9 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
             # A successful sweep is authoritative for openness, not identity. Service/NSE
             # probing may transiently miss or filter this port, so preserve all prior identity,
             # classification, and evidence fields while advancing the observation timestamp.
-            observed = {key: observed[key] for key in ("state", "rtt")}
+            # reason 은 state 와 한 몸이다 — sweep 이 개방 여부의 권위라면 그렇게 판단한
+            # 근거도 sweep 의 것이다. 둘을 떼면 state 는 새 관측인데 reason 은 옛 관측이 된다.
+            observed = {key: observed[key] for key in ("state", "reason", "rtt")}
         elif not _server_was_observed(f):
             # Server NSE를 실행하지 않은 스캔은 기존 증거를 '없음'으로 덮지 않는다.
             observed.pop("server", None)
@@ -178,7 +180,8 @@ def _observed(f: dict) -> dict:
     """스캔이 갱신하는 관측 + 분류 필드(운영상태는 제외)."""
     return {
         "host_ip": f["host_ip"], "hostname": f["hostname"], "port": f["port"],
-        "proto": f["proto"], "state": f["state"], "service": f["service"],
+        "proto": f["proto"], "state": f["state"], "reason": f.get("reason", ""),
+        "service": f["service"],
         "product": f["product"], "version": f["version"],
         "server": f.get("server", ""), "banner": f["banner"],
         "cpe": f["cpe"], "rtt": f["rtt"], "identification": f["identification"],

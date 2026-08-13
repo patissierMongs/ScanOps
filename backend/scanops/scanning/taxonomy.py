@@ -10,6 +10,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from ..models import Category, RiskRule
+from .nmap_parse import nse_failed
 
 _SEED = Path(__file__).resolve().parent.parent / "seed" / "categories.json"
 
@@ -36,19 +37,38 @@ def build_lookup(db: Session) -> dict[str, dict]:
     }
 
 
+# TLS 를 관측했다고 말할 수 있는 스크립트. 둘 다 실제로 핸드셰이크가 성립해야 출력이 나온다.
+_TLS_SCRIPT_IDS = frozenset({"ssl-cert", "tls-alpn"})
+
+
 def _tls_evidence(finding: dict) -> bool:
-    """이 포트가 TLS 위에서 말하는지에 대한 관측 증거."""
+    """이 포트가 TLS 위에서 말하는지에 대한 관측 증거.
+
+    ``nse_json`` 은 파서(nmap_parse)와 모델(Finding.nse_json) 양쪽에서 ``[{"id":..,"output":..}]``
+    리스트다. 이전 구현은 dict 로 받아 **런타임 값을 전부 탈락**시켰다 — service 에 "ssl" 이
+    들어가지 않는 TLS 포트는 ssl-cert 를 갖고도 http 로 분류됐고, 단위 테스트가 dict 를 주입해
+    그 미탐을 가렸다. 형제 소비자(extract_server·server_observed·Finding.fingerprint)와 같은
+    계약으로 맞춘다.
+
+    실패로 끝난 스크립트는 증거가 아니다 — nmap 이 표준화한 실패 출력은 "확인해 봤지만 못 봤다"
+    이므로, 그것으로 https 를 주장하면 관측하지 않은 것을 관측했다고 말하는 셈이다.
+    """
     if "ssl" in (finding.get("service") or "").lower():
         return True
-    nse = finding.get("nse_json") or {}
+    nse = finding.get("nse_json") or []
     if isinstance(nse, str):
         try:
             nse = json.loads(nse)
         except (ValueError, TypeError):
             return False
-    if not isinstance(nse, dict):
+    if not isinstance(nse, list):
         return False
-    return any(key in nse for key in ("ssl-cert", "tls-alpn"))
+    return any(
+        isinstance(script, dict)
+        and str(script.get("id") or "") in _TLS_SCRIPT_IDS
+        and not nse_failed(script.get("output"))
+        for script in nse
+    )
 
 
 def fallback_service_key(finding: dict) -> str:

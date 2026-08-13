@@ -104,6 +104,9 @@ class Finding(Base):
     port: Mapped[int] = mapped_column(Integer)
     proto: Mapped[str] = mapped_column(String(8))
     state: Mapped[str] = mapped_column(String(16), default="open")  # open/closed/filtered
+    # nmap 이 그 상태를 정한 근거(syn-ack·conn-refused·no-response…). --reason 이 이미 붙어 있어
+    # XML 에 늘 있던 값이다. 빈 문자열은 '미관측'(이 컬럼 이전에 인입된 건)이며 no-response 와 다르다.
+    reason: Mapped[str] = mapped_column(String(32), default="")
     service: Mapped[str] = mapped_column(String(64), default="")
     product: Mapped[str] = mapped_column(String(128), default="")
     version: Mapped[str] = mapped_column(String(128), default="")

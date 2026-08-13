@@ -36,7 +36,7 @@ _SERVER_SOURCES = (
 _NSE_FAILURE_RE = re.compile(r"(?i)^\s*ERROR:\s*(?:Script execution failed|Header request failed)\b")
 
 
-def _nse_failed(output: object) -> bool:
+def nse_failed(output: object) -> bool:
     """Nmap이 NSE 실패로 표준화한 출력은 관측값으로 취급하지 않는다."""
     return bool(_NSE_FAILURE_RE.match(str(output or "")))
 
@@ -52,7 +52,7 @@ def extract_server(nse: list[dict] | None) -> str:
             if wanted not in str(script.get("id") or "").lower():
                 continue
             output = script.get("output")
-            if _nse_failed(output):
+            if nse_failed(output):
                 continue
             for match in regex.finditer(str(output or "")):
                 value = " ".join(match.group(1).strip(" \t,").split())
@@ -70,7 +70,7 @@ def server_observed(nse: list[dict] | None) -> bool:
         if not isinstance(script, dict):
             continue
         script_id = str(script.get("id") or "").lower()
-        if _nse_failed(script.get("output")):
+        if nse_failed(script.get("output")):
             continue
         if "http-server-header" in script_id or "http-headers" in script_id:
             # A successful direct header probe is authoritative even when the header is absent.
@@ -129,7 +129,7 @@ def pretty_fingerprint(raw: str) -> str:
 
 
 def _extract_key_line(script_id: str, output: str) -> str:
-    if not output or _nse_failed(output):
+    if not output or nse_failed(output):
         return ""
     sid = (script_id or "").lower()
     for sid_match, label, regex in _REMARK_PATTERNS:
@@ -263,6 +263,11 @@ def parse_xml(source) -> list[dict]:
         for port in ports.findall("port"):
             st = port.find("state")
             state = st.get("state") if st is not None else "open"
+            # nmap 이 이 상태를 무엇을 보고 정했는지(syn-ack·conn-refused·no-response…).
+            # 모든 단계가 --reason 을 이미 싣고 있어 XML 에 늘 있는데 여태 버리고 있었다.
+            # 'open' 안에서도 syn-ack(응답을 받음)과 no-response(안 받고 추정)는 증거 강도가
+            # 다르다 — 이 구분이 open|filtered 를 정직하게 표시하기 위한 최소 재료다.
+            reason = (st.get("reason") if st is not None else "") or ""
             # 발견 = 열린 포트만. 닫힘/필터는 인입하지 않는다(닫힘은 '부재'로 판정).
             # nmap 을 --open 없이 돌려 닫힌 포트가 XML 에 섞여도 안전.
             if not state.startswith("open"):
@@ -289,6 +294,7 @@ def parse_xml(source) -> list[dict]:
                 "port": int(port.get("portid")),
                 "proto": port.get("protocol") or "tcp",
                 "state": state,
+                "reason": reason,
                 "service": service,
                 "product": product,
                 "version": (svc.get("version") if svc is not None else "") or "",

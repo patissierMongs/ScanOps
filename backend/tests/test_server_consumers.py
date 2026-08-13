@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+from pathlib import Path
 
 import openpyxl
 
@@ -310,12 +312,48 @@ def test_server_banner_classifies_findings_nmap_mislabels():
 
 
 def test_server_banner_classification_uses_tls_evidence_for_https():
+    """TLS 증거는 **파서가 실제로 만드는 자료형**으로 검증한다.
+
+    이전 판은 ``{"ssl-cert": ...}`` dict 를 주입했는데 파서는 ``[{"id":..,"output":..}]``
+    리스트를 만든다. 그래서 런타임에서는 이 경로가 한 번도 동작하지 않는데도 테스트는 통과했다.
+    """
     from scanops.scanning.taxonomy import classify
 
-    for nse in ({"ssl-cert": "commonName=x"}, '{"ssl-cert": "commonName=x"}'):
+    runtime = [{"id": "ssl-cert", "output": "Subject: commonName=x"}]
+    for nse in (runtime, json.dumps(runtime)):
         finding = {"service": "apple-iphoto", "port": 8443, "server": "nginx", "nse_json": nse}
         classify(finding, _lookup(), [])
         assert finding["usage"] == "웹 서비스(TLS)", nse
+
+
+def test_tls_evidence_comes_from_the_real_parser_not_a_hand_built_dict():
+    """실제 XML → parse_xml → classify 전 경로. 단위 주입이 가린 미탐을 여기서 잡는다."""
+    from scanops.scanning.nmap_parse import parse_xml
+    from scanops.scanning.taxonomy import classify
+
+    xml = Path(XML).read_bytes()
+    tls = [f for f in parse_xml(xml)
+           if any(s.get("id") == "ssl-cert" for s in (f["nse_json"] or []))]
+    assert tls, "픽스처에 ssl-cert 를 가진 포트가 있어야 이 테스트가 의미를 갖는다"
+
+    for finding in tls:
+        # service 는 taxonomy 키로 두고, 분류만 TLS 증거로 되돌리는지 본다.
+        finding["service"] = "apple-iphoto"
+        finding["server"] = "nginx"
+        classify(finding, _lookup(), [])
+        assert finding["usage"] == "웹 서비스(TLS)", finding["port"]
+
+
+def test_tls_evidence_is_not_claimed_when_the_script_failed():
+    """반대 경계 — nmap 이 실패로 표준화한 출력은 '관측했다'가 아니다."""
+    from scanops.scanning.taxonomy import classify
+
+    finding = {"service": "apple-iphoto", "port": 8443, "server": "nginx",
+               "nse_json": [{"id": "ssl-cert", "output": "ERROR: Script execution failed"}]}
+
+    classify(finding, _lookup(), [])
+
+    assert finding["usage"] == "웹 서비스"          # https 가 아니라 http 로 떨어진다
 
 
 def test_server_banner_never_overrides_a_service_that_already_classifies():

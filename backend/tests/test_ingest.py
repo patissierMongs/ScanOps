@@ -27,6 +27,56 @@ def test_parse_basic():
     assert any("CN=" in f["remarks"] for f in fs)
 
 
+def test_reason_is_parsed_and_stored_because_we_already_pay_for_it():
+    """--reason 은 모든 단계에 이미 붙어 있는데 여태 파서가 버리고 있었다.
+
+    'open' 안에서도 syn-ack(응답을 받아 확인)과 no-response(안 받고 추정)는 증거 강도가
+    전혀 다르다. 이 구분이 open|filtered 를 정직하게 표시하기 위한 최소 재료다.
+    """
+    init_db()
+    db = SessionLocal()
+    try:
+        parsed = parse_xml(XML)
+        assert all("reason" in f for f in parsed)
+        assert {f["reason"] for f in parsed} == {"syn-ack"}, "픽스처는 전부 syn-ack 이다"
+
+        sid = _scan(db)
+        ingest(db, sid, parsed, up_hosts(XML))
+
+        assert db.query(Finding).filter(Finding.reason == "syn-ack").count() == 13
+    finally:
+        db.close()
+
+
+def test_sweep_only_rescan_updates_reason_with_state_not_leaving_it_stale():
+    """개방 여부의 권위가 sweep 이면 그렇게 판단한 근거도 sweep 의 것이다.
+
+    reason 을 state 와 떼어 두면 state 는 새 관측인데 reason 은 옛 관측인 행이 만들어진다.
+    """
+    init_db()
+    db = SessionLocal()
+    try:
+        sid = _scan(db)
+        ingest(db, sid, parse_xml(XML), up_hosts(XML))
+        row = db.query(Finding).filter_by(port=22).one()
+        assert row.reason == "syn-ack"
+        before_service = row.service
+
+        # sweep-only 재관측: 개방은 확인했지만 식별은 안 했다(identity_observed=False).
+        sweep = [f for f in parse_xml(XML) if f["port"] == 22]
+        for f in sweep:
+            f["identity_observed"] = False
+            f["reason"] = "syn-ack"
+            f["service"] = ""          # 식별 결과가 없다 — 기존 값이 보존돼야 한다
+        ingest(db, _scan(db), sweep, up_hosts(XML))
+
+        row = db.query(Finding).filter_by(port=22).one()
+        assert row.reason == "syn-ack"          # 근거가 state 와 함께 갱신됨
+        assert row.service == before_service    # 식별은 여전히 보존됨
+    finally:
+        db.close()
+
+
 def test_first_scan_all_new():
     init_db()
     db = SessionLocal()
