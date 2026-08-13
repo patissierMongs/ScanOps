@@ -1120,13 +1120,24 @@ def mark_interrupted_outputs(base: Path) -> list[str]:
     return renamed
 
 
-# nmap 이 '끝까지 정상적으로 돌지 못했다'고 알리는 표식. 이 줄들은 XML 에 남지 않고
-# stdout 으로만 나오므로, 출력을 보지 않으면 rc=0 · exit="success" 인 XML 만 보고
-# 온전한 결과로 착각하게 된다 — 그게 곧 미탐이다.
-#   NSOCK ERROR       : 소켓 자체를 열지 못함(예: UDP 500 bind 실패)
-#   Trying to delete NSI: nmap 이 자기 이벤트를 정리하지 못한 상태로 끝남
+# NSE/소켓이 매끄럽게 돌지 못했다는 표식. XML 에는 남지 않고 stdout 에만 나온다.
+#   NSOCK ERROR       : 소켓 하나를 열지 못함(예: UDP 500 bind 실패 → WSAEACCES 10013)
+#   Trying to delete NSI: nmap 이 자기 이벤트 장부를 정리하지 못함
 #   QUITTING!         : 치명적 오류로 중단
-NMAP_UNCLEAN_MARKERS = ("NSOCK ERROR", "Trying to delete NSI", "QUITTING!")
+#
+# **이 표식은 포트 관측의 완결성을 부정하지 않는다.** 실측(Windows, nmap 7.99/Npcap 1.87)에서
+#   nmap -sU -Pn -n -p 500 --script ike-version --max-retries 0 127.0.0.1
+# 은 `Bind to 0.0.0.0:500 failed (10013)` 을 네 번 찍고도 "Nmap done" 과 rc=0 으로 끝났다.
+# 스크립트 소켓 하나가 실패했을 뿐 포트 결과는 온전했다. 그런 실행에서 닫힘 권한을 빼앗으면
+# 사라진 서비스가 영영 닫히지 않아 오탐이 쌓인다 — 미탐을 막으려다 반대쪽으로 넘어지는 것이다.
+#
+# 그래서 판정을 둘로 나눈다.
+#   포트 관측 완결성 : rc=0 · XML 파싱 가능 · <finished exit="success"> · 대상 커버리지
+#                      (import_contract_unit 의 객관적 조건. 이것만이 닫힘 권한을 준다)
+#   부가 증거 완결성 : 아래 표식 → nse_degraded. NSE 결과를 완전하다고 믿지 않는다는 뜻일 뿐,
+#                      포트 관측 권한과 --resume 판정에는 관여하지 않는다.
+NMAP_NSE_PROBLEM_MARKERS = ("NSOCK ERROR", "Trying to delete NSI", "QUITTING!")
+NMAP_UNCLEAN_MARKERS = NMAP_NSE_PROBLEM_MARKERS   # 예전 이름(외부 참조 호환)
 _UNCLEAN_KEEP = 5          # state 에 남길 표본 줄 수(로그 전체를 담지 않는다)
 
 
@@ -2351,11 +2362,19 @@ def failed_runs(plan: dict) -> list[dict]:
     return [r for r in latest_runs(plan) if not r.get("skipped") and r.get("returncode") not in (0, None)]
 
 
-def unclean_runs(plan: dict) -> list[dict]:
-    """rc=0 으로 끝났지만 nmap 이 정상 종료를 부정하는 출력을 낸 단계들.
+def degraded_runs(plan: dict) -> list[dict]:
+    """포트 관측은 끝냈지만 NSE/소켓이 매끄럽지 못했던 단계들.
 
-    실패(rc≠0)와 따로 센다. 이쪽은 '실패했다'가 아니라 '성공처럼 보이지만 관측이
-    불완전하다'라서, 조용히 지나가면 못 본 포트가 닫힌 포트로 기록된다."""
+    실패(rc≠0)와도, 미완결(clean=False)과도 다르다. 이쪽은 '포트는 다 봤는데 스크립트
+    결과를 다 믿지는 말라'는 뜻이라 닫힘 권한을 건드리지 않는다 — 사람에게 알리기만 한다."""
+    return [
+        run for run in latest_runs(plan)
+        if not run.get("skipped") and run.get("returncode") == 0 and run.get("nse_degraded")
+    ]
+
+
+def unclean_runs(plan: dict) -> list[dict]:
+    """결과물로 믿을 수 없는 단계들(중단·XML 미완결). 이쪽만 마감 상태를 partial 로 만든다."""
     return [
         run for run in latest_runs(plan)
         if not run.get("skipped") and run.get("returncode") == 0 and not run.get("clean", True)
@@ -2493,6 +2512,13 @@ def print_scan_summary(plan: dict, failed: list[dict], status: str) -> None:
             "닫힘 판정에서 제외합니다(--resume 으로 다시 시도할 수 있습니다).",
             file=sys.stderr,
         )
+    for run in degraded_runs(plan):
+        name = run.get("stage_name") or run.get("stage_id") or "scan"
+        print(
+            f"note: {name} 에서 NSE/소켓 오류가 있었습니다 — 포트 결과는 온전하지만 "
+            "스크립트 결과는 일부 빠졌을 수 있습니다.",
+            file=sys.stderr,
+        )
         for line in run.get("nmap_problems", [])[:3]:
             print(f"  nmap: {line}", file=sys.stderr)
     if not failed and f["live_hosts"] == 0 and f["open_tcp"] == 0 and f["open_udp"] == 0:
@@ -2543,6 +2569,10 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     # 오류를 만나고, 무엇보다 완주한 결과와 섞인다. 중단본과 같은 취급으로 격리한다 —
     # 사용자가 정한 규칙(부분 결과는 인입하지 않는다)이 원인과 무관하게 성립해야 한다.
     truncated = not interrupted and _stage_xml_truncated(base)
+    # 표식(problems)과 XML 미완결(truncated)은 다른 사실이다. 앞은 '부가 증거가 덜 찼다',
+    # 뒤는 '이 실행 자체를 믿을 수 없다'. 섞으면 스크립트 소켓 하나가 실패한 정상 실행까지
+    # 재실행 대상·닫힘 권한 박탈로 넘어간다.
+    nse_degraded = bool(problems)
     if truncated:
         problems.insert(0, "nmap 이 XML 을 끝맺지 못했습니다(파일이 중간에서 끊김).")
     files = (mark_interrupted_outputs(base)
@@ -2556,9 +2586,12 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
         "finished_at": now_iso(),
         "returncode": rc,
         "interrupted": interrupted,
-        # nmap 이 rc=0 으로 끝나도 정상 종료를 부정하는 출력을 냈다면 이 단계는 온전하지 않다.
-        # 그 사실을 여기에 남겨야 닫힘 권한(import_contract_unit)과 재개 판정이 함께 움직인다.
-        "clean": not problems,
+        # clean = 이 실행을 결과물로 믿을 수 있는가(중단·XML 미완결이면 False). 닫힘 권한과
+        # --resume 재시도 판정이 이 값을 본다.
+        "clean": not (interrupted or truncated),
+        # nse_degraded = 포트 관측은 온전하지만 NSE/소켓이 매끄럽지 못했다. 보고용이고
+        # 닫힘 권한에는 관여하지 않는다(NMAP_NSE_PROBLEM_MARKERS 주석 참고).
+        "nse_degraded": nse_degraded,
         "nmap_problems": problems,
         "command": cmd,
         "scan_targets": scan_targets,

@@ -2882,11 +2882,16 @@ def _noisy_nmap(tmp_path, lines: str):
     return [sys.executable, str(script)]
 
 
-def test_a_stage_that_never_finished_cleanly_loses_closure_authority(tmp_path, monkeypatch, capsys):
-    """rc=0 · exit="success" 인데 NSE/소켓이 정리되지 못한 채 끝난 단계.
+def test_socket_errors_do_not_strip_port_observation_authority(tmp_path, monkeypatch, capsys):
+    """NSE 소켓 오류가 있어도 포트 결과가 완결됐으면 닫힘 권한을 지킨다.
 
-    그 사실은 XML 이 아니라 stdout 에만 남는다. 출력을 보지 않으면 온전한 결과로 착각해
-    '못 본 포트'를 '닫힌 포트'로 기록하게 된다 — 되돌리기 가장 어려운 미탐."""
+    실측(Windows, nmap 7.99/Npcap 1.87): `-p 500 --script ike-version` 은
+    `Bind to 0.0.0.0:500 failed (10013)` 을 네 번 찍고도 "Nmap done" 과 rc=0 으로 끝났다.
+    스크립트 소켓 하나가 실패했을 뿐 포트 관측은 온전했다는 뜻이다.
+
+    이런 실행에서 닫힘 권한을 빼앗으면 사라진 서비스가 영영 닫히지 않아 오탐이 쌓인다.
+    미탐을 막으려다 반대쪽으로 넘어지지 않도록, 포트 관측 완결성은 객관적 조건
+    (rc=0 · XML 파싱 · <finished exit="success"> · 대상 커버리지)으로만 판정한다."""
     import sys as _sys
     scanner = _load_scanner()
     plan = {
@@ -2899,27 +2904,61 @@ def test_a_stage_that_never_finished_cleanly_loses_closure_authority(tmp_path, m
     state_path = tmp_path / "scan.state.json"
     noisy = ("Service scan Timing: About 100.00% done\n"
              "NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed (IOD#4)\n"
-             "Trying to delete NSI, but could not find 1 of the purportedly pending events\n")
+             "Trying to delete NSI, but could not find 1 of the purportedly pending events\n"
+             "Nmap done: 1 IP address (1 host up) scanned in 5.43 seconds\n")
     fake = _noisy_nmap(tmp_path, noisy)
     monkeypatch.setattr(scanner, "build_command", lambda *a, **k: fake)
     base = scanner.output_base(plan, 0, "udp_identify")
-    Path(str(base) + ".xml").write_text("<nmaprun/>", encoding="utf-8")
+    Path(str(base) + ".xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats>'
+        '<finished exit="success"/><hosts up="1" down="0" total="1"/>'
+        "</runstats></nmaprun>", encoding="utf-8")
 
     rc = scanner.run_nmap_stage(plan, 0, state_path, "udp_identify")
-    assert rc == 0                                   # nmap 은 성공으로 끝났다고 말한다
+    assert rc == 0
     run = plan["runs"][-1]
-    assert run["clean"] is False
+    # 사실은 남는다 — 다만 '증거가 덜 찼다'이지 '포트를 못 봤다'가 아니다.
+    assert run["nse_degraded"] is True
     assert any("NSOCK ERROR" in line for line in run["nmap_problems"])
+    assert run["clean"] is True
     # 출력은 운영자에게 그대로 흘러가야 한다(진행을 봐야 하므로).
     assert "NSOCK ERROR" in capsys.readouterr().out
 
-    # 1) 닫힘 권한 없음 — 이것이 미탐을 막는 지점
+    # 1) 닫힘 권한을 지킨다 — 여기가 이번 회귀의 핵심
     contract = scanner.import_contract_unit(plan, run, Path(str(base) + ".xml"))
-    assert contract["authoritative"] is False and contract["closure_targets"] == []
-    # 2) 재개 대상으로 남는다
-    assert not scanner.stage_succeeded(plan, 0, "udp_identify")
-    # 3) 마감 상태가 done 이 아니다
+    assert contract["authoritative"] is True and contract["closure_targets"] == ["10.0.0.1"]
+    # 2) 다 끝난 단계이므로 --resume 이 다시 돌리지 않는다
+    assert scanner.stage_succeeded(plan, 0, "udp_identify")
+    # 3) 마감 상태를 partial 로 떨어뜨리지 않는다. 보고만 따로 센다.
+    assert scanner.unclean_runs(plan) == []
+    assert scanner.degraded_runs(plan) == [run]
+
+
+def test_a_truncated_xml_still_loses_closure_authority(tmp_path, monkeypatch):
+    """반대 방향의 경계 — nmap 이 XML 을 끝맺지 못한 실행은 여전히 믿지 않는다.
+
+    소켓 오류를 관대하게 봐준다고 해서 '실행 자체를 믿을 수 없는' 경우까지 통과시키면
+    못 본 포트가 닫힌 포트로 기록된다(미탐). 두 판정은 독립이어야 한다."""
+    scanner = _load_scanner()
+    plan = {
+        "tool": "scanops_scanner", "nmap": "nmap", "name": "scan", "output_dir": str(tmp_path),
+        "workflow": "auto", "batches": [["10.0.0.1"]], "cursor": 0, "runs": [],
+        "stats_every": "10s", "host_timeout": "", "exclude": [], "raw_targets": ["10.0.0.1"],
+        "scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "",
+        "batch_size": 0, "max_hosts": 65536,
+    }
+    fake = _noisy_nmap(tmp_path, "NSE Timing: About 99.43% done;\n")
+    monkeypatch.setattr(scanner, "build_command", lambda *a, **k: fake)
+    base = scanner.output_base(plan, 0, "udp_identify")
+    # 실제 사고 파일과 같은 모양 — </nmaprun> 없이 중간에서 끊긴다.
+    Path(str(base) + ".xml").write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>', encoding="utf-8")
+
+    scanner.run_nmap_stage(plan, 0, tmp_path / "s.state.json", "udp_identify")
+    run = plan["runs"][-1]
+    assert run["clean"] is False
     assert scanner.unclean_runs(plan) == [run]
+    assert not scanner.stage_succeeded(plan, 0, "udp_identify")   # --resume 이 다시 돌린다
 
 
 def test_a_quiet_successful_stage_keeps_its_closure_authority(tmp_path, monkeypatch):

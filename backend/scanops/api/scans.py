@@ -1159,25 +1159,23 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
     if not engine_runner.is_done(out_dir):
         _fail(scan_id, "engine_incomplete")
         return
-    # nmap 이 rc=0 으로 끝나고 XML 에 exit="success" 를 적었어도, NSE/소켓이 정리되지 못한 채
-    # 끝났다면 관측이 불완전하다. 그 사실은 로그에만 남는다 — 여기서 보지 않으면 '못 본 포트'가
-    # '닫힌 포트'로 기록된다(미탐). 결과는 살리되 닫힘 권한만 뺀다.
+    # NSE/소켓 오류는 로그에만 남는다. 다만 이것이 '포트를 못 봤다'는 뜻은 아니다 —
+    # 스크립트 소켓 하나가 bind 에 실패해도(WSAEACCES 10013) nmap 은 포트 결과를 온전히 내고
+    # rc=0 으로 끝난다. 그런 실행에서 닫힘 권한을 빼면 사라진 서비스가 영영 닫히지 않아
+    # 오탐이 쌓인다. 그래서 닫힘 후보는 그대로 두고, '스크립트 결과가 덜 찼다'는 사실만 남긴다.
+    # 포트 관측 완결성은 is_done(위)과 인입 계약의 객관적 조건이 따로 지킨다.
     problems = engine_runner.log_problems(out_dir / "engine.log")
     db = SessionLocal()
     try:
         scan = db.get(ScanRun, scan_id)
         if scan is not None:
-            _commit_engine_ingest(
-                db, scan, out_dir,
-                set() if problems else scope_keys,      # 빈 집합 = 닫힘 후보 없음
-                force_scanned_hosts,
-            )
-            scan.status = "partial" if problems else "done"
+            _commit_engine_ingest(db, scan, out_dir, scope_keys, force_scanned_hosts)
+            scan.status = "done"
             scan.finished_at = datetime.now(timezone.utc)
-            scan.failure_code = "nmap_unclean_exit" if problems else ""
+            scan.failure_code = "nse_degraded" if problems else ""
             scan.failure_message = (
-                "nmap 이 끝까지 정상 종료하지 못했습니다 — 관측이 불완전해 닫힘 판정에서 "
-                f"제외했습니다. ({problems[0][:120]})" if problems else ""
+                "NSE/소켓 오류가 있었습니다 — 포트 결과는 온전하지만 스크립트 결과는 일부 "
+                f"빠졌을 수 있습니다. ({problems[0][:120]})" if problems else ""
             )
             db.commit()
     except Exception:
@@ -1748,30 +1746,37 @@ def delete_scan(
     db.query(Finding).filter(Finding.last_scan_id == scan_id).update(
         {Finding.last_scan_id: None}, synchronize_session=False)
 
-    _remove_scan_artifacts(scan)
     db.delete(scan)
     record(db, user, "SCAN_DELETE", target=str(scan_id),
            detail=f"발견 {len(owned_ids)}건 삭제")
+    # 파일은 커밋이 끝난 뒤에 지운다. 먼저 지우면 커밋이 실패했을 때 DB 행은 살아 있는데
+    # 그 행이 가리키는 증거 파일만 사라져, 되돌릴 수도 확인할 수도 없는 상태가 된다.
+    artifacts = _scan_artifact_paths(scan)
     db.commit()
+    _remove_paths(artifacts)
     return {"scan_id": scan_id, "findings_deleted": len(owned_ids),
             "events_detached": int(kept_events or 0)}
 
 
-def _remove_scan_artifacts(scan: ScanRun) -> None:
-    """스캔이 남긴 파일 정리. 실패해도 삭제 자체는 진행한다(행이 남으면 더 헷갈린다)."""
-    for value in (scan.raw_xml_path, scan.log_path):
-        if not value:
-            continue
+def _scan_artifact_paths(scan: ScanRun) -> list[Path]:
+    """이 스캔이 남긴 파일/폴더 경로. 삭제 전에 미리 모아 둔다 — 커밋 뒤에는 ORM 객체의
+    속성을 더 읽을 수 없기 때문이다(만료된 인스턴스)."""
+    paths = [Path(v) for v in (scan.raw_xml_path, scan.log_path) if v]
+    paths.append(_settings.scans_dir / f"scan_{scan.id}")
+    return paths
+
+
+def _remove_paths(paths: list[Path]) -> None:
+    """파일 정리. 실패해도 예외를 올리지 않는다 — DB 는 이미 커밋됐고, 여기서 실패해도
+    남는 것은 고아 파일뿐이라 되돌리는 것보다 로그를 남기고 넘어가는 편이 안전하다."""
+    for path in paths:
         try:
-            Path(value).unlink(missing_ok=True)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
         except OSError:
-            logger.warning("failed to remove scan artifact %s", value, exc_info=True)
-    out_dir = _settings.scans_dir / f"scan_{scan.id}"
-    if out_dir.is_dir():
-        try:
-            shutil.rmtree(out_dir)
-        except OSError:
-            logger.warning("failed to remove scan directory %s", out_dir, exc_info=True)
+            logger.warning("failed to remove scan artifact %s", path, exc_info=True)
 
 
 @router.get("/options")

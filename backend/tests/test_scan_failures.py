@@ -965,3 +965,56 @@ def test_auto_worker_distinguishes_requested_stop_from_nmap_failure(
     assert result.status == expected_status
     assert result.failure_code == expected_code
     assert chunker.read_state(base)["cursor"] == 0
+
+
+def test_socket_errors_in_the_engine_log_do_not_cancel_closure_candidates(
+    client, monkeypatch, tmp_path,
+):
+    """엔진 로그의 NSE/소켓 오류가 닫힘 후보를 통째로 지우면 안 된다.
+
+    실측(Windows, nmap 7.99/Npcap 1.87)에서 `ike-version` 은 `Bind to 0.0.0.0:500 failed
+    (10013)` 을 네 번 찍고도 "Nmap done" 과 rc=0 으로 끝났다 — 스크립트 소켓 하나가 실패했을
+    뿐 포트 관측은 온전했다. 그런 실행에서 닫힘 후보를 비우면 이미 사라진 서비스가 영영
+    닫히지 않아 오탐이 쌓인다. 사실은 failure_message 로 남기되 관측 권한은 지킨다."""
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    scope_key = "127.0.0.1|161|udp"
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["127.0.0.1"], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"),
+        "stages": {"tcp": {"enabled": False, "ports": ""},
+                   "udp": {"enabled": True, "ports": "161"}},
+        "scanops": {"scope_keys": [scope_key]},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["job"], "live": ["127.0.0.1"], "open_map": {}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
+        encoding="utf-8")
+    (out_dir / "engine.log").write_text(
+        "NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed (IOD#4) (10013)\n"
+        "Nmap done: 1 IP address (1 host up) scanned in 5.43 seconds\n",
+        encoding="utf-8")
+
+    seen: list[set] = []
+
+    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts):
+        seen.append(set(scope_keys))
+        scan.host_count, scan.port_count = 1, 0
+        db.flush()
+        return {}
+
+    monkeypatch.setattr(scans_api, "_commit_engine_ingest", capture)
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    # 닫힘 후보가 살아 있어야 한다 — 여기가 이번 회귀의 핵심.
+    assert seen == [{scope_key}]
+    scan = _read_scan(scan_id)
+    assert scan.status == "done"
+    # 사실 자체는 사라지지 않는다: 스크립트 결과를 다 믿지 말라는 신호로 남는다.
+    assert scan.failure_code == "nse_degraded"
+    assert "포트 결과는 온전" in scan.failure_message
