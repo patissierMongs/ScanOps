@@ -11,6 +11,19 @@ const joinCompliance = (list) =>
 // '그 포트는 보통 이거였다'는 관례일 뿐이므로, 관측값과 같은 무게로 보여주면 안 된다.
 export const isGuessedService = (finding) => finding?.identification === "추측";
 
+// 같은 '열림'이라도 syn-ack(응답을 받아 확인)과 no-response(못 받고 추정)는 증거 강도가
+// 다르다. UDP 는 응답 없는 포트가 예외가 아니라 다수라, 이 구분을 안 보여주면 추정을
+// 관측처럼 읽게 된다. 판정은 서버(observation.py)가 하고 여기서는 표시만 정한다.
+export const needsConfirmation = (finding) => Boolean(finding?.needs_confirmation);
+
+/** 상태 + 근거를 한 줄로. 근거가 확인이면 굳이 덧붙이지 않는다(모든 행에 붙으면 신호가 죽는다). */
+export function stateWithEvidence(finding) {
+  const state = finding?.state || "";
+  const evidence = finding?.state_evidence || "";
+  if (!evidence || evidence === "응답 확인") return state;
+  return `${state} (${evidence})`;
+}
+
 export function observedIdentity(finding) {
   const productVersion = [finding?.product, finding?.version].filter(Boolean).join(" ");
   return finding?.server || productVersion || "";
@@ -71,6 +84,8 @@ export const ALL_COLUMNS = [
   { key: "port", label: "포트", get: (f) => f.port, mono: true, num: true },
   { key: "proto", label: "프로토콜", get: (f) => f.proto },
   { key: "state", label: "상태", get: (f) => f.state },
+  { key: "state_evidence", label: "상태 근거", get: (f) => f.state_evidence || "" },
+  { key: "reason", label: "근거 원문", get: (f) => f.reason || "", mono: true },
   { key: "display_identity", label: "주 식별", get: (f) => primaryServiceIdentity(f) },
   { key: "server", label: "Server", get: (f) => f.server },
   { key: "service", label: "서비스", get: (f) => f.service },

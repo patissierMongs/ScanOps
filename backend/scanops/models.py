@@ -162,6 +162,20 @@ class Finding(Base):
         return ""
 
     @property
+    def state_evidence(self) -> str:
+        """이 상태를 응답으로 확인했는지, 무응답으로 추정했는지(nmap --reason 해석)."""
+        from .observation import state_evidence
+
+        return state_evidence(self.reason)
+
+    @property
+    def needs_confirmation(self) -> bool:
+        """열림 여부를 말하려면 재확인이 필요한 건인가(open|filtered 또는 무응답 추정)."""
+        from .observation import needs_confirmation
+
+        return needs_confirmation(self.state, self.reason)
+
+    @property
     def display_identity(self) -> str:
         """User-facing identity; the normalized service remains the taxonomy key."""
         from .identity import display_identity

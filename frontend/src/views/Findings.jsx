@@ -7,6 +7,7 @@ import ScanOptions from "../ui/ScanOptions.jsx";
 import {
   COLUMN_MAP, PRESETS, DEFAULT_PRESET_ID, cellValue,
   primaryServiceIdentity, secondaryServiceIdentity,
+  needsConfirmation, stateWithEvidence,
 } from "../lib/columns.js";
 import { deadlinePatchValue } from "../lib/findingPatch.js";
 import {
@@ -567,7 +568,16 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
           {finding.reopened ? <span className="tag" style={{ color: "var(--high)" }}>재발</span> : null}
           <span className="tag">{finding.category || "미분류"}</span>
           <span className="tag">{finding.identification}</span>
+          {/* 열려 있다고 확인한 게 아니라 무응답으로 추정한 건이면 그 사실을 먼저 보여 준다. */}
+          {needsConfirmation(finding)
+            ? <span className="tag" style={{ color: "var(--medium)" }}>재확인 필요</span> : null}
           {finding.dept && <span className="tag">{finding.dept}</span>}
+        </div>
+
+        {/* 관측 근거 — '이 포트가 열려 있다고 어떻게 판단했나'. 용도 근거(무엇인가)와 다른 축이다. */}
+        <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+          관측 근거: {stateWithEvidence(finding)}
+          {finding.reason ? <span className="mono"> · {finding.reason}</span> : null}
         </div>
 
         {/* 용도 근거 — '왜 열렸나/무엇인가' 추정 근거(역DNS·서비스·NSE 추출 등). 관리자 통보의 핵심. */}

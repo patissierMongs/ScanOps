@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { cellValue, PRESETS, primaryServiceIdentity } from "../src/lib/columns.js";
+import {
+  cellValue, needsConfirmation, PRESETS, primaryServiceIdentity, stateWithEvidence,
+} from "../src/lib/columns.js";
 import { deadlinePatchValue } from "../src/lib/findingPatch.js";
 import { SCAN_STATUS, scanKind, scanNotice, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
 import { splitScanTokens } from "../src/lib/scanTargets.js";
@@ -490,4 +492,32 @@ test("a completed scan's degraded-evidence note is not rendered as a failure rea
   assert.match(scans, /scanNotice\(\{/);
   assert.doesNotMatch(scans, /<b>실패 원인<\/b>/);
   assert.match(source("../src/styles.css"), /\.scan-failure-detail\.notice/);
+});
+
+test("an inferred-open port never reads on screen as a confirmed observation", () => {
+  // 같은 open 이라도 syn-ack(응답을 받아 확인)과 no-response(못 받고 추정)는 증거 강도가
+  // 전혀 다르다. UDP 는 무응답이 예외가 아니라 다수라, 이 구분이 화면에서 사라지면
+  // 사용자는 추정을 관측으로 읽는다.
+  const confirmed = { state: "open", state_evidence: "응답 확인", reason: "syn-ack" };
+  const inferred = { state: "open|filtered", state_evidence: "무응답 추정",
+                     reason: "no-response", needs_confirmation: true };
+
+  // 확인된 건에는 군더더기를 붙이지 않는다 — 모든 행에 붙으면 신호가 죽는다.
+  assert.equal(stateWithEvidence(confirmed), "open");
+  assert.equal(stateWithEvidence(inferred), "open|filtered (무응답 추정)");
+  assert.equal(needsConfirmation(confirmed), false);
+  assert.equal(needsConfirmation(inferred), true);
+
+  // reason 컬럼 이전에 인입된 행. '기록하지 않았다'와 '응답이 없었다'는 다른 사실이라
+  // 재확인을 요구하지 않는다.
+  const legacy = { state: "open", state_evidence: "미관측", reason: "" };
+  assert.equal(stateWithEvidence(legacy), "open (미관측)");
+  assert.equal(needsConfirmation(legacy), false);
+
+  // 저장만 하고 안 쓰면 이 작업의 목적이 없어진다 — 표/내보내기와 상세에 실제로 실린다.
+  assert.equal(cellValue(inferred, "state_evidence"), "무응답 추정");
+  assert.equal(cellValue(inferred, "reason"), "no-response");
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /stateWithEvidence\(finding\)/);
+  assert.match(view, /needsConfirmation\(finding\)/);
 });

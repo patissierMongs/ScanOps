@@ -68,6 +68,10 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("port", "포트", lambda f: f.port),
     ("proto", "프로토콜", lambda f: f.proto),
     ("state", "상태", lambda f: f.state),
+    # 같은 open 이라도 응답을 받아 확인한 것과 무응답으로 추정한 것은 다르다.
+    # 상태만 내보내면 받는 사람은 그 차이를 알 방법이 없다.
+    ("state_evidence", "상태 근거", lambda f: f.state_evidence),
+    ("reason", "근거 원문", lambda f: f.reason),
     ("display_identity", "표시 식별", lambda f: display_identity(
         server=f.server, product=f.product, version=f.version, service=f.service,
         identification=f.identification,

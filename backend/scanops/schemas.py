@@ -143,6 +143,9 @@ class FindingOut(BaseModel):
     port: int
     proto: str
     state: str
+    reason: str = ""              # nmap --reason 원문(syn-ack/no-response…)
+    state_evidence: str = ""      # 그 근거의 해석 — 응답 확인 / 무응답 추정 / 미관측
+    needs_confirmation: bool = False
     service: str
     product: str
     version: str
