@@ -29,6 +29,41 @@ def _is_older(candidate: datetime, reference: datetime | None) -> bool:
     return reference is not None and _as_utc(candidate) < _as_utc(reference)
 
 
+def _split_key(key: str) -> tuple[str, int, str]:
+    """`host|port|proto` 분해. 형식이 깨졌으면 매칭되지 않는 값으로 돌려준다."""
+    parts = str(key).split("|", 2)
+    if len(parts) != 3:
+        return str(key), -1, ""
+    try:
+        return parts[0], int(parts[1]), parts[2].lower()
+    except ValueError:
+        return parts[0], -1, parts[2].lower()
+
+
+def _close_row(db: Session, row, scan_id: int, closed_at) -> None:
+    row.state = "closed"
+    row.last_scan_id = scan_id
+    row.last_seen = closed_at
+    row.reopened = 0   # 다시 닫혔으므로 재발 태그 해제
+    # 마감/배정이 걸려 있던 항목이 닫힘 → 조치 완료 자동 검증
+    verified = row.status == "처리중" or row.deadline is not None
+    row.status = "정상처리"
+    detail = "포트 닫힘 — 조치 완료 자동 확인" if verified else "포트 닫힘"
+    _event(db, row.id, scan_id, "CLOSED", detail, when=closed_at)
+
+
+def _absence_for(absence_at: dict, host: str, port: int, proto: str) -> tuple[bool, object]:
+    """이 발견의 부재를 증명한 산출물이 있는가, 있다면 언제 끝났는가.
+
+    포트 단위 권한(선택 재스캔의 stage3)이 호스트 단위 권한(sweep)보다 좁으므로 먼저 본다.
+    같은 호스트라도 22 를 훑은 산출물과 443 을 훑은 산출물은 서로의 부재를 증명하지 못한다.
+    """
+    for key in ((host, port, proto), (host, proto)):
+        if key in absence_at:
+            return True, absence_at[key]
+    return False, None
+
+
 def _as_when(observed, scan_date):
     """파일이 밝힌 관측 시각 우선, 없으면 스캔 시각, 그것도 없으면 현재."""
     if isinstance(observed, datetime):
@@ -42,7 +77,8 @@ def _key(f: dict) -> str:
 
 def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[str],
            scope_keys: set[str] | None = None, scan_date: datetime | None = None,
-           absence_at: dict | None = None, *, commit: bool = True) -> dict:
+           absence_at: dict | None = None, closed_keys: set | None = None,
+           *, commit: bool = True) -> dict:
     """findings(이번 스캔의 열린 포트들)와 scanned_hosts(up 호스트)로 DB 갱신.
 
     scope_keys 가 주어지면(타겟 포트 재스캔) 닫힘 판정을 그 키(host|port|proto)로만
@@ -158,44 +194,60 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
     # None인 구형/import 경로만 기존처럼 실제 관측 host 범위를 사용한다.
     # 부재(닫힘)의 기준 시각은 개별 파일이 아니라 이 실행의 authority 완결 시각이다.
     when = scan_date or _now()
-    open_rows = []
     if scope_keys is not None:
-        keys = sorted(scope_keys)
-        for start in range(0, len(keys), 500):
-            open_rows.extend(db.query(Finding).filter(
-                Finding.state.in_(ACTIVE_FINDING_STATES),
-                Finding.finding_key.in_(keys[start:start + 500]),
-            ).all())
+        # 후보 **키**를 돌면서 판단한다. 활성 행만 훑으면 '이미 닫혀 있던 포트를 이번에도
+        # 없다고 확인했다' 는 사실이 남지 않아, 증거 XML 과 히트맵이 그 관측을 잃는다.
+        rows: dict[str, Finding] = {}
+        pending = sorted(set(scope_keys) - seen)
+        for start in range(0, len(pending), 500):
+            chunk = pending[start:start + 500]
+            for row in db.query(Finding).filter(Finding.finding_key.in_(chunk)).all():
+                rows[row.finding_key] = row
+        for key in pending:
+            host, port, proto = _split_key(key)
+            closed_at = when
+            if absence_at is not None:
+                covered, stamp = _absence_for(absence_at, host, port, proto)
+                if not covered:
+                    continue    # 이 실행의 어떤 산출물도 이 호스트·포트·프로토콜을 훑지 않았다
+                # 훑기는 했는데 시각을 밝히지 않은 산출물(옛 XML)은 실행 시각으로 갈음한다.
+                # '커버하지 않았다' 와 '커버했지만 시각을 모른다' 는 다른 사실이다.
+                closed_at = stamp or when
+            row = rows.get(key)
+            if row is not None and _is_older(closed_at, row.last_seen):
+                continue        # 이 산출물보다 나중에 관측된 사실이 있다 - 우리 증거가 낡았다
+            # 여기까지 왔으면 이 실행이 그 포트의 부재를 권위 있게 관측한 것이다.
+            # 상태가 이미 닫힘이어도 '이번에도 없었다' 는 관측이므로 증거에는 남는다.
+            if closed_keys is not None:
+                closed_keys.add(key)
+            if row is None or row.state not in ACTIVE_FINDING_STATES:
+                continue
+            _close_row(db, row, scan_id, closed_at)
+            counts["closed"] += 1
     elif scanned_hosts:
         hosts = sorted(scanned_hosts)
+        open_rows = []
         for start in range(0, len(hosts), 500):
             open_rows.extend(db.query(Finding).filter(
                 Finding.state.in_(ACTIVE_FINDING_STATES),
                 Finding.host_ip.in_(hosts[start:start + 500]),
             ).all())
-    for row in open_rows:
-        if row.finding_key in seen:
-            continue
-        closed_at = when
-        if absence_at is not None:
-            key = (row.host_ip, (row.proto or "").lower())
-            if key not in absence_at:
-                continue        # 이 실행의 어떤 산출물도 이 호스트·프로토콜을 훑지 않았다
-            # 훑기는 했는데 시각을 밝히지 않은 산출물(옛 XML)은 실행 시각으로 갈음한다.
-            # '커버하지 않았다' 와 '커버했지만 시각을 모른다' 는 다른 사실이다.
-            closed_at = absence_at[key] or when
-        if _is_older(closed_at, row.last_seen):
-            continue
-        row.state = "closed"
-        row.last_scan_id = scan_id
-        row.last_seen = closed_at
-        row.reopened = 0   # 다시 닫혔으므로 재발 태그 해제
-        # 마감/배정이 걸려 있던 항목이 닫힘 → 조치 완료 자동 검증
-        verified = row.status == "처리중" or row.deadline is not None
-        row.status = "정상처리"
-        detail = "포트 닫힘 — 조치 완료 자동 확인" if verified else "포트 닫힘"
-        _event(db, row.id, scan_id, "CLOSED", detail, when=closed_at)
-        counts["closed"] += 1
+        for row in open_rows:
+            if row.finding_key in seen:
+                continue
+            closed_at = when
+            if absence_at is not None:
+                covered, stamp = _absence_for(
+                    absence_at, row.host_ip, row.port, (row.proto or "").lower())
+                if not covered:
+                    continue
+                closed_at = stamp or when
+            if _is_older(closed_at, row.last_seen):
+                continue
+            if closed_keys is not None:
+                closed_keys.add(row.finding_key)
+            _close_row(db, row, scan_id, closed_at)
+            counts["closed"] += 1
 
     if commit:
         db.commit()

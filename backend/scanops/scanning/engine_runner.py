@@ -410,13 +410,18 @@ def absence_times(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dic
                 port, proto = int(unit["port"]), str(unit.get("proto") or "tcp").lower()
             except (KeyError, TypeError, ValueError):
                 continue
+            # 선택 재스캔은 포트마다 별도 산출물을 만든다. 22 를 훑은 XML 은 443 의 부재를
+            # 증명하지 못하므로 포트까지 키에 넣는다 - (ip, proto) 로 뭉치면 늦게 끝난
+            # 포트의 시각을 다른 포트가 빌려 쓴다.
             paths = [path for path in _stage3_expected(out, ip, f"{proto}{port}", confirm)
                      if path.exists()]
             if not paths:
                 continue
             stamps = [s for s in (observed_at(path.read_bytes()) for path in paths)
                       if s is not None]
-            times[(ip, proto)] = max(stamps) if stamps else None
+            times[(ip, port, proto)] = max(stamps) if stamps else None
+        # targets_ports 는 한 XML 이 그 호스트의 여러 포트를 실제로 함께 훑으므로 산출물
+        # 범위가 곧 (ip, tcp) 다. 여기서까지 포트로 쪼개면 있지도 않은 구분을 만든다.
         for ip in (spec.get("targets_ports") or {}):
             paths = [path for path in _stage3_expected(out, str(ip), "tcp", confirm)
                      if path.exists()]
@@ -782,7 +787,7 @@ def authority_observed_at(out_dir, spec: dict, force_scanned_hosts: bool = False
 
 def ingest_results(db, scan, out_dir, scope_keys: set | None = None,
                    force_scanned_hosts: bool = False, scan_date=None, spec: dict | None = None,
-                   *, commit: bool = True) -> dict:
+                   closed_keys: set | None = None, *, commit: bool = True) -> dict:
     """단계별 XML → finding 인입. 명시적 scope_keys는 완료 스캔의 closure 권한.
 
     ``spec`` 은 어느 산출물이 어떤 호스트를 훑었는지 되짚는 데 쓴다(absence_times). 없으면
@@ -805,6 +810,7 @@ def ingest_results(db, scan, out_dir, scope_keys: set | None = None,
         # 넘겨 '아무것도 커버하지 않았다' 로 읽히게 하는 대신, 키별 정보 없음(None)으로 둔다.
         absence_at=(absence_times(out_dir, spec, force_scanned_hosts)
                     if spec is not None else None),
+        closed_keys=closed_keys,
         commit=False,
     )
     from ..api.assets import match_assets

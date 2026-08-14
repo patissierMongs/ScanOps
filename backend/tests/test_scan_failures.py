@@ -1787,3 +1787,154 @@ def test_ingest_never_closes_a_key_no_artifact_covered():
         assert rows["10.3.3.1|53|udp"] == "open", "훑지 않은 프로토콜을 닫으면 미탐이다"
     finally:
         db.close()
+
+
+def test_selected_rescan_keeps_time_authority_per_port(client, monkeypatch, tmp_path):
+    """선택 재스캔은 포트마다 별도 산출물이다 - 443 의 시각을 22 가 빌려 쓰면 안 된다.
+
+        00:00  A:22 의 stage3 가 비어 있다(그 포트가 닫혔다)
+        01:00  다른 스캔이 A:22 open 을 관측했다
+        02:00  A:443 의 stage3 가 비어 있다
+
+    두 unit 을 (ip, proto) 하나로 뭉치면 02:00 권한이 22 에도 적용돼 01:00 관측을 닫는다.
+    443 산출물은 22 를 관측한 적이 없다. 일반 배치에서 막은 미탐이 포트 축에서 재발한다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    at22 = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    other_at = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+    at443 = datetime(2026, 8, 1, 2, 0, tzinfo=timezone.utc)
+
+    db = SessionLocal()
+    try:
+        other = ScanRun(name="1시 스캔", status="done")
+        db.add(other)
+        db.commit()
+        other_id = other.id
+        db.add(Finding(
+            finding_key="10.4.4.4|22|tcp", host_ip="10.4.4.4", port=22, proto="tcp",
+            state="open", service="ssh", first_scan_id=other_id, last_scan_id=other_id,
+            first_seen=other_at, last_seen=other_at,
+        ))
+        db.add(Finding(
+            finding_key="10.4.4.4|443|tcp", host_ip="10.4.4.4", port=443, proto="tcp",
+            state="open", service="https", first_scan_id=other_id, last_scan_id=other_id,
+            first_seen=at22, last_seen=at22,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["10.4.4.4"], "exclude": [], "out_dir": str(tmp_path / "ignored"),
+        "rescan_units": [{"ip": "10.4.4.4", "port": 22, "proto": "tcp"},
+                         {"ip": "10.4.4.4", "port": 443, "proto": "tcp"}],
+        "stages": {"service": {"enabled": True, "confirm": False}},
+        "scanops": {"scope_keys": ["10.4.4.4|22|tcp", "10.4.4.4|443|tcp"]},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
+        encoding="utf-8")
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["job"], "live": ["10.4.4.4"], "open_map": {}, "stop": False,
+    }), encoding="utf-8")
+    # 포트마다 별도 authority XML — 각자 자기 시각을 밝힌다(둘 다 열린 포트 없음).
+    for port, when in ((22, at22), (443, at443)):
+        (out_dir / f"stage3-10_4_4_4-tcp{port}.xml").write_text(
+            f'<?xml version="1.0"?><nmaprun start="{int(when.timestamp()) - 60}">'
+            f'<runstats><finished time="{int(when.timestamp())}" exit="success"/>'
+            '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    db = SessionLocal()
+    try:
+        ssh = db.query(Finding).filter(Finding.finding_key == "10.4.4.4|22|tcp").one()
+        assert ssh.state == "open", "443 의 02:00 을 빌려 22 를 닫으면 미탐이다"
+        assert ssh.last_scan_id == other_id
+        assert ssh.last_seen.replace(tzinfo=timezone.utc) == other_at
+        assert not [e for e in db.query(FindingEvent).filter(
+            FindingEvent.finding_id == ssh.id).all() if e.type == "CLOSED"]
+
+        https = db.query(Finding).filter(Finding.finding_key == "10.4.4.4|443|tcp").one()
+        assert https.state == "closed", "자기 산출물이 증명한 443 은 닫혀야 한다"
+        assert https.last_seen.replace(tzinfo=timezone.utc) == at443
+    finally:
+        db.close()
+
+    # 증거 XML 도 DB 와 같은 말을 해야 한다.
+    merged = (scans_api._settings.scans_dir / f"scan_{scan_id}.xml").read_text(encoding="utf-8")
+    assert 'portid="443"' in merged and 'portid="22"' not in merged
+
+
+def test_the_merged_evidence_records_only_what_the_run_actually_closed(client, monkeypatch, tmp_path):
+    """병합 XML 이 DB 와 반대로 증언하면 안 된다.
+
+    예전에는 scope_keys 전체를 '닫힘' 으로 미리 써 버렸다. 인입이 시각·커버리지를 근거로
+    살려 둔 발견까지 증거 파일에는 닫힘으로 남아, 나중에 그 파일을 읽는 사람은 DB 와
+    정반대의 사실을 본다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    swept_at = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    newer_at = datetime(2026, 8, 2, 0, 0, tzinfo=timezone.utc)
+
+    db = SessionLocal()
+    try:
+        other = ScanRun(name="다음날 스캔", status="done")
+        db.add(other)
+        db.commit()
+        # 살아남아야 하는 발견(스윕보다 나중에 관측됨)
+        db.add(Finding(
+            finding_key="10.5.6.1|443|tcp", host_ip="10.5.6.1", port=443, proto="tcp",
+            state="open", service="https", first_scan_id=other.id, last_scan_id=other.id,
+            first_seen=newer_at, last_seen=newer_at,
+        ))
+        # 닫혀야 하는 발견
+        db.add(Finding(
+            finding_key="10.5.6.2|443|tcp", host_ip="10.5.6.2", port=443, proto="tcp",
+            state="open", service="https", first_scan_id=other.id, last_scan_id=other.id,
+            first_seen=swept_at, last_seen=swept_at,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["10.5.6.1", "10.5.6.2"], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"), "batch_size": 256,
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "443"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": False}},
+        "scanops": {"scope_keys": ["10.5.6.1|443|tcp", "10.5.6.2|443|tcp"]},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["tcp", "job"], "live": ["10.5.6.1", "10.5.6.2"],
+        "open_map": {}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 2}}) + "\n",
+        encoding="utf-8")
+    (out_dir / "stage-tcp-b0.xml").write_text(
+        _sweep_xml("10.5.6.2", finished_epoch=int(swept_at.timestamp())), encoding="utf-8")
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    db = SessionLocal()
+    try:
+        kept = db.query(Finding).filter(Finding.finding_key == "10.5.6.1|443|tcp").one()
+        gone = db.query(Finding).filter(Finding.finding_key == "10.5.6.2|443|tcp").one()
+        assert kept.state == "open" and gone.state == "closed"
+    finally:
+        db.close()
+
+    merged = (scans_api._settings.scans_dir / f"scan_{scan_id}.xml").read_text(encoding="utf-8")
+    assert "10.5.6.2" in merged, "실제로 닫은 것은 증거에 남는다"
+    # 살려 둔 발견을 닫힘으로 적으면 DB 와 정반대로 증언하는 것이다.
+    body = merged.split('addr="10.5.6.1"')
+    assert len(body) == 1 or 'state="closed"' not in body[1].split("</host>")[0]

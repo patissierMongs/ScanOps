@@ -637,13 +637,18 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
             as_of=scan_date,
         )
     )
-    if raw_xml_path is not None:
-        _write_merged_xml(db, raw_xml_path, enriched, scanned_hosts, scope_keys, scan_date)
-        scan.raw_xml_path = str(raw_xml_path)
+    # 인입을 먼저 하고 **실제로 닫힌 키만** 증거 XML 에 적는다. 후보 전체를 미리 닫힘으로
+    # 쓰면, 인입이 시각·커버리지를 근거로 살려 둔 발견까지 증거 파일에는 닫힘으로 남아
+    # DB 와 정반대로 증언한다.
+    closed_keys: set[str] = set()
     counts = ingest(
         db, scan.id, enriched, scanned_hosts, scope_keys=scope_keys,
-        scan_date=scan_date, absence_at=absence_at, commit=False,
+        scan_date=scan_date, absence_at=absence_at, closed_keys=closed_keys, commit=False,
     )
+    if raw_xml_path is not None:
+        _write_merged_xml(db, raw_xml_path, enriched, scanned_hosts,
+                          {_finding_key(f) for f in enriched} | closed_keys, scan_date)
+        scan.raw_xml_path = str(raw_xml_path)
     from .assets import match_assets
     match_assets(db, commit=False)
     # '호스트' 는 이 스캔이 **관측한** 호스트 수다. 발견이 있는 호스트만 세면 열린 포트가
@@ -1177,9 +1182,6 @@ def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
     findings, scanned_hosts = engine_runner.collect_results(
         out_dir, scope_keys=scope_keys, force_scanned_hosts=force_scanned_hosts,
     )
-    # Explicit scope_keys are the completed scan's authority, independent of discovery.
-    # They were built from effective targets, so excluded hosts are absent by construction.
-    snapshot_scope = set(scope_keys)
     merged_path = _settings.scans_dir / f"scan_{scan.id}.xml"
     # 부재(닫힘)를 주장할 수 있는 시점은 authority sweep 이 **끝난** 시각이다. 시작 시각을
     # 쓰면 /24 처럼 몇 시간 도는 스캔에서 그 사이 다른 스캔이 남긴 결과가 더 새것으로
@@ -1191,15 +1193,23 @@ def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
             out_dir, saved_spec, force_scanned_hosts)
     if snapshot_date is None:
         snapshot_date = _scan_started_at(scan)
-    _write_merged_xml(
-        db, merged_path, findings, scanned_hosts, snapshot_scope, scan_date=snapshot_date,
-    )
-    scan.raw_xml_path = str(merged_path)
-    return engine_runner.ingest_results(
+    # 인입을 **먼저** 하고, 실제로 닫힌 키만 증거 XML 에 적는다. 예전에는 scope_keys 전체를
+    # '닫힘'으로 미리 써 버려서, 인입이 시각·커버리지를 근거로 살려 둔 발견까지 증거 파일에는
+    # 닫힘으로 남았다 - DB 와 증거가 정반대로 증언한다. 닫힌 행도 그대로 남아 있으므로
+    # 순서를 바꿔도 서비스명 등 표시값은 그대로 읽힌다.
+    closed_keys: set[str] = set()
+    counts = engine_runner.ingest_results(
         db, scan, out_dir, scope_keys=scope_keys,
         force_scanned_hosts=force_scanned_hosts, scan_date=snapshot_date,
-        spec=saved_spec, commit=False,
+        spec=saved_spec, closed_keys=closed_keys, commit=False,
     )
+    _write_merged_xml(
+        db, merged_path, findings, scanned_hosts,
+        {_finding_key(f) for f in findings} | closed_keys,
+        scan_date=snapshot_date,
+    )
+    scan.raw_xml_path = str(merged_path)
+    return counts
 
 
 def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
