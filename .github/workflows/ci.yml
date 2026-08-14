@@ -9,6 +9,10 @@ jobs:
   backend:
     name: backend (pytest)
     runs-on: ubuntu-latest
+    # 이 잡은 nmap 을 설치하므로 실제 프로세스를 띄우는 테스트가 있다. 상한이 없으면 한 번
+    # 멈춘 실행이 기본값인 6시간을 통째로 잡아먹고, 무엇보다 '실패'가 아니라 '진행 중'으로
+    # 보여서 원인을 찾을 로그조차 받을 수 없다. 로컬 전체 실행은 3분이 안 걸린다.
+    timeout-minutes: 15
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
