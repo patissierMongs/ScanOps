@@ -3099,3 +3099,73 @@ def test_a_complete_xml_is_left_in_the_results_folder(tmp_path, monkeypatch):
     assert plan["runs"][-1]["clean"] is True
     assert [p.name for p in tmp_path.glob("*.xml")] == ["scan.10.0.0.1.udp_identify.xml"]
     assert not (tmp_path / scanner.INTERRUPTED_DIR_NAME).exists()
+
+
+def test_failed_udp_identify_is_retried_once_with_the_select_nsock_engine(monkeypatch, tmp_path):
+    """UDP 식별이 죽으면 다른 nsock 엔진으로 한 번만 다시 시도한다.
+
+    nsock 은 epoll → kqueue → poll → iocp → select 순으로 고르므로 Windows 기본은 poll 이다.
+    nmap#3138 의 poll 결함은 7.98 에서 고쳐졌지만, 같은 실패가 또 나면 그 수정이 불완전하거나
+    다른 경로라는 뜻이라 유지관리자가 제시한 우회책을 그대로 쓴다. poll 을 명시하는 것은
+    기본값 재지정이라 아무것도 바꾸지 않는다.
+    """
+    scanner = _load_scanner()
+    plan = {
+        "tool": "scanops_scanner", "nmap": "nmap", "name": "scan", "output_dir": str(tmp_path),
+        "workflow": "auto", "batches": [["10.0.0.1"]], "cursor": 0, "runs": [],
+        "stats_every": "10s", "host_timeout": "", "exclude": [], "raw_targets": ["10.0.0.1"],
+        "scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "",
+        "batch_size": 0, "max_hosts": 65536,
+    }
+    base = scanner.output_base(plan, 0, "udp_identify")
+    calls = []
+
+    def fake_process(cmd, problems):
+        calls.append(list(cmd))
+        if "--nsock-engine" not in cmd:
+            return 1                       # 기본 엔진에서 죽는다 — XML 도 남기지 않는다
+        Path(str(base) + ".xml").write_text(
+            '<?xml version="1.0"?><nmaprun><runstats>'
+            '<finished exit="success"/><hosts up="1" down="0" total="1"/>'
+            "</runstats></nmaprun>", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(scanner, "run_nmap_process", fake_process)
+    rc = scanner.run_nmap_stage(plan, 0, tmp_path / "scan.state.json", "udp_identify")
+
+    assert rc == 0, "재시도가 성공했으면 그 결과를 채택해야 한다"
+    assert len(calls) == 2, "재시도는 정확히 한 번이다"
+    assert "--nsock-engine" not in calls[0]
+    assert calls[1][calls[1].index("--nsock-engine") + 1] == scanner.UDP_RETRY_ENGINE
+    run = plan["runs"][-1]
+    # 어떤 엔진으로 성공했는지가 남아야 기본 엔진이 죽는 환경인지 추적할 수 있다.
+    assert run["nsock_engine_retry"] == scanner.UDP_RETRY_ENGINE
+    assert run["clean"] is True
+
+
+def test_a_healthy_udp_identify_is_never_retried(monkeypatch, tmp_path):
+    """반대 경계 — 정상 실행에 재시도를 붙이면 UDP 단계 비용이 두 배가 된다."""
+    scanner = _load_scanner()
+    plan = {
+        "tool": "scanops_scanner", "nmap": "nmap", "name": "scan", "output_dir": str(tmp_path),
+        "workflow": "auto", "batches": [["10.0.0.1"]], "cursor": 0, "runs": [],
+        "stats_every": "10s", "host_timeout": "", "exclude": [], "raw_targets": ["10.0.0.1"],
+        "scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "",
+        "batch_size": 0, "max_hosts": 65536,
+    }
+    base = scanner.output_base(plan, 0, "udp_identify")
+    calls = []
+
+    def fake_process(cmd, problems):
+        calls.append(list(cmd))
+        Path(str(base) + ".xml").write_text(
+            '<?xml version="1.0"?><nmaprun><runstats>'
+            '<finished exit="success"/><hosts up="1" down="0" total="1"/>'
+            "</runstats></nmaprun>", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(scanner, "run_nmap_process", fake_process)
+    scanner.run_nmap_stage(plan, 0, tmp_path / "scan.state.json", "udp_identify")
+
+    assert len(calls) == 1
+    assert plan["runs"][-1]["nsock_engine_retry"] == ""
