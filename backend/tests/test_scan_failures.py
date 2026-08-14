@@ -5,6 +5,7 @@ import json
 import shutil
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1336,3 +1337,146 @@ def test_saved_stage_scope_reads_the_bounds_the_engine_actually_scanned():
     assert _saved_stage_scope(spec({"udp": {"enabled": True, "ports": ""}}), "udp") == set()
     # stages 자체가 없는 spec 도 죽지 않는다.
     assert _saved_stage_scope({}, "tcp") == set()
+
+
+def test_an_old_completed_result_never_closes_a_port_observed_after_it(
+    client, monkeypatch, tmp_path,
+):
+    """며칠 전 끝난 실행을 지금 마감해도, 그 뒤에 새로 관측된 포트를 닫으면 안 된다.
+
+    구형 spec 은 닫힘 후보 목록이 없어 마감 시점의 현재 DB 에서 후보를 재구성한다. 그러면
+    **그 스캔이 끝난 뒤에** 다른 스캔이 새로 관측한 발견까지 후보에 들어가고, 과거의 부재를
+    근거로 최신 관측이 닫힌다 - 시간이 거꾸로 흐른다.
+
+    `ingest()` 에는 이미 out-of-order 방어(`_is_older`)가 있지만 엔진 경로가 `scan_date` 를
+    넘기지 않아 `when` 이 '지금'이 되면서 한 번도 발동하지 않았다. 병합 XML 은 이미
+    `scan.started_at` 을 쓰고 있어서 DB 와 증거 파일의 시각이 서로 어긋나기도 했다.
+
+    두 축을 다 고정한다: DB 상태·last_scan_id·last_seen·CLOSED 이벤트, 그리고 병합 XML.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    ran_at = datetime(2026, 8, 1, 3, 0, tzinfo=timezone.utc)
+    observed_later = ran_at + timedelta(days=1)
+    key = "10.9.9.9|443|tcp"
+
+    db = SessionLocal()
+    try:
+        newer = ScanRun(name="8월 2일 정상 스캔", status="done")
+        db.add(newer)
+        db.commit()
+        newer_id = newer.id
+        db.add(Finding(
+            finding_key=key, host_ip="10.9.9.9", port=443, proto="tcp",
+            state="open", service="https", first_scan_id=newer_id, last_scan_id=newer_id,
+            first_seen=observed_later, last_seen=observed_later,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["10.9.9.9"], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"),
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "443"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": False}},
+    })
+    db = SessionLocal()
+    try:
+        stale = db.get(ScanRun, scan_id)
+        stale.name = "8월 1일에 끝난 구형 실행"
+        stale.started_at = ran_at
+        db.commit()
+    finally:
+        db.close()
+
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["tcp", "job"], "live": ["10.9.9.9"], "open_map": {}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
+        encoding="utf-8")
+    # 8월 1일에는 443 이 닫혀 있었다. 그 사실이 8월 2일 관측을 뒤집어서는 안 된다.
+    (out_dir / "stage-tcp-b0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
+
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    assert _read_scan(scan_id).status == "done"
+    db = SessionLocal()
+    try:
+        row = db.query(Finding).filter(Finding.finding_key == key).one()
+        assert row.state == "open", "과거 결과가 더 새로운 관측을 닫으면 안 된다"
+        assert row.status != "정상처리"
+        assert row.last_scan_id == newer_id, "더 새로운 관측의 출처가 과거 스캔으로 바뀌면 안 된다"
+        assert row.last_seen.replace(tzinfo=timezone.utc) == observed_later
+        events = db.query(FindingEvent).filter(FindingEvent.finding_id == row.id).all()
+        assert not [e for e in events if e.kind == "CLOSED"], "audit chronology 손상"
+    finally:
+        db.close()
+
+    # 증거 파일에도 닫힘으로 남으면 안 된다 - DB 만 지키면 감사 산출물이 반대로 말한다.
+    merged = (scans_api._settings.scans_dir / f"scan_{scan_id}.xml").read_text(encoding="utf-8")
+    assert 'portid="443"' not in merged or 'state="closed"' not in merged
+
+
+def test_a_backdated_upload_does_not_record_a_newer_port_as_closed(client, monkeypatch, tmp_path):
+    """지난 날짜의 XML 을 오늘 올려도, 그 뒤에 관측된 포트를 증거 파일에 닫힘으로 쓰면 안 된다.
+
+    가져오기는 파일 안의 시각이 곧 관측 시각이라, 과거 XML 을 올리는 것이 정상 경로다.
+    `ingest()` 는 `_is_older` 로 DB 를 지키지만, 닫힘 후보 집합은 병합 XML 의 closed 목록에도
+    그대로 쓰인다. 후보에서 잘라내지 않으면 DB 는 열림인데 감사 산출물은 닫힘이라고 말한다 -
+    한쪽만 지키면 둘이 반대로 증언한다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    scanned_at = datetime(2026, 8, 1, 3, 0, tzinfo=timezone.utc)
+    observed_later = scanned_at + timedelta(days=1)
+    key = "10.8.8.8|8443|tcp"
+
+    db = SessionLocal()
+    try:
+        newer = ScanRun(name="나중 관측", status="done")
+        db.add(newer)
+        db.commit()
+        newer_id = newer.id
+        db.add(Finding(
+            finding_key=key, host_ip="10.8.8.8", port=8443, proto="tcp",
+            state="open", service="https", first_scan_id=newer_id, last_scan_id=newer_id,
+            first_seen=observed_later, last_seen=observed_later,
+        ))
+        target = ScanRun(name="과거 XML 가져오기", status="running")
+        db.add(target)
+        db.commit()
+        target_id = target.id
+    finally:
+        db.close()
+
+    raw_xml_path = scans_api._settings.scans_dir / f"scan_{target_id}.xml"
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, target_id)
+        # 8월 1일 XML 은 8443 을 보지 못했다. 그 부재는 8월 2일 관측을 뒤집지 못한다.
+        scans_api._commit_ingest(
+            db, scan, [], {"10.8.8.8"}, {8443}, set(),
+            scan_date=scanned_at, raw_xml_path=raw_xml_path,
+        )
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        row = db.query(Finding).filter(Finding.finding_key == key).one()
+        assert row.state == "open", "과거 XML 이 더 새로운 관측을 닫으면 안 된다"
+        assert row.last_scan_id == newer_id
+    finally:
+        db.close()
+
+    merged = raw_xml_path.read_text(encoding="utf-8")
+    assert 'portid="8443"' not in merged, "DB 는 열림인데 증거 파일이 닫힘이라 말하면 안 된다"

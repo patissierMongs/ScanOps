@@ -427,8 +427,29 @@ def _finding_key(f: dict) -> str:
     return f"{f['host_ip']}|{f['port']}|{f['proto']}"
 
 
+def _observed_after(last_seen: datetime | None, as_of: datetime) -> bool:
+    """이 발견이 ``as_of`` 보다 나중에 관측됐는가. 시각을 모르면 False(기존 판정 유지).
+
+    SQLite 는 UTC DateTime 을 tzinfo 없이 돌려주므로 비교 전에 UTC 로 맞춘다 - 안 맞추면
+    naive/aware 비교가 TypeError 로 인입 전체를 죽인다.
+    """
+    if last_seen is None:
+        return False
+    seen = last_seen if last_seen.tzinfo else last_seen.replace(tzinfo=timezone.utc)
+    moment = as_of if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
+    return seen > moment
+
+
 def _auto_scope_keys(db: Session, scanned_hosts: set[str], findings: list[dict],
-                     tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set) -> set[str]:
+                     tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set,
+                     as_of: datetime | None = None) -> set[str]:
+    """관측 범위 안의 닫힘 후보. ``as_of`` 는 이 결과가 관측된 시각이다.
+
+    그보다 **나중에** 관측된 발견은 후보가 아니다. 이 결과는 그때 그 포트가 없었다고 말할
+    뿐, 그 뒤에 열린 것에 대해서는 아무 말도 하지 않는다. ingest() 는 같은 판단을
+    `_is_older` 로 하지만, 후보 집합은 병합 XML 의 closed 목록에도 그대로 쓰이므로 여기서
+    빼지 않으면 DB 는 지켜도 증거 파일이 반대로 말한다.
+    """
     keys = {_finding_key(f) for f in findings}
     if not scanned_hosts:
         return keys
@@ -438,6 +459,8 @@ def _auto_scope_keys(db: Session, scanned_hosts: set[str], findings: list[dict],
         rows.extend(db.query(Finding).filter(
             Finding.state.in_(ACTIVE_FINDING_STATES), Finding.host_ip.in_(hosts[start:start + 500])
         ).all())
+    if as_of is not None:
+        rows = [row for row in rows if not _observed_after(row.last_seen, as_of)]
     for row in rows:
         proto = (row.proto or "").lower()
         if proto == "tcp" and (tcp_scope is None or row.port in tcp_scope):
@@ -605,6 +628,10 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
             enriched,
             tcp_scope,
             udp_scope,
+            # 가져온 XML 은 파일 안의 시각이 곧 관측 시각이라, 지난 날짜의 XML 을 오늘 올리는
+            # 일이 정상 경로다. ingest() 는 _is_older 로 그 뒤 관측을 지키지만 후보 집합은
+            # 병합 XML 의 closed 목록에도 쓰이므로 여기서도 잘라야 둘이 같은 말을 한다.
+            as_of=scan_date,
         )
     )
     if raw_xml_path is not None:
@@ -1115,7 +1142,7 @@ def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
     scan.raw_xml_path = str(merged_path)
     return engine_runner.ingest_results(
         db, scan, out_dir, scope_keys=scope_keys,
-        force_scanned_hosts=force_scanned_hosts, commit=False,
+        force_scanned_hosts=force_scanned_hosts, scan_date=snapshot_date, commit=False,
     )
 
 
@@ -1215,12 +1242,16 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
                 # 여기서 None 을 그대로 흘려보내면 인입이 host 단위로 닫아, 스캔하지도
                 # 않은 포트와 비활성 프로토콜까지 '닫힘 + 정상처리'가 된다.
                 # 호스트 축은 기존과 같이 실제 관측한 호스트로만 한정한다.
+                # 후보를 **마감 시점의 현재 DB** 에서 만들므로, 그 스캔이 끝난 뒤에 새로
+                # 관측된 발견까지 딸려 들어온다. 이 결과는 그때 그 포트가 없었다고 말할 뿐
+                # 그 뒤에 열린 것에 대해서는 아무 말도 하지 않는다 - 실행 시각으로 잘라낸다.
                 scope_keys = _auto_scope_keys(
                     db,
                     engine_runner.observed_hosts(out_dir, saved_spec, force_scanned_hosts),
                     [],
                     _saved_stage_scope(saved_spec, "tcp"),
                     _saved_stage_scope(saved_spec, "udp"),
+                    as_of=scan.started_at,
                 )
             closing = (set() if unfinished
                        else engine_runner.observed_scope(

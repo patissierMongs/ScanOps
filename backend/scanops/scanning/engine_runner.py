@@ -642,15 +642,23 @@ def collect_results(out_dir, scope_keys: set | None = None,
 
 
 def ingest_results(db, scan, out_dir, scope_keys: set | None = None,
-                   force_scanned_hosts: bool = False, *, commit: bool = True) -> dict:
-    """단계별 XML → finding 인입. 명시적 scope_keys는 완료 스캔의 closure 권한."""
+                   force_scanned_hosts: bool = False, scan_date=None,
+                   *, commit: bool = True) -> dict:
+    """단계별 XML → finding 인입. 명시적 scope_keys는 완료 스캔의 closure 권한.
+
+    ``scan_date`` 는 이 결과가 **언제 관측된 것인가**다. 며칠 전 끝난 실행을 지금 마감하는
+    경로(finalize/resume)에서 이걸 넘기지 않으면 인입 시각이 '지금'이 되어, ingest() 의
+    out-of-order 방어(_is_older)가 한 번도 발동하지 않는다. 그러면 그 스캔이 끝난 뒤에
+    새로 관측된 포트가 과거의 부재를 근거로 닫힌다 - 시간이 거꾸로 흐른다.
+    """
     findings, scanned = collect_results(
         out_dir, scope_keys=scope_keys, force_scanned_hosts=force_scanned_hosts,
     )
 
     enriched = taxonomy.enrich_all(db, findings)
     counts = ingest(
-        db, scan.id, enriched, scanned, scope_keys=scope_keys, commit=False,
+        db, scan.id, enriched, scanned, scope_keys=scope_keys,
+        scan_date=scan_date, commit=False,
     )
     from ..api.assets import match_assets
     match_assets(db, commit=False)
