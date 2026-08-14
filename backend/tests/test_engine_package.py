@@ -2240,3 +2240,40 @@ def test_audit_upload_host_extraction_matches_production_up_hosts(tmp_path):
     assert set(state["live"]) == up_hosts(xml.encode()), "production 계약과 같아야 한다"
     assert audit_closures._upload_covers(state, "10.0.0.1", 22, "tcp") is False
     assert audit_closures._upload_covers(state, "10.0.0.2", 22, "tcp") is True
+
+
+def test_closure_audit_bounds_a_legacy_scan_by_the_ports_it_actually_scanned(tmp_path):
+    """구형 spec(닫힘 후보 목록 없음)의 판정은 서버 인입과 같은 경계를 써야 한다.
+
+    `scanops.scope_keys` 가 없는 실행은 stages 의 enabled·ports 가 유일한 범위 근거다.
+    서버(api/scans._saved_stage_scope)도 같은 값으로 닫힘 후보를 세운다 - 두 쪽이 어긋나면
+    감사 결과가 운영 동작을 설명하지 못한다.
+
+    그리고 '범위를 모른다'를 '범위 안'으로 읽어서는 안 된다. _ports 의 None 은 전 포트가
+    아니라 해석 실패이고(전 범위는 실제 집합으로 돌아온다), 그것을 확인됨으로 세면 이
+    스크립트가 잡아내려는 오류를 스스로 저지르는 셈이다.
+    """
+    import audit_closures
+
+    state = {"live": ["10.0.0.1"]}
+    bounded = {"stages": {"discovery": {"mode": "sn"},
+                          "tcp": {"enabled": True, "ports": "443"},
+                          "udp": {"enabled": False, "ports": "53"}},
+               "targets": ["10.0.0.1"]}
+    # 스캔한 포트만 '범위 안'이다.
+    assert audit_closures._covers(bounded, state, "10.0.0.1", 443, "tcp") is True
+    assert audit_closures._covers(bounded, state, "10.0.0.1", 22, "tcp") is False
+    assert audit_closures._covers(bounded, state, "10.0.0.1", 53, "udp") is False
+
+    # 전 포트 스캔은 그 프로토콜 전체에 권한이 있다 - 과잉 보수로 넘어가면 안 된다.
+    full = {"stages": {"discovery": {"mode": "sn"},
+                       "tcp": {"enabled": True, "ports": "1-65535"},
+                       "udp": {"enabled": False, "ports": ""}},
+            "targets": ["10.0.0.1"]}
+    assert audit_closures._covers(full, state, "10.0.0.1", 8443, "tcp") is True
+
+    # 범위를 해석할 수 없으면 '확인 불가'다. True 도 False 도 아니다.
+    unknown = {"stages": {"discovery": {"mode": "sn"},
+                          "tcp": {"enabled": True, "ports": ""}},
+               "targets": ["10.0.0.1"]}
+    assert audit_closures._covers(unknown, state, "10.0.0.1", 443, "tcp") is None

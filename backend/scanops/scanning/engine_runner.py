@@ -387,10 +387,11 @@ def observed_scope(scope_keys: set | None, out_dir, spec: dict,
                    force_scanned_hosts: bool = False) -> set | None:
     """닫힘 후보 중 이 실행이 실제로 관측한 호스트의 것만 남긴다.
 
-    ``None`` 은 '후보 없음'이 아니라 **구형 spec 의 host-wide 닫힘**이라는 뜻이므로 그대로
-    돌려준다(_commit_engine_ingest 가 그 의미로 분기한다). 그 경로는 이미 산출물에서 뽑은
-    scanned_hosts 로 범위를 세우므로 관측 기반이다 - 여기서 빈 집합으로 바꾸면 인입이 결과를
-    통째로 버린다. None 과 set() 을 같은 것으로 다루면 안 된다.
+    ``None`` 은 '후보 없음'이 아니라 **닫힘 후보 목록이 없는 구형 spec** 이라는 뜻이므로
+    빈 집합으로 바꾸지 않고 그대로 돌려준다. 운영 경로에서는 워커가 그 전에 stages 의
+    포트/프로토콜 경계로 후보를 세워 명시적 집합으로 만들어 넘기므로 여기 None 이 오지
+    않는다 - 이 분기는 그 순서가 깨졌을 때 실행 결과를 통째로 잃지 않기 위한 방어다.
+    None 과 set() 을 같은 것으로 다루면 안 된다.
     """
     if scope_keys is None:
         return None

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from scanops.api import scans as scans_api
+from scanops.api.scans import _saved_stage_scope
 from scanops.db import SessionLocal
 from scanops.models import AuditLog, Finding, FindingEvent, ScanRun
 from tests.conftest import make_user, token_for
@@ -1129,9 +1130,29 @@ def test_an_old_spec_without_scope_keys_still_ingests_host_wide(client, monkeypa
     engine_ingest_failed + raw_xml_path 삭제로 사라진다 — 살릴 수 있는 결과를 버리는 일이다.
     반대로 None 을 set() 으로 바꿔 넘기면 이번엔 인입이 닫힘을 아예 못 해 기존 오탐이 쌓인다.
     그래서 이 경계는 **실제 _commit_engine_ingest 를 태워** 끝까지 인입되는지로 고정한다.
+
+    그리고 '살린다'가 곧 '전부 닫아도 된다'는 뜻은 아니다. 구형 spec 에는 닫힘 후보 목록이
+    없을 뿐 **무엇을 스캔하기로 했는지**(stages.tcp/udp 의 enabled·ports)는 남아 있다. 그
+    경계를 버리고 host 단위로 닫으면 이번엔 스캔한 적도 없는 포트가 '닫힘 + 정상처리'로
+    인증된다 - 이 PR 이 내내 막아 온 바로 그 미탐이라, 여기서 함께 고정한다.
     """
     monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
     scans_api._settings.ensure_dirs()
+    db = SessionLocal()
+    try:
+        prior = ScanRun(name="prior", status="done")
+        db.add(prior)
+        db.commit()
+        for key, port, proto in (("127.0.0.1|443|tcp", 443, "tcp"),
+                                 ("127.0.0.1|22|tcp", 22, "tcp"),
+                                 ("127.0.0.1|53|udp", 53, "udp")):
+            db.add(Finding(
+                finding_key=key, host_ip="127.0.0.1", port=port, proto=proto,
+                state="open", first_scan_id=prior.id, last_scan_id=prior.id,
+            ))
+        db.commit()
+    finally:
+        db.close()
     scan_id = _scan_with_spec(tmp_path, {
         "targets": ["127.0.0.1"], "exclude": [],
         "out_dir": str(tmp_path / "ignored"),
@@ -1144,17 +1165,15 @@ def test_an_old_spec_without_scope_keys_still_ingests_host_wide(client, monkeypa
     out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
     (out_dir / "run-state.json").write_text(json.dumps({
         "stages_done": ["tcp", "job"], "live": ["127.0.0.1"],
-        "open_map": {"127.0.0.1": {"tcp": [443]}}, "stop": False,
+        "open_map": {}, "stop": False,
     }), encoding="utf-8")
     (out_dir / "events.ndjson").write_text(
         json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
         encoding="utf-8")
+    # 443 이 이번엔 열려 있지 않다 — 범위 안이므로 닫혀야 한다.
     (out_dir / "stage-tcp-b0.xml").write_text(
-        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
-        '<address addr="127.0.0.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="443">'
-        '<state state="open" reason="syn-ack"/><service name="https"/></port></ports></host>'
-        '<runstats><finished exit="success"/><hosts up="1" down="0" total="1"/></runstats>'
-        '</nmaprun>', encoding="utf-8")
+        '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
 
     monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
 
@@ -1166,8 +1185,20 @@ def test_an_old_spec_without_scope_keys_still_ingests_host_wide(client, monkeypa
     assert scan.raw_xml_path, "결과 XML 을 지우고 실패로 마감하면 안 된다"
     db = SessionLocal()
     try:
-        rows = db.query(Finding).filter(Finding.host_ip == "127.0.0.1").all()
-        assert [(f.port, f.proto) for f in rows] == [(443, "tcp")]
+        rows = {f.finding_key: f for f in
+                db.query(Finding).filter(Finding.host_ip == "127.0.0.1").all()}
+        # 스캔하기로 한 포트는 닫힌다 — 구형 결과도 닫힘 권한을 잃지 않는다.
+        assert rows["127.0.0.1|443|tcp"].state == "closed"
+        assert rows["127.0.0.1|443|tcp"].status == "정상처리"
+        # 스캔하지 않은 포트는 건드리지 않는다. spec 에 닫힘 후보 목록이 없다는 것은
+        # '무엇을 스캔했는지 모른다'가 아니라 '목록만 없다'는 뜻이다 - stages 의
+        # enabled·ports 가 그 경계를 그대로 들고 있다.
+        assert rows["127.0.0.1|22|tcp"].state == "open", "포트 범위 밖을 닫으면 안 된다"
+        assert rows["127.0.0.1|53|udp"].state == "open", "비활성 프로토콜을 닫으면 안 된다"
+        for key in ("127.0.0.1|22|tcp", "127.0.0.1|53|udp"):
+            events = db.query(FindingEvent).filter(
+                FindingEvent.finding_id == rows[key].id).all()
+            assert not events, f"{key} 는 audit history 도 건드리지 않아야 한다"
     finally:
         db.close()
 
@@ -1233,3 +1264,75 @@ def test_unobserved_scope_and_degraded_enrichment_are_both_reported(
     assert "NSE" in scan.failure_message, "저하 사실이 미관측에 묻히면 안 된다"
     # 정반대 문구가 남으면 안 된다.
     assert "포트 결과는 온전" not in scan.failure_message
+
+
+def test_an_old_full_port_spec_still_closes_everything_it_scanned(client, monkeypatch, tmp_path):
+    """반대 경계 — 구형 spec 을 포트 범위로 묶는 것이 '구형은 안 닫는다'가 되면 안 된다.
+
+    범위를 적용하는 수정은 과잉 보수로 넘어가기 쉽다. 전 포트 TCP 스캔은 실제로 65535 포트를
+    다 봤으므로 그 프로토콜의 모든 발견에 닫힘 권한이 있다(_port_scope 가 전 범위를 None 으로
+    돌려주는 이유). 여기서 닫지 못하면 이미 사라진 서비스가 영영 열린 채 남아 오탐이 쌓인다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    db = SessionLocal()
+    try:
+        prior = ScanRun(name="prior full", status="done")
+        db.add(prior)
+        db.commit()
+        for key, port, proto in (("10.0.0.9|8443|tcp", 8443, "tcp"),
+                                 ("10.0.0.9|161|udp", 161, "udp")):
+            db.add(Finding(
+                finding_key=key, host_ip="10.0.0.9", port=port, proto=proto,
+                state="open", first_scan_id=prior.id, last_scan_id=prior.id,
+            ))
+        db.commit()
+    finally:
+        db.close()
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["10.0.0.9"], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"),
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "1-65535"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": False}},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["tcp", "job"], "live": ["10.0.0.9"], "open_map": {}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
+        encoding="utf-8")
+    (out_dir / "stage-tcp-b0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
+
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    db = SessionLocal()
+    try:
+        rows = {f.finding_key: f for f in
+                db.query(Finding).filter(Finding.host_ip == "10.0.0.9").all()}
+        # 전 포트를 봤으므로 TCP 는 목록에 없던 포트도 닫힌다.
+        assert rows["10.0.0.9|8443|tcp"].state == "closed"
+        # UDP 는 여전히 비활성 — 프로토콜 경계는 그대로다.
+        assert rows["10.0.0.9|161|udp"].state == "open"
+    finally:
+        db.close()
+
+
+def test_saved_stage_scope_reads_the_bounds_the_engine_actually_scanned():
+    """`_saved_stage_scope` 의 세 갈래 - 전 포트(None) · 일부(집합) · 근거 없음(빈 집합)."""
+    def spec(stages):
+        return {"stages": stages}
+
+    assert _saved_stage_scope(spec({"tcp": {"enabled": True, "ports": "1-65535"}}), "tcp") is None
+    assert _saved_stage_scope(spec({"tcp": {"enabled": True, "ports": "80,443"}}), "tcp") == {80, 443}
+    assert _saved_stage_scope(spec({"udp": {"enabled": False, "ports": "53"}}), "udp") == set()
+    # 활성인데 범위가 비었으면 무엇을 봤는지 모른다 - 전 포트로 넘겨짚지 않는다.
+    assert _saved_stage_scope(spec({"udp": {"enabled": True, "ports": ""}}), "udp") == set()
+    # stages 자체가 없는 spec 도 죽지 않는다.
+    assert _saved_stage_scope({}, "tcp") == set()

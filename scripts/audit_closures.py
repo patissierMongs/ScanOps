@@ -202,7 +202,10 @@ def _covers(spec: dict, state: dict, host_ip: str, port: int, proto: str) -> boo
     if not stage.get("enabled", True):
         return False
     scope = _ports(stage.get("ports"))
-    return True if scope is None else port in scope
+    # _ports 의 None 은 '전 포트'가 아니라 '범위를 모른다'이다 - 전 범위(1-65535)는 실제
+    # 집합으로 돌아온다. 모르는 것을 '범위 안'으로 읽으면, 이 스크립트가 잡아내려는 바로
+    # 그 오류(관측하지 못한 것을 확인된 것으로 세기)를 스스로 저지른다.
+    return None if scope is None else port in scope
 
 
 def _host_was_swept(spec: dict, state: dict, host_ip: str) -> bool | None:

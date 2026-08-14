@@ -447,6 +447,28 @@ def _auto_scope_keys(db: Session, scanned_hosts: set[str], findings: list[dict],
     return keys
 
 
+def _saved_stage_scope(saved_spec: dict, proto: str) -> set[int] | None | set:
+    """저장된 엔진 spec 이 '이 프로토콜에서 무엇을 스캔하기로 했는가'.
+
+    ``None`` = 전 포트, ``set()`` = 닫힘 근거 없음. 구형 spec 은 닫힘 후보 목록
+    (``scanops.scope_keys``)을 저장하지 않았지만, **무엇을 스캔하기로 했는지**는 그대로
+    들고 있다. 그 경계를 버리고 host 단위로 닫으면 스캔한 적도 없는 포트가 '닫힘 +
+    정상처리'로 인증된다 - 되돌리기 가장 어려운 미탐이다.
+
+    활성인데 포트 범위가 비어 있으면 무엇을 봤는지 알 수 없다. 전 포트로 넘겨짚지 않고
+    닫지 않는 쪽으로 판정한다(엔진 spec 검증은 그런 조합을 애초에 거부하므로, 여기 걸리는
+    것은 손상됐거나 손으로 만든 spec 뿐이다).
+    """
+    stage = (saved_spec.get("stages") or {}).get(proto) or {}
+    if not stage.get("enabled", True):
+        return set()
+    ports = str(stage.get("ports") or "").strip()
+    if not ports:
+        return set()
+    prefix = "T" if proto == "tcp" else "U"
+    return _port_scope(f"{prefix}:{ports}", prefix)
+
+
 def _prefer_identified(primary: list[dict], fallback: list[dict]) -> list[dict]:
     """Keep service-identification rows, but preserve discovery-only open ports."""
     by_key = {_finding_key(f): f for f in primary}
@@ -1067,20 +1089,20 @@ def _validate_engine_scope_keys(saved_spec: dict) -> None:
 
 
 def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
-                          scope_keys: set[str] | None,
+                          scope_keys: set[str],
                           force_scanned_hosts: bool) -> dict:
-    """Persist staged findings and the equivalent authoritative heatmap snapshot."""
+    """Persist staged findings and the equivalent authoritative heatmap snapshot.
+
+    ``scope_keys`` 는 언제나 명시적 집합이다. 구형 spec(저장된 목록이 없는 실행)은 호출자가
+    미리 stages 의 포트/프로토콜 경계로 후보를 세워 넘긴다 - ``None`` 을 받아 host 단위로
+    닫는 경로는 스캔하지 않은 포트까지 '닫힘 + 정상처리'로 만들어서 없앴다.
+    """
     findings, scanned_hosts = engine_runner.collect_results(
         out_dir, scope_keys=scope_keys, force_scanned_hosts=force_scanned_hosts,
     )
-    if scope_keys is None:
-        # Backward-compatible old specs used host-wide closure. Capture those same active keys
-        # before ingest mutates them so the synthetic XML records every resulting close.
-        snapshot_scope = _auto_scope_keys(db, scanned_hosts, findings, None, None)
-    else:
-        # Explicit scope_keys are the completed scan's authority, independent of discovery.
-        # They were built from effective targets, so excluded hosts are absent by construction.
-        snapshot_scope = set(scope_keys)
+    # Explicit scope_keys are the completed scan's authority, independent of discovery.
+    # They were built from effective targets, so excluded hosts are absent by construction.
+    snapshot_scope = set(scope_keys)
     merged_path = _settings.scans_dir / f"scan_{scan.id}.xml"
     snapshot_date = scan.started_at
     if snapshot_date is not None and snapshot_date.tzinfo is None:
@@ -1186,11 +1208,26 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
             # 통과한다. 그 상태로 scope_keys 를 그대로 닫으면 패킷을 한 번도 보내지 않은
             # 포트가 전부 '닫힘 + 정상처리'가 된다 - 관측하지 못한 것을 없다고 말하는,
             # 이 PR 이 내내 막아 온 바로 그 오류다.
+            legacy_scope = scope_keys is None
+            if legacy_scope:
+                # 구형 spec 은 닫힘 후보 **목록**만 없을 뿐, 무엇을 스캔하기로 했는지는
+                # stages 에 남아 있다. 그 경계로 후보를 세워 명시적 집합으로 만든다 -
+                # 여기서 None 을 그대로 흘려보내면 인입이 host 단위로 닫아, 스캔하지도
+                # 않은 포트와 비활성 프로토콜까지 '닫힘 + 정상처리'가 된다.
+                # 호스트 축은 기존과 같이 실제 관측한 호스트로만 한정한다.
+                scope_keys = _auto_scope_keys(
+                    db,
+                    engine_runner.observed_hosts(out_dir, saved_spec, force_scanned_hosts),
+                    [],
+                    _saved_stage_scope(saved_spec, "tcp"),
+                    _saved_stage_scope(saved_spec, "udp"),
+                )
             closing = (set() if unfinished
                        else engine_runner.observed_scope(
                            scope_keys, out_dir, saved_spec, force_scanned_hosts))
-            # scope_keys 가 None 이면 구형 host-wide 닫힘이라 '빠진 건수' 개념이 없다.
-            unobserved = (0 if unfinished or scope_keys is None or closing is None
+            # 구형 spec 의 후보는 실행 전 스냅샷이 아니라 관측한 호스트에서 세운 것이라
+            # '빠진 건수'를 셀 기준이 없다. 없는 숫자를 지어내지 않는다.
+            unobserved = (0 if unfinished or legacy_scope
                           else len(scope_keys) - len(closing))
             _commit_engine_ingest(
                 db, scan, out_dir,
