@@ -1938,3 +1938,97 @@ def test_the_merged_evidence_records_only_what_the_run_actually_closed(client, m
     # 살려 둔 발견을 닫힘으로 적으면 DB 와 정반대로 증언하는 것이다.
     body = merged.split('addr="10.5.6.1"')
     assert len(body) == 1 or 'state="closed"' not in body[1].split("</host>")[0]
+
+
+def test_a_stale_open_never_survives_a_round_trip_through_the_merged_evidence(
+    client, monkeypatch, tmp_path,
+):
+    """인입이 시간상 폐기한 open 은 증거에도 남으면 안 된다.
+
+        00:00  b0 이 A:443 을 open 으로 관측
+        01:00  다른 스캔이 A:443 을 closed + 정상처리로 기록
+        02:00  b1 완료
+
+    인입은 b0 의 관측(00:00)이 01:00 보다 낡았으므로 정확히 버린다. 그런데 증거 XML 이
+    raw findings 를 전부 open 으로 적으면, 그 파일을 다시 가져올 때 과거 관측이 최신 노출로
+    되살아난다 - DB 가 거절한 사실이 증거 경로로 되돌아오는 왕복 오염이다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    b0_at = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    other_at = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+    b1_at = datetime(2026, 8, 1, 2, 0, tzinfo=timezone.utc)
+
+    db = SessionLocal()
+    try:
+        other = ScanRun(name="1시 스캔", status="done")
+        db.add(other)
+        db.commit()
+        other_id = other.id
+        db.add(Finding(
+            finding_key="10.8.8.1|443|tcp", host_ip="10.8.8.1", port=443, proto="tcp",
+            state="closed", status="정상처리", service="https",
+            first_scan_id=other_id, last_scan_id=other_id,
+            first_seen=other_at, last_seen=other_at,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["10.8.8.1", "10.8.8.2"], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"), "batch_size": 1,
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "443"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": False}},
+        "scanops": {"scope_keys": []},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["tcp", "job"], "live": ["10.8.8.1", "10.8.8.2"],
+        "open_map": {"10.8.8.1": {"tcp": [443]}}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 2}}) + "\n",
+        encoding="utf-8")
+    (out_dir / "stage-tcp-b0.xml").write_text(
+        _sweep_xml("10.8.8.1", finished_epoch=int(b0_at.timestamp()), open_port=443),
+        encoding="utf-8")
+    (out_dir / "stage-tcp-b1.xml").write_text(
+        _sweep_xml("10.8.8.2", finished_epoch=int(b1_at.timestamp())), encoding="utf-8")
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    def state_of():
+        session = SessionLocal()
+        try:
+            row = session.query(Finding).filter(
+                Finding.finding_key == "10.8.8.1|443|tcp").one()
+            events = session.query(FindingEvent).filter(
+                FindingEvent.finding_id == row.id).count()
+            return (row.state, row.status, row.last_scan_id,
+                    row.last_seen.replace(tzinfo=timezone.utc), events)
+        finally:
+            session.close()
+
+    before = state_of()
+    assert before[:4] == ("closed", "정상처리", other_id, other_at), (
+        "낡은 관측은 인입에서 이미 거절된다")
+
+    merged_path = scans_api._settings.scans_dir / f"scan_{scan_id}.xml"
+    merged = merged_path.read_text(encoding="utf-8")
+    # 호스트를 훑었다는 사실 자체는 남아도 된다(사실이다). 남으면 안 되는 것은 '443 이
+    # 열려 있었다' 는 주장이다 - 인입은 그 관측이 낡았다며 버렸다.
+    assert 'portid="443"' not in merged, "인입이 버린 open 을 증거가 주장하면 안 된다"
+    assert 'state="open"' not in merged
+
+    # 왕복: 이 증거 파일을 그대로 다시 가져와도 아무것도 바뀌지 않아야 한다.
+    # 합성 스냅샷은 애초에 원본처럼 인입될 수 없다(개별 관측 시각이 사라진 파일이다).
+    headers = _headers(client)
+    again = client.post("/api/scans/import", headers=headers,
+                        files={"file": ("snapshot.xml", merged.encode("utf-8"), "text/xml")})
+    assert again.status_code == 400
+    assert "스냅샷" in again.json()["detail"]
+    assert state_of() == before, "왕복 후에도 상태·출처·이력이 그대로여야 한다"

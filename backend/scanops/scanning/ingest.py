@@ -78,7 +78,7 @@ def _key(f: dict) -> str:
 def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[str],
            scope_keys: set[str] | None = None, scan_date: datetime | None = None,
            absence_at: dict | None = None, closed_keys: set | None = None,
-           *, commit: bool = True) -> dict:
+           applied_keys: set | None = None, *, commit: bool = True) -> dict:
     """findings(이번 스캔의 열린 포트들)와 scanned_hosts(up 호스트)로 DB 갱신.
 
     scope_keys 가 주어지면(타겟 포트 재스캔) 닫힘 판정을 그 키(host|port|proto)로만
@@ -106,6 +106,10 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
         # 스캔 시각으로 되돌아간다.
         when = _as_when(f.get("observed_at"), scan_date)
         row = db.query(Finding).filter(Finding.finding_key == key).first()
+        if applied_keys is not None and (
+            row is None or not _is_older(when, row.last_seen)
+        ):
+            applied_keys.add(key)
         if row is None:
             row = Finding(finding_key=key, first_scan_id=scan_id, first_seen=when, **_observed(f))
             row.last_scan_id = scan_id

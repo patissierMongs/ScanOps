@@ -787,7 +787,8 @@ def authority_observed_at(out_dir, spec: dict, force_scanned_hosts: bool = False
 
 def ingest_results(db, scan, out_dir, scope_keys: set | None = None,
                    force_scanned_hosts: bool = False, scan_date=None, spec: dict | None = None,
-                   closed_keys: set | None = None, *, commit: bool = True) -> dict:
+                   closed_keys: set | None = None, applied_keys: set | None = None,
+                   *, commit: bool = True) -> dict:
     """단계별 XML → finding 인입. 명시적 scope_keys는 완료 스캔의 closure 권한.
 
     ``spec`` 은 어느 산출물이 어떤 호스트를 훑었는지 되짚는 데 쓴다(absence_times). 없으면
@@ -811,6 +812,7 @@ def ingest_results(db, scan, out_dir, scope_keys: set | None = None,
         absence_at=(absence_times(out_dir, spec, force_scanned_hosts)
                     if spec is not None else None),
         closed_keys=closed_keys,
+        applied_keys=applied_keys,
         commit=False,
     )
     from ..api.assets import match_assets

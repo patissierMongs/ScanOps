@@ -79,6 +79,13 @@ AUTO_STAGE_LABELS = {
     "tcp_identify": "발견된 TCP 포트 용도/서비스 식별",
     "udp_identify": "주요 UDP 서비스 식별",
 }
+# 합성 스냅샷 표식 — 이 값이 붙은 XML 은 원본 스캔 결과가 아니다.
+SNAPSHOT_MARK = "1"
+SNAPSHOT_REJECT = (
+    "ScanOps 가 만든 스냅샷 XML 은 다시 가져올 수 없습니다. 여러 산출물을 하나로 합치면서 "
+    "개별 관측 시각이 사라져, 원본 결과처럼 인입하면 과거 관측이 최신 관측으로 둔갑합니다. "
+    "원본 단계 XML(scan_N.<단계>.xml)이나 스캐너 결과 폴더를 가져오세요."
+)
 STAGE_FILE_RE = re.compile(r"^(?P<base>.+)\.(?P<stage>tcp_discovery|tcp_identify|udp_identify)\.xml$", re.I)
 # 중단본 표식 — 스캐너(scanops_scanner.INTERRUPTED_*)와 같은 문자열이어야 한다.
 INTERRUPTED_DIR_NAME = "interrupted"
@@ -560,6 +567,11 @@ def _write_merged_xml(db: Session, xml_path: Path, findings: list[dict], scanned
     root = ET.Element(
         "nmaprun",
         scanner="scanops",
+        # 이 파일은 nmap 산출물이 아니라 **여러 산출물을 합친 스냅샷**이다. nmap XML 은 문서
+        # 단위 시각 하나만 표현할 수 있어서, 서로 다른 시각에 관측한 열림을 한 파일로 합치면
+        # 개별 관측 시각이 사라진다. 그 상태로 다시 가져오면 과거 관측이 최신 노출로 둔갑한다
+        # - 그래서 원본처럼 재인입되지 않도록 표식을 남긴다.
+        scanops_snapshot=SNAPSHOT_MARK,
         args="scanops bundled import",
         start=str(int(when.timestamp())),
         startstr=when.isoformat(),
@@ -641,13 +653,16 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
     # 쓰면, 인입이 시각·커버리지를 근거로 살려 둔 발견까지 증거 파일에는 닫힘으로 남아
     # DB 와 정반대로 증언한다.
     closed_keys: set[str] = set()
+    applied_keys: set[str] = set()
     counts = ingest(
         db, scan.id, enriched, scanned_hosts, scope_keys=scope_keys,
-        scan_date=scan_date, absence_at=absence_at, closed_keys=closed_keys, commit=False,
+        scan_date=scan_date, absence_at=absence_at,
+        closed_keys=closed_keys, applied_keys=applied_keys, commit=False,
     )
     if raw_xml_path is not None:
-        _write_merged_xml(db, raw_xml_path, enriched, scanned_hosts,
-                          {_finding_key(f) for f in enriched} | closed_keys, scan_date)
+        applied = [f for f in enriched if _finding_key(f) in applied_keys]
+        _write_merged_xml(db, raw_xml_path, applied, scanned_hosts,
+                          {_finding_key(f) for f in applied} | closed_keys, scan_date)
         scan.raw_xml_path = str(raw_xml_path)
     from .assets import match_assets
     match_assets(db, commit=False)
@@ -1198,14 +1213,18 @@ def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
     # 닫힘으로 남았다 - DB 와 증거가 정반대로 증언한다. 닫힌 행도 그대로 남아 있으므로
     # 순서를 바꿔도 서비스명 등 표시값은 그대로 읽힌다.
     closed_keys: set[str] = set()
+    applied_keys: set[str] = set()
     counts = engine_runner.ingest_results(
         db, scan, out_dir, scope_keys=scope_keys,
         force_scanned_hosts=force_scanned_hosts, scan_date=snapshot_date,
-        spec=saved_spec, closed_keys=closed_keys, commit=False,
+        spec=saved_spec, closed_keys=closed_keys, applied_keys=applied_keys, commit=False,
     )
+    # 열림도 닫힘과 같은 조건이어야 한다. 인입이 '더 새로운 관측이 있다'며 버린 open 을
+    # 증거에는 그대로 적으면, 그 파일이 DB 가 거절한 과거 관측을 최신 노출로 되살린다.
+    applied = [f for f in findings if _finding_key(f) in applied_keys]
     _write_merged_xml(
-        db, merged_path, findings, scanned_hosts,
-        {_finding_key(f) for f in findings} | closed_keys,
+        db, merged_path, applied, scanned_hosts,
+        {_finding_key(f) for f in applied} | closed_keys,
         scan_date=snapshot_date,
     )
     scan.raw_xml_path = str(merged_path)
@@ -1660,8 +1679,19 @@ def _validate_import_manifest(manifest_bytes: bytes, payloads: list[dict]) -> di
     return authorities
 
 
+def is_scanops_snapshot(xml_bytes: bytes) -> bool:
+    """ScanOps 가 합성한 스냅샷인가(원본 nmap 산출물이 아님)."""
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return False
+    return root.tag == "nmaprun" and bool(root.get("scanops_snapshot"))
+
+
 def _prepare_import_xml(xml_bytes: bytes, filename: str | None = None) -> tuple:
     """Parse every XML-derived value before creating a ScanRun or writing a file."""
+    if is_scanops_snapshot(xml_bytes):
+        raise _InvalidImportXML(SNAPSHOT_REJECT)
     try:
         # 시작 시각이 아니라 **관측을 끝낸** 시각이다. 몇 시간 도는 스캔에서 시작 시각을 쓰면
         # 그 사이 다른 스캔이 남긴 결과가 더 새것으로 판정되어, 이 XML 이 나중에 확인한
