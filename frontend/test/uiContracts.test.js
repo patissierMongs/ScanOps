@@ -707,6 +707,16 @@ test("a running scan says which batch and stage it is on", () => {
   assert.match(scans, /p\.batch_label/);
   assert.match(scans, /p\.stage_hosts \? <span className="muted">· 대상/);
   assert.match(scans, /p\.hosts_up != null \? <span className="muted">· 응답/);
-  // 배치 번호는 사람이 세는 방식(1부터)으로 보여준다.
-  assert.match(scans, /배치 \$\{p\.batches_done \+ 1\}\/\$\{total\}/);
+  // 배치 번호는 사람이 세는 방식(1부터)이되 총 개수를 넘지 않는다(마지막 배치에서 N+1/N 방지).
+  assert.match(scans, /배치 \$\{Math\.min\(p\.batches_done \+ 1, total\)\}\/\$\{total\}/);
+  assert.match(scans, /\(\$\{p\.batch_size\}대씩\)/);
+});
+
+test("a finished batched scan still says how it was split", () => {
+  // 배치 구성이 실행 중에만 보이면, 이력을 나중에 읽는 사람에게는 없는 정보와 같다.
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /function BatchNote\(\{ scan, progress \}\)/);
+  assert.match(scans, /if \(!scan\.batch_total \|\| scan\.batch_total <= 1\) return null;/);
+  assert.match(scans, /배치 \{scan\.batch_total\}\/\{scan\.batch_total\} · \{scan\.batch_size\}대씩/);
+  assert.match(scans, /<BatchNote scan=\{s\}/);
 });

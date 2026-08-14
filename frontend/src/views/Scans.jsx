@@ -495,9 +495,16 @@ export default function Scans({ user }) {
                       <span className={`pill ${st.cls}`}>{st.label}</span>
                       {s.failure_message && <div className="scan-failure">{s.failure_message}</div>}
                     </td>
-                    <td>{stages[s.id]?.stages?.length
-                      ? <StageTimeline s={stages[s.id]} />
-                      : isActive(s.status) ? <Progress p={p} /> : <span className="muted">—</span>}</td>
+                    <td>
+                      {stages[s.id]?.stages?.length
+                        ? <StageTimeline s={stages[s.id]} />
+                        : isActive(s.status) ? <Progress p={p} /> : null}
+                      {/* 배치 구성은 끝난 뒤에도 '이 스캔이 어떻게 돌았는지'를 말해 준다.
+                          실행 중에는 Progress 가 x/y 를 이미 보여주므로 중복해서 적지 않는다. */}
+                      <BatchNote scan={s} progress={isActive(s.status) ? p : null} />
+                      {!stages[s.id]?.stages?.length && !isActive(s.status) && !s.batch_total
+                        ? <span className="muted">—</span> : null}
+                    </td>
                     <td className="mono">{s.host_count}</td>
                     <td className="mono">{s.port_count}</td>
                     <td>
@@ -565,6 +572,21 @@ function ScanScope({ summary }) {
 }
 
 // 진행률 막대 — 전체 진행(배치 누적)을 막대로, 배치 카운트 + 현재 배치 ETC/경과를 보조로.
+// 배치 구성 한 줄 — 실행 중이면 Progress 가 x/y 를 이미 그리므로 크기만, 끝난 뒤에는 둘 다.
+function BatchNote({ scan, progress }) {
+  if (!scan.batch_total || scan.batch_total <= 1) return null;
+  if (progress) {
+    return progress.batch_size ? null : (
+      <div className="mono muted" style={{ fontSize: 11 }}>{scan.batch_size}대씩</div>
+    );
+  }
+  return (
+    <div className="mono muted" style={{ fontSize: 11, marginTop: 2 }}>
+      배치 {scan.batch_total}/{scan.batch_total} · {scan.batch_size}대씩
+    </div>
+  );
+}
+
 function Progress({ p }) {
   if (!p) return <span className="muted">…</span>;
   const overall = p.overall_percent != null ? p.overall_percent : null;
@@ -583,7 +605,8 @@ function Progress({ p }) {
       </div>
       <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
         {known ? `${overall}%` : "준비 중"}
-        {total > 1 ? ` · 배치 ${p.batches_done + 1}/${total}` : ""}
+        {total > 1 ? ` · 배치 ${Math.min(p.batches_done + 1, total)}/${total}` : ""}
+        {total > 1 && p.batch_size ? ` (${p.batch_size}대씩)` : ""}
         {p.eta_seconds != null ? ` · ~남음 ${fmtDur(p.eta_seconds)}` : (p.remaining ? ` · 남음 ${p.remaining}` : "")}
         {p.elapsed_seconds != null ? ` · 경과 ${fmtDur(p.elapsed_seconds)}` : (p.elapsed ? ` · 경과 ${p.elapsed}` : "")}
       </div>

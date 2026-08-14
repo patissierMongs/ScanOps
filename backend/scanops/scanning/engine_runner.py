@@ -388,6 +388,26 @@ def expected_authority_xml(out_dir, spec: dict, force_scanned_hosts: bool = Fals
     return expected
 
 
+def swept_batches(out_dir, spec: dict) -> int:
+    """모든 활성 프로토콜에 대해 sweep 이 끝난 배치 수.
+
+    엔진도 대역을 배치로 나눠 돈다(stage-tcp-b0.xml …). 청킹 스캔은 sidecar 에 cursor 가
+    있지만 엔진에는 없어서, 진행 화면이 배치 진행을 아예 말하지 못했다. 파일이 곧 진행
+    기록이므로 그것을 센다 - TCP 는 끝나고 UDP 가 도는 중이면 그 배치는 아직 '끝난' 것이
+    아니므로 프로토콜별 완료 수의 **최솟값**을 쓴다.
+    """
+    out = Path(out_dir)
+    stages = spec.get("stages") or {}
+    counts = []
+    for proto in ("tcp", "udp"):
+        if not (stages.get(proto) or {}).get("enabled", True):
+            continue
+        counts.append(sum(
+            1 for path in out.glob(f"stage-{proto}-b*.xml") if _xml_run_finished(path)
+        ))
+    return min(counts) if counts else 0
+
+
 def observed_hosts(out_dir, spec: dict, force_scanned_hosts: bool = False) -> set[str]:
     """이 실행이 **실제로 포트를 관측한** 호스트.
 

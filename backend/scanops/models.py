@@ -84,6 +84,10 @@ class ScanRun(Base):
     log_path: Mapped[str] = mapped_column(Text, default="")
     host_count: Mapped[int] = mapped_column(Integer, default=0)
     port_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 대역을 몇 덩어리로 나눠 돌렸는가. 끝난 뒤에도 '이 스캔이 어떻게 돌았는지'를 말할 수
+    # 있어야 한다 - 실행 중에만 보이면 이력을 나중에 읽는 사람에게는 없는 정보다.
+    batch_total: Mapped[int] = mapped_column(Integer, default=0)
+    batch_size: Mapped[int] = mapped_column(Integer, default=0)
     # 단계분리 엔진 스캔의 단계별 요약(상태/소요/카운트/에러) — 진행 타임라인·이력용. 청킹 스캔은 빈 값.
     stages_json: Mapped[list | None] = mapped_column(JSON, default=list)
     # 사용자에게 노출 가능한 안정적 실패 분류/메시지. 원시 경로·명령·traceback은 로그에만 남긴다.

@@ -96,6 +96,11 @@ def _migrate() -> None:
         conn.exec_driver_sql("UPDATE findings SET reopened=1, status='미조치' WHERE status='재발'")
         # 단계분리 엔진 스캔의 단계 요약 컬럼(기존 DB 보강)
         sc_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(scan_runs)").fetchall()}
+        for column in ("batch_total", "batch_size"):
+            if sc_cols and column not in sc_cols:
+                # 소급 계산은 하지 않는다 - 과거 실행의 배치 구성은 어디에도 남아 있지 않다.
+                conn.exec_driver_sql(
+                    f"ALTER TABLE scan_runs ADD COLUMN {column} INTEGER DEFAULT 0")
         if "stages_json" not in sc_cols:
             conn.exec_driver_sql("ALTER TABLE scan_runs ADD COLUMN stages_json JSON")
         if "failure_code" not in sc_cols:

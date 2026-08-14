@@ -1140,6 +1140,14 @@ def _validate_engine_scope_keys(saved_spec: dict) -> None:
             )
 
 
+def _read_engine_spec(out_dir: Path) -> dict | None:
+    """진행 표시에 쓰는 spec 읽기 — 없거나 깨졌으면 None(진행을 넘겨짚지 않는다)."""
+    try:
+        return _load_engine_spec(out_dir / "spec.json")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _target_label(hosts: list[str]) -> str:
     """현재 배치를 한 줄로. 64개를 다 적으면 표가 무너지므로 대표 하나와 개수만."""
     if not hosts:
@@ -2372,6 +2380,10 @@ def run_scan(
             scan.command = f"{' '.join(parts)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
         if excludes:
             scan.command += f"  ·  제외 {', '.join(excludes)}"
+        # 배치 구성은 실행이 끝나면 sidecar 와 함께 사라진다. 이력이 나중에도 '어떻게
+        # 돌았는지'를 말할 수 있게 스캔 행에 남긴다.
+        scan.batch_total = len(batches)
+        scan.batch_size = max((len(b) for b in batches), default=0)
         db.commit()
         db.refresh(scan)
         threading.Thread(target=_chunk_worker, args=(scan.id,), daemon=True).start()
@@ -2475,6 +2487,12 @@ def run_staged(
         scan.command = f"{engine_runner.describe(spec)}  ·  {len(hosts)}호스트"
         if excludes:
             scan.command += f"  ·  제외 {', '.join(excludes)}"
+        # 엔진도 같은 대역을 배치로 나눠 sweep 한다(stage-tcp-b0.xml …). 청킹 스캔과 같은
+        # 자리에 같은 뜻으로 남겨야 이력에서 둘을 나란히 읽을 수 있다.
+        scan.batch_size = int(spec.get("batch_size") or 0)
+        scan.batch_total = (
+            -(-len(hosts) // scan.batch_size) if scan.batch_size and hosts else 0
+        )
         db.commit()
         db.refresh(scan)
         threading.Thread(target=_engine_worker, args=(scan.id,), daemon=True).start()
@@ -2678,6 +2696,14 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
     has_batches = bool(state) and "batches" in state
     total = len(state["batches"]) if has_batches else 1
     done = state.get("cursor", 0) if has_batches else (1 if scan.status == "done" else 0)
+    # 단계 엔진에는 sidecar cursor 가 없다. 배치 진행은 산출물이 기록하고 있으므로 그걸 센다.
+    engine_dir = _settings.scans_dir / f"scan_{scan_id}"
+    if not has_batches and scan.batch_total:
+        total = scan.batch_total
+        saved_spec = _read_engine_spec(engine_dir)
+        done = (total if scan.status == "done"
+                else engine_runner.swept_batches(engine_dir, saved_spec) if saved_spec else 0)
+        has_batches = True
     in_batch = (prog["percent"] or 0) / 100.0
     if scan.status == "done":
         overall = 100.0
@@ -2694,8 +2720,11 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
     # 지금 무엇을 보고 있는지. 퍼센트 하나만으로는 몇 분째 같은 숫자를 보면서 진행 중인지
     # 멈춘 것인지조차 알 수 없다 - 현재 배치가 어느 대역이고 어느 단계인지를 함께 준다.
     batch_hosts: list[str] = []
-    if has_batches and 0 <= done < total:
-        current = state["batches"][done]
+    # 배치 대역은 sidecar 에만 있다. 단계 엔진은 batch_total 로 진행만 세므로(state 없음)
+    # 여기서 대역까지 지어내지 않는다.
+    stored = (state or {}).get("batches")
+    if isinstance(stored, list) and 0 <= done < len(stored):
+        current = stored[done]
         batch_hosts = [str(h) for h in current] if isinstance(current, list) else []
     started = _scan_started_at(scan)
     prog.update({
@@ -2711,6 +2740,7 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
         "stage": (state or {}).get("stage", ""),
         "stage_hosts": (state or {}).get("stage_hosts") or None,
         "batch_hosts": len(batch_hosts),
+        "batch_size": scan.batch_size or (len(batch_hosts) or None),
         "batch_label": _target_label(batch_hosts),
         "elapsed_seconds": (
             round((datetime.now(timezone.utc) - started).total_seconds())

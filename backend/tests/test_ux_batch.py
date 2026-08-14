@@ -483,3 +483,81 @@ def test_progress_says_which_batch_and_stage_is_running(client):
     assert progress["stage_hosts"] == 2
     assert progress["batch_label"] == "10.0.0.1 외 1대"
     assert progress["elapsed_seconds"] is not None, "실행 중이면 경과 시간을 말할 수 있다"
+
+
+def test_a_batched_scan_reports_its_split_while_running_and_after(client):
+    """배치 구성은 실행 중에도, 끝난 뒤에도 말할 수 있어야 한다.
+
+    예전에는 sidecar 에만 있어서 실행이 끝나면 사라졌다. 이력을 나중에 읽는 사람에게는
+    '이 스캔이 어떻게 돌았는지'가 통째로 없는 정보가 된다.
+    """
+    from scanops.scanning import chunker
+
+    headers = _auth(client)
+    db = SessionLocal()
+    try:
+        scan = ScanRun(name="배치 스캔", targets="10.0.0.0/24", status="running",
+                       batch_total=4, batch_size=64)
+        db.add(scan)
+        db.commit()
+        scan_id = scan.id
+    finally:
+        db.close()
+    chunker.write_state(scans_api._basename(scan_id), {
+        "batches": [["10.0.0.1"], ["10.0.0.65"], ["10.0.0.129"], ["10.0.0.193"]],
+        "cursor": 2, "workflow": "auto", "stop": False,
+    })
+
+    progress = client.get(f"/api/scans/{scan_id}/progress", headers=headers).json()
+    assert (progress["batches_done"], progress["batches_total"]) == (2, 4)
+    assert progress["batch_size"] == 64
+
+    # 끝난 뒤에도 목록 응답만으로 구성을 말할 수 있다.
+    db = SessionLocal()
+    try:
+        row = db.get(ScanRun, scan_id)
+        row.status = "done"
+        db.commit()
+    finally:
+        db.close()
+    listed = next(s for s in client.get("/api/scans", headers=headers).json()
+                  if s["id"] == scan_id)
+    assert (listed["batch_total"], listed["batch_size"]) == (4, 64)
+
+
+def test_a_staged_engine_scan_counts_batches_from_its_own_artifacts(client, monkeypatch, tmp_path):
+    """단계 엔진에는 sidecar cursor 가 없다 - 산출물이 곧 진행 기록이다.
+
+    TCP 는 끝났는데 UDP 가 도는 중인 배치는 아직 '끝난' 것이 아니므로, 프로토콜별 완료
+    수의 최솟값을 쓴다. 한쪽만 세면 진행이 실제보다 앞서 보인다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    headers = _auth(client)
+    db = SessionLocal()
+    try:
+        scan = ScanRun(name="단계 스캔", targets="10.0.0.0/24", status="running",
+                       batch_total=3, batch_size=128)
+        db.add(scan)
+        db.commit()
+        scan_id = scan.id
+    finally:
+        db.close()
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "spec.json").write_text(json.dumps({
+        "targets": ["10.0.0.0/24"], "exclude": [], "out_dir": str(out_dir), "batch_size": 128,
+        "stages": {"discovery": {"mode": "sn"},
+                   "tcp": {"enabled": True, "ports": "1-65535"},
+                   "udp": {"enabled": True, "ports": "53"},
+                   "service": {"enabled": True}},
+    }), encoding="utf-8")
+    finished = ('<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+                '<hosts up="1" down="0" total="1"/></runstats></nmaprun>')
+    for name in ("stage-tcp-b0.xml", "stage-tcp-b1.xml", "stage-udp-b0.xml"):
+        (out_dir / name).write_text(finished, encoding="utf-8")
+
+    progress = client.get(f"/api/scans/{scan_id}/progress", headers=headers).json()
+    assert progress["batches_total"] == 3
+    assert progress["batches_done"] == 1, "UDP 가 아직 안 끝난 배치는 세지 않는다"
+    assert progress["batch_size"] == 128

@@ -110,6 +110,9 @@ class ScanOut(BaseModel):
     finished_at: datetime | None
     host_count: int
     port_count: int
+    # 배치로 나눠 돌렸으면 몇 덩어리를 몇 대씩. 0 이면 배치 정보가 없는 실행이다.
+    batch_total: int = 0
+    batch_size: int = 0
     stages_json: list | None = None
     failure_code: str = ""
     failure_message: str = ""
