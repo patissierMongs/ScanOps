@@ -1179,6 +1179,9 @@ def _package_source(root: Path) -> None:
         "backend/scanops/database.py": "DATABASE = 'runtime'\n",
         "engine/scanops_engine/__main__.py": "raise SystemExit(0)\n",
         "frontend/dist/index.html": "<!doctype html>\n",
+        # 에어갭 번들은 결과 검사 도구를 싣는다 — 합성 트리에도 있어야 실제 계약을 검증한다.
+        "scripts/check_scan_xml.py": "raise SystemExit(0)\n",
+        "scripts/audit_closures.py": "raise SystemExit(0)\n",
     }
     for relative, content in safe_files.items():
         path = root / relative
@@ -1814,3 +1817,29 @@ def test_closure_audit_reports_suspects_and_changes_nothing(tmp_path, capsys):
     assert "확인됨      1건" in out and "확인 불가   1건" in out
     assert "10.0.0.2:22/tcp" in out      # scan_2 는 산출물이 없어 의심
     assert db.read_bytes() == before, "읽기 전용이어야 한다"
+
+
+def test_allinone_bundle_ships_the_result_inspection_tools(tmp_path):
+    """검사 도구는 에어갭에서 쓰라고 만든 것이다 — 번들에 없으면 쓸 수가 없다.
+
+    둘 다 stdlib 전용이라 번들 임베디드 파이썬으로 그대로 돌아간다.
+    """
+    import importlib.util
+
+    module_path = ROOT / "packaging" / "build_allinone.py"
+    spec = importlib.util.spec_from_file_location("scanops_allinone_tools", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    app = tmp_path / "app"
+    app.mkdir()
+
+    module.copy_app(app)
+    module.write_launcher(app)
+
+    for name in ("check_scan_xml.py", "audit_closures.py"):
+        assert (app / "tools" / name).is_file(), name
+    # 도구만 넣고 부를 방법을 안 주면 에어갭 운영자는 그것들이 있는지도 모른다.
+    for bat, tool in (("CHECK.bat", "check_scan_xml.py"), ("AUDIT.bat", "audit_closures.py")):
+        launcher = (app / bat).read_text(encoding="ascii")
+        assert tool in launcher, bat
+        assert "runtime\\python\\python.exe" in launcher, bat

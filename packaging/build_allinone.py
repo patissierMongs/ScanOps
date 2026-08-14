@@ -289,6 +289,14 @@ def copy_app(app: Path) -> None:
         if src.exists():
             shutil.copy2(src, scanner_dst / f)
 
+    # 결과 검사 도구. 에어갭에서 쓰라고 만든 것이므로 에어갭 번들에 들어 있어야 한다 —
+    # 스캔 결과가 믿을 만한지, 이미 닫힌 발견의 근거가 남아 있는지를 여기서 판단한다.
+    # 둘 다 stdlib 전용이라 임베디드 파이썬으로 그대로 실행된다.
+    tools_dst = app / "tools"
+    tools_dst.mkdir(parents=True, exist_ok=True)
+    for f in ("check_scan_xml.py", "audit_closures.py"):
+        shutil.copy2(ROOT / "scripts" / f, tools_dst / f)
+
 
 def install_site(app: Path) -> None:
     site = app / "runtime" / "site"
@@ -372,6 +380,22 @@ def write_launcher(app: Path) -> None:
     (app / "SCAN.bat").write_text(
         "@echo off\r\n"
         "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0scanner\\scanops_scanner.py\" %*\r\n",
+        encoding="ascii",
+    )
+    # 결과 XML 이 믿을 만한지 — 올리기 전에 살릴 것과 버릴 것을 가른다.
+    # 예: CHECK.bat scanops_scans
+    (app / "CHECK.bat").write_text(
+        "@echo off\r\n"
+        "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0tools\\check_scan_xml.py\" %*\r\n"
+        "pause\r\n",
+        encoding="ascii",
+    )
+    # 이미 닫힌 발견 중 '닫혔다고 확인할 수 없는' 것 — 읽기 전용, 아무것도 바꾸지 않는다.
+    # 예: AUDIT.bat --db backend\\scanops.db --scans backend\\scanops_scans --list
+    (app / "AUDIT.bat").write_text(
+        "@echo off\r\n"
+        "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0tools\\audit_closures.py\" %*\r\n"
+        "pause\r\n",
         encoding="ascii",
     )
 
