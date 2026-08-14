@@ -360,6 +360,36 @@ def expected_authority_xml(out_dir, spec: dict, force_scanned_hosts: bool = Fals
     return expected
 
 
+def observed_hosts(out_dir, spec: dict, force_scanned_hosts: bool = False) -> set[str]:
+    """이 실행이 **실제로 포트를 관측한** 호스트.
+
+    산출물이 모두 완결됐다는 것과 '이 호스트의 포트를 봤다'는 것은 다른 사실이다.
+    sn discovery 에서 호스트가 응답하지 않으면 live 가 비고, sweep 은 아예 실행되지 않는다
+    (pipeline.run 이 live 를 sweep 입력으로 쓴다). 그때 기대 산출물은 discovery 하나뿐이라
+    완결성 검사는 **공허하게 통과**한다 - 그 상태로 scope_keys 를 그대로 닫으면 그 호스트의
+    포트에 패킷을 한 번도 보내지 않고 전부 '닫힘 + 정상처리'가 된다.
+
+    nmap 문서도 host discovery 가 엄격한 방화벽 뒤의 호스트를 놓칠 수 있고, 기본 포트 스캔은
+    up 으로 판정된 호스트에만 수행된다고 명시한다. 그러므로 discovery 미응답은 '포트가 닫혔다'가
+    아니라 '아무것도 관측하지 못했다'이다.
+
+    -Pn 은 pipeline._discovery 가 targets 를 그대로 live 로 넣으므로 같은 규칙으로 덮인다.
+    """
+    out = Path(out_dir)
+    if force_scanned_hosts:
+        hosts = {str(u.get("ip")) for u in (spec.get("rescan_units") or []) if u.get("ip")}
+        hosts |= {str(ip) for ip in (spec.get("targets_ports") or {})}
+        return hosts
+    return {h for h in (_read_state(out).get("live") or []) if isinstance(h, str)}
+
+
+def observed_scope(scope_keys: set, out_dir, spec: dict,
+                   force_scanned_hosts: bool = False) -> set:
+    """닫힘 후보 중 이 실행이 실제로 관측한 호스트의 것만 남긴다."""
+    hosts = observed_hosts(out_dir, spec, force_scanned_hosts)
+    return {key for key in scope_keys if str(key).split("|", 1)[0] in hosts}
+
+
 def artifact_report(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dict:
     """기대 산출물 대비 실제 산출물. authority 가 하나라도 어긋나면 닫으면 안 된다."""
     out = Path(out_dir)

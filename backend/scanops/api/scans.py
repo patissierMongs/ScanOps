@@ -1180,9 +1180,19 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
     try:
         scan = db.get(ScanRun, scan_id)
         if scan is not None:
+            # 산출물이 완결됐다는 것과 '이 호스트의 포트를 봤다'는 것은 다른 사실이다.
+            # sn discovery 에서 호스트가 응답하지 않으면 live 가 비고 sweep 이 아예 돌지
+            # 않는데, 그때 기대 산출물은 discovery 하나뿐이라 완결성 검사가 공허하게
+            # 통과한다. 그 상태로 scope_keys 를 그대로 닫으면 패킷을 한 번도 보내지 않은
+            # 포트가 전부 '닫힘 + 정상처리'가 된다 - 관측하지 못한 것을 없다고 말하는,
+            # 이 PR 이 내내 막아 온 바로 그 오류다.
+            closing = (set() if unfinished
+                       else engine_runner.observed_scope(
+                           scope_keys, out_dir, saved_spec, force_scanned_hosts))
+            unobserved = len(scope_keys) - len(closing) if not unfinished else 0
             _commit_engine_ingest(
                 db, scan, out_dir,
-                set() if unfinished else scope_keys,   # 빈 집합 = 닫힘 후보 없음
+                closing,                               # 빈 집합 = 닫힘 후보 없음
                 force_scanned_hosts,
             )
             scan.status = "partial" if unfinished else "done"
@@ -1204,6 +1214,14 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
                     f"온전하지만 스크립트 결과는 일부 빠졌을 수 있습니다. ({str(degraded[0])[:120]})"
                     if degraded else ""
                 )
+                if unobserved and not degraded:
+                    # 실패가 아니다 — 대상이 응답하지 않아 그 포트를 못 본 것이고, 그래서
+                    # 닫지 않았다. 사용자가 '왜 그대로 열려 있지?' 를 물을 때의 답이다.
+                    scan.failure_code = "nse_degraded"
+                    scan.failure_message = (
+                        f"응답하지 않은 호스트가 있어 발견 {unobserved}건은 관측하지 못했습니다 "
+                        "— 관측하지 않은 포트는 닫지 않습니다."
+                    )
             db.commit()
     except Exception:
         logger.exception("failed to ingest staged scan %s result", scan_id)

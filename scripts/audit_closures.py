@@ -164,9 +164,16 @@ def _covers(spec: dict, state: dict, host_ip: str, port: int, proto: str) -> boo
     api/scans 의 staged 경로), 근사한 target/포트 범위로 덮으면 같은 host 의 다른 포트까지
     '확인됨'이 된다.
     """
+    # scope_keys 는 '닫으려던 후보'이지 '포트를 관측했다'는 증거가 아니다. 실행 **전에**
+    # DB 에서 만들어지므로 그 호스트에 패킷을 한 번도 안 보낸 실행에도 그대로 들어 있다.
+    # 그래서 범위를 좁히는 데만 쓰고, 관측 여부는 따로 확인한다.
     scope_keys = ((spec.get("scanops") or {}).get("scope_keys"))
     if isinstance(scope_keys, list):
-        return f"{host_ip}|{port}|{proto}" in set(scope_keys)
+        if f"{host_ip}|{port}|{proto}" not in set(scope_keys):
+            return False
+        if spec.get("rescan_units") or spec.get("targets_ports"):
+            return True                      # 재스캔은 그 단위가 곧 관측 대상이다
+        return _host_was_swept(spec, state, host_ip)
 
     if spec.get("rescan_units"):
         return any(str(u.get("ip")) == host_ip and int(u.get("port", -1)) == port
@@ -196,6 +203,22 @@ def _covers(spec: dict, state: dict, host_ip: str, port: int, proto: str) -> boo
         return False
     scope = _ports(stage.get("ports"))
     return True if scope is None else port in scope
+
+
+def _host_was_swept(spec: dict, state: dict, host_ip: str) -> bool | None:
+    """이 호스트의 포트를 실제로 훑었는가.
+
+    sn discovery 에서 응답하지 않은 호스트는 live 에 없고 sweep 이 아예 돌지 않는다
+    (pipeline.run 이 live 를 sweep 입력으로 쓴다). 그때 기대 산출물은 discovery 하나뿐이라
+    완결성 검사는 공허하게 통과한다 - 그것을 '닫힘 확인'으로 읽으면 일시적 discovery 미응답
+    하나가 그 호스트의 모든 포트를 닫는다.
+
+    -Pn 은 엔진이 targets 를 그대로 live 로 넣으므로 같은 규칙으로 덮인다.
+    """
+    live = state.get("live")
+    if not isinstance(live, list):
+        return None                          # run-state 를 못 읽었다 - 넘겨짚지 않는다
+    return host_ip in {h for h in live if isinstance(h, str)}
 
 
 def _scaninfo_scope(root, proto: str) -> set[int] | None:
@@ -273,8 +296,17 @@ def scan_evidence(scans_dir: Path, scan_id: int) -> tuple[str, str, dict, dict]:
                     spec, state)
         # 업로드본에도 범위 메타데이터가 있다 - host 뿐 아니라 scaninfo 의 protocol/services
         # 까지 재구성해야 TCP/22 만 스캔한 XML 이 같은 host 의 TCP/23 을 보증하지 않는다.
-        seen = {(el.get("addr") or "")
-                for el in root.findall("./host/address[@addrtype='ipv4']")}
+        # production nmap_parse.up_hosts 와 같은 계약 - status 가 up 인 호스트만.
+        # nmap 은 verbose 출력에서 down 호스트도 XML 에 넣으므로 주소만 모으면 인입이
+        # 닫을 권한이 없는 호스트를 감사가 '확인됨'으로 인증한다.
+        seen = set()
+        for host in root.findall("host"):
+            status = host.find("status")
+            if status is not None and status.get("state") != "up":
+                continue
+            addr_el = host.find("address[@addrtype='ipv4']")
+            if addr_el is not None:
+                seen.add(addr_el.get("addr") or "")
         state = {"live": sorted(x for x in seen if x),
                  "scaninfo": {proto: _scaninfo_scope(root, proto)
                               for proto in ("tcp", "udp")}}

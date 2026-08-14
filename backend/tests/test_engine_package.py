@@ -2134,3 +2134,109 @@ def test_check_tool_reports_a_missing_path_instead_of_a_traceback(tmp_path, caps
 
     assert rc == 2
     assert "경로가 없습니다" in capsys.readouterr().out
+
+
+def test_a_host_that_never_answered_discovery_keeps_its_open_findings(monkeypatch, tmp_path):
+    """discovery 미응답은 '포트가 닫혔다'가 아니라 '아무것도 관측하지 못했다'이다.
+
+    live 가 비면 sweep 이 아예 돌지 않는데, 그때 기대 산출물은 discovery 하나뿐이라
+    완결성 검사가 **공허하게 통과**한다. 그 상태로 scope_keys 를 닫으면 패킷을 한 번도
+    보내지 않은 포트가 전부 '닫힘 + 정상처리'가 된다.
+    """
+    from scanops.scanning import engine_runner
+
+    ip = "10.0.0.1"
+    spec_dict = {
+        "targets": [ip], "out_dir": str(tmp_path), "batch_size": 256,
+        "stages": {"discovery": {"mode": "sn"}, "tcp": {"enabled": True, "ports": "1-65535"},
+                   "udp": {"enabled": False}, "service": {"enabled": True}},
+        "scanops": {"scope_keys": [f"{ip}|22|tcp"]},
+    }
+    calls = []
+
+    def fake_run(nmap, args, out_base, **_kwargs):
+        calls.append(args)
+        Path(str(out_base) + ".xml").write_text(
+            '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+            '<hosts up="0" down="1" total="1"/></runstats></nmaprun>', encoding="utf-8")
+        return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
+
+    monkeypatch.setattr(nmaprun, "run", fake_run)
+    Pipeline(JobSpec.from_dict(spec_dict), _Sink(), "nmap").run()
+
+    assert len(calls) == 1, "discovery 만 돌고 sweep 은 호출되지 않는다"
+    report = engine_runner.artifact_report(tmp_path, spec_dict)
+    assert report["authority_missing"] == [] and report["authority_broken"] == []
+    # 완결성은 통과하지만 그 호스트를 관측하지는 않았다 - 닫힘 후보에서 빠져야 한다.
+    assert engine_runner.observed_hosts(tmp_path, spec_dict) == set()
+    assert engine_runner.observed_scope({f"{ip}|22|tcp"}, tmp_path, spec_dict) == set()
+
+
+def test_pn_mode_and_a_completed_sweep_do_hold_real_port_authority(monkeypatch, tmp_path):
+    """반대 경계 - -Pn 은 대상을 그대로 관측 대상으로 삼는다."""
+    from scanops.scanning import engine_runner
+
+    ip = "10.0.0.1"
+    spec_dict = {
+        "targets": [ip], "out_dir": str(tmp_path), "batch_size": 256,
+        "stages": {"discovery": {"mode": "pn"}, "tcp": {"enabled": True, "ports": "22"},
+                   "udp": {"enabled": False}, "service": {"enabled": False}},
+    }
+
+    def fake_run(nmap, args, out_base, **_kwargs):
+        Path(str(out_base) + ".xml").write_text(
+            '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+            '</runstats></nmaprun>', encoding="utf-8")
+        return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
+
+    monkeypatch.setattr(nmaprun, "run", fake_run)
+    Pipeline(JobSpec.from_dict(spec_dict), _Sink(), "nmap").run()
+
+    assert engine_runner.observed_hosts(tmp_path, spec_dict) == {ip}
+    assert engine_runner.observed_scope({f"{ip}|22|tcp"}, tmp_path, spec_dict) == {f"{ip}|22|tcp"}
+
+
+def test_audit_treats_an_unswept_host_closure_as_unverifiable(tmp_path):
+    """감사도 같은 판단을 해야 한다 - scope_keys 는 관측 증거가 아니다."""
+    import audit_closures
+
+    scans = tmp_path / "scans"
+    out = scans / "scan_1"
+    out.mkdir(parents=True)
+    (out / "spec.json").write_text(json.dumps({
+        "targets": ["10.0.0.1"], "batch_size": 256,
+        "scanops": {"scope_keys": ["10.0.0.1|22|tcp"]},
+        "stages": {"discovery": {"mode": "sn"}, "tcp": {"enabled": True, "ports": "1-65535"},
+                   "udp": {"enabled": False}, "service": {"enabled": True}},
+    }), encoding="utf-8")
+    (out / "run-state.json").write_text(json.dumps({"live": []}), encoding="utf-8")
+    _finished(out / "stage0-discovery.xml")
+
+    _mark, _why, spec, state = audit_closures.scan_evidence(scans, 1)
+    assert audit_closures._covers(spec, state, "10.0.0.1", 22, "tcp") is False
+
+    # 반대 경계 - 응답한 호스트는 sweep 을 받았으므로 권한이 있다.
+    (out / "run-state.json").write_text(json.dumps({"live": ["10.0.0.1"]}), encoding="utf-8")
+    _finished(out / "stage-tcp-b0.xml")
+    _mark, _why, spec, state = audit_closures.scan_evidence(scans, 1)
+    assert audit_closures._covers(spec, state, "10.0.0.1", 22, "tcp") is True
+
+
+def test_audit_upload_host_extraction_matches_production_up_hosts(tmp_path):
+    """nmap 은 verbose 출력에서 down 호스트도 XML 에 넣는다 - 인입은 그것을 닫지 않는다."""
+    import audit_closures
+    from scanops.scanning.nmap_parse import up_hosts
+
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    xml = ('<?xml version="1.0"?><nmaprun scanner="nmap">'
+           '<scaninfo type="syn" protocol="tcp" numservices="1" services="22"/>'
+           '<host><status state="down"/><address addr="10.0.0.1" addrtype="ipv4"/></host>'
+           '<host><status state="up"/><address addr="10.0.0.2" addrtype="ipv4"/></host>'
+           '<runstats><finished exit="success"/></runstats></nmaprun>')
+    (scans / "scan_4.xml").write_text(xml, encoding="utf-8")
+
+    _mark, _why, _spec, state = audit_closures.scan_evidence(scans, 4)
+    assert set(state["live"]) == up_hosts(xml.encode()), "production 계약과 같아야 한다"
+    assert audit_closures._upload_covers(state, "10.0.0.1", 22, "tcp") is False
+    assert audit_closures._upload_covers(state, "10.0.0.2", 22, "tcp") is True
