@@ -4,7 +4,12 @@ import { createPortal } from "react-dom";
 // 비밀번호 설정 모달. requireCurrent=true 면 현재 비밀번호 입력(본인 변경),
 // 아니면 새 비밀번호만(admin 재설정). onSubmit({current,next}) 은 Promise 반환:
 // 성공(resolve) 시 닫히고, 실패(reject) 시 유지(부모가 토스트).
-export default function PasswordModal({ title, requireCurrent = false, onSubmit, onClose, onSuccess }) {
+export default function PasswordModal({
+  title, requireCurrent = false, onSubmit, onClose, onSuccess,
+  // 강제 변경 — 남이 정해 준 비밀번호를 쓰는 동안은 서버가 모든 작업을 막는다. 닫을 수
+  // 있게 두면 '아무것도 안 되는 빈 화면'만 남아 사용자가 무엇을 해야 할지 알 수 없다.
+  mandatory = false, notice = "",
+}) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -16,6 +21,8 @@ export default function PasswordModal({ title, requireCurrent = false, onSubmit,
   const errorId = useId();
   const dialogRef = useRef(null);
   const onCloseRef = useRef(onClose);
+  const mandatoryRef = useRef(mandatory);
+  mandatoryRef.current = mandatory;
   const onSuccessRef = useRef(onSuccess);
   onCloseRef.current = onClose;
   onSuccessRef.current = onSuccess;
@@ -36,11 +43,16 @@ export default function PasswordModal({ title, requireCurrent = false, onSubmit,
       .catch(() => setBusy(false)); // 실패 시 모달 유지
   }
 
+  function dismiss() {
+    if (mandatory) return;
+    onCloseRef.current();
+  }
+
   function onDialogKeyDown(event) {
     if (event.key !== "Escape") return;
     event.preventDefault();
     event.stopPropagation();
-    onCloseRef.current();
+    dismiss();
   }
 
   useEffect(() => {
@@ -56,7 +68,7 @@ export default function PasswordModal({ title, requireCurrent = false, onSubmit,
     function onKey(event) {
       if (event.key === "Escape") {
         event.preventDefault();
-        onCloseRef.current();
+        if (!mandatoryRef.current) onCloseRef.current();
         return;
       }
       if (event.key !== "Tab") return;
@@ -83,10 +95,11 @@ export default function PasswordModal({ title, requireCurrent = false, onSubmit,
   }, []);
 
   return createPortal(
-    <div className="modal" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="modal" onMouseDown={(e) => { if (e.target === e.currentTarget) dismiss(); }}>
       <form ref={dialogRef} className="panel modal-card" onSubmit={submit} onKeyDown={onDialogKeyDown}
             role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <h3 id={titleId}>{title}</h3>
+        {notice && <p className="modal-notice">{notice}</p>}
         {requireCurrent && (
           <label className="field" htmlFor={currentId}>현재 비밀번호
           <input id={currentId}
@@ -118,7 +131,7 @@ export default function PasswordModal({ title, requireCurrent = false, onSubmit,
           </span>
         )}
         <div className="row" style={{ justifyContent: "flex-end", marginTop: 2 }}>
-          <button type="button" className="sm" onClick={onClose}>취소</button>
+          {!mandatory && <button type="button" className="sm" onClick={onClose}>취소</button>}
           <button type="submit" className="primary" disabled={invalid || busy}>변경</button>
         </div>
       </form>

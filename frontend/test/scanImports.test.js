@@ -338,5 +338,7 @@ test("Scans preflights and uploads each planned group through the existing endpo
   assert.match(scans, /await runImportGroups\(plan, async \(group\)/);
   assert.match(scans, /uploadMany\("\/scans\/import-bundle", group\.files\)/);
   assert.match(scans, /formatImportSummary\(summary\)/);
-  assert.match(scans, /summary\.hasFailures \? \{ type: "err" \}/);
+  // 실패뿐 아니라 '검증에 걸린 파일'도 성공 토스트로 흘려보내지 않는다.
+  assert.match(scans, /summary\.hasFailures \|\| flagged \? \{ type: "err" \}/);
+  assert.match(scans, /\(summary\.reviews \|\| \[\]\)\.length > 0/);
 });

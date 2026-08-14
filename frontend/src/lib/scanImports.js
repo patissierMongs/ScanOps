@@ -217,6 +217,9 @@ export async function runImportGroups(plan, uploadGroup) {
     interruptedXmlCount: number(plan.interruptedXmlCount),
     counts: {},
     closureModes: [],
+    // 가져오기 자동 검증 결과. 서버가 매 XML 을 판정해 돌려주므로, 사용자가 따로 도구를
+    // 돌리지 않아도 '이 결과를 그대로 믿어도 되는가'를 그 자리에서 알 수 있다.
+    reviews: [],
     errors: [],
   };
   for (const group of groups) {
@@ -231,6 +234,9 @@ export async function runImportGroups(plan, uploadGroup) {
       }
       if (result?.closure_mode && !summary.closureModes.includes(result.closure_mode)) {
         summary.closureModes.push(result.closure_mode);
+      }
+      for (const review of Array.isArray(result?.reviews) ? result.reviews : []) {
+        if (review && !review.usable) summary.reviews.push(review);
       }
       for (const item of Array.isArray(result?.errors) ? result.errors : []) {
         const name = item && typeof item === "object" ? item.name : "";
@@ -273,6 +279,14 @@ export function formatImportSummary(summary) {
   // 중단본 제외는 실패가 아니라 의도된 보호다 — 다만 조용히 빠지면 '왜 안 들어왔지'가 된다.
   if (summary.interruptedXmlCount) {
     message += ` · 중단된 스캔 ${number(summary.interruptedXmlCount)}개 제외(부분 결과)`;
+  }
+  // 검증에서 걸린 파일은 실패가 아니다(결과는 들어왔다). 다만 조용히 넘기면 사용자는
+  // 반쪽짜리 결과를 온전한 것으로 읽는다 - 무엇이 왜 걸렸는지 한 건은 그대로 보여준다.
+  const flagged = summary.reviews || [];
+  if (flagged.length) {
+    const head = flagged[0];
+    const others = flagged.length > 1 ? ` 외 ${flagged.length - 1}건` : "";
+    message += ` · 검증 [${head.mark}] ${head.file}${others}: ${head.why}`;
   }
   if (summary.errors?.length) message += ` · 실패: ${summary.errors.join(" | ")}`;
   return message;

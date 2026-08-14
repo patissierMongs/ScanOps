@@ -10,6 +10,10 @@ import { deadlinePatchValue } from "../src/lib/findingPatch.js";
 import { SCAN_STATUS, scanKind, scanNotice, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
 import { splitScanTokens } from "../src/lib/scanTargets.js";
 import { toastAnnouncement, toastDuration } from "../src/lib/toast.js";
+import { matchesFilter, parseNeedle } from "../src/lib/filterText.js";
+import { formatImportSummary } from "../src/lib/scanImports.js";
+import { matchFocus } from "../src/lib/ruleFocus.js";
+import { PAGE_SIZES } from "../src/lib/pageSize.js";
 
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
@@ -93,7 +97,7 @@ test("findings search debounces on typing without firing mid-composition", () =>
   assert.match(view, /if \(composing\.current\) return;/);
   assert.match(view, /setTimeout\(\(\) => \{ setPage\(0\); load\(0\); \}, 250\)/);
   // 조합이 끝나면 그때 한 번은 반드시 나가야 한다.
-  assert.match(view, /\[queryString\.toString\(\), imeTick\]/);
+  assert.match(view, /\[queryString\.toString\(\), imeTick, pageSize\]/);
   // 검색창과 컬럼 필터 모두 같은 보호를 받는다.
   assert.ok(view.split("{...imeProps}").length - 1 >= 3, "search + column filters must share the IME guard");
 });
@@ -551,4 +555,134 @@ test("a closed finding never wears the reason it had while it was open", () => {
   const view = source("../src/views/Findings.jsx");
   assert.match(view, /currentReason\(finding\)/);
   assert.doesNotMatch(view, /\{finding\.reason\}/);
+});
+
+test("every filter shares one exclude syntax", () => {
+  // 화면마다 규칙이 다르면 외울 수 없다. 서버(parse_needle)와 같은 문법을 클라이언트
+  // 전용 필터(자산대장)까지 같은 모듈로 쓴다.
+  assert.deepEqual(parseNeedle("!ssh"), { needle: "ssh", negate: true });
+  assert.deepEqual(parseNeedle("!!ssh"), { needle: "!ssh", negate: false });
+  assert.deepEqual(parseNeedle("ssh"), { needle: "ssh", negate: false });
+
+  assert.equal(matchesFilter(["ssh", "22"], "ssh"), true);
+  assert.equal(matchesFilter(["ssh", "22"], "!ssh"), false);
+  assert.equal(matchesFilter(["https", "443"], "!ssh"), true);
+  // 빈 필터는 아무것도 거르지 않는다 - `!` 만 입력한 중간 상태에서 목록이 비면 안 된다.
+  assert.equal(matchesFilter(["https"], "!"), true);
+  assert.equal(matchesFilter(["https"], "  "), true);
+
+  const findings = source("../src/views/Findings.jsx");
+  const assets = source("../src/views/Assets.jsx");
+  const history = source("../src/views/History.jsx");
+  for (const view of [findings, assets, history]) {
+    assert.match(view, /FILTER_HINT/, "제외 문법은 화면에서 안내돼야 한다");
+  }
+  assert.match(assets, /matchesFilter\(/);
+});
+
+test("an allowed finding is folded on a different axis than a resolved one", () => {
+  // 규칙이 '허용'한 것과 사람이 '정상처리'한 것은 다른 사실이다. 하나로 묶으면 둘 중
+  // 무엇 때문에 안 보이는지 알 수 없다.
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /const \[hideAllowed, setHideAllowed\] = useState\(true\)/);
+  assert.match(view, /qs\.set\("hide_allowed"/);
+  assert.match(view, /허용 제외/);
+  // 접힌 것을 펼쳤을 때 왜 보이는지 표에서 읽혀야 한다.
+  assert.match(view, /finding\.allowed/);
+  assert.match(view, /className="tag allowed"/);
+  // 정상처리 토글과 독립적이어야 한다 - 같은 상태를 공유하면 축이 도로 합쳐진다.
+  assert.ok(!/hideNormal\s*\|\|\s*hideAllowed/.test(view));
+});
+
+test("a rule's match count leads to the findings it actually matched", () => {
+  // 건수만 보여 주면 '그래서 어떤 건데?' 를 매번 손으로 찾아야 한다. 서버 _match_count 와
+  // 같은 기준이어야 건수와 목록이 어긋나지 않는다.
+  assert.deepEqual(matchFocus({ kind: "service_rule", service: "telnet" }), {
+    filters: { service: "telnet" }, match: "exact", hideNormal: false, hideAllowed: false,
+  });
+  assert.deepEqual(matchFocus({ kind: "port_rule", port: 3389, service: "" }), {
+    filters: { port: "3389" }, match: "exact", hideNormal: false, hideAllowed: false,
+  });
+  assert.deepEqual(matchFocus({ kind: "product_rule", product: "vsftpd" }), {
+    filters: { product: "vsftpd" }, match: "contains", hideNormal: false, hideAllowed: false,
+  });
+  // 허용 규칙의 매칭은 기본으로 접혀 있다 - 그대로 이동하면 빈 목록만 보인다.
+  assert.equal(matchFocus({ kind: "cpe_rule", cpe: "openssh" }).hideAllowed, false);
+
+  const rules = source("../src/views/Rules.jsx");
+  assert.match(rules, /onShowMatches\(matchFocus\(r\)\)/);
+  // 0 건은 볼 것이 없으므로 링크로 만들지 않는다.
+  assert.match(rules, /r\.match_count && onShowMatches/);
+  const app = source("../src/App.jsx");
+  assert.match(app, /onShowMatches=\{focusFindings\}/);
+  assert.match(app, /focus=\{findingsFocus\}/);
+});
+
+test("a wide findings table can be scrolled without leaving the rows", () => {
+  // 기본 가로 스크롤바는 200행 아래에 있다 - 오른쪽 컬럼을 보려면 페이지 끝까지 내려가
+  // 바를 잡고 다시 올라와야 해서 사실상 못 쓴다.
+  const scroller = source("../src/ui/TableScroller.jsx");
+  const css = source("../src/styles.css");
+  assert.match(scroller, /overflowing &&/, "넘치지 않으면 군더더기를 더하지 않는다");
+  assert.match(scroller, /role="scrollbar"/);
+  assert.match(css, /\.table-scrollbar\s*\{[^}]*position: sticky;[^}]*bottom: 0;/);
+  // 둘이 동시에 보이면 어느 쪽이 진짜인지 알 수 없다.
+  assert.match(css, /\.table-scroll\.has-proxy::-webkit-scrollbar \{ height: 0; \}/);
+  assert.match(source("../src/views/Findings.jsx"), /<TableScroller/);
+});
+
+test("a long fingerprint expands in place and collapses when the pointer leaves", () => {
+  // 팝업이 아니라 셀 자체가 늘어나야 커서가 벗어나는 순간 원래대로 돌아온다.
+  const css = source("../src/styles.css");
+  assert.match(css, /\.pre-cell \{[\s\S]*?max-height: 2\.8em;/);
+  assert.match(css, /\.pre-cell:hover, \.pre-cell:focus-visible \{[\s\S]*?max-height: 22em;/);
+  assert.match(source("../src/views/Findings.jsx"), /className=\{"mono pre-cell"/);
+});
+
+test("a forced password change cannot be dismissed and says why", () => {
+  const app = source("../src/App.jsx");
+  const modal = source("../src/ui/PasswordModal.jsx");
+  assert.match(app, /const mustChange = !!user\.must_change_password/);
+  assert.match(app, /mandatory=\{mustChange\}/);
+  // 닫을 수 있게 두면 아무것도 안 되는 빈 화면만 남는다.
+  assert.match(modal, /if \(mandatory\) return;/);
+  assert.match(modal, /\{!mandatory && <button type="button" className="sm" onClick=\{onClose\}>취소<\/button>\}/);
+  // 왜 떴는지가 유일한 설명이므로 흐린 보조 텍스트로 두지 않는다.
+  assert.match(modal, /\{notice && <p className="modal-notice">\{notice\}<\/p>\}/);
+  assert.match(app, /INITIAL_ADMIN\.txt/);
+});
+
+test("an import that failed verification is not reported as a clean success", () => {
+  const flagged = formatImportSummary({
+    imported: 1, groupCount: 1, succeededGroups: 1, fileCount: 1, selectedXmlCount: 1,
+    counts: { new: 2, closed: 0 },
+    reviews: [{ file: "weekly.udp_identify.xml", mark: "재실행 권장", why: "NSE 결과가 없습니다." }],
+  });
+  assert.match(flagged, /검증 \[재실행 권장\] weekly\.udp_identify\.xml/);
+  assert.match(flagged, /NSE 결과가 없습니다/);
+
+  const clean = formatImportSummary({
+    imported: 1, groupCount: 1, succeededGroups: 1, fileCount: 1, selectedXmlCount: 1,
+    counts: { new: 2, closed: 0 }, reviews: [],
+  });
+  assert.doesNotMatch(clean, /검증/, "정상 결과에까지 딱지를 붙이면 신호가 죽는다");
+});
+
+test("a scan whose range was never recorded says so instead of showing a default", () => {
+  // 예전에는 명령 표기가 argv 가 아니면 무조건 'TCP · 기본 1000개' 로 그려서, 전 포트
+  // TCP+UDP 단계 스캔이 상위 1000개 TCP 스캔으로 보였다.
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /const unknown = !\(summary\.protocols \|\| \[\]\)\.length/);
+  assert.match(scans, /is-unknown/);
+  assert.match(source("../src/styles.css"), /\.scan-scope-ports\.is-unknown/);
+});
+
+test("long lists let the reader choose how much fits on one page", () => {
+  const findings = source("../src/views/Findings.jsx");
+  const history = source("../src/views/History.jsx");
+  assert.ok(PAGE_SIZES.includes(200) && PAGE_SIZES.at(-1) >= 5000);
+  assert.match(findings, /<PageSize value=\{pageSize\}/);
+  // 예전에는 200건에서 잘린 채 총 건수만 보여 줘, 그 뒤가 있는지도 알 수 없었다.
+  assert.match(history, /<PageSize value=\{size\}/);
+  assert.match(history, /feed\.items\.length < feed\.total/);
 });

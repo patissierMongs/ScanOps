@@ -199,7 +199,10 @@ export default function Scans({ user }) {
       const summary = await runImportGroups(plan, async (group) => (
         uploadMany("/scans/import-bundle", group.files)
       ));
-      toast(formatImportSummary(summary), summary.hasFailures ? { type: "err" } : undefined);
+      // 검증에 걸린 파일이 있으면 성공 토스트로 흘려보내지 않는다 - 눈에 남아야 한다.
+      const flagged = (summary.reviews || []).length > 0;
+      toast(formatImportSummary(summary),
+            summary.hasFailures || flagged ? { type: "err" } : undefined);
       if (summary.succeededGroups) load();
     } catch (e) {
       toast(e.message, { type: "err" });
@@ -533,6 +536,10 @@ export default function Scans({ user }) {
 // 원문 명령은 [상세]에 그대로 남는다(필요한 사람은 거기서 본다).
 function ScanScope({ summary }) {
   if (!summary) return <span className="muted">—</span>;
+  // 프로토콜을 모르면 뱃지를 달지 않는다. 예전에는 명령 표기가 argv 가 아니면 무조건
+  // 'TCP · 기본 1000개' 로 그려서, 전 포트 TCP+UDP 단계 스캔이 상위 1000개 TCP 스캔으로
+  // 보였다 - 스캔하지 않은 범위를 봤다고 말하고 실제 범위는 감추는 이중 오류였다.
+  const unknown = !(summary.protocols || []).length;
   const partial = summary.excluded_ports || summary.excluded_hosts;
   return (
     <div className="scan-scope">
@@ -541,7 +548,10 @@ function ScanScope({ summary }) {
         {(summary.protocols || []).map((p) => (
           <span key={p} className={`tag proto-${p.toLowerCase()}`}>{p}</span>
         ))}
-        <span className={`scan-scope-ports${partial ? " is-partial" : ""}`}>{summary.ports}</span>
+        <span className={`scan-scope-ports${partial ? " is-partial" : ""}${unknown ? " is-unknown" : ""}`}
+              title={unknown ? "이 실행의 명령 표기에 스캔 범위가 남아 있지 않습니다 (이 기능 이전에 실행된 스캔)" : undefined}>
+          {summary.ports}
+        </span>
       </div>
       {partial && (
         <div className="scan-scope-excluded">

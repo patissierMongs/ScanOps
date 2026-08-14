@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useToast } from "../ui/Toast.jsx";
+import { FILTER_HINT, matchesFilter } from "../lib/filterText.js";
 import {
   detectHeaderRow, assetColumnsFrom,
   computeAutoMap, buildAssetRecords, normalizeSpec, normHeader,
@@ -239,9 +240,10 @@ export default function Assets({ user }) {
   const skipped = imp ? Math.max(0, dataRows - records.length) : 0;
 
   const q = search.trim().toLowerCase();
-  const filtered = !q ? assets : assets.filter((a) =>
-    [a.ip, a.hostname, a.dept, a.owner, a.contact, a.asset_no].some((v) => (v || "").toLowerCase().includes(q)) ||
-    Object.values(a.extra || {}).some((v) => String(v).toLowerCase().includes(q)));
+  // 다른 화면과 같은 `!` 제외 문법을 쓴다 — 화면마다 규칙이 다르면 외울 수 없다.
+  const filtered = !q ? assets : assets.filter((a) => matchesFilter(
+    [a.ip, a.hostname, a.dept, a.owner, a.contact, a.asset_no,
+     ...Object.values(a.extra || {})], search));
 
   return (
     <div className="content">
@@ -430,7 +432,9 @@ export default function Assets({ user }) {
       <div className="panel">
         <div className="row" style={{ marginBottom: 12 }}>
           <h3 style={{ margin: 0 }}>자산 목록 · {filtered.length}{q && `/${assets.length}`}건</h3>
-          <input style={{ marginLeft: "auto", minWidth: 220 }} placeholder="검색 (IP/부서/담당/연락처/커스텀)"
+          <input style={{ marginLeft: "auto", minWidth: 220 }}
+                 placeholder="검색 (IP/부서/담당/연락처/커스텀 · !로 시작하면 제외)"
+                 title={FILTER_HINT}
                  value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
         <div style={{ overflowX: "auto" }}>

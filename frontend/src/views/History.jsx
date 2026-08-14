@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { primaryServiceIdentity } from "../lib/columns.js";
 import { useToast } from "../ui/Toast.jsx";
+import { FILTER_HINT } from "../lib/filterText.js";
+import PageSize, { PAGE_SIZES } from "../ui/PageSize.jsx";
 
 // 이벤트 타입 표시 메타 (백엔드 FindingEvent.type 과 일치)
 const TYPE_META = {
@@ -25,18 +27,20 @@ export default function History() {
   const [feed, setFeed] = useState({ total: 0, items: [] });
   const [type, setType] = useState("");
   const [host, setHost] = useState("");
+  // 예전에는 200건에서 잘린 채 총 건수만 보여 줘, 그 뒤가 있는지도 알 수 없었다.
+  const [size, setSize] = useState(200);
   const toast = useToast();
 
-  function load() {
+  function load(limit = size) {
     const qs = new URLSearchParams();
     if (type) qs.set("type", type);
     if (host.trim()) qs.set("host", host.trim());
-    qs.set("limit", "200");
+    qs.set("limit", String(limit));
     api(`/events?${qs.toString()}`)
       .then(setFeed)
       .catch((e) => toast(e.message, { type: "err" }));
   }
-  useEffect(() => { load(); }, [type]);
+  useEffect(() => { load(); }, [type, size]);
 
   return (
     <div className="content">
@@ -46,13 +50,17 @@ export default function History() {
             <option value="">전체 타입</option>
             {FILTERS.filter(Boolean).map((t) => <option key={t} value={t}>{TYPE_META[t]?.label || t}</option>)}
           </select>
-          <input placeholder="호스트 IP 필터" value={host} onChange={(e) => setHost(e.target.value)}
+          <input placeholder="호스트 IP 필터 (!로 시작하면 제외)" title={FILTER_HINT}
+                 value={host} onChange={(e) => setHost(e.target.value)}
                  onKeyDown={(e) => {
                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                    if (e.key === "Enter") load();
                  }} />
-          <button onClick={load}>적용</button>
-          <span className="muted" style={{ marginLeft: "auto" }}>총 {feed.total}건</span>
+          <button onClick={() => load()}>적용</button>
+          <PageSize value={size} onChange={setSize} />
+          <span className="muted" style={{ marginLeft: "auto" }}>
+            총 {feed.total}건{feed.items.length < feed.total ? ` · ${feed.items.length}건 표시` : ""}
+          </span>
         </div>
       </div>
 
