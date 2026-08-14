@@ -141,11 +141,12 @@ def test_the_event_feed_host_filter_uses_the_same_exclude_rule(client):
 
 
 # ── 6. 최초 로그인 비밀번호 강제 변경 ──────────────────────────────────────────
-def test_a_borrowed_password_can_log_in_but_do_nothing_until_it_is_changed(client, tmp_path):
+def test_a_borrowed_password_is_flagged_and_its_file_disappears_when_changed(client, tmp_path):
     """INITIAL_ADMIN.txt 의 비밀번호는 평문으로 파일에 남는다.
 
-    '로그인 후 바꾸세요' 라는 안내만으로는 남는다. 바꾸기 전까지는 어떤 작업도 못 하게 막고,
-    바꾸는 순간 파일을 지운다 - 파일이 실제로 사라져야 변경이 끝난 것이다.
+    화면은 이 표시를 보고 첫 로그인에 변경 창을 띄운다(닫을 수 없다). 서버가 모든 API 를
+    막는 대신 표시만 내려 주고, 변경이 끝나면 평문 비밀번호 파일을 지운다 - '나중에
+    지우세요' 라는 안내만으로는 남기 때문이다.
     """
     cred = scans_api._settings.data_dir / "INITIAL_ADMIN.txt"
     cred.write_text("ScanOps 최초 관리자 계정\n  비밀번호: bootstrappw12\n", encoding="utf-8")
@@ -161,16 +162,11 @@ def test_a_borrowed_password_can_log_in_but_do_nothing_until_it_is_changed(clien
     token = token_for(client, "firstadmin", "bootstrappw12")
     headers = {"Authorization": f"Bearer {token}"}
 
-    # 로그인 자체는 된다 - 비밀번호를 바꾸려면 로그인 상태여야 하기 때문이다.
+    # 화면이 강제 변경 창을 띄우는 근거가 이 표시다.
     me = client.get("/api/auth/me", headers=headers)
     assert me.status_code == 200 and me.json()["must_change_password"] == 1
 
-    # 그러나 실제 작업은 전부 막힌다.
-    blocked = client.get("/api/findings", headers=headers)
-    assert blocked.status_code == 403
-    assert "비밀번호를 먼저 변경" in blocked.json()["detail"]
-
-    # 같은 비밀번호로 '변경'해 잠금만 푸는 우회를 막는다.
+    # 같은 비밀번호로 '변경'해 표시만 지우는 우회를 막는다.
     same = client.post("/api/auth/change-password", headers=headers,
                        json={"current_password": "bootstrappw12",
                              "new_password": "bootstrappw12"})
@@ -183,9 +179,9 @@ def test_a_borrowed_password_can_log_in_but_do_nothing_until_it_is_changed(clien
     assert changed.status_code == 200
     assert not cred.exists(), "변경했으면 평문 비밀번호 파일은 사라져야 한다"
 
-    # 비밀번호가 바뀌었으니 토큰도 무효 - 새로 받아 정상 작업.
+    # 표시가 내려가 다음 로그인에는 창이 뜨지 않는다.
     fresh = {"Authorization": f"Bearer {token_for(client, 'firstadmin', 'realpassword34')}"}
-    assert client.get("/api/findings", headers=fresh).status_code == 200
+    assert client.get("/api/auth/me", headers=fresh).json()["must_change_password"] == 0
 
 
 def test_an_admin_reset_also_requires_the_owner_to_choose_a_new_password(client):
@@ -197,7 +193,7 @@ def test_an_admin_reset_also_requires_the_owner_to_choose_a_new_password(client)
     assert created.json()["must_change_password"] == 1, "admin 이 정해 준 비밀번호다"
 
     victim = {"Authorization": f"Bearer {token_for(client, 'newbie', 'temporary1234')}"}
-    assert client.get("/api/findings", headers=victim).status_code == 403
+    assert client.get("/api/auth/me", headers=victim).json()["must_change_password"] == 1
 
 
 # ── 8. 가져오기 자동 검증 ─────────────────────────────────────────────────────
@@ -377,3 +373,113 @@ def test_removing_an_allow_rule_brings_the_finding_back(client):
     rows = client.get("/api/findings?state=open", headers=headers).json()
     assert [f["service"] for f in rows] == ["ssh"]
     assert rows[0]["allowed"] == 0
+
+
+# ── 단독 스캐너 실행 하나 = 스캔 이력 한 줄 ────────────────────────────────────
+def _stage_xml(host: str, *, stage: str, port: int | None) -> bytes:
+    proto = "udp" if stage == "udp_identify" else "tcp"
+    services = "53,161" if proto == "udp" else "1-65535"
+    ports = (
+        f'<ports><port protocol="{proto}" portid="{port}">'
+        '<state state="open" reason="syn-ack"/><service name="https"/></port></ports>'
+    ) if port else ""
+    return (
+        '<?xml version="1.0"?><nmaprun scanner="nmap" start="1785542400">'
+        f'<scaninfo type="syn" protocol="{proto}" numservices="2" services="{services}"/>'
+        f'<host><status state="up"/><address addr="{host}" addrtype="ipv4"/>{ports}</host>'
+        '<runstats><finished time="1785546000" exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>'
+    ).encode("utf-8")
+
+
+def _manifest(names: list[str]) -> bytes:
+    return json.dumps({
+        "tool": "scanops_scanner",
+        "name": "weekly",
+        "import_xml_files": names,
+    }).encode("utf-8")
+
+
+def test_a_standalone_run_becomes_one_scan_row_not_one_per_batch(client):
+    """단독 스캐너 실행 하나는 이력에서 한 줄이어야 한다.
+
+    예전에는 배치마다, 심지어 단계 하나만 남은 배치마다 별도 ScanRun 이 생겼다. /24 스캔은
+    열린 포트가 없는 배치가 대부분이라 tcp_discovery 파일 하나짜리 행이 이력을 가득 채웠고,
+    그 행들은 아무것도 말해 주지 않으면서 자리만 차지했다. 웹에서 돌린 단계 스캔은 배치가
+    몇 개든 한 줄이므로 가져온 실행도 같아야 한다.
+    """
+    headers = _auth(client)
+    files = {
+        # b0000: 열린 포트가 있어 식별까지 돈 배치
+        "weekly.10_0_0_0.b0000.tcp_discovery.xml": _stage_xml("10.0.0.1", stage="tcp_discovery", port=443),
+        "weekly.10_0_0_0.b0000.tcp_identify.xml": _stage_xml("10.0.0.1", stage="tcp_identify", port=443),
+        # b0001: 열린 포트가 없어 발견 단계 XML 만 남은 배치 - 예전에는 이것도 한 줄이었다
+        "weekly.10_0_0_0.b0001.tcp_discovery.xml": _stage_xml("10.0.0.2", stage="tcp_discovery", port=None),
+    }
+    upload = [("files", (name, data, "text/xml")) for name, data in files.items()]
+    upload.append(("files", ("weekly.manifest.json", _manifest(list(files)), "application/json")))
+
+    response = client.post("/api/scans/import-bundle", headers=headers, files=upload)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["imported"] == 1, "실행 하나는 스캔 하나다"
+
+    scans = client.get("/api/scans", headers=headers).json()
+    assert len(scans) == 1
+    scan = scans[0]
+    # 웹에서 돌린 단계 스캔처럼 타임라인이 남는다.
+    stages = [(s["stage"], s["batch"]) for s in scan["stages_json"]]
+    assert stages == [("tcp_discovery", 0), ("tcp_identify", 0), ("tcp_discovery", 1)]
+    # 범위도 XML 이 밝힌 그대로 - '기본 1000개' 로 넘겨짚지 않는다.
+    assert scan["summary"]["protocols"] == ["TCP"]
+    assert scan["summary"]["ports"] == "전체"
+
+    # 두 배치의 관측이 모두 한 스캔에 들어간다.
+    hosts = {f["host_ip"] for f in client.get("/api/findings?state=open", headers=headers).json()}
+    assert hosts == {"10.0.0.1"}, "열린 포트가 있는 호스트만 발견으로 남는다"
+    assert scan["host_count"] == 2, "관측한 호스트는 두 배치 모두 세어야 한다"
+
+
+def test_without_a_manifest_files_are_still_only_grouped_by_name(client):
+    """반대 경계 - manifest 가 없으면 어떤 파일들이 한 실행인지 단언할 근거가 없다.
+
+    파일명 base 로만 묶고 그 이상은 넘겨짚지 않는다. 서로 다른 실행의 결과를 한 줄로
+    합치면 이번엔 없는 사실(같은 실행이었다)을 만들어 내는 셈이다.
+    """
+    headers = _auth(client)
+    files = {
+        "monday.10_0_0_0.tcp_discovery.xml": _stage_xml("10.0.0.1", stage="tcp_discovery", port=443),
+        "tuesday.10_0_0_0.tcp_discovery.xml": _stage_xml("10.0.0.2", stage="tcp_discovery", port=8443),
+    }
+    upload = [("files", (name, data, "text/xml")) for name, data in files.items()]
+
+    response = client.post("/api/scans/import-bundle", headers=headers, files=upload)
+    assert response.status_code == 200, response.text
+    assert response.json()["imported"] == 2, "다른 실행은 다른 줄이다"
+
+
+def test_progress_says_which_batch_and_stage_is_running(client):
+    """진행률 숫자 하나로는 '멈춘 것인지 도는 것인지'조차 알 수 없다."""
+    from scanops.scanning import chunker
+
+    headers = _auth(client)
+    db = SessionLocal()
+    try:
+        scan = ScanRun(name="진행 중", targets="10.0.0.0/24", status="running")
+        db.add(scan)
+        db.commit()
+        scan_id = scan.id
+    finally:
+        db.close()
+    base = scans_api._basename(scan_id)
+    chunker.write_state(base, {
+        "batches": [["10.0.0.1", "10.0.0.2"], ["10.0.0.3"]], "cursor": 0,
+        "workflow": "auto", "stage": "tcp_identify", "stage_hosts": 2, "stop": False,
+    })
+
+    progress = client.get(f"/api/scans/{scan_id}/progress", headers=headers).json()
+    assert progress["batches_total"] == 2 and progress["batches_done"] == 0
+    assert progress["stage"] == "tcp_identify"
+    assert progress["stage_hosts"] == 2
+    assert progress["batch_label"] == "10.0.0.1 외 1대"
+    assert progress["elapsed_seconds"] is not None, "실행 중이면 경과 시간을 말할 수 있다"

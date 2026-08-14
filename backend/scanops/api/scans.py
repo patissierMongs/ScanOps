@@ -645,7 +645,10 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
     )
     from .assets import match_assets
     match_assets(db, commit=False)
-    scan.host_count = len({f["host_ip"] for f in enriched})
+    # '호스트' 는 이 스캔이 **관측한** 호스트 수다. 발견이 있는 호스트만 세면 열린 포트가
+    # 없던 호스트가 통째로 사라져, 같은 대역을 웹에서 돌렸을 때(engine 은 scanned 를 센다)와
+    # 숫자가 달라진다. 가져온 결과라고 해서 다르게 셀 이유가 없다.
+    scan.host_count = len(scanned_hosts) or len({f["host_ip"] for f in enriched})
     scan.port_count = len(enriched)
     scan.status = "done"
     scan.finished_at = datetime.now(timezone.utc)
@@ -755,6 +758,22 @@ def _checked_stage(scan_id: int, argv: list[str], log_path: Path) -> None:
         raise _WorkerFailure("nmap_failed")
 
 
+def _mark_stage(scan_id: int, state: dict, stage: str, hosts: int = 0) -> None:
+    """지금 어느 단계를 돌고 있는지 sidecar 에 남긴다.
+
+    자동 스캔은 배치 하나 안에서 발견 -> 식별 -> UDP 를 순서대로 돈다. 그 사실을 남기지
+    않으면 화면은 nmap 이 뱉는 퍼센트 하나만 볼 수 있어서, 몇 분째 같은 숫자를 보면서
+    '무엇을 하는 중인지' 알 수 없다.
+    """
+    state["stage"] = stage
+    if hosts:
+        state["stage_hosts"] = hosts
+    try:
+        chunker.write_state(_basename(scan_id), state)
+    except OSError:
+        logger.warning("failed to record scan %s stage", scan_id, exc_info=True)
+
+
 def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, state: dict) -> bool:
     """Run discovery -> identify -> UDP for one batch, then ingest the final observations once."""
     ports = state.get("ports", "")
@@ -782,6 +801,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             ),
             state.get("exclude"), state.get("exclude_ports", ""),
         )
+        _mark_stage(scan_id, state, "tcp_discovery", len(batch))
         _checked_stage(scan_id, argv, discovery_log)
         discovery_xml = nmap_runner.xml_of(discovery_base)
         if not discovery_xml.exists():
@@ -802,6 +822,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
                 ),
                 state.get("exclude"), state.get("exclude_ports", ""),
             )
+            _mark_stage(scan_id, state, "tcp_identify", len(discovery_live or batch))
             _checked_stage(scan_id, argv, identify_log)
             identify_xml = nmap_runner.xml_of(identify_base)
             if not identify_xml.exists():
@@ -827,6 +848,8 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             ),
             state.get("exclude"), state.get("exclude_ports", ""),
         )
+        _mark_stage(scan_id, state, "udp_identify",
+                    len(batch if udp_all_targets else (discovery_live or batch)))
         _checked_stage(scan_id, argv, udp_log)
         udp_xml = nmap_runner.xml_of(udp_base)
         if not udp_xml.exists():
@@ -1115,6 +1138,13 @@ def _validate_engine_scope_keys(saved_spec: dict) -> None:
             raise ValueError(
                 "저장된 단계 스캔 닫힘 범위(scope_keys)가 유효 스캔 범위를 벗어났습니다."
             )
+
+
+def _target_label(hosts: list[str]) -> str:
+    """현재 배치를 한 줄로. 64개를 다 적으면 표가 무너지므로 대표 하나와 개수만."""
+    if not hosts:
+        return ""
+    return hosts[0] if len(hosts) == 1 else f"{hosts[0]} 외 {len(hosts) - 1}대"
 
 
 def _scan_started_at(scan: ScanRun):
@@ -1756,29 +1786,125 @@ def _import_single_xml(
             "files": [name], "reviews": reviews}
 
 
-def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, dict]) -> dict:
+def _stage_artifact_name(scan_id: int, stage: str, batch: int, many: bool) -> str:
+    """단계 산출물 파일명. 배치가 여럿이면 배치 번호로 갈라야 서로 덮어쓰지 않는다."""
+    return f"scan_{scan_id}.b{batch}.{stage}.xml" if many else f"scan_{scan_id}.{stage}.xml"
+
+
+def _import_timeline(batches: list[tuple[str, dict]], prepared: list[dict]) -> list[dict]:
+    """가져온 실행의 단계 타임라인 — 웹에서 돌린 단계 스캔과 같은 모양으로 보이게 한다.
+
+    단독 스캐너로 돌린 결과라고 해서 이력에서 덜 보여 줄 이유가 없다. 어떤 단계를 어느
+    배치에서 돌렸고 무엇을 찾았는지는 XML 이 다 들고 있다.
+    """
+    timeline = []
+    for index, (base, stages) in enumerate(batches):
+        for stage in ("tcp_discovery", "tcp_identify", "udp_identify"):
+            values = prepared[index].get(stage)
+            if values is None:
+                continue
+            _date, findings, hosts, _tcp, _udp = values
+            counts = {"live": len(hosts), "open_ports": len(findings)}
+            timeline.append({
+                "stage": stage,
+                "status": "done",
+                "percent": 100,
+                "seconds": None,
+                "counts": counts,
+                "batch": index,
+                "base": Path(base.replace("\\", "/")).name,
+            })
+    return timeline
+
+
+class _ImportAccumulator:
+    """여러 배치의 단계 산출물을 한 스캔으로 합친다.
+
+    배치마다 같은 규칙을 반복하는 자리라, 단계별 처리를 한 곳에 모아 둔다. 포트 범위는
+    배치마다 같지만(같은 실행이므로) 첫 배치에서 읽은 값을 유지하고, ``None``(=전 포트)은
+    빈 집합보다 넓으므로 덮어쓰지 않는다.
+    """
+
+    def __init__(self) -> None:
+        self.scanned_hosts: set[str] = set()
+        self.closure_scope_keys: set[str] = set()
+        self.tcp_scope: set[int] | None | set = set()
+        self.udp_scope: set[int] | None | set = set()
+        self._discovery: list[dict] = []
+        self._identified: list[dict] = []
+        self._udp: list[dict] = []
+
+    @staticmethod
+    def _widen(current, incoming):
+        if current is None or incoming is None:
+            return None                       # 전 포트가 한 번이라도 나오면 전 포트다
+        return set(current) | set(incoming)
+
+    def add_batch(self, db: Session, stages: dict[str, dict], prepared: dict) -> None:
+        for stage, bucket, is_udp in (
+            ("tcp_discovery", self._discovery, False),
+            ("tcp_identify", self._identified, False),
+            ("udp_identify", self._udp, True),
+        ):
+            values = prepared.get(stage)
+            if values is None:
+                continue
+            _date, findings, hosts, stage_tcp_scope, stage_udp_scope = values
+            self.scanned_hosts |= hosts
+            bucket.extend(findings)
+            item = stages[stage]
+            if is_udp:
+                self.udp_scope = self._widen(self.udp_scope, stage_udp_scope)
+                tcp_arg, udp_arg = set(), stage_udp_scope
+            else:
+                self.tcp_scope = self._widen(self.tcp_scope, stage_tcp_scope)
+                tcp_arg, udp_arg = stage_tcp_scope, set()
+            self.closure_scope_keys |= _auto_scope_keys(
+                db,
+                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
+                findings,
+                tcp_arg,
+                udp_arg,
+            )
+
+    def findings(self) -> list[dict]:
+        # 식별 결과가 있으면 그것을, 없으면 sweep 이 증명한 열림을 남긴다.
+        return [*_prefer_identified(self._identified, self._discovery), *self._udp]
+
+
+def _import_stage_bundle(db: Session, user: User, display: str,
+                         batches: list[tuple[str, dict[str, dict]]]) -> dict:
+    """단독 스캐너 실행 하나 = 스캔 이력 한 줄.
+
+    예전에는 배치마다, 심지어 단계 하나만 남은 배치마다 별도 ScanRun 이 생겼다. /24 스캔은
+    열린 포트가 없는 배치가 대부분이라 tcp_discovery 파일 하나짜리 행이 이력을 가득 채웠고,
+    그 행들은 아무것도 말해 주지 않으면서 자리만 차지했다. 웹에서 돌린 단계 스캔은 배치가
+    몇 개든 한 줄이므로, 가져온 실행도 같아야 한다.
+    """
     # Validate and derive every stage before the first DB/file side effect. One malformed
     # member invalidates the unit atomically instead of leaving a failed row and partial files.
-    prepared = {
-        stage: _prepare_import_xml(item["bytes"], item["name"])
-        for stage, item in stages.items()
-    }
-    dates = [values[0] for values in prepared.values() if values[0] is not None]
+    prepared = [
+        {stage: _prepare_import_xml(item["bytes"], item["name"])
+         for stage, item in stages.items()}
+        for _base, stages in batches
+    ]
+    dates = [values[0] for per_batch in prepared for values in per_batch.values()
+             if values[0] is not None]
     sdate = min(dates) if dates else None
-    display = Path(base.replace("\\", "/")).name
+    all_items = [item for _base, stages in batches for item in stages.values()]
     scan = ScanRun(name=f"가져오기: {display} 자동 스캔 묶음", status="running", created_by=user.id,
-                   source_fingerprint=result_fingerprint(
-                       [item["bytes"] for item in stages.values()]))
+                   source_fingerprint=result_fingerprint([item["bytes"] for item in all_items]))
     # 묶음의 범위는 구성 XML 이 스스로 밝힌 것을 합친 것이다(단계마다 프로토콜이 다르다).
     bundle_tcp, bundle_udp = set(), set()
-    for item in stages.values():
+    for item in all_items:
         tcp, udp = xml_verdict.scan_scope(item["bytes"])
         if tcp:
             bundle_tcp.add(tcp)
         if udp:
             bundle_udp.add(udp)
+    batch_note = f" · {len(batches)}배치" if len(batches) > 1 else ""
     scan.command = (
-        "자동 스캔 XML 묶음 · TCP 발견 → TCP 식별 → UDP 식별  ·  "
+        f"자동 스캔 XML 묶음 · TCP 발견 → TCP 식별 → UDP 식별{batch_note}  ·  "
         + scan_summary.scope_note(",".join(sorted(bundle_tcp)), ",".join(sorted(bundle_udp)))
     )
     db.add(scan)
@@ -1786,94 +1912,53 @@ def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, d
     if sdate is not None:
         scan.started_at = sdate
 
+    many = len(batches) > 1
     merged_path = _settings.scans_dir / f"scan_{scan.id}.xml"
     artifact_paths = [
         merged_path,
         *(
-            _settings.scans_dir / f"scan_{scan.id}.{stage}.xml"
+            _settings.scans_dir / _stage_artifact_name(scan.id, stage, index, many)
+            for index, (_base, stages) in enumerate(batches)
             for stage in stages
         ),
     ]
     try:
-        scanned_hosts: set[str] = set()
-        closure_scope_keys: set[str] = set()
-        tcp_scope: set[int] | None | set = set()
-        udp_scope: set[int] | None | set = set()
-        tcp_discovery_findings: list[dict] = []
-        tcp_identified_findings: list[dict] = []
-        udp_findings: list[dict] = []
+        acc = _ImportAccumulator()
+        for index, (_base, stages) in enumerate(batches):
+            for stage, item in stages.items():
+                (_settings.scans_dir / _stage_artifact_name(
+                    scan.id, stage, index, many)).write_bytes(item["bytes"])
+            acc.add_batch(db, stages, prepared[index])
 
-        for stage, item in stages.items():
-            (_settings.scans_dir / f"scan_{scan.id}.{stage}.xml").write_bytes(item["bytes"])
-
-        if values := prepared.get("tcp_discovery"):
-            _date, findings, hosts, stage_tcp_scope, _stage_udp_scope = values
-            scanned_hosts |= hosts
-            tcp_scope = stage_tcp_scope
-            tcp_discovery_findings = findings
-            item = stages["tcp_discovery"]
-            closure_scope_keys |= _auto_scope_keys(
-                db,
-                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
-                findings,
-                stage_tcp_scope,
-                set(),
-            )
-        if values := prepared.get("tcp_identify"):
-            _date, findings, hosts, stage_tcp_scope, _stage_udp_scope = values
-            scanned_hosts |= hosts
-            if tcp_scope == set():
-                tcp_scope = stage_tcp_scope
-            tcp_identified_findings = findings
-            item = stages["tcp_identify"]
-            closure_scope_keys |= _auto_scope_keys(
-                db,
-                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
-                findings,
-                stage_tcp_scope,
-                set(),
-            )
-        if values := prepared.get("udp_identify"):
-            _date, findings, hosts, _stage_tcp_scope, stage_udp_scope = values
-            scanned_hosts |= hosts
-            udp_scope = stage_udp_scope
-            udp_findings = findings
-            item = stages["udp_identify"]
-            closure_scope_keys |= _auto_scope_keys(
-                db,
-                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
-                findings,
-                set(),
-                stage_udp_scope,
-            )
-
-        tcp_findings = _prefer_identified(tcp_identified_findings, tcp_discovery_findings)
-        findings = [*tcp_findings, *udp_findings]
-        if not scanned_hosts:
-            scanned_hosts = {f["host_ip"] for f in findings if f.get("host_ip")}
+        findings = acc.findings()
+        scanned_hosts = acc.scanned_hosts or {
+            f["host_ip"] for f in findings if f.get("host_ip")
+        }
 
         counts = _commit_ingest(
             db,
             scan,
             findings,
             scanned_hosts,
-            tcp_scope,
-            udp_scope,
+            acc.tcp_scope,
+            acc.udp_scope,
             scan_date=sdate,
             raw_xml_path=merged_path,
-            closure_scope_keys=closure_scope_keys,
+            closure_scope_keys=acc.closure_scope_keys,
         )
     except Exception:
         _fail_import(db, scan.id, artifact_paths)
         raise
-    files = [stages[k]["name"] for k in sorted(stages)]
-    reviews = [xml_verdict.review(stages[k]["bytes"], stages[k]["name"], k)
-               for k in sorted(stages)]
+    files = [item["name"] for _base, stages in batches for item in stages.values()]
+    reviews = [xml_verdict.review(item["bytes"], item["name"], stage)
+               for _base, stages in batches for stage, item in sorted(stages.items())]
     _import_review(scan, reviews)
+    # 웹에서 돌린 단계 스캔과 같은 타임라인을 남긴다 - 이력에서 둘이 다르게 보일 이유가 없다.
+    scan.stages_json = _import_timeline(batches, prepared)
     db.commit()
     record(db, user, "SCAN_IMPORT_BUNDLE", target=display, detail=f"#{scan.id} · {len(files)} files")
     return {"scan_id": scan.id, "name": scan.name, "counts": counts,
-            "files": files, "reviews": reviews}
+            "files": sorted(files), "reviews": reviews}
 
 
 @router.get("", response_model=list[ScanOut])
@@ -2116,12 +2201,25 @@ async def import_xml_bundle(
             continue
         base, stage = info
         grouped.setdefault(base, {})[stage] = item
-    for base, stages in grouped.items():
-        if len(stages) >= 2:
-            units.append({"kind": "bundle", "sort": base, "base": base, "stages": stages})
+    if grouped:
+        if manifests:
+            # manifest 하나 = 단독 스캐너 실행 하나. 배치가 몇 개든 이력에는 한 줄이어야
+            # 웹에서 돌린 단계 스캔과 같아진다. 예전에는 배치마다 행이 생겼고, 열린 포트가
+            # 없어 tcp_discovery 파일 하나만 남은 배치까지 각자 행을 차지해서 이력이
+            # 아무 말도 하지 않는 줄로 가득 찼다.
+            run_name = Path(manifests[0]["name"].replace("\\", "/")).name
+            run_name = run_name[:-len(".manifest.json")] if run_name.lower().endswith(
+                ".manifest.json") else run_name
+            units.append({
+                "kind": "bundle", "sort": run_name, "base": run_name,
+                "batches": sorted(grouped.items(), key=lambda kv: kv[0].lower()),
+            })
         else:
-            only = next(iter(stages.values()))
-            units.append({"kind": "single", "sort": only["name"], "item": only})
+            # manifest 가 없으면 어떤 파일들이 한 실행인지 단언할 근거가 없다. 파일명 base 로만
+            # 묶고, 그 이상은 넘겨짚지 않는다.
+            for base, stages in sorted(grouped.items(), key=lambda kv: kv[0].lower()):
+                units.append({"kind": "bundle", "sort": base, "base": base,
+                              "batches": [(base, stages)]})
 
     total = _zero_counts()
     imported = []
@@ -2130,7 +2228,9 @@ async def import_xml_bundle(
     for unit in sorted(units, key=lambda u: str(u["sort"]).lower()):
         if skip_known:
             payload_bytes = ([unit["item"]["bytes"]] if unit["kind"] == "single"
-                             else [member["bytes"] for member in unit["stages"].values()])
+                             else [member["bytes"]
+                                   for _base, stages in unit["batches"]
+                                   for member in stages.values()])
             fingerprint = result_fingerprint(payload_bytes)
             # **성공한 인입만** 이미 가져온 것으로 본다. _fail_import 는 실패해도 지문을 남긴 채
             # status="failed" 로 행을 보존하므로, 상태를 보지 않으면 일시적인 디스크/DB 오류 한 번이
@@ -2142,7 +2242,8 @@ async def import_xml_bundle(
                 continue
         try:
             if unit["kind"] == "bundle":
-                result = _import_stage_bundle(db, user, unit["base"], unit["stages"])
+                result = _import_stage_bundle(
+                    db, user, Path(unit["base"].replace("\\", "/")).name, unit["batches"])
             else:
                 item = unit["item"]
                 if "closure_hosts" in item:
@@ -2590,6 +2691,13 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
     if scan.status == "running" and done >= 1 and active > 0 and total:
         avg = active / done
         eta = max(0, round(avg * (total - done - in_batch)))
+    # 지금 무엇을 보고 있는지. 퍼센트 하나만으로는 몇 분째 같은 숫자를 보면서 진행 중인지
+    # 멈춘 것인지조차 알 수 없다 - 현재 배치가 어느 대역이고 어느 단계인지를 함께 준다.
+    batch_hosts: list[str] = []
+    if has_batches and 0 <= done < total:
+        current = state["batches"][done]
+        batch_hosts = [str(h) for h in current] if isinstance(current, list) else []
+    started = _scan_started_at(scan)
     prog.update({
         "scan_id": scan.id,
         "status": scan.status,
@@ -2600,6 +2708,14 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
         "batches_done": done,
         "overall_percent": overall,
         "eta_seconds": eta,
+        "stage": (state or {}).get("stage", ""),
+        "stage_hosts": (state or {}).get("stage_hosts") or None,
+        "batch_hosts": len(batch_hosts),
+        "batch_label": _target_label(batch_hosts),
+        "elapsed_seconds": (
+            round((datetime.now(timezone.utc) - started).total_seconds())
+            if started is not None and scan.status in ("running", "canceling") else None
+        ),
     })
     return prog
 

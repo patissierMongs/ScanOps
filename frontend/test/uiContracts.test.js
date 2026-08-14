@@ -686,3 +686,27 @@ test("long lists let the reader choose how much fits on one page", () => {
   assert.match(history, /<PageSize value=\{size\}/);
   assert.match(history, /feed\.items\.length < feed\.total/);
 });
+
+test("an imported run is drawn exactly like one that ran in the web UI", () => {
+  // 단독 스캐너로 돌렸다는 이유로 이력에서 덜 보여 줄 이유가 없다. 타임라인이 이미
+  // 목록 응답에 실려 오면 추가 요청 없이 그대로 그린다.
+  assert.equal(shouldLoadStages({ status: "done", name: "가져오기: weekly 자동 스캔 묶음",
+                                  stages_json: [{ stage: "tcp_discovery" }] }), false);
+  // 타임라인이 없는 단계 스캔은 여전히 받아온다.
+  assert.equal(shouldLoadStages({ status: "done", command: "단계스캔(엔진) · TCP 443" }), true);
+  const scans = source("../src/views/Scans.jsx");
+  // 엔진 단계와 가져오기 단계를 같은 라벨 표에서 그린다.
+  assert.match(scans, /tcp_discovery: "TCP 발견", tcp_identify: "TCP 식별", udp_identify: "UDP 식별"/);
+  assert.match(scans, /withPersistedStages\(prev, list\)/);
+});
+
+test("a running scan says which batch and stage it is on", () => {
+  // 퍼센트 하나만 보이면 몇 분째 같은 숫자를 보면서 진행 중인지 멈춘 것인지 알 수 없다.
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /\{p\.stage && <span className="pill info"/);
+  assert.match(scans, /p\.batch_label/);
+  assert.match(scans, /p\.stage_hosts \? <span className="muted">· 대상/);
+  assert.match(scans, /p\.hosts_up != null \? <span className="muted">· 응답/);
+  // 배치 번호는 사람이 세는 방식(1부터)으로 보여준다.
+  assert.match(scans, /배치 \$\{p\.batches_done \+ 1\}\/\$\{total\}/);
+});

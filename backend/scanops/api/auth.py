@@ -12,7 +12,7 @@ from ..models import User
 from ..schemas import LoginIn, PasswordChange, TokenOut, UserOut
 from ..security import hash_password, make_token, validate_password, verify_password
 from .audit import record, record_once
-from .deps import _SECRET, authenticated_user
+from .deps import _SECRET, current_user
 
 router = APIRouter()
 _settings = get_settings()
@@ -44,14 +44,14 @@ def login(body: LoginIn, db: Session = Depends(get_db)) -> TokenOut:
 
 
 @router.get("/me", response_model=UserOut)
-def me(user: User = Depends(authenticated_user)) -> User:
+def me(user: User = Depends(current_user)) -> User:
     return user
 
 
 @router.post("/change-password")
 def change_password(
     body: PasswordChange,
-    user: User = Depends(authenticated_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """본인 비밀번호 변경 — 현재 비밀번호 검증 후 교체."""

@@ -583,16 +583,31 @@ function Progress({ p }) {
       </div>
       <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
         {known ? `${overall}%` : "준비 중"}
-        {total > 1 ? ` · 배치 ${p.batches_done}/${total}` : ""}
+        {total > 1 ? ` · 배치 ${p.batches_done + 1}/${total}` : ""}
         {p.eta_seconds != null ? ` · ~남음 ${fmtDur(p.eta_seconds)}` : (p.remaining ? ` · 남음 ${p.remaining}` : "")}
-        {p.elapsed ? ` · 경과 ${p.elapsed}` : ""}
+        {p.elapsed_seconds != null ? ` · 경과 ${fmtDur(p.elapsed_seconds)}` : (p.elapsed ? ` · 경과 ${p.elapsed}` : "")}
       </div>
+      {/* 퍼센트 하나만 보이면 몇 분째 같은 숫자를 보면서 진행 중인지 멈춘 것인지 알 수 없다.
+          지금 어느 대역의 어느 단계를 보고 있는지가 그 답이다. */}
+      {(p.stage || p.batch_label) && (
+        <div style={{ fontSize: 11, marginTop: 3, display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+          {p.stage && <span className="pill info" style={{ fontSize: 10.5 }}>{STAGE_LABEL[p.stage] || p.stage}</span>}
+          {p.batch_label && <span className="mono muted">{p.batch_label}</span>}
+          {p.stage_hosts ? <span className="muted">· 대상 {p.stage_hosts}대</span> : null}
+          {p.hosts_up != null ? <span className="muted">· 응답 {p.hosts_up}대</span> : null}
+        </div>
+      )}
     </div>
   );
 }
 
 // 단계 타임라인 — 단계분리 엔진 스캔의 발견/TCP/UDP/서비스 진행을 색 칩으로(이벤트 기반).
-const STAGE_LABEL = { discovery: "발견", tcp: "TCP", udp: "UDP", service: "서비스" };
+// 엔진 단계(discovery/tcp/udp/service)와 자동 스캔·가져오기 단계(tcp_discovery/…)를 한 표에서
+// 함께 그린다. 가져온 결과라고 해서 이름을 다르게 부를 이유가 없다.
+const STAGE_LABEL = {
+  discovery: "발견", tcp: "TCP", udp: "UDP", service: "서비스",
+  tcp_discovery: "TCP 발견", tcp_identify: "TCP 식별", udp_identify: "UDP 식별",
+};
 const STAGE_CLS = { pending: "info", running: "info", done: "low", stopped: "medium", error: "high" };
 
 function stageLabel(stage) {

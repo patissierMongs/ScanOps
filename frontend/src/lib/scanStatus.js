@@ -46,5 +46,9 @@ export function scanKind(scan = {}) {
 
 export function shouldLoadStages(scan = {}) {
   const active = scan.status === "running" || scan.status === "canceling";
-  return active || (scanKind(scan).key === "staged" && !scan.stages_json?.length);
+  // 이미 영속된 타임라인이 있으면 목록 응답만으로 그릴 수 있다(withPersistedStages).
+  // 가져온 실행도 타임라인을 남기므로, 단계 스캔만 받아오던 조건을 종류가 아니라
+  // '타임라인이 있는가'로 바꾼다 - 웹에서 돌린 것과 가져온 것을 다르게 그릴 이유가 없다.
+  if (scan.stages_json?.length) return false;
+  return active || scanKind(scan).key === "staged";
 }
