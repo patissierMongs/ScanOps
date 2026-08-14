@@ -1858,10 +1858,9 @@ def test_audit_tools_survive_a_cp949_console(tmp_path, monkeypatch, capsys):
     _spec_state(scans / "scan_1", ["10.0.0.1"])
     db = _audit_db(tmp_path, [(1, 1)])
 
+    # 스트림을 보정하지 않는다 - 본문 자체가 CP949 안전해야만 끝까지 나온다.
     class _Cp949Out(io.TextIOWrapper):
-        # 보정이 불가능한 최악의 콘솔. 본문 자체가 CP949 안전해야만 끝까지 나온다.
-        def reconfigure(self, **_kwargs):
-            raise AttributeError("console stream cannot be reconfigured")
+        pass
 
     buffer = io.BytesIO()
     stream = _Cp949Out(buffer, encoding="cp949", errors="strict", write_through=True)

@@ -21,18 +21,15 @@ from pathlib import Path
 _NSE_UDP_PORTS = {53, 111, 123, 137, 161, 500, 5060}
 
 
-def _use_utf8_stdout() -> None:
-    """한국어 Windows 콘솔(CP949)에서 출력 도중 죽지 않게 한다.
+def _cp949_note() -> None:
+    """한국어 Windows 콘솔(CP949) 대응은 **출력 문자 자체를 제한**하는 것으로 한다.
 
-    번들 런처는 chcp 65001 로 UTF-8 을 켜지만 사람이 직접 실행할 수도 있다. 인코딩할 수 없는
-    글자 하나로 정작 확인해야 할 판정이 traceback 으로 끊기는 것이 최악이라 대체 문자로
-    넘긴다. 본문도 CP949 로 표현 가능한 글자만 쓴다(em dash 대신 하이픈).
+    처음에는 sys.stdout 을 UTF-8 로 reconfigure 했지만 그건 전역 스트림을 바꾸는 일이라,
+    캡처된 스트림(테스트 러너·파이프)에서 예기치 않게 동작한다. CP949 로 표현 가능한 글자만
+    쓰면 보정 자체가 필요 없다(em dash 대신 하이픈). 그 규칙은 테스트로 고정돼 있다.
+
+    번들 런처는 별도로 chcp 65001 + PYTHONIOENCODING 을 걸어 한글이 제대로 그려지게 한다.
     """
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError, OSError):
-            pass
 
 
 def inspect(path: Path) -> dict:
@@ -144,7 +141,6 @@ def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print(__doc__)
         return 2
-    _use_utf8_stdout()
     root = Path(argv[1])
     files = sorted(root.rglob("*.xml")) if root.is_dir() else [root]
     if not files:
