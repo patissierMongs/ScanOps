@@ -299,7 +299,15 @@ def expected_enrichment_xml(out_dir, spec: dict) -> list[Path]:
         if not isinstance(protos, dict):
             continue
         for proto in ("tcp", "udp"):
-            if protos.get(proto):
+            ports = protos.get(proto)
+            if not ports:
+                continue
+            if proto == "udp":
+                # UDP 식별은 포트마다 별도 nmap 이다(pipeline._probe_units) — 하나가 죽어도
+                # 나머지 포트를 잃지 않기 위해서다. 기대 산출물도 그 단위로 세야 한다.
+                for port in sorted({int(p) for p in ports}):
+                    expected += _stage3_expected(out, ip, f"udp{port}", confirm)
+            else:
                 expected += _stage3_expected(out, ip, proto, confirm)
     return expected
 

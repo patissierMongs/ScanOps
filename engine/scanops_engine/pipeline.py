@@ -14,6 +14,11 @@ from .spec import (DEFAULT_MAX_PARALLELISM, DEFAULT_MIN_HOSTGROUP,
 from .state import RunState
 
 
+# UDP 식별이 죽었을 때 한 번 갈아 끼울 nsock 엔진. nmap#3138 의 유지관리자 우회책이며
+# select 는 동시 소켓 수에 제약이 있지만, UDP 식별은 이미 열린 포트 하나만 다루므로 무해하다.
+_UDP_RETRY_ENGINE = "select"
+
+
 def _batches(items, size):
     size = max(1, size)
     return [items[i:i + size] for i in range(0, len(items), size)]
@@ -31,7 +36,12 @@ class Pipeline:
         self.open_map = self.state.get("open_map") or {}
 
     # ── 공통 ──
-    def _nmap(self, stage, args, base) -> dict:
+    def _nmap(self, stage, args, base, fatal=True) -> dict:
+        """``fatal=False`` 면 rc!=0 을 기록만 하고 counts["errors"] 를 올리지 않는다.
+
+        run() 은 errors 로 job status 를 정하므로, 격리된 enrichment 실패까지 여기서 세면
+        실패를 격리한 의미가 없어진다 — 실행 전체가 그대로 failed 가 된다.
+        """
         r = nmaprun.run(self.nmap, args, base, sudo_mode=self.spec.sudo,
                         progress=lambda p: self.sink.emit("stage_progress", stage=stage, percent=p),
                         stop_requested=self.state.stopped)
@@ -40,8 +50,10 @@ class Pipeline:
                 "stage_done", stage=stage, seconds=r["seconds"], counts={"stopped": True},
             )
         elif r["rc"] != 0:
-            self.counts["errors"] += 1
-            self.sink.emit("error", stage=stage, rc=r["rc"], cmd=" ".join(map(str, r["cmd"])))
+            if fatal:
+                self.counts["errors"] += 1
+            self.sink.emit("error", stage=stage, rc=r["rc"], fatal=fatal,
+                           cmd=" ".join(map(str, r["cmd"])))
         return r
 
     def _save(self):
@@ -172,7 +184,8 @@ class Pipeline:
         return True
 
     # ── Stage 3: 서비스 probe (호스트별 열린 포트에만) ──
-    def _probe_protocol(self, ip, proto, ports, sp, confirm, retries=None, tag=""):
+    def _probe_protocol(self, ip, proto, ports, sp, confirm, retries=None, tag="",
+                        isolate=False):
         """Probe one protocol per Nmap process.
 
         Mixed ``-sS -sU`` service scans can turn TCP ports proven open by the sweep into
@@ -203,38 +216,79 @@ class Pipeline:
         args.append(ip)
         suffix = tag or proto
         base = self.out / f"stage3-{ip.replace('.', '_')}-{suffix}{'-confirm' if confirm else ''}"
-        r = self._nmap("service", args, base)
+        r = self._nmap("service", args, base, fatal=not isolate)
         ok = not r.get("stopped") and r["rc"] == 0
+        # UDP 식별이 죽었을 때 한 번만 다른 nsock 엔진으로 다시 시도한다.
+        # nsock 은 epoll → kqueue → poll → iocp → select 순으로 고르므로(nsock_engines.c)
+        # Windows 기본은 poll 이다. nmap#3138 의 poll 결함은 7.98 에서 고쳐졌지만, 같은
+        # 실패가 또 나면 그 수정이 불완전하거나 다른 경로라는 뜻이라 유지관리자가 제시한
+        # 우회책(select/iocp)을 그대로 쓴다. poll 을 명시하는 것은 기본값 재지정이라 무의미하다.
+        if not ok and not r.get("stopped") and proto == "udp" and not self.state.stopped():
+            self.sink.emit("service_retry", stage="service", ip=ip, engine=_UDP_RETRY_ENGINE)
+            r = self._nmap("service", ["--nsock-engine", _UDP_RETRY_ENGINE] + args, base,
+                           fatal=not isolate)
+            ok = not r.get("stopped") and r["rc"] == 0
         rows = nmaprun.services(Path(str(base) + ".xml")) if ok else []
         for row in rows:
             self.sink.emit("service", stage="service", confirm=confirm,
                            **{k: row[k] for k in ("ip", "port", "proto", "service", "product", "version")})
         return r["seconds"], rows, ok
 
-    def _probe_host(self, ip, m, sp, tag=""):
-        """Probe all present protocols; completion is atomic at the host/unit boundary."""
-        seconds, rows = 0.0, []
+    def _probe_units(self, proto, ports, tag):
+        """식별 프로세스를 어떤 단위로 쪼갤지.
+
+        UDP 는 포트마다 별도 nmap 으로 돌린다. ``-sV`` 는 version 카테고리 NSE(ike-version·
+        snmp-info·rpcinfo)를 자동 선택하고 그것을 개별로 끌 방법이 문서상 없다 — 그 중 하나가
+        죽으면 한 프로세스에 묶인 UDP 포트 전부의 식별이 함께 사라진다. 포트별로 나누면
+        피해가 그 포트 하나로 줄고, 재시도도 그 포트에만 걸 수 있다.
+
+        TCP 는 지금대로 한 프로세스에 묶는다. 열린 TCP 포트는 UDP 보다 훨씬 많아 포트별로
+        쪼개면 프로세스 수가 감당이 안 되고, 문제가 보고된 쪽도 UDP 다.
+        """
+        if proto != "udp":
+            return [(list(ports), tag)]
+        return [([port], f"{tag}{port}") for port in ports]
+
+    def _probe_host(self, ip, m, sp, tag="", isolate_failures=False):
+        """Probe all present protocols.
+
+        ``isolate_failures`` 는 stage3 가 enrichment 인 전체 스캔에서만 켠다. 그때 식별
+        프로세스 하나가 죽는 것은 '이 포트의 부가 정보를 못 얻었다'는 뜻이지 '포트 관측이
+        틀렸다'는 뜻이 아니다. 그런데도 지금까지는 그 하나가 호스트 전체, 나아가 stage 전체를
+        중단시켜 **뒤따르는 호스트가 통째로 식별되지 못했다** — 사용자가 겪은 'UDP 가 오류
+        내며 안 끝남'의 실제 지점이다.
+
+        재스캔에서는 stage3 가 유일한 폐쇄 근거이므로 이 격리를 켜지 않는다. 거기서는 실패가
+        곧 '판단할 수 없음'이고, 그대로 권위를 박탈해야 한다.
+        """
+        seconds, rows, degraded = 0.0, [], False
         for proto in ("tcp", "udp"):
             ports = m.get(proto, [])
             if not ports:
                 continue
-            proto_tag = tag or proto
-            elapsed, found, ok = self._probe_protocol(
-                ip, proto, ports, sp, confirm=False, tag=proto_tag,
-            )
-            seconds += elapsed
-            rows.extend(found)
-            if not ok:
-                return seconds, rows, False
-            # Confirm independently: a TCP result must not suppress an empty UDP retry.
-            if sp.confirm and not found:
-                elapsed, confirmed, ok = self._probe_protocol(
-                    ip, proto, ports, sp, confirm=True, retries=6, tag=proto_tag,
-                )
-                seconds += elapsed
-                rows.extend(confirmed)
-                if not ok:
-                    return seconds, rows, False
+            for unit_ports, unit_tag in self._probe_units(proto, ports, tag or proto):
+                for confirm, retries in ((False, None), (True, 6)):
+                    if confirm and not (sp.confirm and not found):
+                        continue
+                    elapsed, found, ok = self._probe_protocol(
+                        ip, proto, unit_ports, sp, confirm=confirm, retries=retries,
+                        tag=unit_tag, isolate=isolate_failures,
+                    )
+                    seconds += elapsed
+                    rows.extend(found)
+                    if ok:
+                        continue
+                    # 중지는 저하가 아니다 — 사용자가 멈춘 것이므로 어떤 모드에서도 즉시 끝낸다.
+                    if self.state.stopped() or not isolate_failures:
+                        return seconds, rows, False
+                    degraded = True
+                    break
+        if degraded:
+            # 이 호스트는 service_done 으로 찍지 않는다(재개 때 다시 시도). 다만 stage 와 job
+            # 은 계속 간다 — 산출물이 비면 artifact_report 가 enrichment_missing 으로 잡아
+            # nse_degraded 가 되고, 폐쇄 권위는 sweep 이 그대로 쥔다.
+            self.sink.emit("service_degraded", stage="service", ip=ip)
+            return seconds, rows, False
         return seconds, rows, True
 
     def _service(self):
@@ -248,11 +302,20 @@ class Pipeline:
                 return
             if self.state.service_done(ip):
                 continue
-            s1, rows, ok = self._probe_host(ip, targets[ip], sp)
+            # targets_ports 재스캔은 stage3 가 유일한 폐쇄 근거다 — 거기서는 실패를 격리하지
+            # 않는다. 전체 스캔에서는 sweep 이 이미 개방 여부의 권위를 쥐고 있으므로 식별
+            # 실패는 enrichment 저하로만 남긴다.
+            isolate = not self.spec.targets_ports
+            s1, rows, ok = self._probe_host(ip, targets[ip], sp, isolate_failures=isolate)
             secs += s1
             nsvc += len(rows)
             if not ok:
-                return False
+                # 격리 모드에서는 이 호스트만 건너뛰고 나머지 호스트의 식별을 계속한다.
+                # 예전에는 여기서 stage 를 통째로 중단해, nmap 하나가 죽으면 뒤따르는
+                # 호스트가 전부 식별되지 못한 채 실행이 끝났다.
+                if not isolate or self.state.stopped():
+                    return False
+                continue
             self.state.mark_service_done(ip)
             self._save()
         self.counts["services"] = nsvc
