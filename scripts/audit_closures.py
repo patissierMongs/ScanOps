@@ -92,9 +92,38 @@ def _ports(spec_value: object) -> set[int] | None:
     return out or None
 
 
+def _stage3_path(out_dir: Path, ip: str, tag: str, confirm: bool = False) -> Path:
+    return out_dir / f"stage3-{ip.replace('.', '_')}-{tag}{'-confirm' if confirm else ''}.xml"
+
+
+def _probe_found_nothing(path: Path) -> bool:
+    """이 stage3 가 '완결됐지만 아무것도 못 찾은' 결과인가."""
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return False
+    return not [el for el in root.findall("./host/ports/port/state")
+                if (el.get("state") or "").startswith("open")]
+
+
+def _stage3_expected(out_dir: Path, ip: str, tag: str, confirm: bool) -> list[Path]:
+    """운영 게이트(engine_runner._stage3_expected)와 **같은 규칙**으로 확인 패스를 센다.
+
+    확인 패스는 1차가 빈손일 때만 돈다(pipeline._probe_unit 의 `sp.confirm and not found`).
+    무조건 기대하면 1차에서 서비스를 찾은 정상 재스캔이 전부 부재 판정되고, 아예 안 세면
+    확인 패스가 실패했던 과거 재스캔의 닫힘을 정상 근거로 인증하게 된다.
+    """
+    base = _stage3_path(out_dir, ip, tag)
+    expected = [base]
+    if confirm and base.exists() and _xml_finished(base) and _probe_found_nothing(base):
+        expected.append(_stage3_path(out_dir, ip, tag, confirm=True))
+    return expected
+
+
 def expected_authority(out_dir: Path, spec: dict, state: dict) -> list[Path] | None:
     """이 실행이 만들기로 한 포트-관측 산출물. 계산할 수 없으면 None."""
     stages = spec.get("stages") or {}
+    confirm = bool(((stages.get("service") or {}).get("confirm", False)))
     if spec.get("rescan_units"):
         # 선택 재스캔은 sweep 이 없고 stage3 가 유일한 근거다.
         paths = []
@@ -104,11 +133,13 @@ def expected_authority(out_dir: Path, spec: dict, state: dict) -> list[Path] | N
             except (KeyError, TypeError, ValueError):
                 return None
             proto = str(unit.get("proto") or "tcp")
-            paths.append(out_dir / f"stage3-{ip.replace('.', '_')}-{proto}{port}.xml")
+            paths += _stage3_expected(out_dir, ip, f"{proto}{port}", confirm)
         return paths
     if spec.get("targets_ports"):
-        return [out_dir / f"stage3-{str(ip).replace('.', '_')}-tcp.xml"
-                for ip in spec["targets_ports"]]
+        paths = []
+        for ip in spec["targets_ports"]:
+            paths += _stage3_expected(out_dir, str(ip), "tcp", confirm)
+        return paths
 
     disc = stages.get("discovery") or {}
     runs_discovery = disc.get("enabled", True) and disc.get("mode", "sn") != "pn"
@@ -125,8 +156,18 @@ def expected_authority(out_dir: Path, spec: dict, state: dict) -> list[Path] | N
     return expected
 
 
-def _covers(spec: dict, state: dict, host_ip: str, port: int, proto: str) -> bool:
-    """이 닫힘이 그 실행의 관측 범위 안이었는가."""
+def _covers(spec: dict, state: dict, host_ip: str, port: int, proto: str) -> bool | None:
+    """이 닫힘이 그 실행의 관측 범위 안이었는가. 안전하게 판단할 수 없으면 None.
+
+    실행 당시의 **정확한** 권한 목록이 있으면 그것을 쓴다. spec 의 scanops.scope_keys 가
+    ingest 에 실제로 넘어간 닫힘 후보 집합이므로(api/findings._start_engine_rescan,
+    api/scans 의 staged 경로), 근사한 target/포트 범위로 덮으면 같은 host 의 다른 포트까지
+    '확인됨'이 된다.
+    """
+    scope_keys = ((spec.get("scanops") or {}).get("scope_keys"))
+    if isinstance(scope_keys, list):
+        return f"{host_ip}|{port}|{proto}" in set(scope_keys)
+
     if spec.get("rescan_units"):
         return any(str(u.get("ip")) == host_ip and int(u.get("port", -1)) == port
                    and str(u.get("proto") or "tcp") == proto
@@ -141,20 +182,42 @@ def _covers(spec: dict, state: dict, host_ip: str, port: int, proto: str) -> boo
             return False
     else:
         targets = [str(t) for t in (spec.get("targets") or [])]
-        if not targets:
-            return False
+        nets = [t for t in targets if _is_network(t)]
+        if not nets:
+            return None                      # 대상 범위를 해석할 수 없다
         try:
             addr = ipaddress.ip_address(host_ip)
         except ValueError:
-            return False
-        if not any(addr in ipaddress.ip_network(t, strict=False) for t in targets
-                   if _is_network(t)):
+            return None
+        if not any(addr in ipaddress.ip_network(t, strict=False) for t in nets):
             return False
     stage = (spec.get("stages") or {}).get(proto) or {}
     if not stage.get("enabled", True):
         return False
     scope = _ports(stage.get("ports"))
-    return scope is None or port in scope
+    return True if scope is None else port in scope
+
+
+def _scaninfo_scope(root, proto: str) -> set[int] | None:
+    """업로드 XML 의 <scaninfo protocol services=> 범위. 없으면 None(=범위를 모른다).
+
+    nmap XML 은 실제로 이 범위를 담고 있고 서버 인입도 _scaninfo_scope 로 같은 값을 써서
+    닫힘 후보를 만든다. host 만 비교하면 TCP/22 만 스캔한 XML 이 같은 host 의 TCP/23
+    닫힘까지 보증하게 된다.
+    """
+    scopes = []
+    for info in root.findall("scaninfo"):
+        if (info.get("protocol") or "").lower() != proto:
+            continue
+        services = (info.get("services") or "").strip()
+        if services:
+            scopes.append(_ports(services))
+    if not scopes or any(x is None for x in scopes):
+        return None
+    merged: set[int] = set()
+    for x in scopes:
+        merged.update(x)
+    return merged
 
 
 def _is_network(text: str) -> bool:
@@ -163,6 +226,16 @@ def _is_network(text: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _upload_covers(state: dict, host_ip: str, port: int, proto: str) -> bool | None:
+    """업로드 XML 이 이 (host, port, proto) 를 실제로 스캔했는가."""
+    if host_ip not in set(state.get("live") or []):
+        return False
+    scope = (state.get("scaninfo") or {}).get(proto)
+    if scope is None:
+        return None                          # 범위를 모른다 - 넘겨짚지 않는다
+    return port in scope
 
 
 def scan_evidence(scans_dir: Path, scan_id: int) -> tuple[str, str, dict, dict]:
@@ -198,10 +271,13 @@ def scan_evidence(scans_dir: Path, scan_id: int) -> tuple[str, str, dict, dict]:
         if not _xml_finished(uploaded):
             return ("확인 불가", '업로드 XML 에 <finished exit="success"> 가 없습니다.',
                     spec, state)
-        # 업로드본은 스캔 범위 메타데이터가 없다. 이 XML 이 실제로 본 호스트만 확인해 준다.
+        # 업로드본에도 범위 메타데이터가 있다 - host 뿐 아니라 scaninfo 의 protocol/services
+        # 까지 재구성해야 TCP/22 만 스캔한 XML 이 같은 host 의 TCP/23 을 보증하지 않는다.
         seen = {(el.get("addr") or "")
                 for el in root.findall("./host/address[@addrtype='ipv4']")}
-        state = {"live": sorted(x for x in seen if x)}
+        state = {"live": sorted(x for x in seen if x),
+                 "scaninfo": {proto: _scaninfo_scope(root, proto)
+                              for proto in ("tcp", "udp")}}
         return ("확인됨", f"업로드 XML 이 완결됐습니다(호스트 {len(state['live'])}대).",
                 spec, state)
 
@@ -253,15 +329,12 @@ def main(argv: list[str] | None = None) -> int:
             suspect.append((row, scan_id))
             continue
         # 산출물이 온전해도 이 닫힘이 그 실행의 관측 범위 밖이면 증명된 게 아니다.
-        if spec and not _covers(spec, state, row["host_ip"], row["port"],
-                                (row["proto"] or "tcp").lower()):
-            reasons[scan_id] = ("확인 불가", why + " 다만 일부 닫힘은 이 실행의 관측 범위 "
-                                            "밖입니다.")
-            suspect.append((row, scan_id))
-            continue
-        if not spec and row["host_ip"] not in set(state.get("live") or []):
-            reasons[scan_id] = ("확인 불가", why + " 다만 일부 닫힘은 이 XML 에 없는 "
-                                            "호스트입니다.")
+        proto = (row["proto"] or "tcp").lower()
+        covered = (_covers(spec, state, row["host_ip"], row["port"], proto) if spec
+                   else _upload_covers(state, row["host_ip"], row["port"], proto))
+        if covered is not True:
+            note = ("범위 밖입니다" if covered is False else "범위를 해석할 수 없습니다")
+            reasons[scan_id] = ("확인 불가", f"{why} 다만 일부 닫힘은 이 실행의 관측 {note}.")
             suspect.append((row, scan_id))
             continue
         confirmed += 1

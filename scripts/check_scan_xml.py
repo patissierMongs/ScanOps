@@ -142,6 +142,13 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 2
     root = Path(argv[1])
+    # 서버를 한 번도 띄우지 않은 새 번들에는 data\scans 가 아직 없다. 그대로 두면 없는
+    # 경로를 XML 파일 하나로 넣어 ET.parse 가 FileNotFoundError traceback 으로 죽는다 -
+    # 사용자 오류를 프로그램 오류로 보여주는 셈이다.
+    if not root.exists():
+        print(f"경로가 없습니다: {root}")
+        print("스캔을 한 번도 돌리지 않았다면 아직 결과 폴더가 만들어지지 않은 것입니다.")
+        return 2
     files = sorted(root.rglob("*.xml")) if root.is_dir() else [root]
     if not files:
         print(f"XML 을 찾지 못했습니다: {root}")

@@ -2016,3 +2016,121 @@ def test_a_partially_recovered_split_is_still_reported_as_degraded(tmp_path):
 
     report = engine_runner.artifact_report(tmp_path, spec_dict)
     assert report["enrichment_missing"] == ["stage3-127_0_0_1-udp.xml"], report
+
+
+def test_audit_and_the_production_gate_agree_on_the_rescan_confirm_pass(tmp_path):
+    """감사 도구와 운영 게이트가 같은 fixture 에서 같은 판정을 내려야 한다.
+
+    확인 패스는 1차가 빈손일 때만 돈다. 감사가 그걸 안 세면 확인 패스가 실패했던 과거
+    재스캔의 닫힘을 정상 근거로 인증하고, 무조건 세면 정상 재스캔을 전부 부재 판정한다.
+    """
+    import audit_closures
+    from scanops.scanning import engine_runner
+
+    ip, port = "10.0.0.1", 53
+    spec_dict = {
+        "targets": [ip], "out_dir": str(tmp_path),
+        "rescan_units": [{"ip": ip, "port": port, "proto": "udp"}],
+        "stages": {"service": {"enabled": True, "confirm": True}},
+    }
+    scans = tmp_path.parent / "scans"
+    out = scans / "scan_3"
+    out.mkdir(parents=True)
+    (out / "spec.json").write_text(json.dumps(spec_dict), encoding="utf-8")
+    (out / "run-state.json").write_text("{}", encoding="utf-8")
+    base = out / f"stage3-10_0_0_1-udp{port}.xml"
+
+    def write(path, ports_xml):
+        path.write_text('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                        f'<address addr="{ip}" addrtype="ipv4"/><ports>{ports_xml}</ports>'
+                        '</host><runstats><finished exit="success"/>'
+                        '</runstats></nmaprun>', encoding="utf-8")
+
+    # 1차가 완결된 빈 결과 -> 확인 패스가 돌아야 했다. 그 산출물이 없으면 근거가 아니다.
+    write(base, "")
+    spec_for_gate = dict(spec_dict, out_dir=str(out))
+    gate = engine_runner.artifact_report(out, spec_for_gate, force_scanned_hosts=True)
+    assert gate["authority_missing"] == [f"stage3-10_0_0_1-udp{port}-confirm.xml"]
+    assert audit_closures.scan_evidence(scans, 3)[0] == "확인 불가"
+
+    write(out / f"stage3-10_0_0_1-udp{port}-confirm.xml", "")
+    assert engine_runner.artifact_report(out, spec_for_gate, True)["authority_missing"] == []
+    assert audit_closures.scan_evidence(scans, 3)[0] == "확인됨"
+
+    # 반대 경계 - 1차에서 서비스를 찾았으면 확인 패스는 애초에 돌지 않는다.
+    (out / f"stage3-10_0_0_1-udp{port}-confirm.xml").unlink()
+    write(base, f'<port protocol="udp" portid="{port}">'
+                '<state state="open" reason="udp-response"/>'
+                '<service name="domain" method="probed"/></port>')
+    assert engine_runner.artifact_report(out, spec_for_gate, True)["authority_missing"] == []
+    assert audit_closures.scan_evidence(scans, 3)[0] == "확인됨"
+
+
+def test_audit_uses_the_stored_scope_keys_not_a_wider_stage_range(tmp_path, capsys):
+    """실행 당시의 정확한 권한 목록이 있으면 근사치로 덮으면 안 된다."""
+    import audit_closures
+
+    scans = tmp_path / "scans"
+    out = scans / "scan_1"
+    out.mkdir(parents=True)
+    (out / "spec.json").write_text(json.dumps({
+        "targets": ["10.0.0.1"], "batch_size": 256,
+        "scanops": {"scope_keys": ["10.0.0.1|22|tcp"]},
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "1-65535"},
+                   "udp": {"enabled": False}, "service": {"enabled": True}},
+    }), encoding="utf-8")
+    (out / "run-state.json").write_text(json.dumps({"live": ["10.0.0.1"]}), encoding="utf-8")
+    _finished(out / "stage-tcp-b0.xml")
+
+    import sqlite3
+
+    con = sqlite3.connect(tmp_path / "scanops.db")
+    con.executescript(
+        "CREATE TABLE findings (id INTEGER PRIMARY KEY, host_ip TEXT, port INT,"
+        " proto TEXT, state TEXT, status TEXT);"
+        "CREATE TABLE finding_events (id INTEGER PRIMARY KEY, finding_id INT,"
+        " scan_id INT, type TEXT, detail TEXT);"
+        "INSERT INTO findings VALUES (1,'10.0.0.1',23,'tcp','closed','정상처리');"
+        "INSERT INTO finding_events VALUES (1,1,1,'CLOSED','포트 닫힘');")
+    con.commit()
+    con.close()
+
+    rc = audit_closures.main(["--db", str(tmp_path / "scanops.db"),
+                              "--scans", str(scans), "--list"])
+    printed = capsys.readouterr().out
+
+    # 23/tcp 는 저장된 권한 목록에 없다 - 넓은 stage 범위가 그것을 덮으면 안 된다.
+    assert rc == 1, printed
+    assert "확인 불가   1건" in printed
+
+
+def test_audit_upload_path_respects_the_scaninfo_port_range(tmp_path):
+    """업로드 XML 도 host 만이 아니라 scaninfo 의 실제 포트 범위까지 봐야 한다."""
+    import audit_closures
+
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    (scans / "scan_4.xml").write_text(
+        '<?xml version="1.0"?><nmaprun scanner="nmap">'
+        '<scaninfo type="syn" protocol="tcp" numservices="1" services="22"/>'
+        '<host><status state="up"/><address addr="10.0.0.1" addrtype="ipv4"/></host>'
+        '<runstats><finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
+
+    mark, _why, _spec, state = audit_closures.scan_evidence(scans, 4)
+    assert mark == "확인됨"
+    assert audit_closures._upload_covers(state, "10.0.0.1", 22, "tcp") is True
+    assert audit_closures._upload_covers(state, "10.0.0.1", 23, "tcp") is False
+    assert audit_closures._upload_covers(state, "10.0.0.2", 22, "tcp") is False
+    # 범위를 알 수 없는 프로토콜은 넘겨짚지 않는다.
+    assert audit_closures._upload_covers(state, "10.0.0.1", 161, "udp") is None
+
+
+def test_check_tool_reports_a_missing_path_instead_of_a_traceback(tmp_path, capsys):
+    """서버를 한 번도 띄우지 않은 새 번들에는 data\\scans 가 아직 없다."""
+    import check_scan_xml
+
+    rc = check_scan_xml.main(["check_scan_xml.py", str(tmp_path / "never-created")])
+
+    assert rc == 2
+    assert "경로가 없습니다" in capsys.readouterr().out
