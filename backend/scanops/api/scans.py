@@ -1680,12 +1680,22 @@ def _validate_import_manifest(manifest_bytes: bytes, payloads: list[dict]) -> di
 
 
 def is_scanops_snapshot(xml_bytes: bytes) -> bool:
-    """ScanOps 가 합성한 스냅샷인가(원본 nmap 산출물이 아님)."""
+    """ScanOps 가 합성한 스냅샷인가(원본 nmap 산출물이 아님).
+
+    표식(scanops_snapshot)은 이번 버전부터 붙는다. 그 이전에 만들어져 이미 반출된 파일에는
+    없지만, `_write_merged_xml` 은 처음부터 ``scanner="scanops"`` 를 써 왔다 - 그리고 nmap 은
+    자기 산출물에 언제나 ``scanner="nmap"`` 을 쓴다. 단독 스캐너 결과도 nmap 이 직접 쓴
+    파일이라 마찬가지다. 그래서 이 값 하나로 구형 합성물을 원본과 충돌 없이 가려낼 수 있다.
+    업그레이드 이후에도 과거 반출물이 그대로 돌아오는 경로가 열려 있으면, 이 수정이 겨냥한
+    '과거 관측 -> 최신 노출' 둔갑이 그대로 재현된다.
+    """
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError:
         return False
-    return root.tag == "nmaprun" and bool(root.get("scanops_snapshot"))
+    if root.tag != "nmaprun":
+        return False
+    return bool(root.get("scanops_snapshot")) or (root.get("scanner") or "").lower() == "scanops"
 
 
 def _prepare_import_xml(xml_bytes: bytes, filename: str | None = None) -> tuple:

@@ -2032,3 +2032,88 @@ def test_a_stale_open_never_survives_a_round_trip_through_the_merged_evidence(
     assert again.status_code == 400
     assert "스냅샷" in again.json()["detail"]
     assert state_of() == before, "왕복 후에도 상태·출처·이력이 그대로여야 한다"
+
+
+def _legacy_snapshot(host: str, port: int, finished_epoch: int) -> bytes:
+    """업그레이드 전 `_write_merged_xml` 이 만들던 모양 - 표식이 없다."""
+    return (
+        '<?xml version="1.0"?>'
+        f'<nmaprun scanner="scanops" args="scanops bundled import" '
+        f'start="{finished_epoch - 3600}" version="scanops" xmloutputversion="1.05">'
+        f'<host><status state="up"/><address addr="{host}" addrtype="ipv4"/><ports>'
+        f'<port protocol="tcp" portid="{port}"><state state="open" reason="syn-ack"/>'
+        '<service name="https" method="table"/></port></ports></host>'
+        f'<runstats><finished time="{finished_epoch}" exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>'
+    ).encode("utf-8")
+
+
+def test_a_snapshot_made_before_the_marker_existed_is_still_refused(client, monkeypatch, tmp_path):
+    """업그레이드 전에 반출된 합성 XML 도 같은 오염 경로다.
+
+    표식은 이번 버전부터 붙는다. 그 이전 파일에는 없지만 `scanner="scanops"` 는 처음부터
+    있었고, nmap 은 자기 산출물에 언제나 `scanner="nmap"` 을 쓴다. 새 파일만 막으면 과거
+    반출물로 같은 둔갑이 그대로 재현된다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    kept_at = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+    stale_at = datetime(2026, 8, 1, 2, 0, tzinfo=timezone.utc)
+
+    db = SessionLocal()
+    try:
+        prior = ScanRun(name="1시 스캔", status="done")
+        db.add(prior)
+        db.commit()
+        prior_id = prior.id
+        db.add(Finding(
+            finding_key="10.9.9.1|443|tcp", host_ip="10.9.9.1", port=443, proto="tcp",
+            state="closed", status="정상처리", service="https",
+            first_scan_id=prior_id, last_scan_id=prior_id,
+            first_seen=kept_at, last_seen=kept_at,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    def state_of():
+        session = SessionLocal()
+        try:
+            row = session.query(Finding).filter(
+                Finding.finding_key == "10.9.9.1|443|tcp").one()
+            return (row.state, row.status, row.last_scan_id,
+                    row.last_seen.replace(tzinfo=timezone.utc),
+                    session.query(FindingEvent).filter(
+                        FindingEvent.finding_id == row.id).count())
+        finally:
+            session.close()
+
+    before = state_of()
+    headers = _headers(client)
+    legacy = _legacy_snapshot("10.9.9.1", 443, int(stale_at.timestamp()))
+    refused = client.post("/api/scans/import", headers=headers,
+                          files={"file": ("old_snapshot.xml", legacy, "text/xml")})
+    assert refused.status_code == 400
+    assert "스냅샷" in refused.json()["detail"]
+    assert state_of() == before, "거절됐으면 상태·출처·이력이 그대로여야 한다"
+
+    # 반대 경계 - 진짜 nmap 산출물은 계속 들어와야 한다.
+    real = (
+        '<?xml version="1.0"?><nmaprun scanner="nmap" args="nmap -sS 10.9.9.2" '
+        f'start="{int(stale_at.timestamp()) - 60}">'
+        '<scaninfo type="syn" protocol="tcp" numservices="1" services="443"/>'
+        '<host><status state="up"/><address addr="10.9.9.2" addrtype="ipv4"/><ports>'
+        '<port protocol="tcp" portid="443"><state state="open" reason="syn-ack"/>'
+        '<service name="https"/></port></ports></host>'
+        f'<runstats><finished time="{int(stale_at.timestamp())}" exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>'
+    ).encode("utf-8")
+    accepted = client.post("/api/scans/import", headers=headers,
+                           files={"file": ("real.xml", real, "text/xml")})
+    assert accepted.status_code == 200, accepted.text
+    db = SessionLocal()
+    try:
+        assert db.query(Finding).filter(
+            Finding.finding_key == "10.9.9.2|443|tcp").one().state == "open"
+    finally:
+        db.close()
