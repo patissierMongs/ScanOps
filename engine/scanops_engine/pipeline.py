@@ -17,6 +17,9 @@ from .state import RunState
 # UDP 식별이 죽었을 때 한 번 갈아 끼울 nsock 엔진. nmap#3138 의 유지관리자 우회책이며
 # select 는 동시 소켓 수에 제약이 있지만, UDP 식별은 이미 열린 포트 하나만 다루므로 무해하다.
 _UDP_RETRY_ENGINE = "select"
+# 실패한 UDP 묶음을 포트별로 쪼갤 때의 상한. 넘으면 쪼개지 않고 그 실행을 저하로 남긴다 —
+# 죽은 실행이 포트를 많이 물고 있으면 쪼개는 것 자체가 프로세스 폭증이 된다.
+_MAX_SPLIT_UNITS = 32
 
 
 def _batches(items, size):
@@ -234,19 +237,22 @@ class Pipeline:
                            **{k: row[k] for k in ("ip", "port", "proto", "service", "product", "version")})
         return r["seconds"], rows, ok
 
-    def _probe_units(self, proto, ports, tag):
-        """식별 프로세스를 어떤 단위로 쪼갤지.
+    def _split_units(self, proto, ports, tag):
+        """**실패한 뒤에만** 쪼갤 단위. 정상 경로는 묶어서 한 프로세스로 돌린다.
 
-        UDP 는 포트마다 별도 nmap 으로 돌린다. ``-sV`` 는 version 카테고리 NSE(ike-version·
-        snmp-info·rpcinfo)를 자동 선택하고 그것을 개별로 끌 방법이 문서상 없다 — 그 중 하나가
-        죽으면 한 프로세스에 묶인 UDP 포트 전부의 식별이 함께 사라진다. 포트별로 나누면
-        피해가 그 포트 하나로 줄고, 재시도도 그 포트에만 걸 수 있다.
+        무조건 포트별로 나누면 프로세스가 폭증한다. UDP 무응답 포트는 nmap 이 ``open|filtered``
+        로 보고하고 ``nmaprun.open_ports()`` 가 그것도 open_map 에 넣으므로, 방화벽이 조용히
+        버리는 대역에서는 스캔한 포트가 **전부** 후보가 된다 — 기본 27포트 × /24 면 수천 개
+        프로세스다. 고치려던 '안 끝남'을 오히려 악화시킨다.
 
-        TCP 는 지금대로 한 프로세스에 묶는다. 열린 TCP 포트는 UDP 보다 훨씬 많아 포트별로
-        쪼개면 프로세스 수가 감당이 안 되고, 문제가 보고된 쪽도 UDP 다.
+        그래서 순서를 뒤집는다. 묶어서 한 번 돌리고, **그 실행이 비정상 종료했을 때만** 쪼갠다.
+        건강한 실행은 프로세스 하나로 끝나고, 죽는 실행에서만 피해를 포트 단위로 줄인다.
+
+        쪼갤 때도 상한을 둔다. 죽은 실행이 포트를 많이 물고 있으면 그만큼 프로세스가 늘어나는
+        건 마찬가지라, 상한을 넘으면 쪼개지 않고 그 실행 전체를 저하로 남긴다.
         """
-        if proto != "udp":
-            return [(list(ports), tag)]
+        if proto != "udp" or len(ports) <= 1 or len(ports) > _MAX_SPLIT_UNITS:
+            return []
         return [([port], f"{tag}{port}") for port in ports]
 
     def _probe_host(self, ip, m, sp, tag="", isolate_failures=False):
@@ -258,6 +264,10 @@ class Pipeline:
         중단시켜 **뒤따르는 호스트가 통째로 식별되지 못했다** — 사용자가 겪은 'UDP 가 오류
         내며 안 끝남'의 실제 지점이다.
 
+        저하된 호스트는 service_done 에 넣지 않지만, 그것으로 **재개가 되지는 않는다** —
+        errors=0 이라 job 이 done 으로 마감되고 /resume 은 is_done 을 거절한다. 다시 얻으려면
+        해당 발견을 골라 타겟 재스캔을 돌려야 한다(발견 관리 → 재스캔).
+
         재스캔에서는 stage3 가 유일한 폐쇄 근거이므로 이 격리를 켜지 않는다. 거기서는 실패가
         곧 '판단할 수 없음'이고, 그대로 권위를 박탈해야 한다.
         """
@@ -266,29 +276,56 @@ class Pipeline:
             ports = m.get(proto, [])
             if not ports:
                 continue
-            for unit_ports, unit_tag in self._probe_units(proto, ports, tag or proto):
-                for confirm, retries in ((False, None), (True, 6)):
-                    if confirm and not (sp.confirm and not found):
-                        continue
-                    elapsed, found, ok = self._probe_protocol(
-                        ip, proto, unit_ports, sp, confirm=confirm, retries=retries,
-                        tag=unit_tag, isolate=isolate_failures,
-                    )
-                    seconds += elapsed
-                    rows.extend(found)
-                    if ok:
-                        continue
-                    # 중지는 저하가 아니다 — 사용자가 멈춘 것이므로 어떤 모드에서도 즉시 끝낸다.
-                    if self.state.stopped() or not isolate_failures:
-                        return seconds, rows, False
-                    degraded = True
-                    break
+            unit_tag = tag or proto
+            elapsed, found, ok = self._probe_unit(ip, proto, ports, sp, unit_tag, isolate_failures)
+            seconds += elapsed
+            rows.extend(found)
+            if ok:
+                continue
+            # 중지는 저하가 아니다 — 사용자가 멈춘 것이므로 어떤 모드에서도 즉시 끝낸다.
+            if self.state.stopped() or not isolate_failures:
+                return seconds, rows, False
+            # 묶음이 죽었다 — 이제서야 포트별로 쪼개 피해를 줄인다. 정상 경로는 여기 오지 않는다.
+            units = self._split_units(proto, ports, unit_tag)
+            if units:
+                self.sink.emit("service_split", stage="service", ip=ip, proto=proto,
+                               units=len(units))
+            # 묶음이 죽은 시점에 이미 저하다. 쪼개서 **전부** 되살렸을 때만 취소한다 —
+            # 쪼갤 대상이 없으면(포트 1개, 상한 초과) 그대로 저하로 남아야 한다.
+            recovered = 0
+            for unit_ports, split_tag in units:
+                elapsed, found, ok = self._probe_unit(
+                    ip, proto, unit_ports, sp, split_tag, isolate_failures)
+                seconds += elapsed
+                rows.extend(found)
+                if self.state.stopped():
+                    return seconds, rows, False
+                recovered += 1 if ok else 0
+            if not units or recovered < len(units):
+                degraded = True
         if degraded:
-            # 이 호스트는 service_done 으로 찍지 않는다(재개 때 다시 시도). 다만 stage 와 job
-            # 은 계속 간다 — 산출물이 비면 artifact_report 가 enrichment_missing 으로 잡아
-            # nse_degraded 가 되고, 폐쇄 권위는 sweep 이 그대로 쥔다.
+            # stage 와 job 은 계속 간다 — 산출물이 비면 artifact_report 가 enrichment_missing
+            # 으로 잡아 done + nse_degraded 가 되고, 폐쇄 권위는 sweep 이 그대로 쥔다.
             self.sink.emit("service_degraded", stage="service", ip=ip)
             return seconds, rows, False
+        return seconds, rows, True
+
+    def _probe_unit(self, ip, proto, ports, sp, unit_tag, isolate):
+        """한 단위(포트 묶음 또는 포트 하나)를 base + 필요 시 confirm 까지 돌린다."""
+        seconds, rows = 0.0, []
+        elapsed, found, ok = self._probe_protocol(
+            ip, proto, ports, sp, confirm=False, tag=unit_tag, isolate=isolate)
+        seconds += elapsed
+        rows.extend(found)
+        if not ok:
+            return seconds, rows, False
+        if sp.confirm and not found:
+            elapsed, confirmed, ok = self._probe_protocol(
+                ip, proto, ports, sp, confirm=True, retries=6, tag=unit_tag, isolate=isolate)
+            seconds += elapsed
+            rows.extend(confirmed)
+            if not ok:
+                return seconds, rows, False
         return seconds, rows, True
 
     def _service(self):

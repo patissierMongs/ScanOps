@@ -302,13 +302,10 @@ def expected_enrichment_xml(out_dir, spec: dict) -> list[Path]:
             ports = protos.get(proto)
             if not ports:
                 continue
-            if proto == "udp":
-                # UDP 식별은 포트마다 별도 nmap 이다(pipeline._probe_units) — 하나가 죽어도
-                # 나머지 포트를 잃지 않기 위해서다. 기대 산출물도 그 단위로 세야 한다.
-                for port in sorted({int(p) for p in ports}):
-                    expected += _stage3_expected(out, ip, f"udp{port}", confirm)
-            else:
-                expected += _stage3_expected(out, ip, proto, confirm)
+            # 정상 경로는 프로토콜별로 한 프로세스다(pipeline._probe_unit). 포트별로 쪼갠
+            # 산출물은 그 묶음이 죽었을 때만 생기므로 기대 목록에 넣지 않는다 — 넣으면
+            # 건강한 실행이 전부 부재 판정된다. 쪼갠 뒤 깨진 파일은 glob 합집합이 잡는다.
+            expected += _stage3_expected(out, ip, proto, confirm)
     return expected
 
 

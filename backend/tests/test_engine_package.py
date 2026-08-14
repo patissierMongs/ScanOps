@@ -1030,8 +1030,8 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
     assert [call["proto"] for call in calls] == ["tcp", "udp"]
     tcp, udp = calls
     assert tcp["base"].name == "stage3-127_0_0_1-tcp"
-    # UDP 식별은 포트마다 별도 nmap 이다 — 하나가 죽어도 나머지 UDP 포트를 잃지 않는다.
-    assert udp["base"].name == "stage3-127_0_0_1-udp63848"
+    # 정상 경로는 프로토콜당 한 프로세스다. 포트별로 쪼개는 것은 그 묶음이 죽었을 때뿐이다.
+    assert udp["base"].name == "stage3-127_0_0_1-udp"
     assert tcp["args"][tcp["args"].index("-p") + 1] == "T:54842,54844"
     assert udp["args"][udp["args"].index("-p") + 1] == "U:63848"
     assert "-sS" in tcp["args"] and "-sU" not in tcp["args"]
@@ -1107,7 +1107,8 @@ def test_mixed_service_does_not_mark_host_done_after_one_protocol_fails_or_stops
     assert calls == expected_calls
     assert counts["errors"] == expected_errors
     state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
-    # 어느 쪽이든 이 호스트는 done 으로 찍지 않는다 — 재개하면 다시 시도해야 한다.
+    # 어느 쪽이든 이 호스트는 done 으로 찍지 않는다. (다만 done 으로 마감된 실행은 /resume
+    # 이 거절하므로, 다시 얻으려면 해당 발견을 골라 타겟 재스캔을 돌려야 한다.)
     assert ip not in state["service_done"]
     done = next(event for event in sink.events if event["event"] == "job_done")
     assert done["status"] == expected_status
@@ -1632,9 +1633,11 @@ def test_one_dead_udp_probe_no_longer_abandons_the_rest_of_the_identify_stage(
 ):
     """보고된 'UDP 가 오류 내며 안 끝남'의 실제 지점.
 
-    예전에는 식별 nmap 하나가 죽으면 _service 가 stage 를 통째로 중단해 **뒤따르는 호스트가
-    전부 식별되지 못한 채** 실행이 failed 로 끝났다. stage3 는 전체 스캔에서 enrichment 이고
-    폐쇄 권위는 sweep 이 쥐므로, 그 하나는 해당 포트만 저하시키고 나머지는 계속해야 한다.
+    예전에는 식별 nmap 하나가 죽으면 _service 가 stage 를 통째로 중단해 뒤따르는 호스트가
+    전부 식별되지 못한 채 실행이 failed 로 끝났다. 이제는 그 호스트만 저하로 남기고 계속한다.
+
+    그리고 정상 경로는 묶어서 돌린다 — 포트마다 프로세스를 만들면 open|filtered 가 다수인
+    UDP 에서 프로세스가 폭증해 고치려던 증상을 오히려 악화시킨다.
     """
     dead, alive = "127.0.0.1", "127.0.0.2"
     (tmp_path / "run-state.json").write_text(json.dumps({
@@ -1652,16 +1655,19 @@ def test_one_dead_udp_probe_no_longer_abandons_the_rest_of_the_identify_stage(
     seen = []
 
     def fake_run(nmap, args, out_base, **_kwargs):
-        target, base = args[-1], Path(str(out_base) + ".xml")
-        seen.append((target, "--nsock-engine" in args))
-        if target == dead and "-p" in args and args[args.index("-p") + 1] == "U:500":
+        target = args[-1]
+        pspec = args[args.index("-p") + 1].split(":")[1]
+        ports = [int(x) for x in pspec.split(",")]
+        seen.append((target, tuple(ports), "--nsock-engine" in args))
+        # 500 을 물고 있는 실행만 죽는다 — 묶음도, 쪼갠 뒤의 500 도.
+        if target == dead and 500 in ports:
             return {"rc": 7, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
-        port = args[args.index("-p") + 1].split(":")[1]
-        base.write_text(
+        rows = "".join(
+            f'<port protocol="udp" portid="{p}"><state state="open" reason="udp-response"/>'
+            '<service name="test" method="probed"/></port>' for p in ports)
+        Path(str(out_base) + ".xml").write_text(
             '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
-            f'<address addr="{target}" addrtype="ipv4"/><ports>'
-            f'<port protocol="udp" portid="{port}"><state state="open" reason="udp-response"/>'
-            '<service name="test" method="probed"/></port></ports>'
+            f'<address addr="{target}" addrtype="ipv4"/><ports>{rows}</ports>'
             '</host><runstats><finished exit="success"/></runstats></nmaprun>',
             encoding="utf-8",
         )
@@ -1671,13 +1677,54 @@ def test_one_dead_udp_probe_no_longer_abandons_the_rest_of_the_identify_stage(
     sink = _Sink()
     counts = Pipeline(spec, sink, "nmap").run()
 
-    # 죽은 건 500 하나뿐 — 같은 호스트의 161 도, 뒤따르는 호스트도 살아남는다.
-    assert (alive, False) in seen, "뒤 호스트가 식별되지 않았다 — stage 가 중단됐다는 뜻"
+    # 정상 호스트는 묶음 한 번으로 끝난다 — 포트마다 프로세스를 만들지 않는다.
+    assert [call for call in seen if call[0] == alive] == [(alive, (123,), False)]
+    # 죽은 호스트는 묶음 → select 재시도 → 그때서야 포트별 분할.
+    assert (dead, (161, 500), False) in seen and (dead, (161, 500), True) in seen
+    assert (dead, (161,), False) in seen, "묶음이 죽은 뒤에야 포트별로 쪼갠다"
     assert (tmp_path / f"stage3-{dead.replace('.', '_')}-udp161.xml").exists()
-    assert (tmp_path / f"stage3-{alive.replace('.', '_')}-udp123.xml").exists()
-    # 죽은 포트는 select 엔진으로 한 번 재시도한다(nmap#3138 유지관리자 우회책).
-    assert (dead, True) in seen
-    # 실행 전체는 실패가 아니다 — 폐쇄 권위는 sweep 이 그대로 쥔다.
+    # 뒤따르는 호스트가 살아남는다 — stage 가 중단되지 않았다는 뜻.
+    assert (tmp_path / f"stage3-{alive.replace('.', '_')}-udp.xml").exists()
     assert counts["errors"] == 0
     assert next(e for e in sink.events if e["event"] == "job_done")["status"] == "done"
     assert any(e["event"] == "service_degraded" and e["ip"] == dead for e in sink.events)
+
+
+@pytest.mark.parametrize("proto", ["tcp", "udp"])
+def test_rescan_unit_artifact_name_matches_what_the_authority_gate_expects(
+    monkeypatch, tmp_path, proto,
+):
+    """재스캔은 stage3 가 유일한 폐쇄 근거다 — 파일명이 한 글자만 어긋나도 권한이 사라진다.
+
+    호출자가 이미 tag="udp53" 을 넘기는데 분할 로직이 포트를 또 붙이면 udp5353 이 되어,
+    성공한 재스캔이 산출물 부재로 partial 판정된다.
+    """
+    from scanops.scanning import engine_runner
+
+    ip, port = "127.0.0.1", 53
+    spec_dict = {
+        "targets": [ip], "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": False}, "udp": {"enabled": False},
+                   "service": {"nse": [], "confirm": True}},
+        "rescan_units": [{"ip": ip, "port": port, "proto": proto}],
+    }
+
+    def fake_run(nmap, args, out_base, **_kwargs):
+        Path(str(out_base) + ".xml").write_text(
+            '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+            f'<address addr="{ip}" addrtype="ipv4"/><ports>'
+            f'<port protocol="{proto}" portid="{port}">'
+            '<state state="open" reason="syn-ack"/>'
+            '<service name="domain" method="probed"/></port></ports>'
+            '</host><runstats><finished exit="success"/></runstats></nmaprun>',
+            encoding="utf-8",
+        )
+        return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
+
+    monkeypatch.setattr(nmaprun, "run", fake_run)
+    Pipeline(JobSpec.from_dict(spec_dict), _Sink(), "nmap").run()
+
+    report = engine_runner.artifact_report(tmp_path, spec_dict, force_scanned_hosts=True)
+    produced = sorted(p.name for p in tmp_path.glob("stage3-*.xml"))
+    assert produced == [f"stage3-127_0_0_1-{proto}{port}.xml"], produced
+    assert report["authority_missing"] == [] and report["authority_broken"] == []

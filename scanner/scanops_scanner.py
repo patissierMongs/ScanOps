@@ -227,6 +227,9 @@ FASTER_TIMING_FLAGS = {"-T4", "-T5"}
 GENTLE_MAX_PARALLELISM = "10"
 GENTLE_MIN_HOSTGROUP = "16"
 GENTLE_MAX_RETRIES = "1"
+# UDP 식별이 죽었을 때 한 번 갈아 끼울 nsock 엔진(nmap#3138 유지관리자 우회책).
+# select 는 동시 소켓 수 제약이 있지만 UDP 식별은 포트 수가 적어 무해하다.
+UDP_RETRY_ENGINE = "select"
 GENTLE_MAX_RATE_DEFAULT = "150"   # packets/sec
 GENTLE_HOST_TIMEOUT_DEFAULT = "30m"
 # 허용 강도 — 파서 choices 와 state 재검증이 같은 목록을 쓴다.
@@ -2575,8 +2578,27 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     print(f"[{idx + 1}/{len(plan['batches'])}]{stage_label} {display_command(cmd)}", flush=True)
     interrupted = False
     problems: list[str] = []
+    retried_engine = ""
     try:
         rc = run_nmap_process(cmd, problems)
+        # UDP 식별이 죽으면 다른 nsock 엔진으로 한 번만 다시 시도한다.
+        # nsock 은 epoll → kqueue → poll → iocp → select 순으로 고르므로(nsock_engines.c)
+        # Windows 기본은 poll 이다. nmap#3138 의 poll 결함은 7.98 에서 고쳐졌지만, 같은
+        # 실패가 또 나면 그 수정이 불완전하거나 다른 경로라는 뜻이라 유지관리자가 제시한
+        # 우회책(select)을 그대로 쓴다. poll 을 명시하는 것은 기본값 재지정이라 무의미하다.
+        if stage_id == "udp_identify" and (rc != 0 or _stage_xml_truncated(base)):
+            retry_cmd = list(cmd)
+            retry_cmd[1:1] = ["--nsock-engine", UDP_RETRY_ENGINE]
+            print(f"    UDP 식별이 실패했습니다(rc={rc}) — {UDP_RETRY_ENGINE} 엔진으로 "
+                  f"한 번 다시 시도합니다.", flush=True)
+            print(f"    {display_command(retry_cmd)}", flush=True)
+            retry_problems: list[str] = []
+            retry_rc = run_nmap_process(retry_cmd, retry_problems)
+            # 재시도가 더 나으면 그 결과를 채택한다. 아니면 원래 실패를 그대로 남긴다 —
+            # 재시도가 실패했다고 첫 실행보다 나쁘게 기록할 이유는 없다.
+            if retry_rc == 0 and not _stage_xml_truncated(base):
+                rc, problems = retry_rc, retry_problems
+                retried_engine = UDP_RETRY_ENGINE
     except KeyboardInterrupt:
         # 중단도 '일어난 일'이라 기록한다. 기록하지 않으면 중간까지 스캔한 부분 결과가
         # state 에 없는 유령 파일로 남고, 재개 후 온전한 결과에 덮어써진다.
@@ -2610,6 +2632,8 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
         # 닫힘 권한에는 관여하지 않는다(NMAP_NSE_PROBLEM_MARKERS 주석 참고).
         "nse_degraded": nse_degraded,
         "nmap_problems": problems,
+        # 어떤 nsock 엔진으로 성공했는지 — 기본 엔진이 죽는 환경인지 추적하는 유일한 기록이다.
+        "nsock_engine_retry": retried_engine,
         "command": cmd,
         "scan_targets": scan_targets,
         "scan_targets_complete": targets_complete,
