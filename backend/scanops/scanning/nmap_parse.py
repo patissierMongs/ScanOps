@@ -191,6 +191,34 @@ def scan_start(source) -> datetime | None:
         return None
 
 
+def scan_finished(source) -> datetime | None:
+    """이 XML 이 관측을 **끝낸** 시각(<runstats><finished time="epoch">) → UTC. 없으면 None.
+
+    시작 시각과 완료 시각은 다른 사실이다. /24 스캔은 몇 시간을 돌기도 하므로, 시작 시각을
+    관측 시각으로 쓰면 그 사이에 다른 스캔이 남긴 결과가 이 스캔보다 '새것'으로 판정된다.
+    반대로 이 스캔이 실제로는 더 나중에 확인한 열린 포트가 '오래된 관측'으로 버려진다 -
+    노출을 숨기는 미탐이다. 그래서 최신성 판단에는 완료 시각을 쓴다.
+    """
+    root = _root_of(source)
+    for finished in root.findall("./runstats/finished"):
+        raw = finished.get("time")
+        if not raw:
+            continue
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
+    return None
+
+
+def observed_at(source) -> datetime | None:
+    """이 XML 의 관측 시각 — 완료 시각이 있으면 그것, 없으면 시작 시각."""
+    try:
+        return scan_finished(source) or scan_start(source)
+    except ET.ParseError:
+        return None
+
+
 def probed_identity(source) -> bool | None:
     """이 XML 이 '서비스 식별까지 관측한 실행'인가. 판단 불가면 None.
 

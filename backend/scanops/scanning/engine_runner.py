@@ -24,9 +24,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from ..config import get_settings
-from . import nmap_runner, process_control, scan_options, taxonomy
+from . import nmap_runner, process_control, scan_options, scan_summary, taxonomy
 from .ingest import ingest
-from .nmap_parse import parse_xml
+from .nmap_parse import observed_at, parse_xml
 
 _settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -164,13 +164,37 @@ def rescan_targets(findings: list[tuple]) -> tuple[list, set]:
     return units, keys
 
 
+def _unit_scope(units) -> tuple[str, str]:
+    """재스캔 단위 목록 -> (TCP 포트 표기, UDP 포트 표기)."""
+    ports: dict[str, list[int]] = {"tcp": [], "udp": []}
+    for unit in units or []:
+        try:
+            proto = str(unit.get("proto") or "tcp").lower()
+            ports.setdefault(proto, []).append(int(unit["port"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return (",".join(str(p) for p in sorted(set(ports["tcp"]))),
+            ",".join(str(p) for p in sorted(set(ports["udp"]))))
+
+
 def describe(spec: dict) -> str:
-    """명령 표기용 사람이 읽는 요약."""
+    """명령 표기용 사람이 읽는 요약 + 기계 판독용 범위 꼬리표.
+
+    꼬리표(`범위: T:… U:…`)가 없으면 이력 요약이 이 문장을 nmap argv 로 오인해 '기본 1000개
+    TCP' 라고 단언한다. 전 포트 TCP+UDP 스캔이 상위 1000개 TCP 스캔으로 보이는 셈이다.
+    무엇을 스캔했는지는 spec 이 알고 있으므로, 아는 쪽이 적어 준다.
+    """
     if spec.get("rescan_units"):
-        return f"타겟 재스캔(엔진) · {len(spec['rescan_units'])}건 개별(IP:포트별) · Stage3"
+        tcp, udp = _unit_scope(spec["rescan_units"])
+        head = f"타겟 재스캔(엔진) · {len(spec['rescan_units'])}건 개별(IP:포트별) · Stage3"
+        return f"{head}  ·  {scan_summary.scope_note(tcp, udp)}"
     if spec.get("targets_ports"):
         n = sum(len(v) for v in spec["targets_ports"].values())
-        return f"타겟 재스캔(엔진) · {len(spec['targets_ports'])}호스트 / {n}포트 · Stage3"
+        tcp = ",".join(str(p) for p in sorted({
+            int(p) for ports in spec["targets_ports"].values() for p in ports
+        }))
+        head = f"타겟 재스캔(엔진) · {len(spec['targets_ports'])}호스트 / {n}포트 · Stage3"
+        return f"{head}  ·  {scan_summary.scope_note(tcp, '')}"
     st = spec["stages"]
     bits = [f"발견 {st['discovery']['mode']}"]
     if st["tcp"]["enabled"]:
@@ -178,7 +202,11 @@ def describe(spec: dict) -> str:
     if st["udp"]["enabled"]:
         bits.append(f"UDP {st['udp']['ports']}")
     bits.append("서비스 --version-all" if st["service"]["version_all"] else "서비스 -sV")
-    return "단계스캔(엔진) · " + " · ".join(bits)
+    note = scan_summary.scope_note(
+        st["tcp"]["ports"] if st["tcp"]["enabled"] else "",
+        st["udp"]["ports"] if st["udp"]["enabled"] else "",
+    )
+    return "단계스캔(엔진) · " + " · ".join(bits) + f"  ·  {note}"
 
 
 def spawn(spec_path: Path, out_dir: Path, log_path: Path) -> subprocess.Popen:
@@ -617,28 +645,55 @@ def collect_results(out_dir, scope_keys: set | None = None,
         scanned.update(key.split("|", 1)[0] for key in scope_keys)
 
     by_key: dict[tuple, dict] = {}
+    # 파일마다 관측 시각이 다르다. 배치가 여러 개면 b0 과 b7 사이에 몇 시간이 벌어지기도
+    # 하므로, 스캔 하나의 시각으로 뭉뚱그리면 실제 순서와 어긋난다.
     if not force_scanned_hosts:
         # Service probing is enrichment, not authority over a successful open-port sweep.
         # In particular, a flaky mixed/Windows probe must not close a port just proven open.
         for pattern in ("stage-tcp-b*.xml", "stage-udp-b*.xml"):
             for x in sorted(out.glob(pattern)):
                 try:
-                    fallback = parse_xml(x.read_bytes())
+                    raw = x.read_bytes()
+                    fallback = parse_xml(raw)
                 except Exception:
                     continue
+                seen_at = observed_at(raw)
                 for f in fallback:
+                    f["observed_at"] = seen_at
                     # Sweep proves openness only. It has not run the service/NSE probes and
                     # therefore must not erase an existing identity when stage3 misses a key.
                     f["identity_observed"] = False
                     by_key.setdefault((f["host_ip"], f["port"], f["proto"]), f)
     for x in sorted(out.glob("stage3-*.xml")):
         try:
-            fnd = parse_xml(x.read_bytes())
+            raw = x.read_bytes()
+            fnd = parse_xml(raw)
         except Exception:
             continue
+        seen_at = observed_at(raw)
         for f in fnd:
+            f["observed_at"] = seen_at
             by_key[(f["host_ip"], f["port"], f["proto"])] = f   # confirm/base 중복 제거(존재값 우선)
     return list(by_key.values()), scanned
+
+
+def authority_observed_at(out_dir, spec: dict, force_scanned_hosts: bool = False):
+    """부재(닫힘)를 주장할 수 있는 시점 — authority 산출물이 **모두** 끝난 시각.
+
+    '이 포트가 없다'는 마지막 authority sweep 이 끝나야 할 수 있는 말이다. 시작 시각을 쓰면
+    실행 중에 다른 스캔이 새로 연 포트를 과거의 부재로 닫고, 반대로 이 스캔이 나중에 확인한
+    열림을 오래된 것으로 버린다. 읽을 수 있는 시각이 하나도 없으면 None 을 돌려주어
+    호출자가 스캔 시각으로 되돌아가게 한다.
+    """
+    times = []
+    for path in expected_authority_xml(out_dir, spec, force_scanned_hosts):
+        try:
+            when = observed_at(path.read_bytes())
+        except OSError:
+            continue
+        if when is not None:
+            times.append(when)
+    return max(times) if times else None
 
 
 def ingest_results(db, scan, out_dir, scope_keys: set | None = None,

@@ -50,6 +50,12 @@ def _migrate() -> None:
         user_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
         if "auth_version" not in user_cols:
             conn.exec_driver_sql("ALTER TABLE users ADD COLUMN auth_version INTEGER DEFAULT 0")
+        if user_cols and "must_change_password" not in user_cols:
+            # 기존 DB 의 계정은 이미 각자 비밀번호를 쓰고 있다고 본다. 소급해서 전원을 잠그면
+            # 운영 중인 시스템이 통째로 멈춘다 - 새로 발급되는 계정부터 적용한다.
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0"
+            )
         rule_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(risk_rules)").fetchall()}
         if rule_cols and "product" not in rule_cols:  # 제품/CPE 기반 조직 규칙
             conn.exec_driver_sql("ALTER TABLE risk_rules ADD COLUMN product VARCHAR(128) DEFAULT ''")
@@ -64,6 +70,9 @@ def _migrate() -> None:
             # 소급 backfill 은 불가능하다 — 이 값은 여태 저장한 적이 없다. 기본 '' 는
             # '미관측'이며, 다음 스캔이 관측할 때 채워진다. no-response 로 넘겨짚지 않는다.
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN reason VARCHAR(32) DEFAULT ''")
+        if cols and "allowed" not in cols:
+            # 소급 계산은 하지 않는다 - 규칙이 바뀔 때 reclassify_all 이 전부 다시 채운다.
+            conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN allowed INTEGER DEFAULT 0")
         server_added = "server" not in cols
         if server_added:  # NSE HTTP Server 구조화 값
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN server VARCHAR(256) DEFAULT ''")

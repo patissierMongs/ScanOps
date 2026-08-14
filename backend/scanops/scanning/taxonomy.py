@@ -100,6 +100,10 @@ def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> d
     finding["usage"] = info.get("usage", "")
     finding["risk_level"] = info.get("risk_level", "info")
     finding["compliance_json"] = list(info.get("compliance", []))
+    # '조직이 허용하기로 정했다'와 '아직 아무 규칙도 걸리지 않았다'는 둘 다 risk_level=info 로
+    # 끝난다. 등급만 보면 구분할 수 없어서, 허용 규칙에 걸린 사실을 따로 기록한다 - 이게
+    # 없으면 미분류 발견까지 '허용'으로 숨겨져 정작 봐야 할 것이 사라진다.
+    finding["allowed"] = False
     if fallback_used:
         # 왜 이렇게 분류됐는지 남긴다. nmap 이 뭐라 했든 Server 헤더가 나왔다는 사실로
         # 분류한 것이므로 근거를 보여줘야 운영자가 판단을 검증할 수 있다.
@@ -133,6 +137,9 @@ def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> d
             finding["risk_level"] = r.risk_level
         else:
             continue
+        # 마지막에 걸린 규칙이 이긴다(위에서 계속 덮어쓴다). 허용 여부도 같은 규칙을 따라야
+        # 나중 규칙이 허용을 취소했을 때 숨김이 풀린다.
+        finding["allowed"] = r.risk_level == "info"
         if r.note:
             finding["compliance_json"].append({"std": "조직규칙", "ref": r.note})
     return finding
@@ -157,6 +164,7 @@ def reclassify_all(db: Session) -> int:
         f.category = d["category"]
         f.usage = d["usage"]
         f.risk_level = d["risk_level"]
+        f.allowed = 1 if d.get("allowed") else 0
         f.compliance_json = d["compliance_json"]
     db.commit()
     return n

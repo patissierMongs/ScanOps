@@ -46,6 +46,10 @@ class User(Base):
     is_active: Mapped[int] = mapped_column(Integer, default=1)
     # Incremented on every password change/reset so already issued tokens become invalid.
     auth_version: Mapped[int] = mapped_column(Integer, default=0)
+    # 남이 정해 준 비밀번호를 쓰고 있는 계정. 최초 관리자(INITIAL_ADMIN.txt)와 admin 이 만들거나
+    # 재설정한 계정이 여기 해당한다. 그 비밀번호는 파일이나 사람의 기억에 남아 있으므로,
+    # 본인이 바꾸기 전까지는 로그인해도 아무것도 하지 못하게 막는다.
+    must_change_password: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
@@ -122,6 +126,9 @@ class Finding(Base):
     category: Mapped[str] = mapped_column(String(64), default="")
     usage: Mapped[str] = mapped_column(String(64), default="")
     risk_level: Mapped[str] = mapped_column(String(16), default="info")
+    # 조직 규칙이 '허용'으로 정한 발견. risk_level=info 는 '미분류'와 값이 같아 등급만으로는
+    # 구분되지 않는다 - 이 플래그가 있어야 허용만 접고 미분류는 계속 보여줄 수 있다.
+    allowed: Mapped[int] = mapped_column(Integer, default=0)
     remarks: Mapped[str] = mapped_column(Text, default="")
     compliance_json: Mapped[list | None] = mapped_column(JSON, default=list)  # [{"std":"KISA","ref":..}]
 

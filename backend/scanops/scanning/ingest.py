@@ -29,6 +29,13 @@ def _is_older(candidate: datetime, reference: datetime | None) -> bool:
     return reference is not None and _as_utc(candidate) < _as_utc(reference)
 
 
+def _as_when(observed, scan_date):
+    """파일이 밝힌 관측 시각 우선, 없으면 스캔 시각, 그것도 없으면 현재."""
+    if isinstance(observed, datetime):
+        return observed
+    return scan_date or _now()
+
+
 def _key(f: dict) -> str:
     return f"{f['host_ip']}|{f['port']}|{f['proto']}"
 
@@ -51,6 +58,11 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
     for f in findings:
         key = _key(f)
         seen.add(key)
+        # 관측 시각은 **그 결과를 만든 파일**의 것이다. 스캔 하나의 시각으로 뭉뚱그리면,
+        # 몇 시간 도는 스캔에서 나중에 확인한 열림이 '오래된 관측'으로 버려지거나(미탐)
+        # 초반에 본 것이 그 뒤 다른 스캔의 최신 관측을 덮는다. 파일이 시각을 말하지 않으면
+        # 스캔 시각으로 되돌아간다.
+        when = _as_when(f.get("observed_at"), scan_date)
         row = db.query(Finding).filter(Finding.finding_key == key).first()
         if row is None:
             row = Finding(finding_key=key, first_scan_id=scan_id, first_seen=when, **_observed(f))
@@ -138,6 +150,8 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
     # 명시적 scope_keys는 완료된 structured scan의 권한이다. discovery에서 호스트가
     # 관측되지 않았더라도 그 effective target/port/protocol 범위에서 사라진 finding은 닫는다.
     # None인 구형/import 경로만 기존처럼 실제 관측 host 범위를 사용한다.
+    # 부재(닫힘)의 기준 시각은 개별 파일이 아니라 이 실행의 authority 완결 시각이다.
+    when = scan_date or _now()
     open_rows = []
     if scope_keys is not None:
         keys = sorted(scope_keys)
@@ -188,6 +202,7 @@ def _observed(f: dict) -> dict:
         "nse_json": f["nse_json"], "remarks": f["remarks"],
         "category": f.get("category", ""), "usage": f.get("usage", ""),
         "risk_level": f.get("risk_level", "info"),
+        "allowed": 1 if f.get("allowed") else 0,
         "compliance_json": f.get("compliance_json", []),
     }
 

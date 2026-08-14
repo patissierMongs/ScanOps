@@ -706,7 +706,7 @@ def test_resume_finalizes_completed_engine_output_without_rerunning_nmap(
     monkeypatch.setattr(scans_api.engine_runner, "spawn", unexpected_execution)
     finalized = []
 
-    def finalize_existing(db, scan, actual_out_dir, scope_keys, force_scanned_hosts):
+    def finalize_existing(db, scan, actual_out_dir, scope_keys, force_scanned_hosts, spec=None):
         finalized.append((actual_out_dir, scope_keys, force_scanned_hosts))
         scan.host_count = 1
         scan.port_count = 0
@@ -1009,7 +1009,7 @@ def test_socket_errors_in_the_engine_log_do_not_cancel_closure_candidates(
 
     seen: list[set] = []
 
-    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts):
+    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts, spec=None):
         seen.append(set(scope_keys))
         scan.host_count, scan.port_count = 1, 0
         db.flush()
@@ -1061,7 +1061,7 @@ def test_a_truncated_engine_xml_never_grants_closure(client, monkeypatch, tmp_pa
 
     seen: list[set] = []
 
-    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts):
+    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts, spec=None):
         seen.append(set(scope_keys))
         scan.host_count, scan.port_count = 1, 0
         db.flush()
@@ -1105,7 +1105,7 @@ def test_a_completed_engine_xml_keeps_its_closure_scope(client, monkeypatch, tmp
 
     seen: list[set] = []
 
-    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts):
+    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts, spec=None):
         seen.append(set(scope_keys))
         scan.host_count, scan.port_count = 1, 0
         db.flush()
@@ -1245,7 +1245,7 @@ def test_unobserved_scope_and_degraded_enrichment_are_both_reported(
 
     seen: list[set] = []
 
-    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts):
+    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts, spec=None):
         seen.append(set(scope_keys))
         scan.host_count, scan.port_count = 1, 0
         db.flush()
@@ -1480,3 +1480,148 @@ def test_a_backdated_upload_does_not_record_a_newer_port_as_closed(client, monke
 
     merged = raw_xml_path.read_text(encoding="utf-8")
     assert 'portid="8443"' not in merged, "DB 는 열림인데 증거 파일이 닫힘이라 말하면 안 된다"
+
+
+def _staged_out_dir(tmp_path, scan_id, *, live="10.9.9.9", finished_epoch, open_port=None):
+    """완결된 TCP sweep 산출물 하나 — <finished time> 으로 관측 시각을 밝힌다."""
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["tcp", "job"], "live": [live],
+        "open_map": {live: {"tcp": [open_port]}} if open_port else {}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
+        encoding="utf-8")
+    ports = (
+        f'<ports><port protocol="tcp" portid="{open_port}">'
+        '<state state="open" reason="syn-ack"/><service name="https"/></port></ports>'
+    ) if open_port else ""
+    (out_dir / "stage-tcp-b0.xml").write_text(
+        f'<?xml version="1.0"?><nmaprun start="{finished_epoch - 3600}">'
+        f'<host><status state="up"/><address addr="{live}" addrtype="ipv4"/>{ports}</host>'
+        f'<runstats><finished time="{finished_epoch}" exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
+    return out_dir
+
+
+def _legacy_spec(tmp_path, target="10.9.9.9"):
+    return {
+        "targets": [target], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"),
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "443"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": False}},
+    }
+
+
+def test_a_long_running_scan_still_applies_what_it_confirmed_later(client, monkeypatch, tmp_path):
+    """스캔이 먼저 **시작**했다고 해서 그 결과가 오래된 것은 아니다.
+
+    /24 staged 스캔은 몇 시간을 돈다. 시작 시각을 관측 시각으로 쓰면, 실행 중에 다른 스캔이
+    남긴 결과가 더 새것으로 판정되어 이 스캔이 **나중에 실제로 확인한 열린 포트**가 통째로
+    버려진다 - 노출을 숨기는 미탐이다. 최신성은 산출물이 밝힌 완료 시각으로 판단해야 한다.
+
+        00:00  A 시작
+        01:00  다른 스캔이 443/tcp 를 closed + 정상처리로 기록
+        02:00  A 의 완결된 sweep 이 443/tcp open(syn-ack) 확인
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    started = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    other_at = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+    swept_at = datetime(2026, 8, 1, 2, 0, tzinfo=timezone.utc)
+    key = "10.9.9.9|443|tcp"
+
+    db = SessionLocal()
+    try:
+        other = ScanRun(name="1시 스캔", status="done")
+        db.add(other)
+        db.commit()
+        other_id = other.id
+        db.add(Finding(
+            finding_key=key, host_ip="10.9.9.9", port=443, proto="tcp",
+            state="closed", status="정상처리", service="https",
+            first_scan_id=other_id, last_scan_id=other_id,
+            first_seen=other_at, last_seen=other_at,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    scan_id = _scan_with_spec(tmp_path, _legacy_spec(tmp_path))
+    db = SessionLocal()
+    try:
+        run = db.get(ScanRun, scan_id)
+        run.started_at = started
+        db.commit()
+    finally:
+        db.close()
+    _staged_out_dir(tmp_path, scan_id, finished_epoch=int(swept_at.timestamp()), open_port=443)
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    db = SessionLocal()
+    try:
+        row = db.query(Finding).filter(Finding.finding_key == key).one()
+        assert row.state == "open", "나중에 확인한 열림을 시작 시각 때문에 버리면 미탐이다"
+        assert row.reason == "syn-ack"
+        assert row.last_scan_id == scan_id
+        assert row.last_seen.replace(tzinfo=timezone.utc) == swept_at
+        assert row.status != "정상처리", "다시 열렸으므로 조치 완료로 둘 수 없다"
+        kinds = [e.type for e in db.query(FindingEvent).filter(
+            FindingEvent.finding_id == row.id).all()]
+        assert "REOPENED" in kinds
+    finally:
+        db.close()
+
+
+def test_a_result_that_finished_before_a_newer_observation_still_yields(client, monkeypatch, tmp_path):
+    """반대 방향 - sweep 이 **먼저 끝났으면** 그 뒤 관측이 이긴다(직전 라운드의 계약)."""
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    swept_at = datetime(2026, 8, 1, 2, 0, tzinfo=timezone.utc)
+    newer_at = datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc)
+    key = "10.9.9.9|443|tcp"
+
+    db = SessionLocal()
+    try:
+        newer = ScanRun(name="8월 3일 스캔", status="done")
+        db.add(newer)
+        db.commit()
+        newer_id = newer.id
+        db.add(Finding(
+            finding_key=key, host_ip="10.9.9.9", port=443, proto="tcp",
+            state="open", service="https", first_scan_id=newer_id, last_scan_id=newer_id,
+            first_seen=newer_at, last_seen=newer_at,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    scan_id = _scan_with_spec(tmp_path, _legacy_spec(tmp_path))
+    db = SessionLocal()
+    try:
+        run = db.get(ScanRun, scan_id)
+        run.started_at = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+        db.commit()
+    finally:
+        db.close()
+    # 8/1 02:00 에 끝난 sweep 은 443 을 보지 못했다 - 8/3 관측을 뒤집지 못한다.
+    _staged_out_dir(tmp_path, scan_id, finished_epoch=int(swept_at.timestamp()))
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    db = SessionLocal()
+    try:
+        row = db.query(Finding).filter(Finding.finding_key == key).one()
+        assert row.state == "open" and row.last_scan_id == newer_id
+        assert row.last_seen.replace(tzinfo=timezone.utc) == newer_at
+        assert not [e for e in db.query(FindingEvent).filter(
+            FindingEvent.finding_id == row.id).all() if e.type == "CLOSED"]
+    finally:
+        db.close()
+    merged = (scans_api._settings.scans_dir / f"scan_{scan_id}.xml").read_text(encoding="utf-8")
+    assert 'state="closed"' not in merged

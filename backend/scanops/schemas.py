@@ -25,6 +25,8 @@ class UserOut(BaseModel):
     role: str
     display_name: str
     is_active: int
+    # 남이 정해 준 비밀번호를 아직 쓰고 있는가 - 화면이 이 값으로 강제 변경 창을 띄운다.
+    must_change_password: int = 0
 
 
 class UserCreate(BaseModel):
@@ -119,6 +121,9 @@ class ScanOut(BaseModel):
 class IngestSummary(BaseModel):
     scan_id: int
     counts: dict
+    # 가져오기 자동 검증 결과 — [{file, mark, why, usable}]. 사람이 따로 도구를 돌리지 않아도
+    # '이 결과를 그대로 믿어도 되는가'를 그 자리에서 보게 한다.
+    reviews: list[dict] = []
 
 
 # ---- audit ----
@@ -159,6 +164,8 @@ class FindingOut(BaseModel):
     category: str
     usage: str
     risk_level: str
+    # 조직 규칙이 '허용'으로 정한 발견 - 화면이 기본으로 접고 토글로 펼친다.
+    allowed: int = 0
     remarks: str
     compliance_json: list | None
     status: str

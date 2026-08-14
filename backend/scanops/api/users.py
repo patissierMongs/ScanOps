@@ -37,6 +37,9 @@ def create_user(
         password_hash=hash_password(body.password),
         role=body.role,
         display_name=body.display_name or body.username,
+        # admin 이 정해 준 비밀번호다. 본인이 바꾸기 전까지는 그 값을 아는 사람이 둘이라,
+        # 첫 로그인에서 변경을 요구한다.
+        must_change_password=1,
     )
     db.add(user)
     db.commit()
@@ -61,6 +64,8 @@ def reset_password(
         raise HTTPException(status_code=400, detail=str(exc))
     user.password_hash = hash_password(body.new_password)
     user.auth_version += 1
+    # 재설정도 남이 정해 준 비밀번호다 - 본인이 바꾸기 전까지 잠근다.
+    user.must_change_password = 1
     db.commit()
     record(db, admin, "PASSWORD_RESET", target=user.username)
     return {"ok": True}

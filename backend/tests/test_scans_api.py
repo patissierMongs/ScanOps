@@ -2268,8 +2268,14 @@ def test_scan_summary_says_전체_instead_of_a_port_count(client):
     assert partial["excluded_ports"] == "9100,515"
     assert partial["targets"] == "10.0.0.0/24 (일부 제외)"
 
+    # 두 프로토콜을 다른 범위로 스캔했으면 둘 다 적는다. TCP 범위만 보이면 그 옆의 UDP
+    # 뱃지와 붙어 'UDP 도 22,80 을 봤다'로 읽힌다 - 실제로는 53 하나뿐이다.
     both = summarize_command("nmap -sS -sU -p T:22,80,U:53 10.0.0.1", "10.0.0.1")
-    assert both["protocols"] == ["TCP", "UDP"] and both["ports"] == "22,80"
+    assert both["protocols"] == ["TCP", "UDP"] and both["ports"] == "TCP 22,80 · UDP 53"
+
+    # 접두사가 없으면 두 프로토콜이 같은 범위라 나눠 적을 것이 없다.
+    shared = summarize_command("nmap -sS -sU -p 1-1024 10.0.0.1", "10.0.0.1")
+    assert shared["ports"] == "1-1024"
 
     top = summarize_command("nmap -sT --top-ports 1000 10.0.0.1", "10.0.0.1")
     assert top["ports"] == "상위 1000개"

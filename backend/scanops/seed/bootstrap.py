@@ -24,12 +24,15 @@ def run_bootstrap() -> None:
             password_hash=hash_password(pw),
             role="admin",
             display_name="관리자",
+            # 이 비밀번호는 평문으로 파일에 남는다. 바꾸기 전까지는 로그인해도 아무것도
+            # 하지 못하게 막고, 바꾸는 순간 파일을 지운다 - '나중에 하세요'로 두면 남는다.
+            must_change_password=1,
         ))
         db.commit()
         cred = settings.data_dir / "INITIAL_ADMIN.txt"
         cred.write_text(
             f"ScanOps 최초 관리자 계정\n  아이디: admin\n  비밀번호: {pw}\n"
-            f"\n로그인 후 비밀번호를 변경하고 이 파일을 삭제하세요.\n",
+            f"\n첫 로그인 때 비밀번호 변경을 요구합니다. 변경하면 이 파일은 자동으로 삭제됩니다.\n",
             encoding="utf-8",
         )
     finally:

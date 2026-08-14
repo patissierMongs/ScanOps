@@ -16,10 +16,15 @@ _SECRET = load_or_create_secret(_settings.secret_file)
 _RANK = {"viewer": 0, "auditor": 1, "admin": 2}
 
 
-def current_user(
+def authenticated_user(
     authorization: str = Header(default=""),
     db: Session = Depends(get_db),
 ) -> User:
+    """토큰이 가리키는 살아 있는 사용자. 비밀번호 변경 강제는 보지 않는다.
+
+    비밀번호를 바꾸려면 먼저 로그인 상태여야 하므로, `/auth/me` 와 `/auth/change-password`
+    는 이 의존성을 쓴다. 그 둘 말고는 전부 current_user 를 거쳐 잠긴다.
+    """
     token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
     verified = verify_token(token, _SECRET)
     if verified is None:
@@ -34,6 +39,21 @@ def current_user(
         reason = "inactive" if not user.is_active else "auth_version_mismatch"
         record_once(db, user, "TOKEN_REJECTED", target=user.username, detail=reason, ok=False)
         raise HTTPException(status_code=401, detail="유효하지 않은 사용자입니다.")
+    return user
+
+
+def current_user(user: User = Depends(authenticated_user)) -> User:
+    """실제 작업을 할 수 있는 사용자.
+
+    남이 정해 준 비밀번호(최초 관리자 파일·admin 재설정)를 아직 쓰고 있으면 여기서 막는다.
+    '로그인은 되지만 아무것도 못 한다'가 아니라 '먼저 바꾸라'는 뜻이고, 화면은 그 상태에서
+    변경 창만 띄운다. 안내만 하고 통과시키면 파일에 평문으로 남은 비밀번호가 그대로 쓰인다.
+    """
+    if user.must_change_password:
+        raise HTTPException(
+            status_code=403,
+            detail="비밀번호를 먼저 변경해야 합니다.",
+        )
     return user
 
 
