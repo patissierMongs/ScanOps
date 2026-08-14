@@ -1728,3 +1728,89 @@ def test_rescan_unit_artifact_name_matches_what_the_authority_gate_expects(
     produced = sorted(p.name for p in tmp_path.glob("stage3-*.xml"))
     assert produced == [f"stage3-127_0_0_1-{proto}{port}.xml"], produced
     assert report["authority_missing"] == [] and report["authority_broken"] == []
+
+
+def _audit_db(tmp_path, events):
+    """(finding_id, scan_id) 목록으로 최소 DB 를 만든다."""
+    import sqlite3
+
+    db = tmp_path / "scanops.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE findings (id INTEGER PRIMARY KEY, host_ip TEXT, port INT,"
+        " proto TEXT, state TEXT, status TEXT);"
+        "CREATE TABLE finding_events (id INTEGER PRIMARY KEY, finding_id INT,"
+        " scan_id INT, type TEXT, detail TEXT);")
+    for fid, scan_id in events:
+        con.execute("INSERT INTO findings VALUES (?,?,?,?,?,?)",
+                    (fid, f"10.0.0.{fid}", 22, "tcp", "closed", "정상처리"))
+        con.execute("INSERT INTO finding_events VALUES (?,?,?,'CLOSED','포트 닫힘')",
+                    (fid, fid, scan_id))
+    con.commit()
+    con.close()
+    return db
+
+
+def test_closure_audit_separates_confirmed_closures_from_unverifiable_ones(tmp_path):
+    """닫힘은 status 까지 '정상처리'로 바꾸므로 되돌리기 가장 어려운 미탐이다.
+
+    이 도구가 '확인할 수 없는 것'을 확인됨으로 넘겨짚으면 존재 이유가 없어진다.
+    """
+    import audit_closures
+
+    scans = tmp_path / "scans"
+    (scans / "scan_1").mkdir(parents=True)
+    (scans / "scan_2").mkdir(parents=True)
+    (scans / "scan_1" / "stage-tcp-b0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats>'
+        '<finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
+    (scans / "scan_2" / "stage-udp-b0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><host>', encoding="utf-8")   # 끊긴 산출물
+
+    assert audit_closures.scan_evidence(scans, 1)[0] == "확인됨"
+    assert audit_closures.scan_evidence(scans, 2)[0] == "확인 불가"
+    # 산출물이 지워졌으면 알 수 없다 — 없는 것을 온전했다고 넘겨짚지 않는다.
+    assert audit_closures.scan_evidence(scans, 3)[0] == "확인 불가"
+
+
+def test_closure_audit_never_accepts_our_own_merged_xml_as_evidence(tmp_path):
+    """_write_merged_xml 은 원본 실행이 어땠든 늘 exit="success" 를 찍는다.
+
+    그 파일을 완결성 근거로 쓰면 이 도구가 정확히 검출하려는 오류를 스스로 저지른다.
+    """
+    import audit_closures
+
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    (scans / "scan_9.xml").write_text(
+        '<?xml version="1.0"?><nmaprun scanner="scanops"><runstats>'
+        '<finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
+
+    mark, why = audit_closures.scan_evidence(scans, 9)
+    assert mark == "확인 불가" and "병합본" in why
+
+    # 반대 경계 — 진짜 nmap 업로드본은 근거가 된다.
+    (scans / "scan_8.xml").write_text(
+        '<?xml version="1.0"?><nmaprun scanner="nmap"><runstats>'
+        '<finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
+    assert audit_closures.scan_evidence(scans, 8)[0] == "확인됨"
+
+
+def test_closure_audit_reports_suspects_and_changes_nothing(tmp_path, capsys):
+    db = _audit_db(tmp_path, [(1, 1), (2, 2)])
+    scans = tmp_path / "scans"
+    (scans / "scan_1").mkdir(parents=True)
+    (scans / "scan_1" / "stage-tcp-b0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats>'
+        '<finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
+
+    import audit_closures
+
+    before = db.read_bytes()
+    rc = audit_closures.main(["--db", str(db), "--scans", str(scans), "--list"])
+    out = capsys.readouterr().out
+
+    assert rc == 1                       # 의심 건이 있으면 비영 종료
+    assert "확인됨      1건" in out and "확인 불가   1건" in out
+    assert "10.0.0.2:22/tcp" in out      # scan_2 는 산출물이 없어 의심
+    assert db.read_bytes() == before, "읽기 전용이어야 한다"
