@@ -388,6 +388,70 @@ def expected_authority_xml(out_dir, spec: dict, force_scanned_hosts: bool = Fals
     return expected
 
 
+def absence_times(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dict:
+    """``(host, proto) -> 그 호스트의 부재를 확인한 시각``.
+
+    '이 포트가 없다' 는 **그 호스트를 실제로 훑은 산출물**만 할 수 있는 말이다. 실행 전체의
+    max(finished) 하나로 뭉치면 00:00 에 끝난 배치의 부재가 02:00 권한을 얻어, 그 사이
+    01:00 에 다른 스캔이 새로 관측한 열린 포트를 닫는다.
+
+    커버 범위를 산출물의 host 목록에서 읽을 수는 없다 - sweep 은 ``--open`` 으로 돌기
+    때문에 열린 포트가 없는 호스트는 XML 에 아예 나타나지 않는다(그런데 닫힘 판정이
+    필요한 것이 정확히 그 호스트들이다). 그래서 엔진이 배치를 나눈 규칙(pipeline._batches:
+    live 를 순서대로 batch_size 씩)을 그대로 되짚어 배치 i 가 맡은 호스트를 세운다.
+    """
+    out = Path(out_dir)
+    times: dict[tuple[str, str], object] = {}
+    if force_scanned_hosts:
+        confirm = bool(((spec.get("stages") or {}).get("service") or {}).get("confirm", False))
+        for unit in spec.get("rescan_units") or []:
+            try:
+                ip = str(unit["ip"])
+                port, proto = int(unit["port"]), str(unit.get("proto") or "tcp").lower()
+            except (KeyError, TypeError, ValueError):
+                continue
+            paths = [path for path in _stage3_expected(out, ip, f"{proto}{port}", confirm)
+                     if path.exists()]
+            if not paths:
+                continue
+            stamps = [s for s in (observed_at(path.read_bytes()) for path in paths)
+                      if s is not None]
+            times[(ip, proto)] = max(stamps) if stamps else None
+        for ip in (spec.get("targets_ports") or {}):
+            paths = [path for path in _stage3_expected(out, str(ip), "tcp", confirm)
+                     if path.exists()]
+            if not paths:
+                continue
+            stamps = [s for s in (observed_at(path.read_bytes()) for path in paths)
+                      if s is not None]
+            times[(str(ip), "tcp")] = max(stamps) if stamps else None
+        return times
+
+    live = [h for h in (_read_state(out).get("live") or []) if isinstance(h, str)]
+    if not live:
+        return times
+    batch = max(1, int(spec.get("batch_size") or 256))
+    stages = spec.get("stages") or {}
+    for proto in ("tcp", "udp"):
+        if not (stages.get(proto) or {}).get("enabled", True):
+            continue
+        for index in range(-(-len(live) // batch)):
+            path = out / f"stage-{proto}-b{index}.xml"
+            if not path.exists():
+                continue
+            try:
+                when = observed_at(path.read_bytes())
+            except OSError:
+                continue
+            for host in live[index * batch:(index + 1) * batch]:
+                key = (host, proto)
+                current = times.get(key)
+                # 시각이 없는 산출물도 '훑었다' 는 사실은 남긴다(값 None = 시각 미상).
+                if key not in times or (when is not None and (current is None or when > current)):
+                    times[key] = when
+    return times
+
+
 def swept_batches(out_dir, spec: dict) -> int:
     """모든 활성 프로토콜에 대해 sweep 이 끝난 배치 수.
 
@@ -717,9 +781,12 @@ def authority_observed_at(out_dir, spec: dict, force_scanned_hosts: bool = False
 
 
 def ingest_results(db, scan, out_dir, scope_keys: set | None = None,
-                   force_scanned_hosts: bool = False, scan_date=None,
+                   force_scanned_hosts: bool = False, scan_date=None, spec: dict | None = None,
                    *, commit: bool = True) -> dict:
     """단계별 XML → finding 인입. 명시적 scope_keys는 완료 스캔의 closure 권한.
+
+    ``spec`` 은 어느 산출물이 어떤 호스트를 훑었는지 되짚는 데 쓴다(absence_times). 없으면
+    키별 부재 시각을 세우지 않고 실행 시각 하나로 판단한다 - 예전 동작이다.
 
     ``scan_date`` 는 이 결과가 **언제 관측된 것인가**다. 며칠 전 끝난 실행을 지금 마감하는
     경로(finalize/resume)에서 이걸 넘기지 않으면 인입 시각이 '지금'이 되어, ingest() 의
@@ -733,7 +800,12 @@ def ingest_results(db, scan, out_dir, scope_keys: set | None = None,
     enriched = taxonomy.enrich_all(db, findings)
     counts = ingest(
         db, scan.id, enriched, scanned, scope_keys=scope_keys,
-        scan_date=scan_date, commit=False,
+        scan_date=scan_date,
+        # spec 이 없으면 어느 산출물이 무엇을 커버했는지 계산할 근거가 없다. 그때는 빈 맵을
+        # 넘겨 '아무것도 커버하지 않았다' 로 읽히게 하는 대신, 키별 정보 없음(None)으로 둔다.
+        absence_at=(absence_times(out_dir, spec, force_scanned_hosts)
+                    if spec is not None else None),
+        commit=False,
     )
     from ..api.assets import match_assets
     match_assets(db, commit=False)

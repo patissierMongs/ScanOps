@@ -42,13 +42,19 @@ def _key(f: dict) -> str:
 
 def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[str],
            scope_keys: set[str] | None = None, scan_date: datetime | None = None,
-           *, commit: bool = True) -> dict:
+           absence_at: dict | None = None, *, commit: bool = True) -> dict:
     """findings(이번 스캔의 열린 포트들)와 scanned_hosts(up 호스트)로 DB 갱신.
 
     scope_keys 가 주어지면(타겟 포트 재스캔) 닫힘 판정을 그 키(host|port|proto)로만
     한정 — 스캔하지 않은 다른 포트가 거짓 닫힘 처리되지 않게 한다. None 이면 호스트 전체.
     scan_date 는 '실제 스캔 실행일'(가져온 XML 은 파일 내 시각). first/last_seen 에 쓴다.
     None 이면 현재시각. 리턴: 변화 요약 카운트.
+
+    absence_at 은 ``(host_ip, proto) -> 그 부재를 확인한 시각`` 이다. '이 포트가 없다' 는
+    **그 호스트를 실제로 훑은 산출물**만 할 수 있는 말이라, 실행 전체의 시각 하나로 뭉치면
+    다른 배치의 시각을 빌려 오게 된다 - 00:00 에 끝난 배치의 부재가 02:00 권한을 얻어 그
+    사이 01:00 에 새로 열린 포트를 닫는다. 맵이 주어졌는데 키가 없으면 이 실행의 어떤
+    산출물도 그 호스트/프로토콜을 커버하지 않았다는 뜻이므로 닫지 않는다.
     """
     when = scan_date or _now()
     counts = {"new": 0, "reopened": 0, "service_changed": 0,
@@ -168,19 +174,27 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
                 Finding.host_ip.in_(hosts[start:start + 500]),
             ).all())
     for row in open_rows:
-        if _is_older(when, row.last_seen):
-            continue
         if row.finding_key in seen:
+            continue
+        closed_at = when
+        if absence_at is not None:
+            key = (row.host_ip, (row.proto or "").lower())
+            if key not in absence_at:
+                continue        # 이 실행의 어떤 산출물도 이 호스트·프로토콜을 훑지 않았다
+            # 훑기는 했는데 시각을 밝히지 않은 산출물(옛 XML)은 실행 시각으로 갈음한다.
+            # '커버하지 않았다' 와 '커버했지만 시각을 모른다' 는 다른 사실이다.
+            closed_at = absence_at[key] or when
+        if _is_older(closed_at, row.last_seen):
             continue
         row.state = "closed"
         row.last_scan_id = scan_id
-        row.last_seen = when
+        row.last_seen = closed_at
         row.reopened = 0   # 다시 닫혔으므로 재발 태그 해제
         # 마감/배정이 걸려 있던 항목이 닫힘 → 조치 완료 자동 검증
         verified = row.status == "처리중" or row.deadline is not None
         row.status = "정상처리"
         detail = "포트 닫힘 — 조치 완료 자동 확인" if verified else "포트 닫힘"
-        _event(db, row.id, scan_id, "CLOSED", detail, when=when)
+        _event(db, row.id, scan_id, "CLOSED", detail, when=closed_at)
         counts["closed"] += 1
 
     if commit:

@@ -1625,3 +1625,165 @@ def test_a_result_that_finished_before_a_newer_observation_still_yields(client, 
         db.close()
     merged = (scans_api._settings.scans_dir / f"scan_{scan_id}.xml").read_text(encoding="utf-8")
     assert 'state="closed"' not in merged
+
+
+def _sweep_xml(host: str, *, finished_epoch: int, open_port: int | None = None) -> str:
+    ports = (
+        f'<ports><port protocol="tcp" portid="{open_port}">'
+        '<state state="open" reason="syn-ack"/><service name="https"/></port></ports>'
+    ) if open_port else ""
+    host_el = (
+        f'<host><status state="up"/><address addr="{host}" addrtype="ipv4"/>{ports}</host>'
+        # --open 으로 돌린 sweep 은 열린 포트가 없는 호스트를 XML 에 아예 싣지 않는다.
+        if open_port else ""
+    )
+    return (f'<?xml version="1.0"?><nmaprun start="{finished_epoch - 3600}">{host_el}'
+            f'<runstats><finished time="{finished_epoch}" exit="success"/>'
+            '<hosts up="1" down="0" total="1"/></runstats></nmaprun>')
+
+
+def test_one_batch_absence_never_borrows_another_batch_clock(client, monkeypatch, tmp_path):
+    """배치마다 부재를 확인한 시각이 다르다 - 하나로 뭉치면 시각을 빌려 온다.
+
+        00:00  b0 이 A 를 훑고 443 을 못 봤다
+        01:00  다른 스캔이 A:443 을 open 으로 관측했다
+        02:00  b1 이 B 를 훑고 443 을 못 봤다
+
+    실행 전체의 max(finished)=02:00 을 A 에도 적용하면, b0 의 00:00 부재가 02:00 권한을
+    얻어 01:00 관측을 닫는다. b1 은 A 를 본 적조차 없다. A 의 권한은 b0 의 00:00 뿐이고,
+    B 에는 b1 의 02:00 이 그대로 적용돼야 한다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    b0_at = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    other_at = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+    b1_at = datetime(2026, 8, 1, 2, 0, tzinfo=timezone.utc)
+
+    db = SessionLocal()
+    try:
+        other = ScanRun(name="1시 스캔", status="done")
+        db.add(other)
+        db.commit()
+        other_id = other.id
+        # A:443 은 b0 이 끝난 뒤에 관측됐다 - 닫히면 안 된다.
+        db.add(Finding(
+            finding_key="10.1.1.1|443|tcp", host_ip="10.1.1.1", port=443, proto="tcp",
+            state="open", service="https", first_scan_id=other_id, last_scan_id=other_id,
+            first_seen=other_at, last_seen=other_at,
+        ))
+        # B:443 은 b1 이 훑기 전에 관측됐다 - 닫혀야 한다.
+        db.add(Finding(
+            finding_key="10.1.1.2|443|tcp", host_ip="10.1.1.2", port=443, proto="tcp",
+            state="open", service="https", first_scan_id=other_id, last_scan_id=other_id,
+            first_seen=b0_at, last_seen=b0_at,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["10.1.1.1", "10.1.1.2"], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"), "batch_size": 1,
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "443"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": False}},
+        "scanops": {"scope_keys": ["10.1.1.1|443|tcp", "10.1.1.2|443|tcp"]},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["tcp", "job"], "live": ["10.1.1.1", "10.1.1.2"],
+        "open_map": {}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 2}}) + "\n",
+        encoding="utf-8")
+    (out_dir / "stage-tcp-b0.xml").write_text(
+        _sweep_xml("10.1.1.1", finished_epoch=int(b0_at.timestamp())), encoding="utf-8")
+    (out_dir / "stage-tcp-b1.xml").write_text(
+        _sweep_xml("10.1.1.2", finished_epoch=int(b1_at.timestamp())), encoding="utf-8")
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    db = SessionLocal()
+    try:
+        first = db.query(Finding).filter(Finding.finding_key == "10.1.1.1|443|tcp").one()
+        assert first.state == "open", "b1 의 시각을 빌려 A 를 닫으면 미탐이다"
+        assert first.last_scan_id == other_id
+        assert first.last_seen.replace(tzinfo=timezone.utc) == other_at
+        assert not [e for e in db.query(FindingEvent).filter(
+            FindingEvent.finding_id == first.id).all() if e.type == "CLOSED"]
+
+        second = db.query(Finding).filter(Finding.finding_key == "10.1.1.2|443|tcp").one()
+        assert second.state == "closed", "b1 이 실제로 훑은 B 는 닫혀야 한다(과잉 보수 방지)"
+        assert second.last_seen.replace(tzinfo=timezone.utc) == b1_at
+    finally:
+        db.close()
+
+
+def test_absence_times_only_covers_what_each_sweep_actually_swept(tmp_path):
+    """부재 시각 맵은 '무엇을 훑었는가' 를 그대로 반영해야 한다.
+
+    커버 범위를 산출물의 host 목록에서 읽으면 안 된다 - sweep 은 --open 으로 돌기 때문에
+    열린 포트가 없는 호스트는 XML 에 아예 나타나지 않는다. 그런데 닫힘 판정이 필요한 것이
+    정확히 그 호스트들이다. 엔진이 배치를 나눈 규칙을 되짚어 세운다.
+    """
+    from scanops.scanning import engine_runner
+
+    b0_at = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    b1_at = datetime(2026, 8, 1, 2, 0, tzinfo=timezone.utc)
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "live": ["10.2.2.1", "10.2.2.2"], "open_map": {}, "stages_done": ["tcp"],
+    }), encoding="utf-8")
+    spec = {"batch_size": 1,
+            "stages": {"tcp": {"enabled": True, "ports": "443"},
+                       "udp": {"enabled": False, "ports": ""}}}
+    # b0 의 XML 에는 호스트가 아예 없다(열린 포트가 없었다). 그래도 훑은 것은 사실이다.
+    (tmp_path / "stage-tcp-b0.xml").write_text(
+        _sweep_xml("10.2.2.1", finished_epoch=int(b0_at.timestamp())), encoding="utf-8")
+    (tmp_path / "stage-tcp-b1.xml").write_text(
+        _sweep_xml("10.2.2.2", finished_epoch=int(b1_at.timestamp())), encoding="utf-8")
+
+    times = engine_runner.absence_times(tmp_path, spec)
+    assert times == {("10.2.2.1", "tcp"): b0_at, ("10.2.2.2", "tcp"): b1_at}
+    # 돌지 않은 프로토콜은 부재를 주장할 수 없다.
+    assert ("10.2.2.1", "udp") not in times
+
+    # 산출물이 없는 배치는 커버 목록에 들어가지 않는다.
+    (tmp_path / "stage-tcp-b1.xml").unlink()
+    assert set(engine_runner.absence_times(tmp_path, spec)) == {("10.2.2.1", "tcp")}
+
+
+def test_ingest_never_closes_a_key_no_artifact_covered():
+    """맵에 없는 키는 닫지 않는다 - '커버하지 않았다' 와 '시각을 모른다' 는 다르다."""
+    from scanops.scanning.ingest import ingest
+
+    db = SessionLocal()
+    try:
+        run = ScanRun(name="부분 커버", status="running")
+        db.add(run)
+        db.commit()
+        for key, proto in (("10.3.3.1|443|tcp", "tcp"), ("10.3.3.1|53|udp", "udp")):
+            db.add(Finding(
+                finding_key=key, host_ip="10.3.3.1",
+                port=int(key.split("|")[1]), proto=proto, state="open",
+                first_scan_id=run.id, last_scan_id=run.id,
+                first_seen=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                last_seen=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            ))
+        db.commit()
+
+        counts = ingest(
+            db, run.id, [], {"10.3.3.1"},
+            scope_keys={"10.3.3.1|443|tcp", "10.3.3.1|53|udp"},
+            scan_date=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            # TCP 만 훑었다. UDP 부재는 이 실행이 증명할 수 없다.
+            absence_at={("10.3.3.1", "tcp"): datetime(2026, 8, 1, tzinfo=timezone.utc)},
+        )
+        assert counts["closed"] == 1
+        rows = {f.finding_key: f.state for f in db.query(Finding).all()}
+        assert rows["10.3.3.1|443|tcp"] == "closed"
+        assert rows["10.3.3.1|53|udp"] == "open", "훑지 않은 프로토콜을 닫으면 미탐이다"
+    finally:
+        db.close()

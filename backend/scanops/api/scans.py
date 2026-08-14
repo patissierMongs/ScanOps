@@ -32,7 +32,7 @@ from ..scanning import (
 )
 from ..scanning.presets import PRESETS
 from ..scanning.ingest import ingest
-from ..scanning.nmap_parse import parse_xml, probed_identity, scan_start, up_hosts
+from ..scanning.nmap_parse import observed_at, parse_xml, probed_identity, up_hosts
 from .audit import record
 from .deps import current_user, require_role
 
@@ -619,7 +619,8 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
                    tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set,
                    scan_date: datetime | None = None, raw_xml_path: Path | None = None,
                    closure_hosts: set[str] | None = None,
-                   closure_scope_keys: set[str] | None = None) -> dict:
+                   closure_scope_keys: set[str] | None = None,
+                   absence_at: dict | None = None) -> dict:
     enriched = taxonomy.enrich_all(db, findings)
     scope_keys = (
         closure_scope_keys
@@ -641,7 +642,7 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
         scan.raw_xml_path = str(raw_xml_path)
     counts = ingest(
         db, scan.id, enriched, scanned_hosts, scope_keys=scope_keys,
-        scan_date=scan_date, commit=False,
+        scan_date=scan_date, absence_at=absence_at, commit=False,
     )
     from .assets import match_assets
     match_assets(db, commit=False)
@@ -1196,7 +1197,8 @@ def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
     scan.raw_xml_path = str(merged_path)
     return engine_runner.ingest_results(
         db, scan, out_dir, scope_keys=scope_keys,
-        force_scanned_hosts=force_scanned_hosts, scan_date=snapshot_date, commit=False,
+        force_scanned_hosts=force_scanned_hosts, scan_date=snapshot_date,
+        spec=saved_spec, commit=False,
     )
 
 
@@ -1651,9 +1653,12 @@ def _validate_import_manifest(manifest_bytes: bytes, payloads: list[dict]) -> di
 def _prepare_import_xml(xml_bytes: bytes, filename: str | None = None) -> tuple:
     """Parse every XML-derived value before creating a ScanRun or writing a file."""
     try:
-        scan_date = scan_start(xml_bytes)
+        # 시작 시각이 아니라 **관측을 끝낸** 시각이다. 몇 시간 도는 스캔에서 시작 시각을 쓰면
+        # 그 사이 다른 스캔이 남긴 결과가 더 새것으로 판정되어, 이 XML 이 나중에 확인한
+        # 열린 포트가 통째로 버려진다(observed_at = finished, 없으면 start).
+        scan_date = observed_at(xml_bytes)
         stage = (_stage_file_info(filename) or ("", ""))[1]
-        findings = parse_xml(xml_bytes)
+        findings = [{**f, "observed_at": scan_date} for f in parse_xml(xml_bytes)]
         # 두 근거 중 하나라도 'sweep' 이라고 하면 식별 미관측으로 받는다. 파일명은 단계
         # 계약이라 정확하지만 이름이 바뀌면 뚫리고, XML 인자는 이름과 무관하게 남는다.
         sweep_only = stage == "tcp_discovery" or probed_identity(xml_bytes) is False
@@ -1715,6 +1720,18 @@ def result_fingerprint(xml_payloads: list[bytes]) -> str:
     """
     parts = sorted(hashlib.sha256(payload).hexdigest() for payload in xml_payloads)
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _absence_from_xml(xml_bytes: bytes, hosts: set[str], when) -> dict:
+    """이 XML 이 부재를 증명할 수 있는 ``(host, proto)`` 범위와 그 시각.
+
+    커버 범위를 XML 의 host 목록에서 읽으면 안 된다 - ``--open`` 으로 돌린 산출물은 열린
+    포트가 없는 호스트를 아예 싣지 않는데, 닫힘 판정이 필요한 것이 정확히 그 호스트들이다.
+    그래서 범위는 호출자가 아는 것(manifest 의 closure_targets, 없으면 up 호스트)을 쓴다.
+    """
+    tcp, udp = xml_verdict.scan_scope(xml_bytes)
+    protos = [p for p, spec in (("tcp", tcp), ("udp", udp)) if spec]
+    return {(host, proto): when for host in hosts for proto in protos}
 
 
 def _import_command(name: str, xml_bytes: bytes) -> str:
@@ -1782,6 +1799,11 @@ def _import_single_xml(
             scan_date=sdate,
             raw_xml_path=xml_path if stage == "tcp_discovery" else None,
             closure_hosts=closure_hosts,
+            absence_at=_absence_from_xml(
+                xml_bytes,
+                scanned_hosts if closure_hosts is None else closure_hosts,
+                sdate,
+            ),
         )
     except Exception:
         _fail_import(db, scan.id, artifact_paths)
@@ -1836,6 +1858,9 @@ class _ImportAccumulator:
     def __init__(self) -> None:
         self.scanned_hosts: set[str] = set()
         self.closure_scope_keys: set[str] = set()
+        # (host, proto) -> 그 부재를 확인한 시각. 배치·단계마다 다르므로 실행 전체의 min/max
+        # 하나로 뭉치면 다른 배치의 시각을 빌려 오게 된다.
+        self.absence_at: dict = {}
         self.tcp_scope: set[int] | None | set = set()
         self.udp_scope: set[int] | None | set = set()
         self._discovery: list[dict] = []
@@ -1857,10 +1882,17 @@ class _ImportAccumulator:
             values = prepared.get(stage)
             if values is None:
                 continue
-            _date, findings, hosts, stage_tcp_scope, stage_udp_scope = values
+            stage_date, findings, hosts, stage_tcp_scope, stage_udp_scope = values
             self.scanned_hosts |= hosts
             bucket.extend(findings)
             item = stages[stage]
+            covered = hosts if item.get("closure_hosts") is None else item["closure_hosts"]
+            for key, when in _absence_from_xml(item["bytes"], covered, stage_date).items():
+                current = self.absence_at.get(key)
+                if key not in self.absence_at or (
+                    when is not None and (current is None or when > current)
+                ):
+                    self.absence_at[key] = when
             if is_udp:
                 self.udp_scope = self._widen(self.udp_scope, stage_udp_scope)
                 tcp_arg, udp_arg = set(), stage_udp_scope
@@ -1953,6 +1985,7 @@ def _import_stage_bundle(db: Session, user: User, display: str,
             scan_date=sdate,
             raw_xml_path=merged_path,
             closure_scope_keys=acc.closure_scope_keys,
+            absence_at=acc.absence_at,
         )
     except Exception:
         _fail_import(db, scan.id, artifact_paths)

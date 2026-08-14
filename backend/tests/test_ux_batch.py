@@ -561,3 +561,135 @@ def test_a_staged_engine_scan_counts_batches_from_its_own_artifacts(client, monk
     assert progress["batches_total"] == 3
     assert progress["batches_done"] == 1, "UDP 가 아직 안 끝난 배치는 세지 않는다"
     assert progress["batch_size"] == 128
+
+
+# ── 가져오기도 XML 이 밝힌 완료 시각을 쓴다 ────────────────────────────────────
+def _timed_xml(host: str, *, start: int, finished: int, port: int | None = None,
+               services: str = "443") -> bytes:
+    """--open 산출물 흉내 - 열린 포트가 없으면 host 요소 자체가 없다."""
+    ports = (
+        f'<ports><port protocol="tcp" portid="{port}">'
+        '<state state="open" reason="syn-ack"/><service name="https"/></port></ports>'
+    ) if port else ""
+    host_el = (f'<host><status state="up"/><address addr="{host}" addrtype="ipv4"/>'
+               f'{ports}</host>') if port else ""
+    return (
+        f'<?xml version="1.0"?><nmaprun scanner="nmap" start="{start}">'
+        f'<scaninfo type="syn" protocol="tcp" numservices="2" services="{services}"/>'
+        f'{host_el}<runstats><finished time="{finished}" exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>'
+    ).encode("utf-8")
+
+
+def _seed_finding(key: str, host: str, port: int, *, state: str, status: str, when):
+    db = SessionLocal()
+    try:
+        run = ScanRun(name="중간 스캔", status="done")
+        db.add(run)
+        db.commit()
+        run_id = run.id
+        db.add(Finding(
+            finding_key=key, host_ip=host, port=port, proto="tcp",
+            state=state, status=status, service="https",
+            first_scan_id=run_id, last_scan_id=run_id, first_seen=when, last_seen=when,
+        ))
+        db.commit()
+        return run_id
+    finally:
+        db.close()
+
+
+def test_a_single_import_uses_the_time_the_xml_finished_not_when_it_started(client):
+    """start=00:00 · finished=02:00 인 XML 은 01:00 관측보다 새것이다.
+
+    시작 시각을 쓰면 '01:00 에 닫힘으로 기록된 행' 이 더 새것으로 판정되어, 이 XML 이
+    02:00 에 실제로 확인한 열린 포트가 통째로 버려진다 - 노출을 숨기는 미탐이다.
+    """
+    headers = _auth(client)
+    middle = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+    finished = datetime(2026, 8, 1, 2, 0, tzinfo=timezone.utc)
+    _seed_finding("10.7.7.7|443|tcp", "10.7.7.7", 443,
+                  state="closed", status="정상처리", when=middle)
+
+    xml = _timed_xml("10.7.7.7", start=int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp()),
+                     finished=int(finished.timestamp()), port=443)
+    response = client.post("/api/scans/import", headers=headers,
+                           files={"file": ("late.xml", xml, "text/xml")})
+    assert response.status_code == 200, response.text
+
+    db = SessionLocal()
+    try:
+        row = db.query(Finding).filter(Finding.finding_key == "10.7.7.7|443|tcp").one()
+        assert row.state == "open", "완료 시각을 쓰지 않으면 나중 관측이 버려진다"
+        assert row.status != "정상처리"
+        assert row.last_seen.replace(tzinfo=timezone.utc) == finished
+        kinds = [e.type for e in db.query(FindingEvent).filter(
+            FindingEvent.finding_id == row.id).all()]
+        assert "REOPENED" in kinds
+    finally:
+        db.close()
+
+
+def test_an_import_that_finished_before_a_newer_observation_yields_to_it(client):
+    """반대 방향 - XML 이 먼저 끝났으면 그 뒤 관측이 이긴다."""
+    headers = _auth(client)
+    finished = datetime(2026, 8, 1, 2, 0, tzinfo=timezone.utc)
+    newer = datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc)
+    run_id = _seed_finding("10.7.7.8|443|tcp", "10.7.7.8", 443,
+                           state="open", status="미조치", when=newer)
+
+    # 8/1 02:00 에 끝난 XML 은 443 을 보지 못했다 - 8/3 관측을 뒤집지 못한다.
+    xml = _timed_xml("10.7.7.8", start=int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp()),
+                     finished=int(finished.timestamp()), port=None)
+    response = client.post("/api/scans/import", headers=headers,
+                           files={"file": ("early.xml", xml, "text/xml")})
+    assert response.status_code == 200, response.text
+
+    db = SessionLocal()
+    try:
+        row = db.query(Finding).filter(Finding.finding_key == "10.7.7.8|443|tcp").one()
+        assert row.state == "open" and row.last_scan_id == run_id
+        assert row.last_seen.replace(tzinfo=timezone.utc) == newer
+    finally:
+        db.close()
+
+
+def test_a_bundle_applies_each_batch_own_clock_not_the_earliest(client):
+    """묶음도 배치마다 시각이 다르다 - min 하나로 뭉치면 뒤 배치일수록 미탐이 커진다.
+
+        b0 finished 00:00 (A 를 훑고 443 못 봄)
+        01:00 다른 스캔이 A:443 을 open 으로 관측
+        b1 finished 02:00 (B 를 훑고 443 못 봄)
+    """
+    headers = _auth(client)
+    b0 = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+    middle = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+    b1 = datetime(2026, 8, 1, 2, 0, tzinfo=timezone.utc)
+    _seed_finding("10.7.7.1|443|tcp", "10.7.7.1", 443,
+                  state="open", status="미조치", when=middle)
+    _seed_finding("10.7.7.2|443|tcp", "10.7.7.2", 443,
+                  state="open", status="미조치", when=b0)
+
+    # 각 배치는 자기 호스트를 훑었고 80 만 열려 있었다(443 은 사라졌다).
+    files = {
+        "run.10_7_7_1.b0000.tcp_discovery.xml": _timed_xml(
+            "10.7.7.1", start=int(b0.timestamp()) - 60, finished=int(b0.timestamp()),
+            port=80, services="80,443"),
+        "run.10_7_7_2.b0001.tcp_discovery.xml": _timed_xml(
+            "10.7.7.2", start=int(b1.timestamp()) - 60, finished=int(b1.timestamp()),
+            port=80, services="80,443"),
+    }
+    upload = [("files", (name, data, "text/xml")) for name, data in files.items()]
+    response = client.post("/api/scans/import-bundle", headers=headers, files=upload)
+    assert response.status_code == 200, response.text
+
+    db = SessionLocal()
+    try:
+        first = db.query(Finding).filter(Finding.finding_key == "10.7.7.1|443|tcp").one()
+        assert first.state == "open", "b1 의 시각을 빌려 A 를 닫으면 미탐이다"
+        assert first.last_seen.replace(tzinfo=timezone.utc) == middle
+        second = db.query(Finding).filter(Finding.finding_key == "10.7.7.2|443|tcp").one()
+        assert second.state == "closed", "b1 이 실제로 훑은 B 는 닫혀야 한다"
+        assert second.last_seen.replace(tzinfo=timezone.utc) == b1
+    finally:
+        db.close()
