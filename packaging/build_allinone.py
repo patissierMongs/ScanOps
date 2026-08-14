@@ -382,19 +382,32 @@ def write_launcher(app: Path) -> None:
         "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0scanner\\scanops_scanner.py\" %*\r\n",
         encoding="ascii",
     )
-    # 결과 XML 이 믿을 만한지 — 올리기 전에 살릴 것과 버릴 것을 가른다.
-    # 예: CHECK.bat scanops_scans
-    (app / "CHECK.bat").write_text(
+    # 검사 도구 두 개. 한국어 Windows 기본 코드페이지(949)로는 출력이 깨지거나 죽으므로
+    # 콘솔과 파이썬 stdout 을 UTF-8 로 함께 고정한다. 둘 중 하나만 바꾸면 여전히 어긋난다.
+    console_utf8 = (
         "@echo off\r\n"
-        "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0tools\\check_scan_xml.py\" %*\r\n"
+        "chcp 65001 >nul\r\n"
+        "set PYTHONIOENCODING=utf-8\r\n"
+    )
+    # 결과 XML 이 믿을 만한지 - 올리기 전에 살릴 것과 버릴 것을 가른다.
+    # 인자가 없으면 번들이 실제로 산출물을 쓰는 곳(data\scans)을 본다.
+    (app / "CHECK.bat").write_text(
+        console_utf8
+        + "set \"ARGS=%*\"\r\n"
+        "if \"%ARGS%\"==\"\" set \"ARGS=\"\"%~dp0data\\scans\"\"\r\n"
+        "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0tools\\check_scan_xml.py\" %ARGS%\r\n"
         "pause\r\n",
         encoding="ascii",
     )
-    # 이미 닫힌 발견 중 '닫혔다고 확인할 수 없는' 것 — 읽기 전용, 아무것도 바꾸지 않는다.
-    # 예: AUDIT.bat --db backend\\scanops.db --scans backend\\scanops_scans --list
+    # 이미 닫힌 발견 중 '닫혔다고 확인할 수 없는' 것 - 읽기 전용, 아무것도 바꾸지 않는다.
+    # 기본값은 도구의 cwd 기준이 아니라 **번들이 실제로 쓰는 경로**여야 한다
+    # (config._default_data_dir: backend/scanops 기준 parents[2]/data = 번들 루트 data).
     (app / "AUDIT.bat").write_text(
-        "@echo off\r\n"
-        "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0tools\\audit_closures.py\" %*\r\n"
+        console_utf8
+        + "set \"ARGS=%*\"\r\n"
+        "if \"%ARGS%\"==\"\" set \"ARGS=--db \"\"%~dp0data\\scanops.db\"\" "
+        "--scans \"\"%~dp0data\\scans\"\"\"\r\n"
+        "\"%~dp0runtime\\python\\python.exe\" -E -s \"%~dp0tools\\audit_closures.py\" %ARGS%\r\n"
         "pause\r\n",
         encoding="ascii",
     )

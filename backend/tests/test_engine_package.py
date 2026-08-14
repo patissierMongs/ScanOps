@@ -1754,26 +1754,124 @@ def _audit_db(tmp_path, events):
     return db
 
 
-def test_closure_audit_separates_confirmed_closures_from_unverifiable_ones(tmp_path):
-    """닫힘은 status 까지 '정상처리'로 바꾸므로 되돌리기 가장 어려운 미탐이다.
+def _spec_state(out_dir, live, *, tcp=True, udp=False):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "spec.json").write_text(json.dumps({
+        "targets": live, "batch_size": 256,
+        "stages": {"discovery": {"mode": "sn"},
+                   "tcp": {"enabled": tcp, "ports": "1-65535"},
+                   "udp": {"enabled": udp, "ports": "53,161"},
+                   "service": {"enabled": True}},
+    }), encoding="utf-8")
+    (out_dir / "run-state.json").write_text(json.dumps({"live": live}), encoding="utf-8")
 
-    이 도구가 '확인할 수 없는 것'을 확인됨으로 넘겨짚으면 존재 이유가 없어진다.
+
+def _finished(path):
+    path.write_text('<?xml version="1.0"?><nmaprun><runstats>'
+                    '<finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
+
+
+def test_closure_audit_requires_the_expected_authority_not_just_present_files(tmp_path):
+    """이 도구가 검출하려는 오류를 스스로 저지르면 안 된다.
+
+    완결된 discovery 하나만 남고 포트 authority 인 sweep 이 통째로 없는데 '확인됨'이라
+    하면, PR 이 완결성 게이트에서 고친 '있는 파일만 검사'와 같은 잘못이다.
     """
     import audit_closures
 
     scans = tmp_path / "scans"
-    (scans / "scan_1").mkdir(parents=True)
-    (scans / "scan_2").mkdir(parents=True)
-    (scans / "scan_1" / "stage-tcp-b0.xml").write_text(
-        '<?xml version="1.0"?><nmaprun><runstats>'
-        '<finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
-    (scans / "scan_2" / "stage-udp-b0.xml").write_text(
-        '<?xml version="1.0"?><nmaprun><host>', encoding="utf-8")   # 끊긴 산출물
+    out = scans / "scan_1"
+    _spec_state(out, ["10.0.0.1"])
+    _finished(out / "stage0-discovery.xml")          # sweep 산출물은 없다
 
+    mark, why, _spec, _state = audit_closures.scan_evidence(scans, 1)
+    assert mark == "확인 불가", why
+    assert "stage-tcp-b0.xml" in why
+
+    _finished(out / "stage-tcp-b0.xml")              # 이제 기대 집합이 다 찼다
     assert audit_closures.scan_evidence(scans, 1)[0] == "확인됨"
-    assert audit_closures.scan_evidence(scans, 2)[0] == "확인 불가"
-    # 산출물이 지워졌으면 알 수 없다 — 없는 것을 온전했다고 넘겨짚지 않는다.
-    assert audit_closures.scan_evidence(scans, 3)[0] == "확인 불가"
+
+
+def test_closure_audit_recognises_selective_rescan_artifacts_as_authority(tmp_path):
+    """선택 재스캔은 sweep 이 없고 stage3 가 유일한 근거다 - 반대쪽 오탐도 막는다."""
+    import audit_closures
+
+    scans = tmp_path / "scans"
+    out = scans / "scan_5"
+    out.mkdir(parents=True)
+    (out / "spec.json").write_text(json.dumps({
+        "targets": ["10.0.0.1"],
+        "rescan_units": [{"ip": "10.0.0.1", "port": 53, "proto": "udp"}],
+        "stages": {"service": {"enabled": True}},
+    }), encoding="utf-8")
+    (out / "run-state.json").write_text("{}", encoding="utf-8")
+
+    assert audit_closures.scan_evidence(scans, 5)[0] == "확인 불가"
+    _finished(out / "stage3-10_0_0_1-udp53.xml")
+    assert audit_closures.scan_evidence(scans, 5)[0] == "확인됨"
+
+
+def test_closure_audit_does_not_let_one_host_vouch_for_another(tmp_path, capsys):
+    """다른 호스트의 완결 XML 하나로 같은 scan 의 모든 닫힘을 확인해 줄 수는 없다."""
+    import audit_closures
+
+    scans = tmp_path / "scans"
+    out = scans / "scan_1"
+    _spec_state(out, ["10.0.0.1"])                   # live 는 .1 뿐
+    _finished(out / "stage0-discovery.xml")
+    _finished(out / "stage-tcp-b0.xml")
+    db = _audit_db(tmp_path, [(1, 1), (2, 1)])       # findings: 10.0.0.1, 10.0.0.2
+
+    rc = audit_closures.main(["--db", str(db), "--scans", str(scans), "--list"])
+    out_text = capsys.readouterr().out
+
+    assert rc == 1
+    assert "확인됨      1건" in out_text and "확인 불가   1건" in out_text
+    assert "10.0.0.2:22/tcp" in out_text             # 범위 밖 호스트가 의심으로 남는다
+
+
+def test_audit_tools_print_only_characters_a_korean_windows_console_can_encode():
+    """번들은 Windows 용이고 기본 코드페이지는 949 다.
+
+    인코딩할 수 없는 글자 하나로 정작 확인해야 할 판정이 traceback 으로 끊긴다.
+    실제로 CP949 는 em dash(U+2014)를 표현하지 못한다.
+    """
+    for name in ("audit_closures.py", "check_scan_xml.py"):
+        text = (SCRIPTS_ROOT / name).read_text(encoding="utf-8")
+        bad = sorted({ch for ch in text if not _cp949_ok(ch)})
+        assert not bad, f"{name}: CP949 로 출력할 수 없는 문자 {bad}"
+
+
+def _cp949_ok(ch: str) -> bool:
+    try:
+        ch.encode("cp949")
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+def test_audit_tools_survive_a_cp949_console(tmp_path, monkeypatch, capsys):
+    """CP949 콘솔을 흉내 내 출력이 끝까지 나오는지 - 도구의 결론이 잘리면 안 된다."""
+    import audit_closures
+
+    scans = tmp_path / "scans"
+    _spec_state(scans / "scan_1", ["10.0.0.1"])
+    db = _audit_db(tmp_path, [(1, 1)])
+
+    class _Cp949Out(io.TextIOWrapper):
+        # 보정이 불가능한 최악의 콘솔. 본문 자체가 CP949 안전해야만 끝까지 나온다.
+        def reconfigure(self, **_kwargs):
+            raise AttributeError("console stream cannot be reconfigured")
+
+    buffer = io.BytesIO()
+    stream = _Cp949Out(buffer, encoding="cp949", errors="strict", write_through=True)
+    monkeypatch.setattr(sys, "stdout", stream)
+    rc = audit_closures.main(["--db", str(db), "--scans", str(scans)])
+    stream.flush()
+    printed = buffer.getvalue().decode("cp949")
+
+    assert rc == 1
+    assert "이 스크립트는 아무것도 바꾸지 않았습니다." in printed, "결론까지 출력돼야 한다"
 
 
 def test_closure_audit_never_accepts_our_own_merged_xml_as_evidence(tmp_path):
@@ -1789,7 +1887,7 @@ def test_closure_audit_never_accepts_our_own_merged_xml_as_evidence(tmp_path):
         '<?xml version="1.0"?><nmaprun scanner="scanops"><runstats>'
         '<finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
 
-    mark, why = audit_closures.scan_evidence(scans, 9)
+    mark, why = audit_closures.scan_evidence(scans, 9)[:2]
     assert mark == "확인 불가" and "병합본" in why
 
     # 반대 경계 — 진짜 nmap 업로드본은 근거가 된다.
@@ -1802,10 +1900,9 @@ def test_closure_audit_never_accepts_our_own_merged_xml_as_evidence(tmp_path):
 def test_closure_audit_reports_suspects_and_changes_nothing(tmp_path, capsys):
     db = _audit_db(tmp_path, [(1, 1), (2, 2)])
     scans = tmp_path / "scans"
-    (scans / "scan_1").mkdir(parents=True)
-    (scans / "scan_1" / "stage-tcp-b0.xml").write_text(
-        '<?xml version="1.0"?><nmaprun><runstats>'
-        '<finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
+    _spec_state(scans / "scan_1", ["10.0.0.1"])
+    _finished(scans / "scan_1" / "stage0-discovery.xml")
+    _finished(scans / "scan_1" / "stage-tcp-b0.xml")
 
     import audit_closures
 
@@ -1843,3 +1940,80 @@ def test_allinone_bundle_ships_the_result_inspection_tools(tmp_path):
         launcher = (app / bat).read_text(encoding="ascii")
         assert tool in launcher, bat
         assert "runtime\\python\\python.exe" in launcher, bat
+        # 한국어 Windows 기본 코드페이지(949)로는 한글 출력이 깨지거나 죽는다.
+        # 콘솔과 파이썬 stdout 을 함께 UTF-8 로 고정해야 어긋나지 않는다.
+        assert "chcp 65001" in launcher, bat
+        assert "PYTHONIOENCODING=utf-8" in launcher, bat
+
+    # 인자 없이 실행하면 번들이 **실제로 쓰는** 경로를 봐야 한다. 도구 기본값은 cwd 기준이라
+    # 그대로 두면 'DB 를 찾지 못했습니다' 로 끝난다(config._default_data_dir = 번들 루트/data).
+    audit = (app / "AUDIT.bat").read_text(encoding="ascii")
+    assert "%~dp0data\\scanops.db" in audit and "%~dp0data\\scans" in audit
+    assert "%ARGS%" in audit, "사용자 인자가 있으면 그것으로 덮어써야 한다"
+    check = (app / "CHECK.bat").read_text(encoding="ascii")
+    assert "%~dp0data\\scans" in check and "%ARGS%" in check
+
+
+def test_fully_recovered_split_is_not_reported_as_lost_evidence(monkeypatch, tmp_path):
+    """묶음이 죽어도 쪼갠 것이 전부 살아나면 얻은 증거는 같다 — 저하가 아니다.
+
+    묶음 이름만 기대하면 완전 복구를 '증거 손실'로 오탐한다. 최초 실패 이력은
+    service_retry/service_split 이벤트가 따로 남긴다.
+    """
+    from scanops.scanning import engine_runner
+
+    ip = "127.0.0.1"
+    spec_dict = {
+        "targets": [ip], "out_dir": str(tmp_path),
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": False}, "udp": {"enabled": False},
+                   "service": {"nse": [], "confirm": False}},
+    }
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "stages_done": ["discovery"], "open_map": {ip: {"udp": [53, 161]}},
+        "live": [ip], "service_done": [], "stop": False,
+    }), encoding="utf-8")
+
+    def fake_run(nmap, args, out_base, **_kwargs):
+        pspec = args[args.index("-p") + 1].split(":")[1]
+        ports = [int(x) for x in pspec.split(",")]
+        if len(ports) > 1:                      # 묶음은 두 엔진 모두에서 죽는다
+            return {"rc": 7, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
+        Path(str(out_base) + ".xml").write_text(
+            '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+            f'<address addr="{ip}" addrtype="ipv4"/><ports>'
+            f'<port protocol="udp" portid="{ports[0]}">'
+            '<state state="open" reason="udp-response"/>'
+            '<service name="t" method="probed"/></port></ports></host>'
+            '<runstats><finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
+        return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
+
+    monkeypatch.setattr(nmaprun, "run", fake_run)
+    Pipeline(JobSpec.from_dict(spec_dict), _Sink(), "nmap").run()
+
+    names = sorted(p.name for p in tmp_path.glob("stage3-*.xml"))
+    assert names == ["stage3-127_0_0_1-udp161.xml", "stage3-127_0_0_1-udp53.xml"]
+    report = engine_runner.artifact_report(tmp_path, spec_dict)
+    assert report["authority_missing"] == [] and report["authority_broken"] == []
+    assert report["enrichment_missing"] == [], report
+    assert report["enrichment_broken"] == [], report
+
+
+def test_a_partially_recovered_split_is_still_reported_as_degraded(tmp_path):
+    """반대 경계 — 쪼갠 것 중 하나만 살아났으면 증거는 실제로 빠졌다."""
+    from scanops.scanning import engine_runner
+
+    ip = "127.0.0.1"
+    spec_dict = {
+        "targets": [ip], "out_dir": str(tmp_path),
+        "stages": {"service": {"nse": [], "confirm": False}},
+    }
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "open_map": {ip: {"udp": [53, 161]}}, "live": [ip],
+    }), encoding="utf-8")
+    (tmp_path / "stage3-127_0_0_1-udp53.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats>'
+        '<finished exit="success"/></runstats></nmaprun>', encoding="utf-8")
+
+    report = engine_runner.artifact_report(tmp_path, spec_dict)
+    assert report["enrichment_missing"] == ["stage3-127_0_0_1-udp.xml"], report

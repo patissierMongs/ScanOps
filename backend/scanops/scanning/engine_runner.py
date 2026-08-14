@@ -288,25 +288,50 @@ def expected_enrichment_xml(out_dir, spec: dict) -> list[Path]:
     있는 파일만 훑으면 'probe 는 돌았는데 XML 을 못 만든' 경우가 증거 손실인 채로 정상 완료로
     숨는다. open_map(=sweep 이 연 포트)과 service 설정에서 기대 집합을 세운다.
     """
+    return [path for group in _enrichment_units(out_dir, spec) for path in group[0]]
+
+
+# 엔진이 실패한 UDP 묶음을 포트별로 쪼갤 때의 상한(pipeline._MAX_SPLIT_UNITS 와 같은 값).
+# 넘으면 엔진이 쪼개지 않으므로 대체 산출물도 존재하지 않는다.
+_MAX_SPLIT_UNITS = 32
+
+
+def _enrichment_units(out_dir, spec: dict) -> list[tuple[list[Path], list[Path]]]:
+    """(ip, proto) 마다 (묶음 산출물, 대체 가능한 분할 산출물).
+
+    정상 경로는 프로토콜당 한 프로세스라 묶음 파일 하나가 나온다. 그 묶음이 죽으면 엔진이
+    포트별로 쪼개 다시 돌리므로(pipeline._split_units), **쪼갠 것이 전부 완결되면 얻을 증거는
+    같다.** 묶음 이름만 기대하면 완전 복구를 '증거 손실'로 오탐한다 — 최초 묶음이 실패했다는
+    사실은 service_retry/service_split 이벤트가 이미 남긴다.
+
+    대체 집합은 엔진이 실제로 쪼갤 수 있는 조건(UDP · 2개 이상 · 상한 이내)일 때만 만든다.
+    """
     out = Path(out_dir)
     svc = ((spec.get("stages") or {}).get("service") or {})
     if not svc.get("enabled", True):
         return []
     confirm = bool(svc.get("confirm", False))
     open_map = _read_state(out).get("open_map") or {}
-    expected: list[Path] = []
+    units: list[tuple[list[Path], list[Path]]] = []
     for ip, protos in sorted((open_map or {}).items()):
         if not isinstance(protos, dict):
             continue
         for proto in ("tcp", "udp"):
-            ports = protos.get(proto)
-            if not ports:
+            raw = protos.get(proto)
+            if not raw:
                 continue
-            # 정상 경로는 프로토콜별로 한 프로세스다(pipeline._probe_unit). 포트별로 쪼갠
-            # 산출물은 그 묶음이 죽었을 때만 생기므로 기대 목록에 넣지 않는다 — 넣으면
-            # 건강한 실행이 전부 부재 판정된다. 쪼갠 뒤 깨진 파일은 glob 합집합이 잡는다.
-            expected += _stage3_expected(out, ip, proto, confirm)
-    return expected
+            grouped = _stage3_expected(out, ip, proto, confirm)
+            ports = sorted({int(p) for p in raw})
+            split: list[Path] = []
+            if proto == "udp" and 1 < len(ports) <= _MAX_SPLIT_UNITS:
+                for port in ports:
+                    split += _stage3_expected(out, ip, f"{proto}{port}", confirm)
+            units.append((grouped, split))
+    return units
+
+
+def _complete(paths: list[Path]) -> bool:
+    return bool(paths) and all(p.exists() and _xml_run_finished(p) for p in paths)
 
 
 def expected_authority_xml(out_dir, spec: dict, force_scanned_hosts: bool = False) -> list[Path]:
@@ -346,14 +371,24 @@ def artifact_report(out_dir, spec: dict, force_scanned_hosts: bool = False) -> d
     if not force_scanned_hosts:
         # 전체 스캔에서 stage3 는 enrichment 다. 어긋나도 sweep 의 안전한 권한을 뺏지 않지만,
         # 증거가 빠졌다는 사실은 남겨야 한다 — 안 그러면 손실이 정상 완료로 숨는다.
-        expected_enrich = expected_enrichment_xml(out, spec)
-        enrichment_missing = [p.name for p in expected_enrich if not p.exists()]
-        seen = {p.name for p in expected_enrich}
-        enrichment_broken = sorted(
-            {p.name for p in expected_enrich if p.exists() and not _xml_run_finished(p)}
-            # 기대 집합 밖의 산출물(확인 패스 등)도 깨졌으면 증거 저하로 센다.
-            | {p.name for p in out.glob("stage3-*.xml")
-               if p.name not in seen and not _xml_run_finished(p)})
+        units = _enrichment_units(out, spec)
+        seen: set[str] = set()
+        for grouped, split in units:
+            seen |= {p.name for p in grouped} | {p.name for p in split}
+            # 묶음이 온전하면 그것으로 끝. 아니면 쪼갠 집합이 **전부** 완결됐는지 본다 —
+            # 그때 얻은 증거는 묶음과 같으므로 저하가 아니다.
+            if _complete(grouped) or _complete(split):
+                continue
+            enrichment_missing += [p.name for p in grouped if not p.exists()]
+            enrichment_broken += [p.name for p in grouped
+                                  if p.exists() and not _xml_run_finished(p)]
+            # 쪼갠 것 중 일부만 살아났으면 그 부분 손실도 남긴다.
+            enrichment_broken += [p.name for p in split
+                                  if p.exists() and not _xml_run_finished(p)]
+        # 기대 집합 밖의 산출물(확인 패스 등)도 깨졌으면 증거 저하로 센다.
+        enrichment_broken = sorted(set(enrichment_broken) | {
+            p.name for p in out.glob("stage3-*.xml")
+            if p.name not in seen and not _xml_run_finished(p)})
     return {"authority_missing": missing, "authority_broken": broken,
             "enrichment_missing": enrichment_missing,
             "enrichment_broken": enrichment_broken}

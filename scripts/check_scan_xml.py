@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""이미 돌린 스캔 XML 이 믿을 만한지 판정한다 — 버릴지 다시 돌릴지 정하는 데 쓴다.
+"""이미 돌린 스캔 XML 이 믿을 만한지 판정한다 - 버릴지 다시 돌릴지 정하는 데 쓴다.
 
 이 스크립트가 답하는 질문은 하나다: **이 XML 의 포트 상태를 믿어도 되는가.**
 
@@ -17,8 +17,22 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-# NSE 가 붙는 UDP 포트 — 여기에 스크립트 결과가 하나도 없으면 스크립트 단계가 날아갔을 수 있다.
+# NSE 가 붙는 UDP 포트 - 여기에 스크립트 결과가 하나도 없으면 스크립트 단계가 날아갔을 수 있다.
 _NSE_UDP_PORTS = {53, 111, 123, 137, 161, 500, 5060}
+
+
+def _use_utf8_stdout() -> None:
+    """한국어 Windows 콘솔(CP949)에서 출력 도중 죽지 않게 한다.
+
+    번들 런처는 chcp 65001 로 UTF-8 을 켜지만 사람이 직접 실행할 수도 있다. 인코딩할 수 없는
+    글자 하나로 정작 확인해야 할 판정이 traceback 으로 끊기는 것이 최악이라 대체 문자로
+    넘긴다. 본문도 CP949 로 표현 가능한 글자만 쓴다(em dash 대신 하이픈).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
 
 
 def inspect(path: Path) -> dict:
@@ -84,11 +98,11 @@ def verdict(info: dict) -> tuple[str, str]:
     if info["truncated"]:
         # nmap 이 XML 을 끝맺지 못한 채 죽은 경우다. 완료된 호스트만 살리려면 파일 끝에
         # </nmaprun> 을 붙여 복구할 수도 있지만, 그건 nmap 이 쓰지 않은 문서를 우리가
-        # 만들어 내는 일이라 자동으로 하지 않는다 — 하려면 사람이 관측 전용으로 판단해서.
+        # 만들어 내는 일이라 자동으로 하지 않는다 - 하려면 사람이 관측 전용으로 판단해서.
         return "버림", ("XML 이 중간에서 끊겨 파싱되지 않습니다(nmap 이 끝맺지 못함). "
-                       "완료된 호스트가 하나도 없으면 건질 것이 없습니다 — 다시 스캔하세요.")
+                       "완료된 호스트가 하나도 없으면 건질 것이 없습니다 - 다시 스캔하세요.")
     if not info["finished"]:
-        return "버림", "<finished> 가 없습니다 — nmap 이 결과를 마무리하지 못했습니다."
+        return "버림", "<finished> 가 없습니다 - nmap 이 결과를 마무리하지 못했습니다."
     if info["exit"] != "success":
         return "버림", f'nmap 이 exit="{info["exit"]}" 로 끝났습니다.'
     # 서버는 닫힘 권한을 주기 전에 '단계가 광고한 프로토콜'과 XML 이 실제로 스캔한 프로토콜이
@@ -97,7 +111,7 @@ def verdict(info: dict) -> tuple[str, str]:
     if info["stage"] == "udp_identify" and info["protocols"] - {"udp"}:
         mixed = ",".join(sorted(info["protocols"]))
         return ("가져오기 거절",
-                f"UDP 식별 XML 인데 scaninfo 에 {mixed} 가 섞여 있습니다 — 서버가 "
+                f"UDP 식별 XML 인데 scaninfo 에 {mixed} 가 섞여 있습니다 - 서버가 "
                 "'UDP 식별 manifest와 XML protocol이 일치하지 않습니다' 로 거절합니다. "
                 "옛 버전에서 스캔 기법이 UDP 단계로 새어 만들어진 XML 입니다. 다시 스캔하세요.")
     # 끝맺혔더라도 대상의 일부만 봤다면, 못 본 호스트에 대해 이 XML 은 아무 말도 하지 않는다.
@@ -106,14 +120,14 @@ def verdict(info: dict) -> tuple[str, str]:
     if info["hosts_total"] and info["hosts_up"] < info["hosts_total"]:
         down = info["hosts_total"] - info["hosts_up"]
         coverage = (f"대상 {info['hosts_total']}대 중 {info['hosts_up']}대만 응답했습니다"
-                    f"(나머지 {down}대는 이 XML 이 아무 말도 하지 않습니다 — 닫힘 범위 밖).")
+                    f"(나머지 {down}대는 이 XML 이 아무 말도 하지 않습니다 - 닫힘 범위 밖).")
     else:
         coverage = ""
 
     if info["nse_candidates"] and not info["hosts_with_scripts"]:
         return ("재실행 권장",
                 "포트 상태는 온전하지만 NSE 스크립트 결과가 하나도 없습니다 "
-                "— 스크립트 단계가 정리되지 못했을 수 있습니다(서비스 상세만 손실). " + coverage)
+                "- 스크립트 단계가 정리되지 못했을 수 있습니다(서비스 상세만 손실). " + coverage)
 
     # 응답 없이 추정된 열린 포트가 섞여 있으면 그 사실을 말해 준다. UDP 는 open|filtered 가
     # 예외가 아니라 다수라, 이걸 '확인된 열림'으로 읽으면 실제보다 노출을 크게 본다.
@@ -130,6 +144,7 @@ def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print(__doc__)
         return 2
+    _use_utf8_stdout()
     root = Path(argv[1])
     files = sorted(root.rglob("*.xml")) if root.is_dir() else [root]
     if not files:
@@ -154,7 +169,7 @@ def main(argv: list[str]) -> int:
             print(f"          관측 근거: {spread}")
         print(f"          {why}")
 
-    # 살릴 수 있는 것과 아닌 것을 마지막에 한 번 더 갈라 준다 — 파일이 수십 개면 위 목록만
+    # 살릴 수 있는 것과 아닌 것을 마지막에 한 번 더 갈라 준다 - 파일이 수십 개면 위 목록만
     # 보고는 '무엇을 올려도 되는지'가 눈에 안 들어온다.
     print()
     print("=" * 60)
@@ -170,7 +185,7 @@ def main(argv: list[str]) -> int:
             print(f"{mark} {len(buckets[mark])}건: {', '.join(buckets[mark])}")
     if inferred_total:
         print(f"열린 포트 {open_total}건 중 {inferred_total}건은 응답 없이 추정된 것입니다 "
-              "— 올린 뒤 '재확인 필요'로 표시됩니다.")
+              "- 올린 뒤 '재확인 필요'로 표시됩니다.")
     print("주의: 여기서 '사용 가능'은 그 XML 이 스캔한 호스트에 한정된 판정입니다. "
           "대상 대역 전체를 확인했다는 뜻이 아닙니다.")
     return 0 if worst == 0 else 1
