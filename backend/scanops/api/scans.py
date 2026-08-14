@@ -1189,7 +1189,9 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
             closing = (set() if unfinished
                        else engine_runner.observed_scope(
                            scope_keys, out_dir, saved_spec, force_scanned_hosts))
-            unobserved = len(scope_keys) - len(closing) if not unfinished else 0
+            # scope_keys 가 None 이면 구형 host-wide 닫힘이라 '빠진 건수' 개념이 없다.
+            unobserved = (0 if unfinished or scope_keys is None or closing is None
+                          else len(scope_keys) - len(closing))
             _commit_engine_ingest(
                 db, scan, out_dir,
                 closing,                               # 빈 집합 = 닫힘 후보 없음
@@ -1214,13 +1216,17 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
                     f"온전하지만 스크립트 결과는 일부 빠졌을 수 있습니다. ({str(degraded[0])[:120]})"
                     if degraded else ""
                 )
-                if unobserved and not degraded:
-                    # 실패가 아니다 — 대상이 응답하지 않아 그 포트를 못 본 것이고, 그래서
-                    # 닫지 않았다. 사용자가 '왜 그대로 열려 있지?' 를 물을 때의 답이다.
-                    scan.failure_code = "nse_degraded"
+                if unobserved:
+                    # 미관측과 NSE 저하는 **다른 축**이다. 하나로 뭉치면 둘이 겹쳤을 때
+                    # '포트 결과는 온전하다'고 반대로 말하게 된다 — 실제로는 그 호스트의
+                    # 포트를 아예 못 봤다. 코드는 더 중요한 사실(포트 미관측)을 가리키고,
+                    # 메시지는 두 사실을 모두 싣는다.
+                    scan.failure_code = "observation_incomplete"
+                    note = (f"응답하지 않은 호스트가 있어 발견 {unobserved}건은 관측하지 "
+                            "못했습니다 - 관측하지 않은 포트는 닫지 않습니다.")
                     scan.failure_message = (
-                        f"응답하지 않은 호스트가 있어 발견 {unobserved}건은 관측하지 못했습니다 "
-                        "— 관측하지 않은 포트는 닫지 않습니다."
+                        f"{note} 또한 NSE/서비스 상세 산출물도 일부 빠졌습니다."
+                        if degraded else note
                     )
             db.commit()
     except Exception:

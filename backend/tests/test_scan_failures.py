@@ -1117,3 +1117,119 @@ def test_a_completed_engine_xml_keeps_its_closure_scope(client, monkeypatch, tmp
     assert seen == [{scope_key}]
     scan = _read_scan(scan_id)
     assert scan.status == "done" and scan.failure_code == ""
+
+
+def test_an_old_spec_without_scope_keys_still_ingests_host_wide(client, monkeypatch, tmp_path):
+    """scope_keys 가 없는 저장 spec(구버전)은 host-wide 닫힘이라는 뜻이다 — None 은 빈 집합이 아니다.
+
+    `scanops.scope_keys` 가 spec 에 없으면 워커는 scope_keys 를 None 으로 두고,
+    `_commit_engine_ingest` 가 그 뜻으로 분기해 산출물에서 뽑은 scanned_hosts 로 범위를
+    세운다(_auto_scope_keys). 그 사이에 낀 관측 필터가 None 을 그냥 순회하면
+    `TypeError: 'NoneType' object is not iterable` 로 워커가 통째로 죽어, 정상 완료된 실행이
+    engine_ingest_failed + raw_xml_path 삭제로 사라진다 — 살릴 수 있는 결과를 버리는 일이다.
+    반대로 None 을 set() 으로 바꿔 넘기면 이번엔 인입이 닫힘을 아예 못 해 기존 오탐이 쌓인다.
+    그래서 이 경계는 **실제 _commit_engine_ingest 를 태워** 끝까지 인입되는지로 고정한다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["127.0.0.1"], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"),
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "443"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": False}},
+        # scanops 키 자체가 없다 — 이 PR 이전에 저장된 spec 의 모양.
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["tcp", "job"], "live": ["127.0.0.1"],
+        "open_map": {"127.0.0.1": {"tcp": [443]}}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
+        encoding="utf-8")
+    (out_dir / "stage-tcp-b0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="127.0.0.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="443">'
+        '<state state="open" reason="syn-ack"/><service name="https"/></port></ports></host>'
+        '<runstats><finished exit="success"/><hosts up="1" down="0" total="1"/></runstats>'
+        '</nmaprun>', encoding="utf-8")
+
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    scan = _read_scan(scan_id)
+    assert scan.status == "done", "구형 spec 은 여전히 정상 완료로 인입돼야 한다"
+    assert scan.failure_code == ""
+    assert scan.raw_xml_path, "결과 XML 을 지우고 실패로 마감하면 안 된다"
+    db = SessionLocal()
+    try:
+        rows = db.query(Finding).filter(Finding.host_ip == "127.0.0.1").all()
+        assert [(f.port, f.proto) for f in rows] == [(443, "tcp")]
+    finally:
+        db.close()
+
+
+def test_unobserved_scope_and_degraded_enrichment_are_both_reported(
+    client, monkeypatch, tmp_path,
+):
+    """미관측 scope 와 NSE 저하는 **다른 축**이라, 겹쳤을 때 둘 다 보여야 한다.
+
+    이전에는 `if unobserved and not degraded` 라서 두 사실이 함께 일어나면 미관측이 통째로
+    가려지고, 화면에는 "포트 결과는 온전하지만 스크립트 결과는 일부 빠졌을 수 있습니다" 만
+    남았다 — 실제로는 그 호스트의 포트를 아예 못 봤는데 정반대로 읽히는 문구다. 코드는 더
+    무거운 사실(포트 미관측)을 가리키고 메시지는 두 사실을 모두 실어야 한다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    seen_key, unseen_key = "127.0.0.1|443|tcp", "127.0.0.2|443|tcp"
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": ["127.0.0.1", "127.0.0.2"], "exclude": [],
+        "out_dir": str(tmp_path / "ignored"),
+        "stages": {"discovery": {"mode": "sn"},
+                   "tcp": {"enabled": True, "ports": "443"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": False}},
+        "scanops": {"scope_keys": [seen_key, unseen_key]},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    # 127.0.0.2 는 discovery 에 응답하지 않아 live 에 없다 → sweep 이 아예 돌지 않았다.
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["tcp", "job"], "live": ["127.0.0.1"], "open_map": {}, "stop": False,
+    }), encoding="utf-8")
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
+        encoding="utf-8")
+    for name in ("stage0-discovery.xml", "stage-tcp-b0.xml"):
+        (out_dir / name).write_text(
+            '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+            '<hosts up="1" down="1" total="2"/></runstats></nmaprun>', encoding="utf-8")
+    # 동시에 NSE 소켓 오류도 있었다 — 저하 축.
+    (out_dir / "engine.log").write_text(
+        "NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed (IOD#4) (10013)\n",
+        encoding="utf-8")
+
+    seen: list[set] = []
+
+    def capture(db, scan, actual_out_dir, scope_keys, force_scanned_hosts):
+        seen.append(set(scope_keys))
+        scan.host_count, scan.port_count = 1, 0
+        db.flush()
+        return {}
+
+    monkeypatch.setattr(scans_api, "_commit_engine_ingest", capture)
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    # 못 본 호스트의 발견은 닫힘 후보에서 빠진다.
+    assert seen == [{seen_key}]
+    scan = _read_scan(scan_id)
+    assert scan.status == "done"
+    assert scan.failure_code == "observation_incomplete"
+    assert "관측하지 못했습니다" in scan.failure_message
+    assert "NSE" in scan.failure_message, "저하 사실이 미관측에 묻히면 안 된다"
+    # 정반대 문구가 남으면 안 된다.
+    assert "포트 결과는 온전" not in scan.failure_message

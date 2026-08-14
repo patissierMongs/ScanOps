@@ -487,6 +487,17 @@ test("a completed scan's degraded-evidence note is not rendered as a failure rea
   assert.equal(failed.tone, "failure");
   assert.equal(failed.title, "실패 원인");
 
+  // 미관측은 '부가 정보 부족'과 다른 축이다. 응답하지 않은 호스트의 포트는 아예 못 본
+  // 것이라, 같은 라벨로 그리면 '포트 결과는 온전'하다고 반대로 읽힌다. 그리고 이 실행은
+  // status=done 으로 결과가 정상 인입된 실행이므로 '실패 원인'으로 그려서도 안 된다.
+  const unobserved = scanNotice({
+    failure_code: "observation_incomplete",
+    failure_message: "응답하지 않은 호스트가 있어 발견 3건은 관측하지 못했습니다 …",
+  });
+  assert.equal(unobserved.tone, "notice");
+  assert.equal(unobserved.title, "참고 — 일부 호스트 미관측");
+  assert.notEqual(unobserved.title, degraded.title);
+
   assert.equal(scanNotice({}), null);
   // 뷰는 라벨을 직접 쓰지 않고 이 계약을 통해서만 그린다.
   const scans = source("../src/views/Scans.jsx");

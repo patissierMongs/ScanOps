@@ -383,9 +383,17 @@ def observed_hosts(out_dir, spec: dict, force_scanned_hosts: bool = False) -> se
     return {h for h in (_read_state(out).get("live") or []) if isinstance(h, str)}
 
 
-def observed_scope(scope_keys: set, out_dir, spec: dict,
-                   force_scanned_hosts: bool = False) -> set:
-    """닫힘 후보 중 이 실행이 실제로 관측한 호스트의 것만 남긴다."""
+def observed_scope(scope_keys: set | None, out_dir, spec: dict,
+                   force_scanned_hosts: bool = False) -> set | None:
+    """닫힘 후보 중 이 실행이 실제로 관측한 호스트의 것만 남긴다.
+
+    ``None`` 은 '후보 없음'이 아니라 **구형 spec 의 host-wide 닫힘**이라는 뜻이므로 그대로
+    돌려준다(_commit_engine_ingest 가 그 의미로 분기한다). 그 경로는 이미 산출물에서 뽑은
+    scanned_hosts 로 범위를 세우므로 관측 기반이다 - 여기서 빈 집합으로 바꾸면 인입이 결과를
+    통째로 버린다. None 과 set() 을 같은 것으로 다루면 안 된다.
+    """
+    if scope_keys is None:
+        return None
     hosts = observed_hosts(out_dir, spec, force_scanned_hosts)
     return {key for key in scope_keys if str(key).split("|", 1)[0] in hosts}
 
