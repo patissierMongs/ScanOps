@@ -749,3 +749,16 @@ test("a finding can be assigned to someone from its own drawer", () => {
   assert.match(cols, /key: "owner", label: "담당자\(자산대장\)"/);
   assert.match(cols, /key: "assignee", label: "배정 담당자"/);
 });
+
+test("an observed exposure is shown as the fact that drove the grade", () => {
+  // 익명 FTP 와 잠긴 FTP 가 같은 발견으로 보이던 것이 여기서 갈린다.
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /\(finding\.exposure_json \|\| \[\]\)\.length > 0/);
+  assert.match(view, /노출 관측 \(스캔이 확인한 사실\)/);
+  // 등급을 올린 근거이므로 컴플라이언스 근거 바로 위에 온다.
+  assert.ok(view.indexOf("노출 관측 (스캔이 확인한 사실)") < view.indexOf("컴플라이언스 근거"));
+  // 표·내보내기에서도 조회할 수 있어야 '익명 FTP만' 같은 작업이 된다.
+  const cols = source("../src/lib/columns.js");
+  assert.match(cols, /key: "exposure", label: "노출 관측"/);
+  assert.ok(PRESETS.find((p) => p.id === "p_risk").cols.includes("exposure"));
+});

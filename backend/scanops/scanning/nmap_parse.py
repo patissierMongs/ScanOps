@@ -33,6 +33,109 @@ _SERVER_SOURCES = (
     ("fingerprint-strings", re.compile(r"(?im)^[ \t]*server:[ \t]*([^\r\n]+)")),
 )
 
+# ── 노출 신호 ────────────────────────────────────────────────────────────────
+# 이미 돌리고 있는 NSE 가 '이 포트가 왜 위험한가' 를 이미 말하고 있는데, 여태 remarks 문자열
+# 한 줄로만 남아 등급에도 필터에도 쓰이지 못했다. 익명 FTP 와 잠긴 FTP 가 같은 발견이었다.
+#
+# 여기서는 **관측된 사실만** 뽑는다. 등급을 정하는 것은 taxonomy 의 일이다(관측과 판단을
+# 섞지 않는다). 스크립트가 실패로 끝났으면 아무 말도 하지 않는다 - nse_failed 가 거른다.
+_SMB_V1_RE = re.compile(r"(?i)\bSMBv1\b")
+_CERT_EXPIRY_RE = re.compile(r"(?i)Not valid after:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})")
+_CERT_SUBJECT_RE = re.compile(r"(?i)^Subject:\s*(.+)$", re.M)
+_CERT_ISSUER_RE = re.compile(r"(?i)^Issuer:\s*(.+)$", re.M)
+_CERT_BITS_RE = re.compile(r"(?i)Public Key bits:\s*(\d+)")
+_VNC_TYPES_RE = re.compile(r"(?i)^\s*Security types:\s*(.*)$")
+
+
+def _vnc_accepts_no_auth(output: str) -> bool:
+    """vnc-info 가 인증 없음을 보고했는가.
+
+    nmap 은 목록을 라벨 **다음 줄들**에 들여써서 낸다::
+
+        Security types:
+          None (1)
+
+    그래서 한 줄짜리 정규식으로는 잡히지 않는다(실측으로 확인). 라벨 뒤에 이어지는
+    더 들여쓴 블록만 훑어서, 다른 곳의 'None' 을 잘못 집지 않게 한다.
+    """
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
+        match = _VNC_TYPES_RE.match(line)
+        if not match:
+            continue
+        if re.search(r"(?i)\bNone\b", match.group(1)):
+            return True
+        indent = len(line) - len(line.lstrip())
+        for follower in lines[index + 1:]:
+            if not follower.strip():
+                continue
+            if len(follower) - len(follower.lstrip()) <= indent:
+                break          # 블록이 끝났다
+            if re.search(r"(?i)\bNone\b", follower):
+                return True
+    return False
+
+
+def _cert_signals(output: str) -> list[dict]:
+    """ssl-cert 출력에서 만료·자가서명·약한 키를 뽑는다. CN 만 쓰고 나머지를 버리던 자리다."""
+    out: list[dict] = []
+    if match := _CERT_EXPIRY_RE.search(output):
+        expiry = match.group(1)
+        try:
+            expired = datetime.strptime(expiry, "%Y-%m-%d").replace(tzinfo=timezone.utc) < datetime.now(timezone.utc)
+        except ValueError:
+            expired = False
+        if expired:
+            out.append({"kind": "cert_expired", "detail": f"인증서 만료됨 (유효기간 {expiry} 까지)"})
+    subject = _CERT_SUBJECT_RE.search(output)
+    issuer = _CERT_ISSUER_RE.search(output)
+    if subject and issuer and subject.group(1).strip() == issuer.group(1).strip():
+        out.append({"kind": "self_signed", "detail": "자가서명 인증서(발급자 = 주체)"})
+    if bits := _CERT_BITS_RE.search(output):
+        try:
+            size = int(bits.group(1))
+        except ValueError:
+            size = 0
+        if 0 < size < 2048:
+            out.append({"kind": "weak_key", "detail": f"약한 공개키 {size}bit (2048 미만)"})
+    return out
+
+
+def exposure_signals(nse: list[dict] | None) -> list[dict]:
+    """NSE 출력 -> 구조화된 노출 사실 목록. 판단이 아니라 관측만 담는다.
+
+    `[{"kind": ..., "detail": "사람이 읽는 근거"}]`. kind 는 taxonomy 가 등급을 올릴 때
+    쓰는 기계 판독용 키이고, detail 은 화면·내보내기에 그대로 실린다.
+    """
+    signals: list[dict] = []
+    for script in (nse or []):
+        if not isinstance(script, dict):
+            continue
+        sid = str(script.get("id") or "").lower()
+        output = str(script.get("output") or "")
+        if not output or nse_failed(output):
+            continue
+        if sid == "ftp-anon" and "anonymous ftp login allowed" in output.lower():
+            signals.append({"kind": "anon_access", "detail": "익명 FTP 로그인 허용"})
+        elif sid == "telnet-encryption" and "does not support encryption" in output.lower():
+            signals.append({"kind": "plaintext", "detail": "Telnet 암호화 미지원(평문 전송)"})
+        elif sid == "smb-protocols" and _SMB_V1_RE.search(output):
+            signals.append({"kind": "legacy_protocol", "detail": "SMBv1 지원(레거시 프로토콜)"})
+        elif sid == "vnc-info" and _vnc_accepts_no_auth(output):
+            signals.append({"kind": "no_auth", "detail": "VNC 인증 없음(Security type None)"})
+        elif sid == "ssl-cert":
+            signals.extend(_cert_signals(output))
+    # 같은 사실이 여러 스크립트에서 겹쳐 나올 수 있다.
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for signal in signals:
+        if signal["kind"] in seen:
+            continue
+        seen.add(signal["kind"])
+        unique.append(signal)
+    return unique
+
+
 _NSE_FAILURE_RE = re.compile(r"(?i)^\s*ERROR:\s*(?:Script execution failed|Header request failed)\b")
 
 
@@ -334,6 +437,8 @@ def parse_xml(source) -> list[dict]:
                 "rtt": rtt or "",
                 "identification": _identification(svc),
                 "nse_json": nse,
+                # 이미 돌린 NSE 가 말한 노출 사실. 관측만 담고 등급은 taxonomy 가 정한다.
+                "exposure_json": exposure_signals(nse),
                 "remarks": remarks,
             })
     return findings

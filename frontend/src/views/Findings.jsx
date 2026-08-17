@@ -651,6 +651,18 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
           {finding.owner && <div className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>담당(자산대장): {finding.owner}{finding.contact ? ` · ${finding.contact}` : ""}</div>}
         </div>
 
+        {/* 노출 관측 — NSE 가 실제로 확인한 사실. 익명 FTP 와 잠긴 FTP 가 같은 발견으로
+            보이던 것이 여기서 갈린다. 등급을 올린 근거이기도 해서 바로 위에 둔다. */}
+        {(finding.exposure_json || []).length > 0 && (
+          <div className="panel" style={{ boxShadow: "none", marginBottom: 12,
+                                          background: "var(--high-bg)" }}>
+            <div className="cb-label" style={{ marginTop: 0 }}>노출 관측 (스캔이 확인한 사실)</div>
+            <ul style={{ margin: "4px 0 0", paddingLeft: 18, fontSize: 12.5, lineHeight: 1.6 }}>
+              {finding.exposure_json.map((s, i) => <li key={i}>{s.detail || s.kind}</li>)}
+            </ul>
+          </div>
+        )}
+
         {/* 컴플라이언스 근거 — '왜 이 등급인가'. 분류가 붙인 KISA/NIS 참조와 조직규칙 비고가
             여기 저장돼 있는데, 여태 '위험·컴플라이언스' 프리셋을 따로 골라야만 보였다.
             정작 발견을 열어 본 자리에 없으면 감사 근거를 확인하려고 표로 되돌아가야 한다. */}

@@ -274,6 +274,7 @@ def _observed(f: dict) -> dict:
         "risk_level": f.get("risk_level", "info"),
         "allowed": 1 if f.get("allowed") else 0,
         "compliance_json": f.get("compliance_json", []),
+        "exposure_json": f.get("exposure_json", []),
     }
 
 

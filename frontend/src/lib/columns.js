@@ -3,6 +3,8 @@
 import { RISK_LABEL } from "./format.js";
 
 const fmtDate = (v) => (v ? String(v).slice(0, 10) : "");
+const joinExposure = (list) =>
+  (list || []).map((s) => s.detail || s.kind).filter(Boolean).join(" · ");
 const joinCompliance = (list) =>
   (list || []).map((c) => `${c.std}:${c.ref}`).join("; ");
 
@@ -110,6 +112,8 @@ export const ALL_COLUMNS = [
   { key: "usage", label: "용도", get: (f) => f.usage },
   { key: "risk_level", label: "위험등급", get: (f) => RISK_LABEL[f.risk_level] || f.risk_level, badge: "risk" },
   { key: "remarks", label: "비고", get: (f) => f.remarks },
+  // 관측된 노출 사실(익명 접근·평문·레거시·인증서 문제). 등급을 올린 근거이기도 하다.
+  { key: "exposure", label: "노출 관측", get: (f) => joinExposure(f.exposure_json) },
   { key: "compliance", label: "컴플라이언스근거", get: (f) => joinCompliance(f.compliance_json) },
   { key: "status", label: "운영상태", get: (f) => f.status, badge: "status" },
   { key: "reopened", label: "재발", get: (f) => (f.reopened ? "재발" : "") },
@@ -139,7 +143,7 @@ export const PRESETS = [
   { id: "p_report", name: "표준 보고서", cols: ["host_ip", "hostname", "port", "proto", "display_identity", "service", "risk_level", "status", "dept", "first_seen", "last_seen"] },
   { id: "p_ports", name: "포트 인벤토리", cols: ["host_ip", "port", "proto", "state", "display_identity", "service"] },
   { id: "p_finger", name: "서비스 핑거프린트", cols: ["host_ip", "port", "display_identity", "server", "service", "product", "version", "banner", "cpe", "fingerprint"] },
-  { id: "p_risk", name: "위험·컴플라이언스", cols: ["host_ip", "port", "display_identity", "service", "risk_level", "category", "compliance", "status", "deadline"] },
+  { id: "p_risk", name: "위험·컴플라이언스", cols: ["host_ip", "port", "display_identity", "service", "risk_level", "exposure", "category", "compliance", "status", "deadline"] },
   { id: "p_min", name: "최소 (CSV)", cols: ["host_ip", "port", "display_identity"] },
 ];
 

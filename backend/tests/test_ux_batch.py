@@ -766,3 +766,131 @@ def test_the_assignee_is_a_separate_axis_from_the_asset_register_owner(client):
     labels = {key: header for key, header, _getter in COLUMNS}
     assert labels["owner"] == "담당자(자산대장)"
     assert labels["assignee"] == "배정 담당자"
+
+
+# ── NSE 노출 신호: 수집만 하고 안 쓰던 데이터 ─────────────────────────────────
+def _nse_finding(service: str, port: int, nse: list[dict]) -> dict:
+    from scanops.scanning.nmap_parse import exposure_signals
+    return {
+        "host_ip": "10.11.11.11", "hostname": "", "port": port, "proto": "tcp",
+        "state": "open", "reason": "syn-ack", "service": service, "product": "",
+        "version": "", "server": "", "banner": "", "cpe": "", "rtt": "",
+        "identification": "확인", "nse_json": nse, "remarks": "",
+        "exposure_json": exposure_signals(nse),
+    }
+
+
+def test_an_anonymous_ftp_is_no_longer_the_same_finding_as_a_locked_one(client):
+    """익명 FTP 와 잠긴 FTP 가 같은 발견이던 것이 이 작업의 출발점이다.
+
+    스캐너는 ftp-anon 을 이미 돌리고 있었고 그 답도 XML 에 있었는데, remarks 문자열
+    한 줄로만 남아 등급에도 필터에도 쓰이지 못했다.
+    """
+    from scanops.scanning.taxonomy import enrich_all
+
+    db = SessionLocal()
+    try:
+        anon = _nse_finding("ftp", 21, [
+            {"id": "ftp-anon", "output": "Anonymous FTP login allowed (FTP code 230)"}])
+        locked = _nse_finding("ftp", 21, [
+            {"id": "ftp-anon", "output": "ERROR: Script execution failed (use -d to debug)"}])
+        enrich_all(db, [anon, locked])
+    finally:
+        db.close()
+
+    assert anon["exposure_json"] == [
+        {"kind": "anon_access", "detail": "익명 FTP 로그인 허용"}]
+    assert locked["exposure_json"] == [], "실패로 끝난 스크립트는 관측이 아니다"
+
+    # 근거가 갈린다 - 이제 표·필터·내보내기에서 '익명 접근 가능한 것만' 을 뽑을 수 있다.
+    assert any(c["std"] == "노출관측" for c in anon["compliance_json"])
+    assert not any(c["std"] == "노출관측" for c in locked["compliance_json"])
+
+    # 등급까지 갈리지는 **않는다**. 시드가 ftp 라는 서비스 자체를 이미 high 로 보기 때문이다.
+    # 같은 서비스의 인스턴스 구분(익명이냐 아니냐)은 등급과 다른 축이라, 한 필드에 두 사실을
+    # 싣지 않는다 - allowed 를 risk_level 과 분리한 것과 같은 이유다.
+    assert anon["risk_level"] == locked["risk_level"] == "high"
+
+
+def test_exposure_raises_an_unclassified_service_that_would_otherwise_read_as_info(client):
+    """하한이 실제로 작동하는 자리 - 표준 포트를 벗어난 서비스.
+
+    시드는 서비스 이름으로 등급을 매기므로, 비표준 포트의 미식별 FTP 는 아무 규칙에도
+    걸리지 않아 info 로 남는다. 그런데 익명 접근이 관측됐다면 그것만으로 우선순위가 있다.
+    """
+    from scanops.scanning.taxonomy import enrich_all
+
+    db = SessionLocal()
+    try:
+        odd = _nse_finding("unknown-svc", 2121, [
+            {"id": "ftp-anon", "output": "Anonymous FTP login allowed (FTP code 230)"}])
+        plain = _nse_finding("unknown-svc", 2121, [])
+        enrich_all(db, [odd, plain])
+    finally:
+        db.close()
+
+    assert plain["risk_level"] == "info", "관측된 노출이 없으면 미분류 그대로다"
+    assert odd["risk_level"] == "high", "익명 접근 관측은 그 자체로 우선순위가 있다"
+
+
+def test_exposure_raises_the_floor_but_an_org_rule_still_wins(client):
+    """노출 신호는 하한을 올릴 뿐이다.
+
+    등급을 올리는 것은 운영자의 우선순위를 바꾸는 일이라, 조직이 명시적으로 '허용' 으로
+    정했다면 그 판단이 이겨야 한다. 그래서 규칙보다 **먼저** 적용한다.
+    """
+    from scanops.scanning.taxonomy import enrich_all
+
+    headers = _auth(client)
+    created = client.post("/api/rules", headers=headers, json={
+        "kind": "port_rule", "service": "", "port": 23,
+        "risk_level": "info", "note": "격리망 콘솔 - 승인됨",
+    })
+    assert created.status_code == 201, created.text
+
+    db = SessionLocal()
+    try:
+        telnet = _nse_finding("telnet", 23, [
+            {"id": "telnet-encryption", "output": "\n  Telnet server does not support encryption"}])
+        enrich_all(db, [telnet])
+    finally:
+        db.close()
+
+    # 관측 사실은 그대로 남지만 등급은 조직 판단을 따른다.
+    assert telnet["exposure_json"] == [
+        {"kind": "plaintext", "detail": "Telnet 암호화 미지원(평문 전송)"}]
+    assert telnet["risk_level"] == "info"
+    assert telnet["allowed"] is True
+    # 근거는 둘 다 남아 사람이 검증할 수 있다.
+    stds = {c["std"] for c in telnet["compliance_json"]}
+    assert {"노출관측", "조직규칙"} <= stds
+
+
+def test_exposure_never_lowers_a_grade(client):
+    """하한이지 확정값이 아니다 - taxonomy 가 더 높게 본 것을 끌어내리면 안 된다."""
+    from scanops.scanning.taxonomy import apply_exposure
+
+    finding = {"risk_level": "high", "compliance_json": [],
+               "exposure_json": [{"kind": "self_signed", "detail": "자가서명"}]}
+    apply_exposure(finding)
+    assert finding["risk_level"] == "high"
+
+
+def test_certificate_facts_beyond_the_common_name_are_kept(client):
+    """ssl-cert 는 CN 만 쓰고 만료·자가서명·키 길이를 버리고 있었다."""
+    from scanops.scanning.nmap_parse import exposure_signals
+
+    signals = exposure_signals([{"id": "ssl-cert", "output": (
+        "Subject: commonName=legacy.local\n"
+        "Issuer: commonName=legacy.local\n"
+        "Public Key type: rsa\nPublic Key bits: 1024\n"
+        "Not valid before: 2018-01-01T00:00:00\n"
+        "Not valid after:  2020-01-01T00:00:00\n")}])
+    kinds = {s["kind"] for s in signals}
+    assert kinds == {"cert_expired", "self_signed", "weak_key"}
+
+    # 유효한 인증서는 아무 신호도 만들지 않는다(모든 TLS 포트에 딱지가 붙으면 신호가 죽는다).
+    healthy = exposure_signals([{"id": "ssl-cert", "output": (
+        "Subject: commonName=good.example\nIssuer: commonName=DigiCert\n"
+        "Public Key bits: 4096\nNot valid after:  2099-01-01T00:00:00\n")}])
+    assert healthy == []

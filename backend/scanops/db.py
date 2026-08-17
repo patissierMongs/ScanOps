@@ -70,6 +70,10 @@ def _migrate() -> None:
             # 소급 backfill 은 불가능하다 — 이 값은 여태 저장한 적이 없다. 기본 '' 는
             # '미관측'이며, 다음 스캔이 관측할 때 채워진다. no-response 로 넘겨짚지 않는다.
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN reason VARCHAR(32) DEFAULT ''")
+        if cols and "exposure_json" not in cols:
+            # 소급 계산은 nse_json 으로 가능하지만 조용히 등급을 바꾸게 되므로 하지 않는다.
+            # 다음 스캔이 채우고, 그때 등급 변화가 이력에 남는다.
+            conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN exposure_json JSON")
         if cols and "allowed" not in cols:
             # 소급 계산은 하지 않는다 - 규칙이 바뀔 때 reclassify_all 이 전부 다시 채운다.
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN allowed INTEGER DEFAULT 0")

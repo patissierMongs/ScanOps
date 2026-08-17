@@ -135,6 +135,9 @@ class Finding(Base):
     allowed: Mapped[int] = mapped_column(Integer, default=0)
     remarks: Mapped[str] = mapped_column(Text, default="")
     compliance_json: Mapped[list | None] = mapped_column(JSON, default=list)  # [{"std":"KISA","ref":..}]
+    # NSE 가 관측한 노출 사실 [{"kind","detail"}] — 익명 접근·평문·레거시·인증서 문제 등.
+    # 관측이지 판단이 아니다(등급은 taxonomy 가 이 값을 보고 올린다).
+    exposure_json: Mapped[list | None] = mapped_column(JSON, default=list)
 
     # --- 시간적 정체성 ---
     first_scan_id: Mapped[int | None] = mapped_column(ForeignKey("scan_runs.id"), nullable=True)

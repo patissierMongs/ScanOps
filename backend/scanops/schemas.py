@@ -180,6 +180,9 @@ class FindingOut(BaseModel):
     allowed: int = 0
     remarks: str
     compliance_json: list | None
+    # NSE 가 관측한 노출 사실 [{"kind","detail"}]. 등급을 올린 근거는 compliance_json 에도
+    # 함께 남지만, 화면이 '무엇이 관측됐나' 를 따로 강조할 수 있게 원본도 내린다.
+    exposure_json: list | None = None
     status: str
     reopened: int
     owner_user_id: int | None

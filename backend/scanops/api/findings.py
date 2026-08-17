@@ -57,6 +57,12 @@ def _purpose_evidence(f: Finding) -> list[str]:
     return ev
 
 
+def _exposure(f: Finding) -> str:
+    """관측된 노출 사실을 한 줄로 - 표·필터·내보내기에서 '익명 FTP만' 같은 조회가 되게."""
+    return " · ".join(str(s.get("detail") or s.get("kind") or "")
+                      for s in (f.exposure_json or []) if isinstance(s, dict))
+
+
 def _compliance(f: Finding) -> str:
     return "; ".join(f"{c.get('std')}:{c.get('ref')}" for c in (f.compliance_json or []))
 
@@ -103,6 +109,7 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("deadline", "마감", lambda f: f.deadline.strftime("%Y-%m-%d") if f.deadline else ""),
     ("first_seen", "등록 날짜", lambda f: f.first_seen.strftime("%Y-%m-%d")),
     ("last_seen", "스캔 날짜", lambda f: f.last_seen.strftime("%Y-%m-%d")),
+    ("exposure", "노출 관측", _exposure),
     ("compliance", "컴플라이언스근거", _compliance),
     ("purpose", "용도근거", lambda f: " · ".join(_purpose_evidence(f))),
     ("manual_note", "메모", lambda f: f.manual_note),

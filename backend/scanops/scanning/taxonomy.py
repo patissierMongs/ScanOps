@@ -84,6 +84,52 @@ def fallback_service_key(finding: dict) -> str:
     return "https" if _tls_evidence(finding) else "http"
 
 
+# 관측된 노출 사실이 보장하는 **최소** 등급. 올리기만 하고 내리지 않는다 - taxonomy 가 이미
+# 더 높게 본 서비스를 노출 신호가 끌어내리면 안 된다.
+#
+# 익명 FTP 와 잠긴 FTP 가 같은 등급이던 것이 문제의 출발점이었다. 등급을 올리는 것은 운영자의
+# 우선순위를 바꾸는 일이라, **왜 올랐는지**를 컴플라이언스 근거에 함께 남긴다(발견 상세에서
+# 바로 읽힌다). 근거 없이 등급만 바뀌면 사람이 판단을 검증할 수 없다.
+_EXPOSURE_FLOOR = {
+    "anon_access": ("high", "인증 없이 접근 가능한 서비스"),
+    "no_auth": ("high", "인증을 요구하지 않는 원격 접근"),
+    "plaintext": ("high", "자격증명이 평문으로 오가는 서비스"),
+    "legacy_protocol": ("high", "알려진 취약 레거시 프로토콜 지원"),
+    "cert_expired": ("medium", "만료된 인증서"),
+    "weak_key": ("medium", "권고 미만 키 길이"),
+    "self_signed": ("low", "신뢰 체인 없는 자가서명 인증서"),
+}
+# 낮은 쪽 -> 높은 쪽. banned 는 조직이 명시 금지한 것이라 노출 신호로 도달하지 않는다.
+_RISK_ORDER = ["info", "low", "medium", "high", "banned"]
+
+
+def _raise_to(current: str, floor: str) -> str:
+    try:
+        return floor if _RISK_ORDER.index(floor) > _RISK_ORDER.index(current) else current
+    except ValueError:
+        return current
+
+
+def apply_exposure(finding: dict) -> None:
+    """관측된 노출 사실로 위험 등급의 하한을 올리고 근거를 남긴다.
+
+    조직 규칙보다 **먼저** 적용한다 - 조직이 명시적으로 '허용'으로 정했다면 그 판단이
+    이겨야 하기 때문이다(규칙 루프가 뒤에서 덮어쓴다).
+    """
+    for signal in (finding.get("exposure_json") or []):
+        if not isinstance(signal, dict):
+            continue
+        floor = _EXPOSURE_FLOOR.get(str(signal.get("kind") or ""))
+        if floor is None:
+            continue
+        level, why = floor
+        finding["risk_level"] = _raise_to(finding.get("risk_level", "info"), level)
+        finding["compliance_json"].append({
+            "std": "노출관측",
+            "ref": f"{signal.get('detail') or signal.get('kind')} - {why}",
+        })
+
+
 def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> dict:
     """finding 에 분류 필드를 채워 반환(같은 dict 수정)."""
     svc = (finding.get("service") or "").lower()
@@ -112,6 +158,10 @@ def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> d
             "ref": (f"nmap service '{svc or '미상'}' 로는 분류되지 않아 Server 배너"
                     f"({finding.get('server', '').strip()}) 기준 {fallback_used} 로 분류"),
         })
+
+    # NSE 가 관측한 노출 사실로 하한을 올린다. 조직 규칙보다 먼저 적용해야, 조직이 명시적으로
+    # 허용한 포트를 관측 신호가 다시 끌어올리지 않는다.
+    apply_exposure(finding)
 
     # 조직 규칙은 taxonomy 기본값을 직접 덮어쓴다. risk_level=info 는 허용/정보 처리다.
     # banned_service 는 기존 호환용 이름이며 항상 금지(banned)로 적용한다.
@@ -157,7 +207,9 @@ def reclassify_all(db: Session) -> int:
     for f in db.query(Finding).all():
         # Server 배너 보조 분류와 제품/CPE 규칙이 재계산에서도 동일하게 걸리도록 관측 증거를 함께 넘긴다.
         d = {"service": f.service, "port": f.port, "server": f.server, "nse_json": f.nse_json,
-             "product": f.product, "cpe": f.cpe}
+             "product": f.product, "cpe": f.cpe,
+             # 노출 신호는 관측값이므로 재분류에서도 그대로 다시 반영돼야 한다.
+             "exposure_json": f.exposure_json}
         classify(d, lookup, rules)
         if f.risk_level != d["risk_level"]:
             n += 1
