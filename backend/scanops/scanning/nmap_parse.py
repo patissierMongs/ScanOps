@@ -44,6 +44,12 @@ _CERT_EXPIRY_RE = re.compile(r"(?i)Not valid after:\s*([0-9]{4}-[0-9]{2}-[0-9]{2
 _CERT_SUBJECT_RE = re.compile(r"(?i)^Subject:\s*(.+)$", re.M)
 _CERT_ISSUER_RE = re.compile(r"(?i)^Issuer:\s*(.+)$", re.M)
 _CERT_BITS_RE = re.compile(r"(?i)Public Key bits:\s*(\d+)")
+_CERT_KEYTYPE_RE = re.compile(r"(?i)Public Key type:\s*(\S+)")
+# 알고리즘별 최소 키 길이. 같은 비트수가 알고리즘마다 전혀 다른 강도를 뜻하므로
+# 하나의 임계값을 전부에 들이대면 안 된다 - NIST SP 800-57 Part 1 Rev.5 가 요구하는
+# 112비트 보안 강도 기준으로, RSA/DSA/DH 는 2048, ECC 는 224 다. EC 256(P-256)은
+# 128비트 강도로 RSA 3072 급이라 약한 키가 아니다.
+_KEY_MIN_BITS = {"rsa": 2048, "dsa": 2048, "dh": 2048, "ec": 224, "ecdsa": 224}
 _VNC_TYPES_RE = re.compile(r"(?i)^\s*Security types:\s*(.*)$")
 
 
@@ -91,13 +97,21 @@ def _cert_signals(output: str) -> list[dict]:
     issuer = _CERT_ISSUER_RE.search(output)
     if subject and issuer and subject.group(1).strip() == issuer.group(1).strip():
         out.append({"kind": "self_signed", "detail": "자가서명 인증서(발급자 = 주체)"})
-    if bits := _CERT_BITS_RE.search(output):
+    # 키 길이는 **알고리즘과 함께** 읽어야 뜻이 생긴다. nmap 은 두 줄을 나란히 내는데
+    # type 을 읽지 않고 2048 을 전부에 적용하면, 흔한 P-256 인증서가 전부 약한 키가 된다
+    # (EC 384 조차 그랬다 - RSA 2048 보다 강한 키다).
+    keytype = match.group(1).strip().lower() if (match := _CERT_KEYTYPE_RE.search(output)) else ""
+    floor = _KEY_MIN_BITS.get(keytype)
+    if floor and (bits := _CERT_BITS_RE.search(output)):
         try:
             size = int(bits.group(1))
         except ValueError:
             size = 0
-        if 0 < size < 2048:
-            out.append({"kind": "weak_key", "detail": f"약한 공개키 {size}bit (2048 미만)"})
+        if 0 < size < floor:
+            out.append({"kind": "weak_key",
+                        "detail": f"약한 공개키 {keytype.upper()} {size}bit ({floor} 미만)"})
+    # 모르는 알고리즘(Ed25519 등)은 판정하지 않는다. 그 곡선들은 256bit 로 128비트 강도를
+    # 내므로, 비트수만 보고 약하다고 하면 정확히 거꾸로 말하게 된다.
     return out
 
 

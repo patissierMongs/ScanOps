@@ -1047,3 +1047,122 @@ def test_an_org_rule_still_overrides_an_eol_verdict(client):
     # 근거는 남아 사람이 검증할 수 있다.
     assert any(c["std"] == "지원종료" for c in old["compliance_json"])
     assert any(c["std"] == "조직규칙" for c in old["compliance_json"])
+
+
+def test_an_eol_verdict_survives_rule_edits(client):
+    """규칙 편집이 EOL 판정을 지우면 안 된다 - 없어진 위험은 아무도 못 본다.
+
+    `reclassify_all()` 은 저장된 행에서 classify() 입력을 다시 만들어 넘기는데, 여기서
+    `version` 이 빠져 있었다. 그래서 EOL 은 최초 인입에서만 high 였고, 위험규칙을
+    만들거나 고치거나 지우는 순간(세 API 가 모두 이 함수를 부른다) 조용히 info 로
+    내려갔다. 이 발견과 아무 상관 없는 규칙이어도 마찬가지였다.
+    """
+    from scanops.scanning.taxonomy import enrich_all
+
+    headers = _auth(client)
+    db = SessionLocal()
+    try:
+        data = _nse_finding("unknown", 8080, [])
+        data.update({"product": "PHP", "version": "7.4.33"})
+        enrich_all(db, [data])
+        assert data["risk_level"] == "high", "최초 분류는 되고 있었다"
+        db.add(Finding(
+            finding_key="10.11.11.11|8080|tcp", host_ip="10.11.11.11", port=8080,
+            proto="tcp", state="open", service="unknown", product="PHP",
+            version="7.4.33", risk_level=data["risk_level"],
+            compliance_json=data["compliance_json"], status="미조치",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    def _verdict():
+        db = SessionLocal()
+        try:
+            row = db.query(Finding).filter_by(finding_key="10.11.11.11|8080|tcp").one()
+            return row.risk_level, [c["std"] for c in (row.compliance_json or [])]
+        finally:
+            db.close()
+
+    # 이 발견과 전혀 매칭되지 않는 규칙이다 - 건드릴 이유가 없다.
+    created = client.post("/api/rules", headers=headers, json={
+        "kind": "port_rule", "service": "", "port": 3389, "product": "", "cpe": "",
+        "risk_level": "high", "note": "RDP 노출 금지",
+    })
+    assert created.status_code == 201
+    rule_id = created.json()["id"]
+
+    level, stds = _verdict()
+    assert level == "high" and "지원종료" in stds, "규칙 생성이 EOL 판정을 지웠다"
+
+    assert client.put(f"/api/rules/{rule_id}", headers=headers, json={
+        "kind": "port_rule", "service": "", "port": 3390, "product": "", "cpe": "",
+        "risk_level": "medium", "note": "RDP 노출 금지(포트 정정)",
+    }).status_code == 200
+    level, stds = _verdict()
+    assert level == "high" and "지원종료" in stds, "규칙 수정이 EOL 판정을 지웠다"
+
+    assert client.delete(f"/api/rules/{rule_id}", headers=headers).status_code == 204
+    level, stds = _verdict()
+    assert level == "high" and "지원종료" in stds, "규칙 삭제가 EOL 판정을 지웠다"
+
+
+def _ssl_cert_nse(keytype: str, bits: int) -> list[dict]:
+    """nmap ssl-cert 가 실제로 내는 형식 - type 과 bits 를 나란히 낸다."""
+    return [{"id": "ssl-cert", "output": (
+        "Subject: commonName=example.internal\n"
+        "Issuer: commonName=Example Corp CA\n"
+        f"Public Key type: {keytype}\n"
+        f"Public Key bits: {bits}\n"
+        "Not valid before: 2026-01-01T00:00:00\n"
+        "Not valid after:  2099-01-01T00:00:00\n")}]
+
+
+def test_key_strength_is_read_with_the_algorithm_not_bits_alone(client):
+    """같은 비트수가 알고리즘마다 다른 강도를 뜻한다 - 2048 을 전부에 들이대면 틀린다.
+
+    P-256 은 오늘날 TLS 의 기본에 가까운데, 그 전부에 '약한 공개키' 근거와 medium 하한을
+    달면 정작 봐야 할 RSA 1024 가 묻힌다. NIST SP 800-57 Part 1 Rev.5 의 112비트 강도
+    기준으로 RSA/DSA/DH 는 2048, ECC 는 224 다.
+    """
+    from scanops.scanning.taxonomy import enrich_all
+
+    db = SessionLocal()
+    try:
+        ec256 = _nse_finding("https", 443, _ssl_cert_nse("ec", 256))
+        rsa1024 = _nse_finding("https", 443, _ssl_cert_nse("rsa", 1024))
+        rsa2048 = _nse_finding("https", 443, _ssl_cert_nse("rsa", 2048))
+        ec192 = _nse_finding("https", 443, _ssl_cert_nse("ec", 192))
+        enrich_all(db, [ec256, rsa1024, rsa2048, ec192])
+    finally:
+        db.close()
+
+    def weak(finding):
+        kinds = [s["kind"] for s in finding["exposure_json"]]
+        stds = [c["ref"] for c in finding["compliance_json"] if c["std"] == "노출관측"]
+        return "weak_key" in kinds, any("약한 공개키" in ref for ref in stds)
+
+    # 음성 경계 - 관측에도 등급 근거에도 남지 않아야 한다.
+    assert weak(ec256) == (False, False), "EC 256 은 RSA 3072 급이다"
+    assert weak(rsa2048) == (False, False)
+    # 양성 경계 - 파서부터 위험 하한까지 그대로 이어져야 한다.
+    assert weak(rsa1024) == (True, True)
+    assert weak(ec192) == (True, True), "ECC 는 224 미만이 약하다"
+
+    base = _nse_finding("https", 443, [])
+    db = SessionLocal()
+    try:
+        enrich_all(db, [base])
+    finally:
+        db.close()
+    assert ec256["risk_level"] == base["risk_level"], "정상 인증서가 등급을 올리면 안 된다"
+    assert rsa1024["risk_level"] == "medium"
+
+
+def test_an_unreadable_key_algorithm_is_not_called_weak(client):
+    """모르는 곡선을 비트수만 보고 약하다고 하면 정확히 거꾸로 말하게 된다."""
+    from scanops.scanning.nmap_parse import exposure_signals
+
+    # Ed25519 는 256bit 로 128비트 강도다 - RSA 임계값을 들이대면 약한 키가 된다.
+    assert exposure_signals(_ssl_cert_nse("ed25519", 256)) == []
+    assert exposure_signals(_ssl_cert_nse("unknown", 512)) == []

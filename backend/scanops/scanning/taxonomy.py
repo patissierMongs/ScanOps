@@ -347,7 +347,10 @@ def reclassify_all(db: Session) -> int:
     for f in db.query(Finding).all():
         # Server 배너 보조 분류와 제품/CPE 규칙이 재계산에서도 동일하게 걸리도록 관측 증거를 함께 넘긴다.
         d = {"service": f.service, "port": f.port, "server": f.server, "nse_json": f.nse_json,
-             "product": f.product, "cpe": f.cpe,
+             # product 만 넘기고 version 을 빠뜨리면 EOL 판정이 재분류에서 조용히 사라진다.
+             # 이 dict 는 classify() 가 읽는 관측 입력의 전부이므로, 하나라도 빠지면 그 판정만
+             # 규칙 편집 때마다 없어진다.
+             "product": f.product, "version": f.version, "cpe": f.cpe,
              # 노출 신호는 관측값이므로 재분류에서도 그대로 다시 반영돼야 한다.
              "exposure_json": f.exposure_json}
         classify(d, lookup, rules)
