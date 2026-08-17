@@ -720,3 +720,16 @@ test("a finished batched scan still says how it was split", () => {
   assert.match(scans, /배치 \{scan\.batch_total\}\/\{scan\.batch_total\} · \{scan\.batch_size\}대씩/);
   assert.match(scans, /<BatchNote scan=\{s\}/);
 });
+
+test("a finding shows the compliance basis for its own risk grade", () => {
+  // 분류가 붙인 KISA/NIS 참조와 조직규칙 비고는 이미 저장·전송되는데, 여태 '위험·컴플라이언스'
+  // 프리셋을 따로 골라야만 보였다. 정작 발견을 열어 본 자리에 없으면 감사 근거를 확인하려고
+  // 표로 되돌아가야 한다 - 수집해 놓고 쓰지 않는 데이터의 전형이다.
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /\(finding\.compliance_json \|\| \[\]\)\.length > 0/);
+  assert.match(view, /컴플라이언스 근거/);
+  // 근거 없이 빈 상자를 띄우면 화면만 시끄러워진다.
+  assert.doesNotMatch(view, /컴플라이언스 근거[\s\S]{0,400}수집된 근거가 부족/);
+  // 관측 근거(어떻게 열렸다고 판단했나)와 다른 축이므로 자리를 나눠 둔다.
+  assert.match(view, /용도 근거 \(이 포트가 무엇이고 왜 열렸나\)/);
+});

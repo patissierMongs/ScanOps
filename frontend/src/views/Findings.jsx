@@ -637,6 +637,25 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
           {finding.owner && <div className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>담당(자산대장): {finding.owner}{finding.contact ? ` · ${finding.contact}` : ""}</div>}
         </div>
 
+        {/* 컴플라이언스 근거 — '왜 이 등급인가'. 분류가 붙인 KISA/NIS 참조와 조직규칙 비고가
+            여기 저장돼 있는데, 여태 '위험·컴플라이언스' 프리셋을 따로 골라야만 보였다.
+            정작 발견을 열어 본 자리에 없으면 감사 근거를 확인하려고 표로 되돌아가야 한다. */}
+        {(finding.compliance_json || []).length > 0 && (
+          <div className="panel" style={{ boxShadow: "none", marginBottom: 12 }}>
+            <div className="cb-label" style={{ marginTop: 0 }}>
+              컴플라이언스 근거 (왜 {RISK_LABEL[finding.risk_level] || finding.risk_level} 등급인가)
+            </div>
+            <ul style={{ margin: "4px 0 0", paddingLeft: 18, fontSize: 12.5, lineHeight: 1.6 }}>
+              {finding.compliance_json.map((c, i) => (
+                <li key={i}>
+                  <span className="tag">{c.std}</span>{" "}
+                  <span>{c.ref}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {canEdit && (
           <div className="panel" style={{ boxShadow: "none" }}>
             <div className="row">
