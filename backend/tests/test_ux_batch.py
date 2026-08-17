@@ -953,3 +953,97 @@ def test_existing_databases_get_the_traits_backfilled(client):
         assert again.risk_level == "low", "사람이 정한 등급은 건드리지 않는다"
     finally:
         db.close()
+
+
+# ── 지원 종료 버전: -sV 가 읽어 놓고 위험에 반영하지 않던 값 ─────────────────
+def test_an_end_of_life_version_raises_the_floor_with_a_dated_reason(client):
+    """`version` 은 diff(VERSION_CHANGED)까지 되면서 위험은 못 올리고 있었다.
+
+    표는 에어갭에서 자동 갱신될 수 없으므로, 판단에 쓴 표의 기준일을 근거에 함께 실어
+    읽는 사람이 얼마나 오래된 판단인지 알 수 있게 한다.
+    """
+    from scanops.scanning.taxonomy import enrich_all
+
+    db = SessionLocal()
+    try:
+        old = _nse_finding("http", 80, [])
+        old.update({"product": "Apache httpd", "version": "2.2.15"})
+        current = _nse_finding("http", 80, [])
+        current.update({"product": "Apache httpd", "version": "2.4.58"})
+        enrich_all(db, [old, current])
+    finally:
+        db.close()
+
+    assert old["risk_level"] == "high"
+    assert current["risk_level"] == "medium", "지원되는 버전은 서비스 기본 등급 그대로다"
+
+    reason = next(c["ref"] for c in old["compliance_json"] if c["std"] == "지원종료")
+    assert "Apache httpd 2.2" in reason
+    assert "2.2.15" in reason, "무엇을 관측했는지 함께 적는다"
+    assert "표 기준일" in reason, "얼마나 오래된 판단인지 알 수 있어야 한다"
+    assert not any(c["std"] == "지원종료" for c in current["compliance_json"])
+
+
+def test_an_unreadable_version_is_never_called_out_of_date(client):
+    """모르는 것을 오래됐다고 하지 않는다 - 이 PR 이 내내 지킨 규칙이다."""
+    from scanops.scanning.taxonomy import eol_finding
+
+    assert eol_finding("Apache httpd", "") is None
+    assert eol_finding("Apache httpd", "unknown") is None
+    assert eol_finding("", "2.2.15") is None
+    # 벤더가 버전별 EOL 을 공표하지 않는 제품은 표에 없다 - 지어내지 않는다.
+    assert eol_finding("nginx", "1.14.0") is None
+    assert eol_finding("OpenSSH", "7.4") is None
+
+
+def test_a_banner_that_is_not_one_plain_version_is_left_unjudged(client):
+    """실측 배너 세 가지가 전부 오탐이었다 - 앞의 숫자만 읽으면 다 틀린다.
+
+    놓치는 쪽은 등급이 안 오를 뿐이지만, 잘못 잡는 쪽은 근거 없이 우선순위를 흔든다.
+    """
+    from scanops.scanning.taxonomy import eol_finding
+
+    # MariaDB 는 MySQL 프로토콜 호환으로 '5.5.5-' 를 앞에 붙인다. 앞을 읽으면 지원 중인
+    # 10.11 조차 EOL MySQL 5.5.5 로 잡힌다.
+    assert eol_finding("MySQL", "5.5.5-10.11.6-MariaDB") is None
+    assert eol_finding("MySQL", "5.5.5-10.3.34-MariaDB") is None
+    # nmap 이 버전을 못 좁히면 범위를 낸다. '모른다'를 '오래됐다'로 바꾸지 않는다.
+    assert eol_finding("Samba smbd", "3.X - 4.X") is None
+    # 배포판 패키지는 업스트림이 끝나도 백포트로 계속 고쳐진다 - 업스트림 표가 안 맞는다.
+    assert eol_finding("Samba smbd", "4.15.13-Ubuntu") is None
+    # 숫자 자리에 붙은 문자 접미사는 버전의 일부다(OpenSSL) - 여기까지 버리면 안 된다.
+    assert eol_finding("OpenSSL", "1.0.2k") is not None
+
+
+def test_a_version_shorter_than_the_threshold_is_not_guessed(client):
+    """'8' 은 8.0.x 일 수도 있다 - 자리수가 모자라면 판단하지 않는다."""
+    from scanops.scanning.taxonomy import eol_finding
+
+    assert eol_finding("MySQL", "8") is None, "기준 8.0 과 겹치는 자리가 같다 - 알 수 없다"
+    assert eol_finding("MySQL", "7") is not None, "7 < 8 은 자리수와 무관하게 분명하다"
+    assert eol_finding("Apache httpd", "2.4") is None
+    assert eol_finding("Apache httpd", "2.4.58") is None, "기준 이상은 자리수가 길어도 같다"
+
+
+def test_an_org_rule_still_overrides_an_eol_verdict(client):
+    """EOL 도 하한일 뿐이다 - 조직이 허용으로 정했으면 그 판단이 이긴다."""
+    from scanops.scanning.taxonomy import enrich_all
+
+    headers = _auth(client)
+    assert client.post("/api/rules", headers=headers, json={
+        "kind": "product_rule", "service": "", "port": None, "product": "Apache httpd",
+        "risk_level": "info", "note": "격리망 레거시 - 교체 계획 승인됨",
+    }).status_code == 201
+
+    db = SessionLocal()
+    try:
+        old = _nse_finding("http", 80, [])
+        old.update({"product": "Apache httpd", "version": "2.2.15"})
+        enrich_all(db, [old])
+    finally:
+        db.close()
+
+    assert old["risk_level"] == "info" and old["allowed"] is True
+    # 근거는 남아 사람이 검증할 수 있다.
+    assert any(c["std"] == "지원종료" for c in old["compliance_json"])
+    assert any(c["std"] == "조직규칙" for c in old["compliance_json"])

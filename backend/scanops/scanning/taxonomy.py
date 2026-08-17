@@ -5,6 +5,8 @@ finding dict 에 category/usage/risk_level/compliance_json 를 채운다.
 from __future__ import annotations
 
 import json
+import logging
+import re
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -12,7 +14,10 @@ from sqlalchemy.orm import Session
 from ..models import Category, RiskRule
 from .nmap_parse import nse_failed
 
+logger = logging.getLogger(__name__)
+
 _SEED = Path(__file__).resolve().parent.parent / "seed" / "categories.json"
+_EOL_SEED = Path(__file__).resolve().parent.parent / "seed" / "eol_products.json"
 
 
 def seed_categories(db: Session) -> None:
@@ -157,6 +162,98 @@ def apply_exposure(finding: dict) -> None:
         })
 
 
+def _version_tuple(text: str) -> tuple[int, ...]:
+    """'2.2.15' -> (2, 2, 15). 읽을 수 없으면 빈 튜플이라 어떤 비교에도 걸리지 않는다.
+
+    자리마다 앞의 숫자만 쓴다 - '1.0.2k' 의 k 는 버린다(OpenSSL 의 문자 접미사).
+
+    다만 **글자만 있는 자리**가 나오면 통째로 포기한다. 그 자리는 이 문자열이 버전 하나가
+    아니라는 뜻이고, 실측에서 세 가지가 전부 여기 걸린다.
+
+      '5.5.5-10.3.34-MariaDB'  MariaDB 가 MySQL 프로토콜 호환으로 붙이는 '5.5.5-' 표식.
+                               앞을 읽으면 지원 중인 MariaDB 가 EOL MySQL 로 잡힌다.
+      '3.X - 4.X'              nmap 이 정확한 버전을 못 좁혔을 때 내는 범위. 3 으로 읽으면
+                               '모른다'가 '오래됐다'로 바뀐다.
+      '4.15.13-Ubuntu'         배포판 패키지. 업스트림이 끝났어도 배포판이 백포트로 계속
+                               고쳐 주므로, 업스트림 EOL 표를 그대로 들이대면 틀린다.
+
+    셋 다 '읽지 못했다'로 두는 편이 맞다. 놓치는 쪽은 등급이 안 오를 뿐이지만, 잘못 잡는
+    쪽은 근거 없이 운영자의 우선순위를 흔든다.
+    """
+    parts: list[int] = []
+    for chunk in re.split(r"[.\-_]", str(text or "").strip()):
+        match = re.match(r"^(\d+)", chunk)
+        if not match:
+            return ()
+        parts.append(int(match.group(1)))
+    return tuple(parts)
+
+
+def _is_below(current: tuple[int, ...], limit: tuple[int, ...]) -> bool:
+    """관측 버전이 기준 **미만**임이 분명한가. 판단할 수 없으면 False.
+
+    튜플 비교를 그대로 쓰면 자리수가 기준보다 짧을 때 틀린다 - MySQL 을 '8' 로만 보고한
+    배너는 (8,) < (8,0) 이 되어 지원 종료로 잡히지만, 실제로는 8.0.x 일 수도 있어 알 수
+    없는 값이다. 겹치는 자리까지만 비교하고, 거기서 같으면 짧은 쪽은 판단을 포기한다.
+    """
+    depth = min(len(current), len(limit))
+    if current[:depth] != limit[:depth]:
+        return current[:depth] < limit[:depth]
+    return False  # 겹치는 자리가 같다 - 기준 이상이거나(2.4.58 vs 2.4) 알 수 없다(8 vs 8.0)
+
+
+def _load_eol() -> dict:
+    try:
+        return json.loads(_EOL_SEED.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("EOL 표를 읽지 못했습니다 - 버전 기반 판정을 건너뜁니다", exc_info=True)
+        return {"as_of": "", "products": []}
+
+
+_EOL = _load_eol()
+
+
+def eol_finding(product: str, version: str) -> dict | None:
+    """이 제품·버전이 지원 종료인가. 아니거나 판단할 수 없으면 None.
+
+    제품명은 nmap 이 'Apache httpd', 'Samba smbd' 처럼 서술 접미사를 붙여 내므로 부분일치로
+    본다. 버전을 읽을 수 없으면 아무 말도 하지 않는다 - 모르는 것을 오래됐다고 하지 않는다.
+    """
+    name = str(product or "").lower()
+    current = _version_tuple(version)
+    if not name or not current:
+        return None
+    for entry in _EOL.get("products", []):
+        wanted = str(entry.get("product") or "").lower()
+        if not wanted or wanted not in name:
+            continue
+        limit = _version_tuple(entry.get("eol_below", ""))
+        if not limit or not _is_below(current, limit):
+            continue
+        return {**entry, "as_of": _EOL.get("as_of", "")}
+    return None
+
+
+def apply_version_age(finding: dict) -> None:
+    """지원 종료 버전이면 위험 하한을 올리고, 판단 근거와 표의 기준일을 남긴다.
+
+    노출 신호와 같은 규칙이다 - 올리기만 하고 내리지 않으며, 조직 규칙보다 먼저 적용해
+    '허용' 판단이 이기게 한다. 표는 에어갭에서 자동 갱신될 수 없으므로 기준일을 함께
+    적어, 읽는 사람이 얼마나 오래된 판단인지 알 수 있게 한다.
+    """
+    hit = eol_finding(finding.get("product", ""), finding.get("version", ""))
+    if hit is None:
+        return
+    finding["risk_level"] = _raise_to(finding.get("risk_level", "info"), "high")
+    stamp = f", 표 기준일 {hit['as_of']}" if hit.get("as_of") else ""
+    finding["compliance_json"].append({
+        "std": "지원종료",
+        "ref": (f"{hit.get('note') or hit.get('product')} "
+                f"(관측 {finding.get('product', '')} {finding.get('version', '')}"
+                f" · EOL {hit.get('eol_date', '미상')}{stamp})"),
+    })
+
+
 def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> dict:
     """finding 에 분류 필드를 채워 반환(같은 dict 수정)."""
     svc = (finding.get("service") or "").lower()
@@ -197,6 +294,10 @@ def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> d
     for label, value in traits:
         if value:
             finding["compliance_json"].append({"std": "서비스특성", "ref": f"{label}: {value}"})
+
+    # 지원 종료 버전도 관측된 사실이다. -sV 가 이미 버전을 읽어 VERSION_CHANGED 이력까지
+    # 남기면서 위험에는 반영되지 않던 자리다.
+    apply_version_age(finding)
 
     # NSE 가 관측한 노출 사실로 하한을 올린다. 조직 규칙보다 먼저 적용해야, 조직이 명시적으로
     # 허용한 포트를 관측 신호가 다시 끌어올리지 않는다.

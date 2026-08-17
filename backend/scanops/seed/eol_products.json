@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "지원 종료(EOL) 제품 목록 — 위험 등급의 하한을 올리는 근거로만 쓴다.",
+    "",
+    "이 표는 코드가 아니라 데이터다. 에어갭 배포에서는 자동 갱신될 수 없으므로,",
+    "조직이 직접 추가·수정하는 것을 전제로 한다. 그래서 판정에 쓴 표의 기준일(as_of)을",
+    "근거 문구에 함께 실어, 읽는 사람이 얼마나 오래된 판단인지 알 수 있게 한다.",
+    "",
+    "항목은 **공표된 EOL 이 분명한 것만** 넣는다. 벤더가 버전별 지원 종료를 공식으로",
+    "선언하지 않는 제품(nginx, OpenSSH 등)은 넣지 않는다 - 지어낸 EOL 로 등급을 올리면",
+    "운영자의 우선순위를 근거 없이 흔든다.",
+    "",
+    "eol_below: 이 버전 **미만**이면 지원 종료로 본다(주 버전 계열 단위)."
+  ],
+  "as_of": "2026-08-17",
+  "products": [
+    {
+      "product": "apache httpd",
+      "eol_below": "2.4",
+      "eol_date": "2018-07-01",
+      "note": "Apache httpd 2.2 계열 지원 종료"
+    },
+    {
+      "product": "openssl",
+      "eol_below": "1.1.1",
+      "eol_date": "2019-12-31",
+      "note": "OpenSSL 1.0.2 및 이전 계열 지원 종료"
+    },
+    {
+      "product": "php",
+      "eol_below": "8.0",
+      "eol_date": "2022-11-28",
+      "note": "PHP 7.4 및 이전 계열 지원 종료"
+    },
+    {
+      "product": "mysql",
+      "eol_below": "8.0",
+      "eol_date": "2023-10-31",
+      "note": "MySQL 5.7 및 이전 계열 지원 종료"
+    },
+    {
+      "product": "postgresql",
+      "eol_below": "11",
+      "eol_date": "2022-11-10",
+      "note": "PostgreSQL 10 및 이전 계열 지원 종료"
+    },
+    {
+      "product": "samba smbd",
+      "eol_below": "4.0",
+      "eol_date": "2013-10-01",
+      "note": "Samba 3.x 계열 지원 종료"
+    },
+    {
+      "product": "microsoft iis httpd",
+      "eol_below": "8.0",
+      "eol_date": "2020-01-14",
+      "note": "IIS 7.x (Windows Server 2008/R2) 지원 종료"
+    }
+  ]
+}
