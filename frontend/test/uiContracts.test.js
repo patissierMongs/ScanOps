@@ -733,3 +733,19 @@ test("a finding shows the compliance basis for its own risk grade", () => {
   // 관측 근거(어떻게 열렸다고 판단했나)와 다른 축이므로 자리를 나눠 둔다.
   assert.match(view, /용도 근거 \(이 포트가 무엇이고 왜 열렸나\)/);
 });
+
+test("a finding can be assigned to someone from its own drawer", () => {
+  // 배정은 라이프사이클의 한 단계(누가 조치하는가)인데 조작 수단이 화면에 없었다.
+  // API(PATCH owner_user_id)와 감사 이벤트(ASSIGN)는 이미 있었다.
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /api\("\/users\/assignable"\)/);
+  assert.match(view, /배정 담당자/);
+  // 빈 선택은 '배정 해제'다. undefined 를 보내면 서버가 '건드리지 않음'으로 읽는다.
+  assert.match(view, /body\.owner_user_id = assignee === "" \? null : Number\(assignee\)/);
+  // 편집 권한이 없어도 현재 배정은 보여야 한다.
+  assert.match(view, /finding\.assignee_name[\s\S]{0,120}배정: \{finding\.assignee_name\}/);
+  // 자산대장 담당자와 배정 담당자는 다른 축이므로 컬럼도 라벨도 나눈다.
+  const cols = source("../src/lib/columns.js");
+  assert.match(cols, /key: "owner", label: "담당자\(자산대장\)"/);
+  assert.match(cols, /key: "assignee", label: "배정 담당자"/);
+});

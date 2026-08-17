@@ -156,6 +156,17 @@ class Finding(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
+    # 배정된 담당자(ScanOps 사용자). 자산대장에서 온 owner/contact 와는 다른 축이다 -
+    # owner 는 '이 자산의 관리 부서가 적어 둔 사람', assignee 는 '이 발견을 조치할 사람'.
+    assignee: Mapped["User | None"] = relationship(lazy="joined")
+
+    @property
+    def assignee_name(self) -> str:
+        user = self.assignee
+        if user is None:
+            return ""
+        return user.display_name or user.username
+
     events: Mapped[list["FindingEvent"]] = relationship(
         back_populates="finding", cascade="all, delete-orphan", order_by="FindingEvent.created_at"
     )

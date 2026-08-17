@@ -114,7 +114,10 @@ export const ALL_COLUMNS = [
   { key: "status", label: "운영상태", get: (f) => f.status, badge: "status" },
   { key: "reopened", label: "재발", get: (f) => (f.reopened ? "재발" : "") },
   { key: "dept", label: "부서", get: (f) => f.dept },
-  { key: "owner", label: "담당자", get: (f) => f.owner },
+  { key: "owner", label: "담당자(자산대장)", get: (f) => f.owner },
+  // 배정 담당자 — '이 발견을 조치할 사람'. 자산대장 담당자(그 자산을 관리하는 사람)와
+  // 다른 축이라 라벨도 컬럼도 나눈다.
+  { key: "assignee", label: "배정 담당자", get: (f) => f.assignee_name },
   { key: "contact", label: "연락처", get: (f) => f.contact, mono: true },
   { key: "deadline", label: "마감", get: (f) => fmtDate(f.deadline), mono: true },
   { key: "first_seen", label: "등록 날짜", get: (f) => fmtDate(f.first_seen), mono: true },

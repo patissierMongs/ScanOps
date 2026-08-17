@@ -29,6 +29,15 @@ class UserOut(BaseModel):
     must_change_password: int = 0
 
 
+class AssigneeOut(BaseModel):
+    """배정 후보 — 이름표에 필요한 최소한만. 역할·활성여부·생성일은 담당자를 고르는 데
+    필요 없고, admin 전용 목록을 auditor 에게 열어 줄 이유도 없다."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    username: str
+    display_name: str
+
+
 class UserCreate(BaseModel):
     username: str
     password: str
@@ -174,6 +183,8 @@ class FindingOut(BaseModel):
     status: str
     reopened: int
     owner_user_id: int | None
+    # 배정된 담당자 이름. id 만 내려 주면 화면이 사용자 목록을 다시 받아 맞춰야 한다.
+    assignee_name: str = ""
     deadline: datetime | None
     dept: str
     contact: str

@@ -95,7 +95,10 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("status", "운영상태", lambda f: f.status),
     ("reopened", "재발", lambda f: "재발" if f.reopened else ""),
     ("dept", "부서", lambda f: f.dept),
-    ("owner", "담당자", lambda f: f.owner),
+    ("owner", "담당자(자산대장)", lambda f: f.owner),
+    # 배정 담당자는 자산대장 담당자와 다른 축이다. 표에서 둘을 구분해야 '누가 조치하는가'를
+    # 필터·내보내기로도 추적할 수 있다.
+    ("assignee", "배정 담당자", lambda f: f.assignee_name),
     ("contact", "연락처", lambda f: f.contact),
     ("deadline", "마감", lambda f: f.deadline.strftime("%Y-%m-%d") if f.deadline else ""),
     ("first_seen", "등록 날짜", lambda f: f.first_seen.strftime("%Y-%m-%d")),

@@ -590,10 +590,22 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
   const [status, setStatus] = useState(finding.status);
   const [deadline, setDeadline] = useState(finding.deadline ? String(finding.deadline).slice(0, 10) : "");
   const [note, setNote] = useState(finding.manual_note || "");
+  // 배정은 라이프사이클의 한 단계인데(누가 조치하는가) 여태 조작 수단이 없었다. API·감사
+  // 이벤트(ASSIGN)는 이미 있었고 화면에만 빠져 있었다.
+  const [assignee, setAssignee] = useState(
+    finding.owner_user_id == null ? "" : String(finding.owner_user_id));
+  const [people, setPeople] = useState([]);
+  useEffect(() => {
+    if (!canEdit) return;
+    api("/users/assignable").then(setPeople).catch(() => setPeople([]));
+  }, [canEdit]);
 
   function save() {
     const body = { status, deadline: deadlinePatchValue(deadline) };
     body.manual_note = note;
+    // 빈 선택은 '배정 해제'다. undefined 로 보내면 서버가 '건드리지 않음'으로 읽어
+    // 해제할 방법이 사라진다.
+    body.owner_user_id = assignee === "" ? null : Number(assignee);
     api(`/findings/${finding.id}`, { method: "PATCH", json: body })
       .then(() => { toast("저장됨"); onSaved(); })
       .catch((e) => toast(e.message, { type: "err" }));
@@ -614,6 +626,8 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
           {needsConfirmation(finding)
             ? <span className="tag" style={{ color: "var(--medium)" }}>재확인 필요</span> : null}
           {finding.dept && <span className="tag">{finding.dept}</span>}
+          {finding.assignee_name
+            ? <span className="tag">배정: {finding.assignee_name}</span> : null}
         </div>
 
         {/* 관측 근거 — '이 포트가 열려 있다고 어떻게 판단했나'. 용도 근거(무엇인가)와 다른 축이다. */}
@@ -666,6 +680,15 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
               </label>
               <label className="field">마감
                 <input type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
+              </label>
+              <label className="field">배정 담당자
+                <select value={assignee} onChange={(e) => setAssignee(e.target.value)}
+                        title="이 발견을 조치할 사람. 자산대장 담당자와는 다른 축입니다.">
+                  <option value="">(미배정)</option>
+                  {people.map((p) => (
+                    <option key={p.id} value={String(p.id)}>{p.display_name || p.username}</option>
+                  ))}
+                </select>
               </label>
             </div>
             <label className="field" style={{ marginTop: 8 }}>메모

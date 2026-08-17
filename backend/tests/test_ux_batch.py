@@ -693,3 +693,76 @@ def test_a_bundle_applies_each_batch_own_clock_not_the_earliest(client):
         assert second.last_seen.replace(tzinfo=timezone.utc) == b1
     finally:
         db.close()
+
+
+# ── 담당 배정: 조작 수단이 화면에 없던 라이프사이클 단계 ──────────────────────
+def test_an_auditor_can_list_assignees_and_assign_a_finding(client):
+    """발견을 고치는 권한(auditor)과 사용자를 관리하는 권한(admin)은 다르다.
+
+    배정하려면 사람 목록이 필요한데 `/api/users` 는 admin 전용이라, auditor 는 배정할 수
+    있는 API 를 갖고도 고를 목록을 받지 못했다. 이름표에 필요한 최소한만 내려 주는 별도
+    목록을 둔다 - admin 전용 목록을 통째로 열어 줄 이유가 없다.
+    """
+    make_user("assign-auditor", "auditorpw123", role="auditor")
+    headers = {"Authorization": f"Bearer {token_for(client, 'assign-auditor', 'auditorpw123')}"}
+    make_user("handler", "handlerpw123", role="viewer")
+    make_user("resigned", "resignedpw12", role="viewer")
+
+    db = SessionLocal()
+    try:
+        db.query(User).filter(User.username == "resigned").update({User.is_active: 0})
+        run = ScanRun(name="배정", status="done")
+        db.add(run)
+        db.commit()
+        finding = Finding(
+            finding_key="10.6.6.6|22|tcp", host_ip="10.6.6.6", port=22, proto="tcp",
+            state="open", service="ssh", first_scan_id=run.id, last_scan_id=run.id,
+        )
+        db.add(finding)
+        db.commit()
+        finding_id = finding.id
+        handler_id = db.query(User).filter(User.username == "handler").one().id
+    finally:
+        db.close()
+
+    # admin 전용 목록은 여전히 막혀 있다.
+    assert client.get("/api/users", headers=headers).status_code == 403
+
+    people = client.get("/api/users/assignable", headers=headers)
+    assert people.status_code == 200, people.text
+    names = [p["username"] for p in people.json()]
+    assert "handler" in names
+    assert "resigned" not in names, "비활성 계정에 배정하면 아무도 보지 않는 발견이 생긴다"
+    # 이름표에 필요한 최소한만 - 역할·활성여부는 내려 주지 않는다.
+    assert set(people.json()[0]) == {"id", "username", "display_name"}
+
+    assigned = client.patch(f"/api/findings/{finding_id}", headers=headers,
+                            json={"owner_user_id": handler_id})
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["owner_user_id"] == handler_id
+    # 화면이 id 를 사람 이름으로 다시 조회하지 않아도 되게 이름을 함께 내린다.
+    assert assigned.json()["assignee_name"] == "handler"
+
+    db = SessionLocal()
+    try:
+        kinds = [e.type for e in db.query(FindingEvent).filter(
+            FindingEvent.finding_id == finding_id).all()]
+        assert "ASSIGN" in kinds, "배정은 감사 이력에 남아야 한다"
+    finally:
+        db.close()
+
+    # 빈 값으로 해제할 수 있어야 한다 - 배정만 되고 못 푸는 건 반쪽이다.
+    cleared = client.patch(f"/api/findings/{finding_id}", headers=headers,
+                           json={"owner_user_id": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["owner_user_id"] is None
+    assert cleared.json()["assignee_name"] == ""
+
+
+def test_the_assignee_is_a_separate_axis_from_the_asset_register_owner(client):
+    """자산대장 담당자(owner)와 배정 담당자는 다른 사실이다 - 표에서도 갈라야 한다."""
+    from scanops.api.findings import COLUMNS
+
+    labels = {key: header for key, header, _getter in COLUMNS}
+    assert labels["owner"] == "담당자(자산대장)"
+    assert labels["assignee"] == "배정 담당자"

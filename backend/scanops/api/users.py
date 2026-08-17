@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import ROLES, User
-from ..schemas import PasswordReset, UserCreate, UserOut
+from ..schemas import AssigneeOut, PasswordReset, UserCreate, UserOut
 from ..security import hash_password, validate_password
 from .audit import record
 from .deps import require_role
@@ -16,6 +16,22 @@ router = APIRouter()
 @router.get("", response_model=list[UserOut])
 def list_users(_: User = Depends(require_role("admin")), db: Session = Depends(get_db)):
     return db.query(User).order_by(User.id).all()
+
+
+@router.get("/assignable", response_model=list[AssigneeOut])
+def list_assignable(
+    _: User = Depends(require_role("auditor")),
+    db: Session = Depends(get_db),
+) -> list[User]:
+    """발견에 배정할 수 있는 사용자.
+
+    발견을 고치는 권한(auditor)과 사용자를 관리하는 권한(admin)은 다르다. 그런데 배정하려면
+    사람 목록이 필요하므로, admin 전용 목록을 열어 주는 대신 이름표에 필요한 최소한만 내려
+    주는 별도 목록을 둔다. 비활성 계정은 배정 대상이 아니다 - 고를 수 있게 두면 아무도
+    보지 않는 발견이 생긴다.
+    """
+    return (db.query(User).filter(User.is_active == 1)
+            .order_by(User.display_name, User.username).all())
 
 
 @router.post("", response_model=UserOut, status_code=201)
