@@ -894,3 +894,62 @@ def test_certificate_facts_beyond_the_common_name_are_kept(client):
         "Subject: commonName=good.example\nIssuer: commonName=DigiCert\n"
         "Public Key bits: 4096\nNot valid after:  2099-01-01T00:00:00\n")}])
     assert healthy == []
+
+
+# ── 서비스 특성: 만들어만 두고 한 번도 안 쓰던 컬럼 ───────────────────────────
+def test_service_traits_are_seeded_and_explain_the_grade(client):
+    """Category.encryption/auth/exposure 는 컬럼만 있고 값이 0/105 였다.
+
+    이 세 값은 프로토콜 명세·제품 기본값으로 정해지는 **기대값**이다. 그 인스턴스에서
+    실제로 관측한 사실(exposure_json)과는 다른 축이라, 등급을 바꾸지 않고 근거로만 남긴다
+    - 시드 등급이 이미 그 사실을 반영해 매겨져 있기 때문이다.
+    """
+    from scanops.models import Category
+    from scanops.scanning.taxonomy import enrich_all
+
+    db = SessionLocal()
+    try:
+        seeded = db.query(Category).filter(Category.service_name == "redis").one()
+        assert (seeded.encryption, seeded.auth, seeded.exposure) == (
+            "평문", "기본 무인증", "내부 전용")
+        # 명세로 정해지지 않는 서비스는 비워 둔다 - 지어내지 않는다.
+        kafka = db.query(Category).filter(Category.service_name == "kafka").one()
+        assert (kafka.encryption, kafka.auth, kafka.exposure) == ("", "", "")
+
+        telnet = _nse_finding("telnet", 23, [])
+        before = telnet.copy()
+        enrich_all(db, [telnet])
+    finally:
+        db.close()
+
+    refs = [c["ref"] for c in telnet["compliance_json"] if c["std"] == "서비스특성"]
+    assert "전송 구간: 평문" in refs
+    # 특성은 등급을 바꾸지 않는다(시드가 이미 그 판단을 반영했다).
+    assert telnet["risk_level"] == "high"
+    assert before.get("risk_level") is None
+
+
+def test_existing_databases_get_the_traits_backfilled(client):
+    """시드는 '비어 있을 때만' 돌기 때문에 운영 중인 DB 는 영영 채워지지 않는다.
+
+    등급·분류처럼 사람이 손댔을 수 있는 값은 건드리지 않고 빈 특성 칸만 메운다.
+    """
+    from scanops.models import Category
+    from scanops.scanning.taxonomy import seed_categories
+
+    db = SessionLocal()
+    try:
+        row = db.query(Category).filter(Category.service_name == "redis").one()
+        row.encryption = ""
+        row.auth = ""
+        row.exposure = ""
+        row.risk_level = "low"          # 사람이 낮춰 둔 등급
+        db.commit()
+
+        seed_categories(db)
+
+        again = db.query(Category).filter(Category.service_name == "redis").one()
+        assert again.encryption == "평문", "빈 특성은 채워진다"
+        assert again.risk_level == "low", "사람이 정한 등급은 건드리지 않는다"
+    finally:
+        db.close()

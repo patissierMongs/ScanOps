@@ -16,15 +16,39 @@ _SEED = Path(__file__).resolve().parent.parent / "seed" / "categories.json"
 
 
 def seed_categories(db: Session) -> None:
-    if db.query(Category).count() > 0:
-        return
     data = json.loads(_SEED.read_text(encoding="utf-8"))
+    if db.query(Category).count() > 0:
+        _backfill_service_traits(db, data)
+        return
     for c in data:
         db.add(Category(
             service_name=c["service_name"], category=c["category"], usage=c["usage"],
             risk_level=c["risk_level"], compliance_json=c["compliance"], desc=c["desc"],
+            encryption=c.get("encryption", ""), auth=c.get("auth", ""),
+            exposure=c.get("exposure", ""),
         ))
     db.commit()
+
+
+def _backfill_service_traits(db: Session, data: list[dict]) -> None:
+    """이미 시드된 DB 에 서비스 특성만 채운다.
+
+    이 세 컬럼은 만들어만 두고 값이 한 번도 들어간 적이 없었다(0/105). 시드는 '비어 있을
+    때만' 돌기 때문에 운영 중인 DB 는 영영 채워지지 않는다. 등급·분류 같은 사람이 손댔을
+    수 있는 값은 건드리지 않고, 비어 있는 특성 칸만 메운다.
+    """
+    traits = {c["service_name"]: c for c in data}
+    changed = 0
+    for row in db.query(Category).all():
+        source = traits.get(row.service_name)
+        if source is None:
+            continue
+        for field in ("encryption", "auth", "exposure"):
+            if not getattr(row, field, "") and source.get(field):
+                setattr(row, field, source[field])
+                changed = 1
+    if changed:
+        db.commit()
 
 
 def build_lookup(db: Session) -> dict[str, dict]:
@@ -32,6 +56,9 @@ def build_lookup(db: Session) -> dict[str, dict]:
         c.service_name: {
             "category": c.category, "usage": c.usage,
             "risk_level": c.risk_level, "compliance": c.compliance_json or [],
+            # 서비스 고유 특성(기대값) - 그 인스턴스에서 관측한 사실(exposure_json)과 다른 축이다.
+            "encryption": c.encryption or "", "auth": c.auth or "",
+            "exposure": c.exposure or "",
         }
         for c in db.query(Category).all()
     }
@@ -158,6 +185,18 @@ def classify(finding: dict, lookup: dict[str, dict], rules: list[RiskRule]) -> d
             "ref": (f"nmap service '{svc or '미상'}' 로는 분류되지 않아 Server 배너"
                     f"({finding.get('server', '').strip()}) 기준 {fallback_used} 로 분류"),
         })
+
+    # 서비스 고유 특성 - '이 프로토콜은 원래 평문이다' 같은 명세상의 사실. 관측이 아니라
+    # 기대값이라 등급을 바꾸지 않는다(시드 등급이 이미 그 사실을 반영해 매겨져 있다).
+    # 다만 왜 이 등급인지를 사람이 검증할 수 있어야 하므로 근거로는 남긴다.
+    traits = [
+        ("전송 구간", info.get("encryption", "")),
+        ("인증", info.get("auth", "")),
+        ("노출 범위", info.get("exposure", "")),
+    ]
+    for label, value in traits:
+        if value:
+            finding["compliance_json"].append({"std": "서비스특성", "ref": f"{label}: {value}"})
 
     # NSE 가 관측한 노출 사실로 하한을 올린다. 조직 규칙보다 먼저 적용해야, 조직이 명시적으로
     # 허용한 포트를 관측 신호가 다시 끌어올리지 않는다.
