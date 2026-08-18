@@ -106,6 +106,42 @@ def _cert_deadline(text: str) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+# hostrule NSE 는 포트가 아니라 **호스트**에 대한 사실이라 nmap 이 <hostscript> 에 싣는다.
+# 파서는 <port> 밑만 읽고 있어서 그 출력이 통째로 사라졌다 - smb-protocols(SMBv1)와
+# smb-os-discovery(OS·컴퓨터명)가 여기 걸린다. 실측으로 확인했다: hostrule 스크립트의 출력은
+# <port> 밑에 0건, <hostscript> 밑에 1건으로 나온다.
+#
+# finding 은 포트 단위라 어딘가에는 붙여야 하는데, 아무 포트에나 붙이면 80/tcp 에
+# 'SMBv1 지원'이 뜬다. 그 사실이 가리키는 서비스의 포트에만 붙인다.
+_HOSTSCRIPT_PORTS = {
+    "smb-os-discovery": frozenset({139, 445}),
+    "smb-protocols": frozenset({139, 445}),
+    "smb2-security-mode": frozenset({139, 445}),
+    "nbstat": frozenset({137}),
+}
+
+
+def host_scripts(host) -> list[dict]:
+    """<hostscript> 밑의 스크립트 출력. 없으면 빈 목록."""
+    return [{"id": s.get("id") or "", "output": s.get("output") or ""}
+            for block in host.findall("hostscript")
+            for s in block.findall("script")]
+
+
+def host_scripts_for_port(scripts: list[dict], port: int) -> list[dict]:
+    """이 포트에 귀속시킬 호스트 스크립트.
+
+    표에 없는 스크립트는 **모든 포트에 붙인다** - 조용히 버리지 않기 위해서다. 표는
+    '어느 포트의 사실인지 아는 것'만 좁히는 용도이고, 모르는 것을 없애는 용도가 아니다.
+    """
+    out = []
+    for script in scripts:
+        wanted = _HOSTSCRIPT_PORTS.get(str(script.get("id") or "").lower())
+        if wanted is None or port in wanted:
+            out.append(script)
+    return out
+
+
 def _cert_signals(output: str) -> list[dict]:
     """ssl-cert 출력에서 만료·자체발급·약한 키를 뽑는다. CN 만 쓰고 나머지를 버리던 자리다."""
     out: list[dict] = []
@@ -427,6 +463,7 @@ def parse_xml(source) -> list[dict]:
         hostname = hn_el.get("name") if hn_el is not None else ""
         times = host.find("times")
         rtt = times.get("srtt") if times is not None else ""
+        hostrule_nse = host_scripts(host)
 
         ports = host.find("ports")
         if ports is None:
@@ -446,6 +483,7 @@ def parse_xml(source) -> list[dict]:
             svc = port.find("service")
             nse = [{"id": s.get("id") or "", "output": s.get("output") or ""}
                    for s in port.findall("script")]
+            nse += host_scripts_for_port(hostrule_nse, int(port.get("portid")))
             cpe = ";".join(c.text or "" for c in (svc.findall("cpe") if svc is not None else []))
             detail = _detail(svc)
             service = (svc.get("name") if svc is not None else "") or ""

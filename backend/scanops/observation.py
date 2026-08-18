@@ -100,3 +100,14 @@ def needs_confirmation(state: str | None, reason: str | None) -> bool:
     if not current.startswith("open"):
         return False
     return state_evidence(state, reason) == INFERRED or current == "open|filtered"
+
+
+def exposure_text(exposure_json) -> str:
+    """관측된 노출 사실을 사람이 읽는 한 줄로.
+
+    표·필터·발견 내보내기·감사 리포트가 **같은 함수**를 쓴다. 뷰마다 따로 만들면 같은 발견이
+    화면과 증빙에서 다르게 적히고, 한쪽에만 넣고 다른 쪽을 잊는 일이 실제로 있었다
+    (감사 xlsx 에서 이 값이 통째로 빠져 있었다).
+    """
+    return " · ".join(str(s.get("detail") or s.get("kind") or "")
+                      for s in (exposure_json or []) if isinstance(s, dict))

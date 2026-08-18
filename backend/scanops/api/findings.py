@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import get_db
 from ..identity import display_identity
-from ..observation import current_reason
+from ..observation import current_reason, exposure_text
 from ..models import (
     ACTIVE_FINDING_STATES, FINDING_STATUSES, RISK_LABELS_KO,
     Finding, FindingEvent, ScanRun, User,
@@ -59,8 +59,7 @@ def _purpose_evidence(f: Finding) -> list[str]:
 
 def _exposure(f: Finding) -> str:
     """관측된 노출 사실을 한 줄로 - 표·필터·내보내기에서 '익명 FTP만' 같은 조회가 되게."""
-    return " · ".join(str(s.get("detail") or s.get("kind") or "")
-                      for s in (f.exposure_json or []) if isinstance(s, dict))
+    return exposure_text(f.exposure_json)
 
 
 def _compliance(f: Finding) -> str:

@@ -142,6 +142,7 @@ def _validate_structured_scan(
     # Keep Nmap's target-injection/IPv6 contract aligned with saved engine specs, then
     # require the narrower IPv4 address/CIDR grammar used by exclusions.
     nmap_runner.validate_targets(body.exclude)
+    scan_options.validate_ports(body.exclude_ports or "")
     excludes = scope.parse_excludes(body.exclude)
     if body.workflow == "auto":
         tcp_spec = nmap_runner.auto_tcp_port_spec(body.ports)
@@ -213,6 +214,14 @@ def _validate_staged_protocol_selection(body: ScanRunIn) -> None:
         raise ValueError("TCP Connect 단계 스캔은 UDP 스캔과 함께 실행할 수 없습니다.")
     if body.ports and nmap_runner.auto_udp_port_spec(body.ports) and "udp" not in body.options:
         raise ValueError("UDP 포트를 지정하려면 udp 스캔 옵션을 활성화해야 합니다.")
+    # 단계 엔진은 --exclude-ports 를 넘길 자리가 없다(build_job_spec 에 해당 인자가 없다).
+    # 여태 조용히 무시했는데, 이건 단순 미구현이 아니라 **안전 컨트롤의 무음 실패**다 -
+    # 취급주의 포트를 뺐다고 믿은 운영자의 요청이 그대로 스캔된다. 못 지키면 거절한다.
+    if (body.exclude_ports or "").strip():
+        raise ValueError(
+            "단계 스캔은 포트 제외를 지원하지 않습니다 - 조용히 무시하지 않고 거절합니다. "
+            "제외가 필요하면 수동 스캔을 쓰거나 포트 범위에서 직접 빼 주세요."
+        )
 
 
 def reconcile_orphans() -> int:
@@ -2784,6 +2793,11 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
     if not has_batches and scan.batch_total:
         total = scan.batch_total
         saved_spec = _read_engine_spec(engine_dir)
+        # 분자와 분모는 같은 모집단이어야 한다. batch_total 은 discovery 이전의 전체 대상으로
+        # 센 값이고, swept_batches 는 live 로 실제 만들어진 산출물을 센다. 그대로 나란히 두면
+        # 없는 배치를 진행 중이라고 말한다 - live 를 알게 된 뒤에는 그쪽으로 갈아탄다.
+        if saved_spec and (live_total := engine_runner.swept_total(engine_dir, saved_spec)):
+            total = live_total
         done = (total if scan.status == "done"
                 else engine_runner.swept_batches(engine_dir, saved_spec) if saved_spec else 0)
         has_batches = True

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..identity import display_identity
 from ..models import RISK_LABELS_KO, Finding, User
+from ..observation import exposure_text
 from ..spreadsheet import safe_cell
 from .deps import current_user
 
@@ -27,8 +28,9 @@ def _row(f: Finding) -> list:
     comp = "; ".join(f"{c.get('std')}:{c.get('ref')}" for c in (f.compliance_json or []))
     # 노출 관측(익명 FTP·무인증·평문·만료 인증서 등)은 '왜 위험한가'의 핵심 근거인데 감사본에만
     # 빠져 있었다 — 발견 뷰 내보내기(findings.py)엔 이미 있는 값이라 같은 규칙으로 한 칸 싣는다.
-    exposure = " · ".join(str(s.get("detail") or s.get("kind") or "")
-                          for s in (f.exposure_json or []) if isinstance(s, dict))
+    # 값을 여기서 다시 만들지 않고 발견 뷰·필터와 **같은 함수**를 쓴다 - 같은 값을 뷰마다 따로
+    # 만드는 것이 이 결함을 만든 원인이라, 세 번째 복사본을 두면 또 갈린다.
+    exposure = exposure_text(f.exposure_json)
     return [
         f.finding_key, f.host_ip, f.hostname, f.port, f.proto, f.state,
         display_identity(server=f.server, product=f.product, version=f.version, service=f.service,

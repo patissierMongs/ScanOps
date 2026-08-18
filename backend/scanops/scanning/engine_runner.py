@@ -477,6 +477,23 @@ def swept_batches(out_dir, spec: dict) -> int:
     return min(counts) if counts else 0
 
 
+def swept_total(out_dir, spec: dict) -> int:
+    """sweep 이 실제로 만들 배치 수 - **swept_batches 와 같은 모집단**에서 센다.
+
+    실행 전에 세어 둔 배치 수(ScanRun.batch_total)는 discovery **이전**의 전체 대상 수로
+    나눈 값이다. 반면 엔진이 실제로 도는 배치는 discovery 를 통과한 live 를 나눈 것이라,
+    둘을 분자·분모로 같이 쓰면 존재하지 않는 배치를 진행 중이라고 말하게 된다
+    (/24 256대 중 1대만 live 면 실제 배치는 b0 하나인데 분모는 4가 된다).
+
+    live 를 아직 모르면 0 - 그때는 호출자가 실행 전 추정치를 그대로 쓴다.
+    """
+    live = [h for h in (_read_state(Path(out_dir)).get("live") or []) if isinstance(h, str)]
+    size = int(spec.get("batch_size") or 0)
+    if not live or size <= 0:
+        return 0
+    return -(-len(live) // size)
+
+
 def observed_hosts(out_dir, spec: dict, force_scanned_hosts: bool = False) -> set[str]:
     """이 실행이 **실제로 포트를 관측한** 호스트.
 
