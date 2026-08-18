@@ -66,7 +66,14 @@ class Pipeline:
     def _exclude_args(self) -> list:
         # Nmap 7.99는 반복 --exclude 를 누적하지 않고 마지막 값만 적용한다.
         # 검증된 토큰을 단일 comma-list로 전달해야 모든 제외가 보장된다.
-        return ["--exclude", ",".join(self.spec.exclude)] if self.spec.exclude else []
+        args = ["--exclude", ",".join(self.spec.exclude)] if self.spec.exclude else []
+        # 포트 제외는 **모든 단계**에 실어야 한다. 한 단계라도 빠지면 그 단계가 그 포트를
+        # 건드리고, 안전 컨트롤로서는 의미가 없어진다. 발견 단계는 -sn 이라 포트를 안 보지만
+        # 그래도 같이 싣는다(실측: nmap 이 거부하지 않는다) - 나중에 발견 방식이 바뀌어도
+        # 제외가 조용히 새지 않게 하려는 것이다.
+        if self.spec.exclude_ports.strip():
+            args += ["--exclude-ports", self.spec.exclude_ports.strip()]
+        return args
 
     def _tcp_scan_flag(self) -> str:
         return {"syn": "-sS", "connect": "-sT"}[self.spec.tcp.scan_type]

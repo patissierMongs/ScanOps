@@ -214,14 +214,6 @@ def _validate_staged_protocol_selection(body: ScanRunIn) -> None:
         raise ValueError("TCP Connect 단계 스캔은 UDP 스캔과 함께 실행할 수 없습니다.")
     if body.ports and nmap_runner.auto_udp_port_spec(body.ports) and "udp" not in body.options:
         raise ValueError("UDP 포트를 지정하려면 udp 스캔 옵션을 활성화해야 합니다.")
-    # 단계 엔진은 --exclude-ports 를 넘길 자리가 없다(build_job_spec 에 해당 인자가 없다).
-    # 여태 조용히 무시했는데, 이건 단순 미구현이 아니라 **안전 컨트롤의 무음 실패**다 -
-    # 취급주의 포트를 뺐다고 믿은 운영자의 요청이 그대로 스캔된다. 못 지키면 거절한다.
-    if (body.exclude_ports or "").strip():
-        raise ValueError(
-            "단계 스캔은 포트 제외를 지원하지 않습니다 - 조용히 무시하지 않고 거절합니다. "
-            "제외가 필요하면 수동 스캔을 쓰거나 포트 범위에서 직접 빼 주세요."
-        )
 
 
 def reconcile_orphans() -> int:
@@ -2567,6 +2559,7 @@ def run_staged(
             scan.id, hosts if body.discovery == "pn" else body.targets,
             excludes, body.options, body.ports,
             body.nse, out_dir, body.batch_size, discovery=body.discovery,
+            exclude_ports=body.exclude_ports,
         )
         tcp_scope = _port_scope(nmap_runner.auto_tcp_port_spec(body.ports), "T")
         udp_scope = (_port_scope(nmap_runner.auto_udp_port_spec(body.ports), "U")

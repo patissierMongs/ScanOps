@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path as pathlib_Path
 
 import openpyxl
 
@@ -115,26 +116,56 @@ def _scan_body(**over):
     return body
 
 
-def test_the_staged_engine_refuses_a_port_exclusion_it_cannot_honor(client):
-    """조용히 받고 무시하는 것이 제일 나쁘다 - 뺐다고 믿은 포트가 그대로 스캔된다.
+def test_the_staged_engine_puts_the_port_exclusion_on_every_stage(tmp_path):
+    """안전 컨트롤은 한 단계라도 새면 의미가 없다.
 
-    단계 엔진은 --exclude-ports 를 넘길 자리가 없다(build_job_spec 에 인자가 없다). 근본
-    구현은 엔진 쪽 일이라 여기서 하지 않지만, **못 지키는 약속을 받지는 않는다.**
+    여태 단계 경로는 exclude_ports 를 조용히 무시했다 - 취급주의 포트를 뺐다고 믿은 요청이
+    그대로 스캔됐다. 이제 엔진이 받아 **발견·TCP·UDP·서비스 전부**의 nmap 인자에 싣는다.
     """
-    headers = _auth(client)
-    refused = client.post("/api/scans/run-staged", headers=headers,
-                          json=_scan_body(exclude_ports="445,3389"))
-    assert refused.status_code == 400
-    assert "포트 제외" in refused.json()["detail"]
+    import sys
 
-    # 예상치도 같은 입력을 거절해야 한다 - 못 돌릴 요청의 예상을 보여주면 안 된다.
-    est = client.post("/api/scans/estimate", headers=headers,
-                      json=_scan_body(staged=True, exclude_ports="445"))
-    assert est.status_code == 400
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine.spec import JobSpec
 
-    # 제외를 안 쓰면 단계 스캔 자체는 막히지 않는다(과잉 차단 방지).
-    ok = client.post("/api/scans/estimate", headers=headers, json=_scan_body(staged=True))
-    assert ok.status_code == 200
+    spec = JobSpec.from_dict({
+        "job_id": "j", "targets": ["10.0.0.1"], "exclude": ["10.0.0.9"],
+        "exclude_ports": "9100,515", "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": True, "ports": "1-1000"},
+                   "udp": {"enabled": True, "ports": "53"}},
+    })
+    spec.validate()
+    assert spec.exclude_ports == "9100,515"
+    # 저장·재적재를 왕복해도 남아야 이어가기에서 새지 않는다.
+    assert JobSpec.from_dict(spec.to_dict()).exclude_ports == "9100,515"
+
+    from scanops_engine.pipeline import Pipeline
+
+    class _Sink:
+        def emit(self, *a, **k):
+            pass
+
+    args = Pipeline(spec, _Sink(), "nmap")._exclude_args()
+    assert "--exclude-ports" in args and "9100,515" in args
+    assert "--exclude" in args and "10.0.0.9" in args, "호스트 제외도 그대로"
+
+    # 문법이 틀리면 엔진이 거절한다 - spec.json 은 별도 프로세스가 읽는 입력이다.
+    import pytest
+
+    bad = JobSpec.from_dict({"job_id": "j", "targets": ["10.0.0.1"],
+                             "exclude_ports": "포트아님", "out_dir": str(tmp_path)})
+    with pytest.raises(ValueError):
+        bad.validate()
+
+
+def test_the_web_scan_request_carries_the_port_exclusion_into_the_saved_spec(client):
+    """화면에서 넣은 값이 실행 spec 까지 도달하는지 - 중간에서 끊기면 조용한 무시로 되돌아간다."""
+    from scanops.scanning import engine_runner
+
+    spec = engine_runner.build_job_spec(
+        1, ["10.0.0.1"], [], ["syn"], "", None, pathlib_Path("/tmp/x"), 64,
+        exclude_ports="9100",
+    )
+    assert spec["exclude_ports"] == "9100"
 
 
 def test_the_manual_path_still_honors_a_port_exclusion(client):

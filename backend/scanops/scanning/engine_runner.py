@@ -91,7 +91,8 @@ def ensure_available() -> Path:
 
 def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options: list[str],
                    ports: str, nse: list[str] | None, out_dir: Path, batch_size: int,
-                   discovery: str = "sn", rescan_units: list | None = None) -> dict:
+                   discovery: str = "sn", rescan_units: list | None = None,
+                   exclude_ports: str = "") -> dict:
     """ScanOps 옵션 키를 엔진 단계 설정으로 매핑. 스캔 기법/타이밍/버전강도/UDP/NSE 를 단계로 분배.
 
     one-liner 옵션(노핑·기법)은 엔진이 단계별로 알아서 처리하므로 그대로 옮기지 않는다.
@@ -121,6 +122,8 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
         "job_id": f"scan_{scan_id}",
         "targets": list(targets),
         "exclude": list(exclude or []),
+        # 포트 제외는 엔진이 모든 단계 인자에 싣는다(pipeline._exclude_args).
+        "exclude_ports": (exclude_ports or "").strip(),
         "out_dir": str(out_dir),
         "batch_size": int(batch_size),
         "sudo": "auto",

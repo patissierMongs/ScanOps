@@ -178,9 +178,6 @@ export default function Scans({ user }) {
   })();
 
   // 실행 전 예상 — 타겟/제외/옵션/포트/배치크기가 바뀌면 디바운스로 /estimate 호출.
-  // 단계 엔진은 포트 제외를 넘길 자리가 없다(서버도 400 으로 거절한다). 화면에서 먼저 막아
-  // 운영자가 '뺐다'고 믿은 채 실행하는 일이 없게 한다.
-  const excludePortsBlocked = staged && !rawMode && !!excludePorts.trim();
   const estKey = JSON.stringify({ t: targetList, x: excludeList, xp: excludePorts, w: opt.workflow, o: opt.options, p: opt.ports, b: batchSize, s: staged });
   useEffect(() => {
     if (!canRun || !targetList.length) { setEst(null); return; }
@@ -362,7 +359,7 @@ export default function Scans({ user }) {
 
           <div className="scan-run-row">
             <button className="primary scan-run"
-                    disabled={busy || excludePortsBlocked || (rawMode ? !rawCmd.trim() : !targetList.length)}
+                    disabled={busy || (rawMode ? !rawCmd.trim() : !targetList.length)}
                     onClick={runScan}
                     title={rawMode ? "명령을 입력하면 실행할 수 있습니다" : "대상을 입력하면 실행할 수 있습니다"}>
               {busy ? "시작 중…" : "스캔 실행"}
@@ -419,17 +416,9 @@ export default function Scans({ user }) {
                 포트 지정과 같은 문법입니다(<code>9100</code>, <code>1-1024</code>,
                 {" "}<code>U:53</code>). 프린터 같은 장비가 스캔에 반응해 문제를 일으키는 포트를 뺄 때
                 씁니다.{" "}
-                {staged
-                  ? <b>단계별 정밀 스캔은 포트 제외를 지원하지 않습니다.</b>
-                  : "실행되는 모든 nmap 명령에서 빠집니다."}
+                실행되는 모든 nmap 명령에서 빠집니다 — 단계별 정밀 스캔도 발견·TCP·UDP·서비스
+                네 단계 전부에 적용됩니다.
               </div>
-              {/* 조용히 무시하면 뺐다고 믿은 포트가 그대로 스캔된다. 실행 전에 막고 이유를 적는다. */}
-              {excludePortsBlocked && (
-                <div className="scan-hint" role="alert" style={{ color: "var(--risk-high)" }}>
-                  단계별 정밀 스캔에서는 이 값이 적용되지 않습니다. 비우고 실행하거나,
-                  {" "}<b>한 번에 실행</b>으로 바꾸세요.
-                </div>
-              )}
             </section>
 
             {/* 옵션 빌더는 raw 모드에서도 마운트 유지(숨김만) — opt.command 가 최신이라 '채우기'가 정확하게 동작 */}

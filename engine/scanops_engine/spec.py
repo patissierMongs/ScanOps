@@ -132,6 +132,9 @@ class JobSpec:
     job_id: str = "job"
     targets: list = field(default_factory=list)
     exclude: list = field(default_factory=list)
+    # 모든 단계에서 뺄 포트(nmap --exclude-ports). 프린터처럼 스캔에 반응해 문제를
+    # 일으키는 포트를 제외하는 안전 컨트롤이라 한 단계라도 새면 의미가 없다.
+    exclude_ports: str = ""
     out_dir: str = "."
     batch_size: int = 256
     sudo: str = "auto"        # auto(POSIX 비root면 sudo) / always / never
@@ -151,6 +154,7 @@ class JobSpec:
             job_id=d.get("job_id", "job"),
             targets=list(d.get("targets", [])),
             exclude=list(d.get("exclude", [])),
+            exclude_ports=str(d.get("exclude_ports", "") or ""),
             out_dir=d.get("out_dir", "."),
             batch_size=int(d.get("batch_size", 256)),
             sudo=d.get("sudo", "auto"),
@@ -165,6 +169,7 @@ class JobSpec:
     def to_dict(self) -> dict:
         return {
             "job_id": self.job_id, "targets": self.targets, "exclude": self.exclude,
+            "exclude_ports": self.exclude_ports,
             "out_dir": self.out_dir, "batch_size": self.batch_size, "sudo": self.sudo,
             "targets_ports": self.targets_ports,
             "rescan_units": self.rescan_units,
@@ -181,6 +186,8 @@ class JobSpec:
             _validate_exclude(t)
         for label, p in (("tcp", self.tcp.ports), ("udp", self.udp.ports)):
             _validate_ports(p, label)
+        if self.exclude_ports.strip():
+            _validate_ports(self.exclude_ports, "제외 포트")
         if self.tcp.enabled and not self.tcp.ports.strip():
             raise ValueError("TCP 단계가 활성화되었지만 포트가 비어 있습니다.")
         if self.udp.enabled and not self.udp.ports.strip():
