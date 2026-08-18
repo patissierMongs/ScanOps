@@ -1251,3 +1251,37 @@ def test_the_same_dn_is_reported_as_self_issued_not_self_signed(client):
     other = _ssl_cert_nse("rsa", 2048, subject="commonName=leaf",
                           issuer="commonName=Real CA")
     assert not any(s["kind"] == "self_issued" for s in exposure_signals_of(other))
+
+
+def test_a_self_issued_certificate_is_recorded_but_does_not_raise_the_grade(client):
+    """관측했다는 것과 더 위험하다는 것은 다른 층이다.
+
+    RFC 5280 3.2 는 자체 발급 인증서를 CA 의 키 교체·정책 변경을 받치는 정상 메커니즘으로
+    설명한다. 발급자와 주체가 같다는 사실만으로는 체인 검증 실패도 취약성도 증명되지 않는다 -
+    같은 DN 을 쓰는 사설 CA 가 발급한 인증서는 실제로 체인 검증을 통과한다. 표·필터에는
+    남겨 두되, 이 사실 하나로 우선순위를 올리지는 않는다.
+    """
+    from scanops.scanning.taxonomy import enrich_all
+
+    same = _ssl_cert_nse("rsa", 2048, subject="commonName=SameName",
+                         issuer="commonName=SameName")
+    db = SessionLocal()
+    try:
+        # 미분류 서비스 - 하한이 실제로 물릴 수 있는 유일한 자리다(info 에서만 올라간다).
+        plain = _nse_finding("unknown", 9999, [])
+        issued = _nse_finding("unknown", 9999, same)
+        # 대조군: 같은 자리에서 하한을 주는 관측은 여전히 등급을 올려야 한다.
+        expired = _nse_finding("unknown", 9999,
+                               _ssl_cert_nse("rsa", 2048, not_after="2025-01-01T00:00:00"))
+        enrich_all(db, [plain, issued, expired])
+    finally:
+        db.close()
+
+    assert plain["risk_level"] == "info"
+    assert issued["risk_level"] == "info", "자체 발급만으로는 등급이 오르지 않는다"
+    assert expired["risk_level"] == "medium", "하한을 주는 관측은 그대로 올린다"
+
+    # 그래도 관측 사실과 이유는 남아 표·필터·상세에서 보인다.
+    assert any(s["kind"] == "self_issued" for s in issued["exposure_json"])
+    ref = next(c["ref"] for c in issued["compliance_json"] if c["std"] == "노출관측")
+    assert "자체 발급" in ref and "등급은 올리지 않는다" in ref

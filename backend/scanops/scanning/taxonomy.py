@@ -129,7 +129,18 @@ _EXPOSURE_FLOOR = {
     "legacy_protocol": ("high", "알려진 취약 레거시 프로토콜 지원"),
     "cert_expired": ("medium", "만료된 인증서"),
     "weak_key": ("medium", "권고 미만 키 길이"),
-    "self_issued": ("low", "발급자와 주체가 같은 인증서(자체 발급)"),
+}
+
+# 등급은 건드리지 않고 **근거로만** 남기는 관측. '볼 값어치가 있다'와 '위험 하한을 올린다'는
+# 별개다. 표·필터에는 그대로 나오고(exposure_json 을 직접 읽는다) 왜 눈에 띄었는지도 남지만,
+# 이 사실 하나로 우선순위를 올리지는 않는다.
+#
+# self_issued 가 그렇다. RFC 5280 3.2 는 자체 발급 인증서를 CA 의 키 교체·정책 변경을 받치는
+# **정상 메커니즘**으로 설명한다. 발급자와 주체가 같다는 것만으로는 체인 검증 실패도 취약성도
+# 증명되지 않는다 - 실측에서 같은 DN 을 쓰는 사설 CA 가 발급한 인증서가 openssl verify 를
+# 통과했다. 서명·체인 검증 실패라는 증거가 따로 잡히면 그때 하한을 논할 자리다.
+_EXPOSURE_NOTE = {
+    "self_issued": "정상 운영에서도 쓰는 형태여서 등급은 올리지 않는다",
 }
 # 낮은 쪽 -> 높은 쪽. banned 는 조직이 명시 금지한 것이라 노출 신호로 도달하지 않는다.
 _RISK_ORDER = ["info", "low", "medium", "high", "banned"]
@@ -143,23 +154,25 @@ def _raise_to(current: str, floor: str) -> str:
 
 
 def apply_exposure(finding: dict) -> None:
-    """관측된 노출 사실로 위험 등급의 하한을 올리고 근거를 남긴다.
+    """관측된 노출 사실을 근거로 남기고, 그럴 만한 것만 위험 등급의 하한을 올린다.
 
-    조직 규칙보다 **먼저** 적용한다 - 조직이 명시적으로 '허용'으로 정했다면 그 판단이
+    두 갈래다 - 하한을 주는 관측(_EXPOSURE_FLOOR)과 근거로만 남기는 관측(_EXPOSURE_NOTE).
+    관측했다는 사실과 그것이 더 위험하다는 판단은 다른 층이라, 코드에서도 갈라 둔다.
+
+    하한은 조직 규칙보다 **먼저** 적용한다 - 조직이 명시적으로 '허용'으로 정했다면 그 판단이
     이겨야 하기 때문이다(규칙 루프가 뒤에서 덮어쓴다).
     """
     for signal in (finding.get("exposure_json") or []):
         if not isinstance(signal, dict):
             continue
-        floor = _EXPOSURE_FLOOR.get(str(signal.get("kind") or ""))
-        if floor is None:
-            continue
-        level, why = floor
-        finding["risk_level"] = _raise_to(finding.get("risk_level", "info"), level)
-        finding["compliance_json"].append({
-            "std": "노출관측",
-            "ref": f"{signal.get('detail') or signal.get('kind')} - {why}",
-        })
+        kind = str(signal.get("kind") or "")
+        detail = signal.get("detail") or kind
+        if floor := _EXPOSURE_FLOOR.get(kind):
+            level, why = floor
+            finding["risk_level"] = _raise_to(finding.get("risk_level", "info"), level)
+            finding["compliance_json"].append({"std": "노출관측", "ref": f"{detail} - {why}"})
+        elif note := _EXPOSURE_NOTE.get(kind):
+            finding["compliance_json"].append({"std": "노출관측", "ref": f"{detail} - {note}"})
 
 
 def _version_tuple(text: str) -> tuple[int, ...]:
