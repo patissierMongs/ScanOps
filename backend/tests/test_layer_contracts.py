@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path as pathlib_Path
 
 import openpyxl
@@ -400,3 +401,88 @@ def test_a_staged_web_scan_runs_the_same_scripts_as_the_manual_path():
     argv = " ".join(map(str, recorded["service"]))
     for script in ("telnet-encryption", "vnc-info", "smb-protocols", "ssl-cert", "ftp-anon"):
         assert script in argv, f"{script} 가 실제 인자에 없다"
+
+
+# ── 제외는 전선뿐 아니라 닫힘 권한에서도 빠져야 한다 ─────────────────────────
+def test_an_excluded_port_is_not_a_closure_candidate(client):
+    """프로브를 보내지 않은 포트를 '부재를 확인했다'며 닫으면 정확히 거꾸로다.
+
+    운영자가 보호하려고 뺀 포트가 오히려 closed + 정상처리로 사라진다. 전선에서만 빼고
+    후보에 남겨 두면 이 PR 이 여덟 라운드 걸려 막은 미탐이 새 기능으로 되돌아온다.
+    """
+    from scanops.api.scans import _auto_scope_keys, _excluded_port_scope, _port_scope
+    from scanops.db import SessionLocal
+    from scanops.models import Finding
+
+    db = SessionLocal()
+    try:
+        for port in (80, 9100):
+            db.add(Finding(finding_key=f"127.0.0.1|{port}|tcp", host_ip="127.0.0.1",
+                           port=port, proto="tcp", state="open", service="x"))
+        db.add(Finding(finding_key="127.0.0.1|53|udp", host_ip="127.0.0.1",
+                       port=53, proto="udp", state="open", service="domain"))
+        db.commit()
+
+        scope_t = _port_scope("T:80,9100", "T")
+        scope_u = _port_scope("U:53", "U")
+
+        # 제외 없음 - 셋 다 후보다.
+        plain = _auto_scope_keys(db, {"127.0.0.1"}, [], scope_t, scope_u)
+        assert "127.0.0.1|9100|tcp" in plain and "127.0.0.1|80|tcp" in plain
+
+        # T:9100 제외 - 9100 만 빠지고 나머지는 그대로 닫힐 수 있어야 한다.
+        guarded = _auto_scope_keys(
+            db, {"127.0.0.1"}, [], scope_t, scope_u,
+            tcp_excluded=_excluded_port_scope("T:9100", "T"),
+            udp_excluded=_excluded_port_scope("T:9100", "U"),
+        )
+        assert "127.0.0.1|9100|tcp" not in guarded, "제외한 포트가 닫힘 후보에 남았다"
+        assert "127.0.0.1|80|tcp" in guarded, "관측한 포트는 계속 닫힐 수 있어야 한다"
+        assert "127.0.0.1|53|udp" in guarded, "T: 제외가 UDP 를 건드리면 안 된다"
+
+        # T:/U: 혼합
+        mixed = _auto_scope_keys(
+            db, {"127.0.0.1"}, [], scope_t, scope_u,
+            tcp_excluded=_excluded_port_scope("T:9100,U:53", "T"),
+            udp_excluded=_excluded_port_scope("T:9100,U:53", "U"),
+        )
+        assert mixed == {"127.0.0.1|80|tcp"}
+
+        # 전 범위 제외 - 그 프로토콜은 통째로 후보가 아니다.
+        none_tcp = _auto_scope_keys(
+            db, {"127.0.0.1"}, [], scope_t, scope_u,
+            tcp_excluded=_excluded_port_scope("T:1-65535", "T"),
+            udp_excluded=_excluded_port_scope("T:1-65535", "U"),
+        )
+        assert not any(k.endswith("|tcp") for k in none_tcp)
+        assert "127.0.0.1|53|udp" in none_tcp
+    finally:
+        db.close()
+
+
+def test_a_staged_scan_saves_a_closure_scope_without_the_excluded_ports(client):
+    """실행 시점에 저장되는 scope_keys 자체에 제외가 반영돼야 마감·재개도 안전하다."""
+    from scanops.db import SessionLocal
+    from scanops.models import Finding
+
+    headers = _auth(client)
+    db = SessionLocal()
+    try:
+        for port in (80, 9100):
+            db.add(Finding(finding_key=f"10.4.4.4|{port}|tcp", host_ip="10.4.4.4",
+                           port=port, proto="tcp", state="open", service="x"))
+        db.commit()
+    finally:
+        db.close()
+
+    started = client.post("/api/scans/run-staged", headers=headers, json=_scan_body(
+        targets=["10.4.4.4"], ports="T:80,9100", exclude_ports="T:9100"))
+    assert started.status_code == 200, started.text
+
+    from scanops.config import get_settings
+    spec = json.loads((get_settings().scans_dir / f"scan_{started.json()['id']}"
+                       / "spec.json").read_text(encoding="utf-8"))
+    keys = set(spec["scanops"]["scope_keys"])
+    assert "10.4.4.4|9100|tcp" not in keys, "제외한 포트가 저장된 닫힘 범위에 남았다"
+    assert "10.4.4.4|80|tcp" in keys
+    assert spec["exclude_ports"] == "T:9100"

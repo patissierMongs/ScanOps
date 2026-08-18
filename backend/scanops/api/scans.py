@@ -450,9 +450,27 @@ def _observed_after(last_seen: datetime | None, as_of: datetime) -> bool:
     return seen > moment
 
 
+def _excluded_port_scope(exclude_ports: str, proto: str) -> set[int] | None | set:
+    """제외한 포트 범위. ``None`` = 그 프로토콜 전체 제외, ``set()`` = 제외 없음.
+
+    제외는 **관측하지 않겠다**는 선언이다. 그러므로 닫힘 후보에서도 빠져야 한다 - 전선에서만
+    빼고 후보에 남겨 두면, 프로브를 한 번도 보내지 않은 포트를 '부재를 확인했다'며 닫는다.
+    운영자가 보호하려고 뺀 포트가 오히려 조용히 사라지는, 정확히 거꾸로 된 결과다.
+    """
+    if not (exclude_ports or "").strip():
+        return set()
+    return _port_scope(exclude_ports, proto)
+
+
+def _is_excluded(port: int, excluded: set[int] | None | set) -> bool:
+    return excluded is None or port in excluded
+
+
 def _auto_scope_keys(db: Session, scanned_hosts: set[str], findings: list[dict],
                      tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set,
-                     as_of: datetime | None = None) -> set[str]:
+                     as_of: datetime | None = None,
+                     tcp_excluded: set[int] | None | set = frozenset(),
+                     udp_excluded: set[int] | None | set = frozenset()) -> set[str]:
     """관측 범위 안의 닫힘 후보. ``as_of`` 는 이 결과가 관측된 시각이다.
 
     그보다 **나중에** 관측된 발견은 후보가 아니다. 이 결과는 그때 그 포트가 없었다고 말할
@@ -473,9 +491,11 @@ def _auto_scope_keys(db: Session, scanned_hosts: set[str], findings: list[dict],
         rows = [row for row in rows if not _observed_after(row.last_seen, as_of)]
     for row in rows:
         proto = (row.proto or "").lower()
-        if proto == "tcp" and (tcp_scope is None or row.port in tcp_scope):
+        if (proto == "tcp" and (tcp_scope is None or row.port in tcp_scope)
+                and not _is_excluded(row.port, tcp_excluded)):
             keys.add(row.finding_key)
-        if proto == "udp" and (udp_scope is None or row.port in udp_scope):
+        if (proto == "udp" and (udp_scope is None or row.port in udp_scope)
+                and not _is_excluded(row.port, udp_excluded)):
             keys.add(row.finding_key)
     return keys
 
@@ -1154,11 +1174,18 @@ def _validate_engine_scope_keys(saved_spec: dict) -> None:
     effective_hosts = set(scope.apply_excludes(chunker.expand_targets(targets), excludes))
     tcp_ports = _engine_stage_port_scope(saved_spec, "tcp")
     udp_ports = _engine_stage_port_scope(saved_spec, "udp")
+    excluded = {proto: _excluded_port_scope(saved_spec.get("exclude_ports", ""), prefix)
+                for proto, prefix in (("tcp", "T"), ("udp", "U"))}
     for host, port, proto in parsed_keys:
         port_scope = tcp_ports if proto == "tcp" else udp_ports
         if host not in effective_hosts or (port_scope is not None and port not in port_scope):
             raise ValueError(
                 "저장된 단계 스캔 닫힘 범위(scope_keys)가 유효 스캔 범위를 벗어났습니다."
+            )
+        # 손으로 고친 spec 이 제외 포트를 닫힘 후보로 되돌리는 것을 막는다.
+        if _is_excluded(port, excluded.get(proto, frozenset())):
+            raise ValueError(
+                "저장된 단계 스캔 닫힘 범위(scope_keys)에 제외한 포트가 들어 있습니다."
             )
 
 
@@ -1338,6 +1365,10 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
                     _saved_stage_scope(saved_spec, "tcp"),
                     _saved_stage_scope(saved_spec, "udp"),
                     as_of=scan.started_at,
+                    # 저장된 spec 의 제외도 같이 읽는다 - 마감·재개가 후보를 다시 세우므로
+                    # 여기서 빠뜨리면 실행 시점에 뺀 포트가 마감 때 되살아나 닫힌다.
+                    tcp_excluded=_excluded_port_scope(saved_spec.get("exclude_ports", ""), "T"),
+                    udp_excluded=_excluded_port_scope(saved_spec.get("exclude_ports", ""), "U"),
                 )
             closing = (set() if unfinished
                        else engine_runner.observed_scope(
@@ -2566,7 +2597,12 @@ def run_staged(
                      if "udp" in body.options else set())
         spec["scanops"] = {
             # Empty is meaningful: this scan must not close any pre-existing finding.
-            "scope_keys": sorted(_auto_scope_keys(db, set(hosts), [], tcp_scope, udp_scope)),
+            # 제외한 포트는 프로브를 보내지 않으므로 닫힘 후보에서도 빼야 한다.
+            "scope_keys": sorted(_auto_scope_keys(
+                db, set(hosts), [], tcp_scope, udp_scope,
+                tcp_excluded=_excluded_port_scope(body.exclude_ports, "T"),
+                udp_excluded=_excluded_port_scope(body.exclude_ports, "U"),
+            )),
         }
         (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
         scan.command = f"{engine_runner.describe(spec)}  ·  {len(hosts)}호스트"
