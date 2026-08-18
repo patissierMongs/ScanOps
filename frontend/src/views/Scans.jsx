@@ -499,8 +499,12 @@ export default function Scans({ user }) {
                       {stages[s.id]?.stages?.length
                         ? <StageTimeline s={stages[s.id]} />
                         : isActive(s.status) ? <Progress p={p} /> : null}
-                      {/* 배치 구성은 끝난 뒤에도 '이 스캔이 어떻게 돌았는지'를 말해 준다.
-                          실행 중에는 Progress 가 x/y 를 이미 보여주므로 중복해서 적지 않는다. */}
+                      {/* StageTimeline 은 단계 칩·전체 % 막대만 그린다 — 배치 x/y·경과는 Progress 에만
+                          있어 진행 중 단계 스캔에서 사라졌다. /progress 는 엔진 스캔에도 배치·경과를
+                          채워 주므로(배치는 swept_batches) 그걸 StageTimeline 아래에 되살린다. */}
+                      {stages[s.id]?.stages?.length && isActive(s.status)
+                        ? <StagedRunMeta p={p} /> : null}
+                      {/* 배치 구성은 끝난 뒤에도 '이 스캔이 어떻게 돌았는지'를 말해 준다. */}
                       <BatchNote scan={s} progress={isActive(s.status) ? p : null} />
                       {!stages[s.id]?.stages?.length && !isActive(s.status) && !s.batch_total
                         ? <span className="muted">—</span> : null}
@@ -583,6 +587,24 @@ function BatchNote({ scan, progress }) {
   return (
     <div className="mono muted" style={{ fontSize: 11, marginTop: 2 }}>
       배치 {scan.batch_total}/{scan.batch_total} · {scan.batch_size}대씩
+    </div>
+  );
+}
+
+// 단계 스캔 보조줄 — StageTimeline 은 단계 칩만 그리므로, /progress 가 엔진 스캔에도 채워 주는
+// 배치 x/y·크기·경과를 여기서 되살린다. ETA·대상수는 엔진 스캔에서 백엔드가 아직 비워 주므로
+// (sidecar 의존) 지어내지 않는다 — 있는 값만 정직하게 보여준다.
+function StagedRunMeta({ p }) {
+  if (!p) return null;
+  const total = p.batches_total || 1;
+  const parts = [];
+  if (total > 1) parts.push(`배치 ${Math.min(p.batches_done + 1, total)}/${total}`);
+  if (total > 1 && p.batch_size) parts.push(`${p.batch_size}대씩`);
+  if (p.elapsed_seconds != null) parts.push(`경과 ${fmtDur(p.elapsed_seconds)}`);
+  if (!parts.length) return null;
+  return (
+    <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
+      {parts.join(" · ")}
     </div>
   );
 }
