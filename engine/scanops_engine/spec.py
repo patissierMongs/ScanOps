@@ -30,9 +30,21 @@ DEFAULT_UDP_PORTS = ("7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,5
                      "514,520,623,1900,2049,4500,5060,5353,5355,11211")
 # 서비스 probe 기본 NSE — 타겟형(portrule 안 맞으면 자동 skip). 원본의 20종 전수 대신 핵심만.
 # DB 찌르는 스크립트(redis-info·oracle-tns-version·ms-sql-info 등)는 장애 위험으로 기본 제외.
-DEFAULT_NSE = ["banner", "http-headers", "http-title", "http-server-header",
-               "ssl-cert", "ssh-hostkey", "ftp-anon",
-               "smb-os-discovery", "snmp-info"]
+# spec 이 stages.service.nse 를 지정하지 않았을 때의 **폴백**이다. 운영 경로(웹)는
+# engine_runner.build_job_spec 이 scan_options.NSE_DEFAULT_KEYS 를 항상 채워 넣으므로 여기까지
+# 오지 않는다. 그래도 목록이 달랐던 탓에 "단계 스캔은 이 스크립트를 안 돌린다"는 잘못된 결론이
+# 실제로 나왔다 - 안 쓰이는 기본값이라도 다르면 읽는 사람을 속인다.
+#
+# 그래서 웹·단독과 **같은 집합**으로 맞춘다. 세 곳이 어긋나지 않는지는 백엔드 계약 테스트가
+# 검사한다(tests/test_layer_contracts.py). 엔진은 백엔드를 import 하지 않는 독립 패키지라
+# 파생시킬 수 없어서, 사본을 두되 드리프트를 테스트로 막는 방식이다.
+#
+# UDP 식별 단계는 NSE 를 붙이지 않으므로(_probe_protocol 이 tcp 일 때만 --script 를 싣는다)
+# 이 목록은 TCP 식별에만 쓰인다.
+DEFAULT_NSE = ["banner", "dns-nsid", "fingerprint-strings", "ftp-anon", "ftp-syst",
+               "http-headers", "http-server-header", "http-title", "rdp-ntlm-info",
+               "rpcinfo", "sip-methods", "smb-os-discovery", "smb-protocols",
+               "ssh-hostkey", "ssl-cert", "telnet-encryption", "tls-alpn", "vnc-info"]
 
 
 @dataclass

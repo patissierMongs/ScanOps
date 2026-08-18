@@ -310,3 +310,93 @@ def test_batch_progress_counts_the_batches_that_actually_exist(tmp_path):
     (out / "run-state.json").write_text(
         json.dumps({"live": [f"10.0.0.{i}" for i in range(1, 66)]}), encoding="utf-8")
     assert engine_runner.swept_total(out, spec) == 2
+
+
+# ── 웹·단독·엔진의 기본 설정은 하나여야 한다 ─────────────────────────────────
+def _standalone_default_nse() -> set[str]:
+    """단독 스캐너의 기본 NSE 세트 - 소스에서 직접 읽는다(별도 프로세스라 import 불가)."""
+    import re
+
+    text = (pathlib_Path(__file__).resolve().parents[2] / "scanner" / "scanops_scanner.py"
+            ).read_text(encoding="utf-8")
+    block = re.search(r"DEFAULT_NSE_SCRIPTS = \((.*?)\)", text, re.S).group(1)
+    return {s for s in re.findall(r"[a-z0-9\-]+", block.replace('"', "")) if s}
+
+
+def test_the_three_scan_paths_share_one_default_nse_set():
+    """웹·단독·엔진이 같은 스크립트를 돌려야 결과를 서로 도킹할 수 있다.
+
+    엔진 목록만 9건으로 달랐다. 운영 경로에서는 build_job_spec 이 웹 목록을 항상 채워 넣어
+    실제 동작은 같았지만, **안 쓰이는 기본값이라도 다르면 읽는 사람을 속인다** - 실제로
+    "단계 스캔은 telnet/vnc/smb 를 안 돌린다"는 잘못된 결론이 이 목록 때문에 나왔다.
+
+    엔진은 백엔드를 import 하지 않는 독립 패키지라 파생시킬 수 없다. 사본을 두되 드리프트를
+    여기서 막는다.
+    """
+    import sys
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine.spec import DEFAULT_NSE
+
+    from scanops.scanning import scan_options
+
+    web = set(scan_options.NSE_DEFAULT_KEYS)
+    assert set(DEFAULT_NSE) == web, "엔진 폴백이 웹 기본값과 달라졌다"
+    assert _standalone_default_nse() == web, "단독 스캐너가 웹 기본값과 달라졌다"
+
+
+def test_the_three_scan_paths_share_one_udp_port_set():
+    """포트 기본값이 갈리면 같은 대역을 스캔해도 결과 집합이 달라진다."""
+    import re
+    import sys
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine.spec import DEFAULT_UDP_PORTS
+
+    from scanops.scanning import scan_options
+
+    text = (pathlib_Path(__file__).resolve().parents[2] / "scanner" / "scanops_scanner.py"
+            ).read_text(encoding="utf-8")
+    alone = re.search(r'^UDP_DEFAULT_PORTS\s*=\s*"([^"]+)"', text, re.M).group(1)
+
+    assert DEFAULT_UDP_PORTS == scan_options.UDP_DEFAULT_PORTS
+    assert alone == scan_options.UDP_DEFAULT_PORTS
+
+
+def test_a_staged_web_scan_runs_the_same_scripts_as_the_manual_path():
+    """spec 까지가 아니라 **실제 nmap 인자**에 같은 스크립트가 실리는지 본다.
+
+    목록만 대조하면 중간에서 끊기는 것을 못 잡는다 - 프론트가 빈 배열을 보내면 0건이 되는
+    경로가 실제로 있다.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine.pipeline import Pipeline
+    from scanops_engine.spec import JobSpec
+
+    from scanops.scanning import engine_runner, scan_options
+
+    built = engine_runner.build_job_spec(
+        1, ["10.0.0.1"], [], ["syn", "version"], "", None, Path("/tmp/x"), 64)
+    spec = JobSpec.from_dict(built)
+    assert set(spec.service.nse) == set(scan_options.NSE_DEFAULT_KEYS)
+
+    class _Sink:
+        def emit(self, *a, **k):
+            pass
+
+    # 서비스 단계가 TCP 에 싣는 --script 를 확인한다(UDP 는 의도적으로 NSE 미사용).
+    recorded = {}
+
+    def fake_nmap(stage, args, base, fatal=True):
+        recorded.setdefault(stage, args)
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe = Pipeline(spec, _Sink(), "nmap")
+    pipe._nmap = fake_nmap
+    pipe._probe_protocol("10.0.0.1", "tcp", [443], spec.service, confirm=False)
+    argv = " ".join(map(str, recorded["service"]))
+    for script in ("telnet-encryption", "vnc-info", "smb-protocols", "ssl-cert", "ftp-anon"):
+        assert script in argv, f"{script} 가 실제 인자에 없다"
