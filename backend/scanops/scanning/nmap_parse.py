@@ -40,7 +40,10 @@ _SERVER_SOURCES = (
 # 여기서는 **관측된 사실만** 뽑는다. 등급을 정하는 것은 taxonomy 의 일이다(관측과 판단을
 # 섞지 않는다). 스크립트가 실패로 끝났으면 아무 말도 하지 않는다 - nse_failed 가 거른다.
 _SMB_V1_RE = re.compile(r"(?i)\bSMBv1\b")
-_CERT_EXPIRY_RE = re.compile(r"(?i)Not valid after:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})")
+# nmap 은 `Not valid after: 2026-08-18T23:59:59` 처럼 **시각까지** 낸다. 날짜만 잘라 읽고
+# 자정으로 되돌리면 오늘 만료되는 인증서가 하루 내내 이미 만료된 것으로 잡힌다.
+_CERT_EXPIRY_RE = re.compile(r"(?i)Not valid after:\s*(\S+)")
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _CERT_SUBJECT_RE = re.compile(r"(?i)^Subject:\s*(.+)$", re.M)
 _CERT_ISSUER_RE = re.compile(r"(?i)^Issuer:\s*(.+)$", re.M)
 _CERT_BITS_RE = re.compile(r"(?i)Public Key bits:\s*(\d+)")
@@ -82,21 +85,44 @@ def _vnc_accepts_no_auth(output: str) -> bool:
     return False
 
 
+def _cert_deadline(text: str) -> datetime | None:
+    """ssl-cert 의 유효기간 끝 시각. 읽지 못하면 None - 그때는 만료를 주장하지 않는다.
+
+    nmap 은 초 단위까지 낸다(`2026-08-18T23:59:59`). 빌드에 따라 `Z` 나 오프셋이 붙을 수
+    있어 ISO 8601 로 읽고, 시간대가 없으면 nmap 의 출력대로 UTC 로 본다.
+
+    날짜만 있는 경우에는 **그날 끝**으로 본다. 자정으로 읽으면 그날 하루가 통째로 '이미
+    만료' 가 되는데, 만료는 등급을 올리는 신호라 모르는 쪽으로 기울여야 한다.
+    """
+    stamp = (text or "").strip()
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if _DATE_ONLY_RE.match(stamp):
+        parsed = parsed.replace(hour=23, minute=59, second=59)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _cert_signals(output: str) -> list[dict]:
-    """ssl-cert 출력에서 만료·자가서명·약한 키를 뽑는다. CN 만 쓰고 나머지를 버리던 자리다."""
+    """ssl-cert 출력에서 만료·자체발급·약한 키를 뽑는다. CN 만 쓰고 나머지를 버리던 자리다."""
     out: list[dict] = []
     if match := _CERT_EXPIRY_RE.search(output):
         expiry = match.group(1)
-        try:
-            expired = datetime.strptime(expiry, "%Y-%m-%d").replace(tzinfo=timezone.utc) < datetime.now(timezone.utc)
-        except ValueError:
-            expired = False
-        if expired:
+        deadline = _cert_deadline(expiry)
+        if deadline is not None and deadline < datetime.now(timezone.utc):
             out.append({"kind": "cert_expired", "detail": f"인증서 만료됨 (유효기간 {expiry} 까지)"})
     subject = _CERT_SUBJECT_RE.search(output)
     issuer = _CERT_ISSUER_RE.search(output)
     if subject and issuer and subject.group(1).strip() == issuer.group(1).strip():
-        out.append({"kind": "self_signed", "detail": "자가서명 인증서(발급자 = 주체)"})
+        # RFC 5280 3.2 는 issuer=subject 를 **self-issued** 로 정의하고, 그 인증서 안의
+        # 공개키로 서명이 검증될 때만 self-signed 라고 구분한다. ssl-cert 문자열에는 서명
+        # 검증 결과가 없으므로 '자가서명'은 관측보다 강한 결론이다 - 같은 DN 을 쓰는 사설
+        # CA 가 발급한 인증서도 여기 걸린다(실측으로 openssl verify 통과가 확인됐다).
+        out.append({"kind": "self_issued",
+                    "detail": "발급자와 주체가 같음(자체 발급) - 서명 검증은 이 출력으로 확인 불가"})
     # 키 길이는 **알고리즘과 함께** 읽어야 뜻이 생긴다. nmap 은 두 줄을 나란히 내는데
     # type 을 읽지 않고 2048 을 전부에 적용하면, 흔한 P-256 인증서가 전부 약한 키가 된다
     # (EC 384 조차 그랬다 - RSA 2048 보다 강한 키다).

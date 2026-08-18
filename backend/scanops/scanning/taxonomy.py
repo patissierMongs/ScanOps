@@ -129,7 +129,7 @@ _EXPOSURE_FLOOR = {
     "legacy_protocol": ("high", "알려진 취약 레거시 프로토콜 지원"),
     "cert_expired": ("medium", "만료된 인증서"),
     "weak_key": ("medium", "권고 미만 키 길이"),
-    "self_signed": ("low", "신뢰 체인 없는 자가서명 인증서"),
+    "self_issued": ("low", "발급자와 주체가 같은 인증서(자체 발급)"),
 }
 # 낮은 쪽 -> 높은 쪽. banned 는 조직이 명시 금지한 것이라 노출 신호로 도달하지 않는다.
 _RISK_ORDER = ["info", "low", "medium", "high", "banned"]

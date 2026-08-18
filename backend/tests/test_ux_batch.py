@@ -871,13 +871,13 @@ def test_exposure_never_lowers_a_grade(client):
     from scanops.scanning.taxonomy import apply_exposure
 
     finding = {"risk_level": "high", "compliance_json": [],
-               "exposure_json": [{"kind": "self_signed", "detail": "자가서명"}]}
+               "exposure_json": [{"kind": "self_issued", "detail": "자체 발급"}]}
     apply_exposure(finding)
     assert finding["risk_level"] == "high"
 
 
 def test_certificate_facts_beyond_the_common_name_are_kept(client):
-    """ssl-cert 는 CN 만 쓰고 만료·자가서명·키 길이를 버리고 있었다."""
+    """ssl-cert 는 CN 만 쓰고 만료·자체발급·키 길이를 버리고 있었다."""
     from scanops.scanning.nmap_parse import exposure_signals
 
     signals = exposure_signals([{"id": "ssl-cert", "output": (
@@ -887,7 +887,7 @@ def test_certificate_facts_beyond_the_common_name_are_kept(client):
         "Not valid before: 2018-01-01T00:00:00\n"
         "Not valid after:  2020-01-01T00:00:00\n")}])
     kinds = {s["kind"] for s in signals}
-    assert kinds == {"cert_expired", "self_signed", "weak_key"}
+    assert kinds == {"cert_expired", "self_issued", "weak_key"}
 
     # 유효한 인증서는 아무 신호도 만들지 않는다(모든 TLS 포트에 딱지가 붙으면 신호가 죽는다).
     healthy = exposure_signals([{"id": "ssl-cert", "output": (
@@ -1107,15 +1107,22 @@ def test_an_eol_verdict_survives_rule_edits(client):
     assert level == "high" and "지원종료" in stds, "규칙 삭제가 EOL 판정을 지웠다"
 
 
-def _ssl_cert_nse(keytype: str, bits: int) -> list[dict]:
-    """nmap ssl-cert 가 실제로 내는 형식 - type 과 bits 를 나란히 낸다."""
+def _ssl_cert_nse(keytype: str, bits: int, *, not_after: str = "2099-01-01T00:00:00",
+                  subject: str = "commonName=example.internal",
+                  issuer: str = "commonName=Example Corp CA") -> list[dict]:
+    """nmap ssl-cert 가 실제로 내는 형식 - type/bits 를 나란히, 만료는 시각까지 낸다."""
     return [{"id": "ssl-cert", "output": (
-        "Subject: commonName=example.internal\n"
-        "Issuer: commonName=Example Corp CA\n"
+        f"Subject: {subject}\n"
+        f"Issuer: {issuer}\n"
         f"Public Key type: {keytype}\n"
         f"Public Key bits: {bits}\n"
         "Not valid before: 2026-01-01T00:00:00\n"
-        "Not valid after:  2099-01-01T00:00:00\n")}]
+        f"Not valid after:  {not_after}\n")}]
+
+
+def exposure_signals_of(nse: list[dict]) -> list[dict]:
+    from scanops.scanning.nmap_parse import exposure_signals
+    return exposure_signals(nse)
 
 
 def test_key_strength_is_read_with_the_algorithm_not_bits_alone(client):
@@ -1166,3 +1173,81 @@ def test_an_unreadable_key_algorithm_is_not_called_weak(client):
     # Ed25519 는 256bit 로 128비트 강도다 - RSA 임계값을 들이대면 약한 키가 된다.
     assert exposure_signals(_ssl_cert_nse("ed25519", 256)) == []
     assert exposure_signals(_ssl_cert_nse("unknown", 512)) == []
+
+
+def test_a_certificate_expiring_later_today_is_not_called_expired(client):
+    """nmap 은 시각까지 내는데 날짜만 읽고 자정으로 되돌리면 하루를 통째로 잃는다.
+
+    오늘 23:59 에 끝나는 인증서가 그날 내내 '이미 만료' 로 잡혔다. 만료는 medium 하한을
+    올리는 신호라, 아직 유효한 인증서가 운영자의 우선순위를 하루 먼저 흔든다.
+    """
+    from datetime import timedelta
+
+    from scanops.scanning.nmap_parse import exposure_signals
+
+    now = datetime.now(timezone.utc)
+
+    def expired(not_after: str) -> bool:
+        return any(s["kind"] == "cert_expired"
+                   for s in exposure_signals(_ssl_cert_nse("rsa", 2048, not_after=not_after)))
+
+    # 음성 경계 - 오늘 끝나지만 아직 남아 있다.
+    assert not expired(now.replace(hour=23, minute=59, second=59).strftime("%Y-%m-%dT%H:%M:%S"))
+    assert not expired((now + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S"))
+    # 양성 경계 - 1초 전에 끝났다.
+    assert expired((now - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S"))
+    assert expired("2025-01-01T00:00:00")
+    # 시간대 표기가 붙어도 같은 뜻이어야 한다.
+    assert expired("2025-01-01T00:00:00Z")
+    assert not expired((now + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S") + "+00:00")
+    # 읽지 못하면 만료를 주장하지 않는다.
+    assert not expired("not-a-date")
+    assert not expired("")
+
+
+def test_an_expiry_given_as_a_bare_date_is_read_as_the_end_of_that_day(client):
+    """날짜만 있으면 그날 끝으로 본다 - 자정으로 읽으면 그날이 통째로 만료가 된다."""
+    from scanops.scanning.nmap_parse import exposure_signals
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def expired(not_after: str) -> bool:
+        return any(s["kind"] == "cert_expired"
+                   for s in exposure_signals(_ssl_cert_nse("rsa", 2048, not_after=not_after)))
+
+    assert not expired(today), "오늘 날짜만 적혀 있으면 아직 끝나지 않았다"
+    assert expired("2025-01-01")
+
+
+def test_the_same_dn_is_reported_as_self_issued_not_self_signed(client):
+    """issuer = subject 는 self-issued 일 뿐 self-signed 를 증명하지 않는다.
+
+    RFC 5280 3.2 는 그 인증서 안의 공개키로 서명이 검증될 때만 self-signed 라고 구분한다.
+    ssl-cert 문자열에는 서명 검증 결과가 없으므로 '자가서명'은 관측보다 강한 결론이다 -
+    같은 DN 을 쓰는 사설 CA 가 발급한(= 체인 검증을 통과하는) 인증서도 여기 걸린다.
+    """
+    from scanops.scanning.taxonomy import enrich_all
+
+    same = _ssl_cert_nse("rsa", 2048, subject="commonName=SameName",
+                         issuer="commonName=SameName")
+    signals = [s for s in exposure_signals_of(same)]
+    kinds = {s["kind"] for s in signals}
+    assert "self_issued" in kinds and "self_signed" not in kinds
+    detail = next(s["detail"] for s in signals if s["kind"] == "self_issued")
+    assert "자가서명" not in detail, "관측하지 않은 것을 관측했다고 말하면 안 된다"
+    assert "확인 불가" in detail, "무엇을 확인하지 못했는지 함께 적는다"
+
+    # 등급 근거에도 같은 문구로 실린다.
+    db = SessionLocal()
+    try:
+        finding = _nse_finding("https", 443, same)
+        enrich_all(db, [finding])
+    finally:
+        db.close()
+    ref = next(c["ref"] for c in finding["compliance_json"] if c["std"] == "노출관측")
+    assert "자체 발급" in ref and "자가서명" not in ref
+
+    # 발급자가 다르면 신호 자체가 없다.
+    other = _ssl_cert_nse("rsa", 2048, subject="commonName=leaf",
+                          issuer="commonName=Real CA")
+    assert not any(s["kind"] == "self_issued" for s in exposure_signals_of(other))
