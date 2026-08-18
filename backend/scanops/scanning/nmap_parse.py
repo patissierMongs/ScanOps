@@ -5,11 +5,14 @@ nmapParser 의 검증된 로직을 포팅한 것.
 """
 from __future__ import annotations
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 from . import fingerprints
+
+logger = logging.getLogger(__name__)
 
 # (script_id 부분일치, 라벨, 정규식) — NSE 출력에서 한 줄 핵심 추출
 _REMARK_PATTERNS = [
@@ -128,17 +131,61 @@ def host_scripts(host) -> list[dict]:
             for s in block.findall("script")]
 
 
-def host_scripts_for_port(scripts: list[dict], port: int) -> list[dict]:
-    """이 포트에 귀속시킬 호스트 스크립트.
+# finding 하나가 실을 수 있는 NSE 증거의 상한. 가져오기 XML 은 외부에서 온 입력이라
+# 파싱 **후** 크기도 묶어야 한다(업로드 상한은 파싱 전 입력에만 걸린다).
+_MAX_NSE_SCRIPTS = 64
+_MAX_NSE_BYTES = 64 * 1024
 
-    표에 없는 스크립트는 **모든 포트에 붙인다** - 조용히 버리지 않기 위해서다. 표는
-    '어느 포트의 사실인지 아는 것'만 좁히는 용도이고, 모르는 것을 없애는 용도가 아니다.
+
+def host_scripts_for_port(scripts: list[dict], port: int) -> list[dict]:
+    """이 포트에 귀속시킬 호스트 스크립트 - **매핑이 있는 것만.**
+
+    처음에는 표에 없는 스크립트를 '조용히 버리지 않으려고' 모든 포트에 붙였다. 그건 보존이
+    아니라 **없는 귀속을 지어내는 것**이었다 - hostrule 은 정의상 포트 인자를 받지 않으므로
+    (nmap NSE 문서) '어느 포트인지 모른다'가 '모든 포트의 사실'이 될 수는 없다. 22/tcp 와
+    443/tcp 에 같은 증거가 붙고, 열린 포트 512개 + 64KiB 출력 하나로 저장량이 288배가 됐다.
+
+    모르는 것은 붙이지 않되 **조용히 버리지도 않는다** - 호출자가 로그로 남긴다.
     """
     out = []
     for script in scripts:
         wanted = _HOSTSCRIPT_PORTS.get(str(script.get("id") or "").lower())
-        if wanted is None or port in wanted:
+        if wanted is not None and port in wanted:
             out.append(script)
+    return out
+
+
+def unmapped_host_scripts(scripts: list[dict]) -> list[str]:
+    """귀속 규칙이 없어 finding 에 싣지 못한 hostrule 스크립트 id."""
+    return sorted({str(s.get("id") or "") for s in scripts
+                   if str(s.get("id") or "").lower() not in _HOSTSCRIPT_PORTS})
+
+
+def cap_nse(nse: list[dict]) -> list[dict]:
+    """finding 하나가 지는 증거량을 묶는다. 잘렸으면 **잘렸다고 적는다.**
+
+    조용히 자르면 읽는 사람이 그것을 전체로 오해한다 - 이 PR 이 내내 지킨 규칙이 여기에도
+    똑같이 걸린다.
+    """
+    out: list[dict] = []
+    budget = _MAX_NSE_BYTES
+    for script in nse[:_MAX_NSE_SCRIPTS]:
+        text = str(script.get("output") or "")
+        size = len(text.encode("utf-8", "replace"))
+        if size <= budget:
+            out.append(script)
+            budget -= size
+            continue
+        if budget > 0:
+            out.append({**script,
+                        "output": text.encode("utf-8", "replace")[:budget].decode("utf-8", "ignore")
+                                  + f"\n… (증거 상한 {_MAX_NSE_BYTES} bytes 로 잘림)"})
+        budget = 0
+        break
+    dropped = len(nse) - len(out)
+    if dropped > 0:
+        out.append({"id": "scanops-evidence-capped",
+                    "output": f"증거 상한으로 스크립트 {dropped}건을 싣지 않았습니다."})
     return out
 
 
@@ -464,6 +511,11 @@ def parse_xml(source) -> list[dict]:
         times = host.find("times")
         rtt = times.get("srtt") if times is not None else ""
         hostrule_nse = host_scripts(host)
+        if unmapped := unmapped_host_scripts(hostrule_nse):
+            # 붙일 포트를 모르는 hostrule 결과. 지어내서 붙이지 않되, 사라졌다는 사실은 남긴다 -
+            # 소비처가 생기면 _HOSTSCRIPT_PORTS 에 귀속 규칙을 더하면 된다.
+            logger.info("귀속 규칙이 없는 hostscript 를 finding 에 싣지 않았습니다: %s (host=%s)",
+                        ", ".join(unmapped), host_ip)
 
         ports = host.find("ports")
         if ports is None:
@@ -484,6 +536,7 @@ def parse_xml(source) -> list[dict]:
             nse = [{"id": s.get("id") or "", "output": s.get("output") or ""}
                    for s in port.findall("script")]
             nse += host_scripts_for_port(hostrule_nse, int(port.get("portid")))
+            nse = cap_nse(nse)
             cpe = ";".join(c.text or "" for c in (svc.findall("cpe") if svc is not None else []))
             detail = _detail(svc)
             service = (svc.get("name") if svc is not None else "") or ""

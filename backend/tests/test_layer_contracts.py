@@ -187,14 +187,65 @@ def test_a_hostrule_script_reaches_the_finding_it_describes():
     assert exposure_signals(web["nse_json"]) == []
 
 
-def test_an_unmapped_host_script_is_kept_rather_than_dropped():
-    """표에 없는 hostrule 스크립트를 조용히 버리면 같은 병이 다시 난다."""
-    from scanops.scanning.nmap_parse import parse_xml
+def test_an_unmapped_host_script_is_not_copied_onto_every_port():
+    """'조용히 버리지 않는다'를 모든 포트 복제로 구현한 것이 잘못이었다.
 
-    xml = _HOSTSCRIPT_XML.replace(b'id="smb-protocols"', b'id="some-new-hostrule"')
-    rows = {f["port"]: f for f in parse_xml(xml)}
-    assert "some-new-hostrule" in {s["id"] for s in rows[80]["nse_json"]}
-    assert "some-new-hostrule" in {s["id"] for s in rows[445]["nse_json"]}
+    hostrule 은 정의상 포트 인자를 받지 않는다(nmap NSE 문서). '어느 포트인지 모른다'가
+    '모든 포트의 사실'이 될 수는 없다 - 그건 보존이 아니라 **없는 귀속을 지어내는 것**이고,
+    22/tcp 와 443/tcp 에 같은 증거가 붙는다. 저장량도 포트 수에 비례해 늘어난다.
+
+    모르는 것은 붙이지 않되, 조용히 사라지지도 않는다 - 파서가 로그로 남긴다.
+    """
+    import json
+    import logging
+
+    from scanops.scanning.nmap_parse import parse_xml, unmapped_host_scripts
+
+    big = "A" * 65536
+    ports = "".join(
+        f'<port protocol="tcp" portid="{p}"><state state="open" reason="syn-ack"/>'
+        f'<service name="x"/></port>' for p in range(1000, 1512)
+    )
+    xml = (
+        '<?xml version="1.0"?><nmaprun scanner="nmap"><host><status state="up"/>'
+        '<address addr="10.0.0.5" addrtype="ipv4"/>'
+        f"<ports>{ports}</ports>"
+        f'<hostscript><script id="some-new-hostrule" output="{big}"/></hostscript>'
+        '</host><runstats><finished exit="success"/><hosts up="1" down="0" total="1"/>'
+        "</runstats></nmaprun>"
+    ).encode()
+
+    rows = parse_xml(xml)
+    assert len(rows) == 512
+    assert all(r["nse_json"] == [] for r in rows), "무관한 포트에 귀속시키지 않는다"
+
+    # 저장량이 포트 수에 비례해 늘어나면 XML 하나로 DB 를 채울 수 있다.
+    stored = sum(len(json.dumps(r["nse_json"], ensure_ascii=False).encode()) for r in rows)
+    assert stored < len(xml), f"입력보다 커지면 안 된다 ({stored} vs {len(xml)})"
+
+    # 버린 사실 자체는 남는다.
+    assert unmapped_host_scripts([{"id": "some-new-hostrule"}]) == ["some-new-hostrule"]
+    assert unmapped_host_scripts([{"id": "smb-protocols"}]) == [], "매핑이 있으면 버리지 않는다"
+
+
+def test_script_evidence_on_one_finding_is_bounded_and_says_so():
+    """가져오기 XML 은 외부 입력이다 - 업로드 상한은 파싱 **전** 크기에만 걸린다.
+
+    조용히 자르면 읽는 사람이 그것을 전체로 오해하므로, 잘렸으면 잘렸다고 적는다.
+    """
+    from scanops.scanning.nmap_parse import _MAX_NSE_BYTES, _MAX_NSE_SCRIPTS, cap_nse
+
+    one = cap_nse([{"id": "huge", "output": "B" * (_MAX_NSE_BYTES * 2)}])
+    assert len(one) == 1 and "잘림" in one[0]["output"]
+    assert len(one[0]["output"].encode()) < _MAX_NSE_BYTES * 1.1
+
+    many = cap_nse([{"id": f"s{i}", "output": "x" * 4096} for i in range(_MAX_NSE_SCRIPTS * 2)])
+    assert sum(len(s["output"].encode()) for s in many) <= _MAX_NSE_BYTES * 1.1
+    assert any(s["id"] == "scanops-evidence-capped" for s in many), "생략한 사실을 적는다"
+
+    # 평범한 출력은 그대로 지나간다 - 상한이 정상 경로를 건드리면 안 된다.
+    plain = [{"id": "ssl-cert", "output": "Subject: commonName=a"}]
+    assert cap_nse(plain) == plain
 
 
 # ── 진행 표시: 분자와 분모는 같은 모집단 ─────────────────────────────────────
