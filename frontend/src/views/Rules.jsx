@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useToast } from "../ui/Toast.jsx";
 import { RISK_LABEL } from "../lib/format.js";
+import { matchFocus } from "../lib/ruleFocus.js";
 
 const RISK = ["banned", "high", "medium", "low", "info"];
 const EMPTY_FORM = { kind: "service_rule", service: "", product: "", cpe: "", port: "", risk_level: "high", note: "" };
@@ -87,7 +88,7 @@ function TargetInputs({ form, setForm }) {
   );
 }
 
-export default function Rules({ user }) {
+export default function Rules({ user, onShowMatches }) {
   const [rules, setRules] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
   const [editing, setEditing] = useState(null);
@@ -219,9 +220,19 @@ export default function Rules({ user }) {
                   </>
                 )}
                 <td>
-                  <span className="mono" style={{ color: r.match_count ? "var(--high)" : "var(--muted)" }}>
-                    {r.match_count}
-                  </span>
+                  {/* 건수만 보여 주면 '그래서 어떤 건데?' 를 매번 손으로 찾아야 한다.
+                      0 건이면 볼 것이 없으므로 링크로 만들지 않는다. */}
+                  {r.match_count && onShowMatches ? (
+                    <button type="button" className="linklike mono"
+                            title="이 규칙이 잡는 발견을 발견 관리에서 보기"
+                            onClick={() => onShowMatches(matchFocus(r))}>
+                      {r.match_count}
+                    </button>
+                  ) : (
+                    <span className="mono" style={{ color: r.match_count ? "var(--high)" : "var(--muted)" }}>
+                      {r.match_count}
+                    </span>
+                  )}
                 </td>
                 {editing?.id === r.id ? (
                   <>

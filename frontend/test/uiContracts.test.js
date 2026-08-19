@@ -2,11 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { cellValue, PRESETS, primaryServiceIdentity } from "../src/lib/columns.js";
+import {
+  cellValue, currentReason, needsConfirmation, PRESETS, primaryServiceIdentity,
+  stateWithEvidence,
+} from "../src/lib/columns.js";
 import { deadlinePatchValue } from "../src/lib/findingPatch.js";
-import { SCAN_STATUS, scanKind, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
+import { SCAN_STATUS, scanKind, scanNotice, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
 import { splitScanTokens } from "../src/lib/scanTargets.js";
 import { toastAnnouncement, toastDuration } from "../src/lib/toast.js";
+import { matchesFilter, parseNeedle } from "../src/lib/filterText.js";
+import { formatImportSummary } from "../src/lib/scanImports.js";
+import { matchFocus } from "../src/lib/ruleFocus.js";
+import { PAGE_SIZES } from "../src/lib/pageSize.js";
 
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
@@ -90,7 +97,7 @@ test("findings search debounces on typing without firing mid-composition", () =>
   assert.match(view, /if \(composing\.current\) return;/);
   assert.match(view, /setTimeout\(\(\) => \{ setPage\(0\); load\(0\); \}, 250\)/);
   // 조합이 끝나면 그때 한 번은 반드시 나가야 한다.
-  assert.match(view, /\[queryString\.toString\(\), imeTick\]/);
+  assert.match(view, /\[queryString\.toString\(\), imeTick, pageSize\]/);
   // 검색창과 컬럼 필터 모두 같은 보호를 받는다.
   assert.ok(view.split("{...imeProps}").length - 1 >= 3, "search + column filters must share the IME guard");
 });
@@ -130,6 +137,8 @@ test("dashboard and scan history share every localized scan status", () => {
       canceled: "중지됨",
       interrupted: "중단됨(서버 재시작)",
       failed: "실패",
+      // nmap 이 끝까지 정상 종료하지 못한 실행 — 결과는 쓰되 닫힘 판정에서 제외된다.
+      partial: "부분 완료",
       done: "완료",
     },
   );
@@ -420,4 +429,336 @@ test("interrupted output that never uploads is not counted as a failure", async 
   );
   assert.equal(summary.interruptedXmlCount, 3);
   assert.equal(summary.hasFailures, false);
+});
+
+test("scan history shows scope, not the raw command line", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /<th>스캔 범위<\/th>/);
+  assert.match(scans, /<ScanScope summary=\{s\.summary\}/);
+  // 원문 명령은 사라지지 않고 상세로 내려간다.
+  assert.match(scans, /scan-detail-command/);
+  assert.doesNotMatch(scans, /whiteSpace: "normal", color: "var\(--muted\)" \}\}>\{s\.command\}/);
+});
+
+test("deleting a scan is admin-only and says what else it removes", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /const canDelete = user\.role === "admin"/);
+  assert.match(scans, /window\.confirm\(/);
+  assert.match(scans, /발견 관리에서 함께 삭제됩니다/);
+  assert.match(scans, /method: "DELETE"/);
+});
+
+test("web scan can exclude ports, and the estimate sees the same value", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /id="scan-exclude-ports"/);
+  // 실행 두 경로와 예상치 호출이 모두 같은 값을 실어 보낸다.
+  assert.equal((scans.match(/exclude_ports: excludePorts/g) || []).length, 3);
+});
+
+test("findings colour indicators are per-element and persist", async () => {
+  const findings = source("../src/views/Findings.jsx");
+  assert.match(findings, /COLOR_ELEMENTS/);
+  assert.match(findings, /localStorage\.setItem\(COLOR_KEY/);
+  const colors = source("../src/lib/findingColors.js");
+  for (const key of ["risk", "deadline", "status", "guess"]) {
+    assert.ok(colors.includes(`key: "${key}"`), `${key} 토글이 없습니다`);
+  }
+  const { cellTone, loadColorFlags, COLOR_DEFAULTS } = await import("../src/lib/findingColors.js");
+  assert.deepEqual(loadColorFlags({ getItem: () => "{oops" }), COLOR_DEFAULTS);
+  const banned = { risk_level: "banned", status: "미조치", identification: "확인" };
+  assert.equal(cellTone(banned, "risk_level", { risk: true }), "tone-high");
+  assert.equal(cellTone(banned, "risk_level", { risk: false }), "");   // 끄면 색이 없다
+  const guessed = { identification: "추측" };
+  assert.equal(cellTone(guessed, "display_identity", { guess: true }), "tone-guess");
+  assert.equal(cellTone(guessed, "display_identity", { guess: false }), "");
+});
+
+test("a completed scan's degraded-evidence note is not rendered as a failure reason", () => {
+  // 포트 관측은 온전한데 NSE 소켓 오류만 있었던 실행. 백엔드가 이 둘을 분리해 두었는데
+  // 화면에서 다시 '실패 원인'으로 합치면 의미가 도로 뭉개진다.
+  const degraded = scanNotice({
+    failure_code: "nse_degraded",
+    failure_message: "NSE/소켓 오류가 있었습니다 — 포트 결과는 온전하지만 …",
+  });
+  assert.equal(degraded.tone, "notice");
+  assert.equal(degraded.title, "참고 — 부가 정보 불완전");
+
+  // 진짜 실패는 그대로 실패로 보여야 한다.
+  const failed = scanNotice({
+    failure_code: "nmap_xml_incomplete",
+    failure_message: "nmap 이 결과 XML 을 끝맺지 못했습니다 …",
+  });
+  assert.equal(failed.tone, "failure");
+  assert.equal(failed.title, "실패 원인");
+
+  // 미관측은 '부가 정보 부족'과 다른 축이다. 응답하지 않은 호스트의 포트는 아예 못 본
+  // 것이라, 같은 라벨로 그리면 '포트 결과는 온전'하다고 반대로 읽힌다. 그리고 이 실행은
+  // status=done 으로 결과가 정상 인입된 실행이므로 '실패 원인'으로 그려서도 안 된다.
+  const unobserved = scanNotice({
+    failure_code: "observation_incomplete",
+    failure_message: "응답하지 않은 호스트가 있어 발견 3건은 관측하지 못했습니다 …",
+  });
+  assert.equal(unobserved.tone, "notice");
+  assert.equal(unobserved.title, "참고 — 일부 호스트 미관측");
+  assert.notEqual(unobserved.title, degraded.title);
+
+  assert.equal(scanNotice({}), null);
+  // 뷰는 라벨을 직접 쓰지 않고 이 계약을 통해서만 그린다.
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /scanNotice\(\{/);
+  assert.doesNotMatch(scans, /<b>실패 원인<\/b>/);
+  assert.match(source("../src/styles.css"), /\.scan-failure-detail\.notice/);
+});
+
+test("an inferred-open port never reads on screen as a confirmed observation", () => {
+  // 같은 open 이라도 syn-ack(응답을 받아 확인)과 no-response(못 받고 추정)는 증거 강도가
+  // 전혀 다르다. UDP 는 무응답이 예외가 아니라 다수라, 이 구분이 화면에서 사라지면
+  // 사용자는 추정을 관측으로 읽는다.
+  const confirmed = { state: "open", state_evidence: "응답 확인", reason: "syn-ack" };
+  const inferred = { state: "open|filtered", state_evidence: "무응답 추정",
+                     reason: "no-response", needs_confirmation: true };
+
+  // 확인된 건에는 군더더기를 붙이지 않는다 — 모든 행에 붙으면 신호가 죽는다.
+  assert.equal(stateWithEvidence(confirmed), "open");
+  assert.equal(stateWithEvidence(inferred), "open|filtered (무응답 추정)");
+  assert.equal(needsConfirmation(confirmed), false);
+  assert.equal(needsConfirmation(inferred), true);
+
+  // reason 컬럼 이전에 인입된 행. '기록하지 않았다'와 '응답이 없었다'는 다른 사실이라
+  // 재확인을 요구하지 않는다.
+  const legacy = { state: "open", state_evidence: "미관측", reason: "" };
+  assert.equal(stateWithEvidence(legacy), "open (미관측)");
+  assert.equal(needsConfirmation(legacy), false);
+
+  // 저장만 하고 안 쓰면 이 작업의 목적이 없어진다 — 표/내보내기와 상세에 실제로 실린다.
+  assert.equal(cellValue(inferred, "state_evidence"), "무응답 추정");
+  assert.equal(cellValue(inferred, "reason"), "no-response");
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /stateWithEvidence\(finding\)/);
+  assert.match(view, /needsConfirmation\(finding\)/);
+});
+
+test("a closed finding never wears the reason it had while it was open", () => {
+  // 부재 기반 닫힘은 state 만 바꾸고 reason 은 열려 있던 시절의 syn-ack 을 그대로 둔다.
+  // 해석만 고치고 원문을 옆에 그대로 두면 'closed · syn-ack' 이 되어 오독이 남는다.
+  const closed = { state: "closed", state_evidence: "부재로 판정", reason: "syn-ack" };
+
+  assert.equal(stateWithEvidence(closed), "closed (부재로 판정)");
+  assert.equal(currentReason(closed), "");
+  assert.equal(needsConfirmation(closed), false);
+
+  // 닫힘을 응답으로 실제 확인한 경우에는 원문이 그대로 남는다.
+  const refused = { state: "closed", state_evidence: "응답 확인", reason: "conn-refused" };
+  assert.equal(currentReason(refused), "conn-refused");
+
+  // 상세는 이 규칙을 통해서만 원문을 그린다.
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /currentReason\(finding\)/);
+  assert.doesNotMatch(view, /\{finding\.reason\}/);
+});
+
+test("every filter shares one exclude syntax", () => {
+  // 화면마다 규칙이 다르면 외울 수 없다. 서버(parse_needle)와 같은 문법을 클라이언트
+  // 전용 필터(자산대장)까지 같은 모듈로 쓴다.
+  assert.deepEqual(parseNeedle("!ssh"), { needle: "ssh", negate: true });
+  assert.deepEqual(parseNeedle("!!ssh"), { needle: "!ssh", negate: false });
+  assert.deepEqual(parseNeedle("ssh"), { needle: "ssh", negate: false });
+
+  assert.equal(matchesFilter(["ssh", "22"], "ssh"), true);
+  assert.equal(matchesFilter(["ssh", "22"], "!ssh"), false);
+  assert.equal(matchesFilter(["https", "443"], "!ssh"), true);
+  // 빈 필터는 아무것도 거르지 않는다 - `!` 만 입력한 중간 상태에서 목록이 비면 안 된다.
+  assert.equal(matchesFilter(["https"], "!"), true);
+  assert.equal(matchesFilter(["https"], "  "), true);
+
+  const findings = source("../src/views/Findings.jsx");
+  const assets = source("../src/views/Assets.jsx");
+  const history = source("../src/views/History.jsx");
+  for (const view of [findings, assets, history]) {
+    assert.match(view, /FILTER_HINT/, "제외 문법은 화면에서 안내돼야 한다");
+  }
+  assert.match(assets, /matchesFilter\(/);
+});
+
+test("an allowed finding is folded on a different axis than a resolved one", () => {
+  // 규칙이 '허용'한 것과 사람이 '정상처리'한 것은 다른 사실이다. 하나로 묶으면 둘 중
+  // 무엇 때문에 안 보이는지 알 수 없다.
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /const \[hideAllowed, setHideAllowed\] = useState\(true\)/);
+  assert.match(view, /qs\.set\("hide_allowed"/);
+  assert.match(view, /허용 제외/);
+  // 접힌 것을 펼쳤을 때 왜 보이는지 표에서 읽혀야 한다.
+  assert.match(view, /finding\.allowed/);
+  assert.match(view, /className="tag allowed"/);
+  // 정상처리 토글과 독립적이어야 한다 - 같은 상태를 공유하면 축이 도로 합쳐진다.
+  assert.ok(!/hideNormal\s*\|\|\s*hideAllowed/.test(view));
+});
+
+test("a rule's match count leads to the findings it actually matched", () => {
+  // 건수만 보여 주면 '그래서 어떤 건데?' 를 매번 손으로 찾아야 한다. 서버 _match_count 와
+  // 같은 기준이어야 건수와 목록이 어긋나지 않는다.
+  assert.deepEqual(matchFocus({ kind: "service_rule", service: "telnet" }), {
+    filters: { service: "telnet" }, match: "exact", hideNormal: false, hideAllowed: false,
+  });
+  assert.deepEqual(matchFocus({ kind: "port_rule", port: 3389, service: "" }), {
+    filters: { port: "3389" }, match: "exact", hideNormal: false, hideAllowed: false,
+  });
+  assert.deepEqual(matchFocus({ kind: "product_rule", product: "vsftpd" }), {
+    filters: { product: "vsftpd" }, match: "contains", hideNormal: false, hideAllowed: false,
+  });
+  // 허용 규칙의 매칭은 기본으로 접혀 있다 - 그대로 이동하면 빈 목록만 보인다.
+  assert.equal(matchFocus({ kind: "cpe_rule", cpe: "openssh" }).hideAllowed, false);
+
+  const rules = source("../src/views/Rules.jsx");
+  assert.match(rules, /onShowMatches\(matchFocus\(r\)\)/);
+  // 0 건은 볼 것이 없으므로 링크로 만들지 않는다.
+  assert.match(rules, /r\.match_count && onShowMatches/);
+  const app = source("../src/App.jsx");
+  assert.match(app, /onShowMatches=\{focusFindings\}/);
+  assert.match(app, /focus=\{findingsFocus\}/);
+});
+
+test("a wide findings table can be scrolled without leaving the rows", () => {
+  // 기본 가로 스크롤바는 200행 아래에 있다 - 오른쪽 컬럼을 보려면 페이지 끝까지 내려가
+  // 바를 잡고 다시 올라와야 해서 사실상 못 쓴다.
+  const scroller = source("../src/ui/TableScroller.jsx");
+  const css = source("../src/styles.css");
+  assert.match(scroller, /overflowing &&/, "넘치지 않으면 군더더기를 더하지 않는다");
+  assert.match(scroller, /role="scrollbar"/);
+  assert.match(css, /\.table-scrollbar\s*\{[^}]*position: sticky;[^}]*bottom: 0;/);
+  // 둘이 동시에 보이면 어느 쪽이 진짜인지 알 수 없다.
+  assert.match(css, /\.table-scroll\.has-proxy::-webkit-scrollbar \{ height: 0; \}/);
+  assert.match(source("../src/views/Findings.jsx"), /<TableScroller/);
+});
+
+test("a long fingerprint expands in place and collapses when the pointer leaves", () => {
+  // 팝업이 아니라 셀 자체가 늘어나야 커서가 벗어나는 순간 원래대로 돌아온다.
+  const css = source("../src/styles.css");
+  assert.match(css, /\.pre-cell \{[\s\S]*?max-height: 2\.8em;/);
+  assert.match(css, /\.pre-cell:hover, \.pre-cell:focus-visible \{[\s\S]*?max-height: 22em;/);
+  assert.match(source("../src/views/Findings.jsx"), /className=\{"mono pre-cell"/);
+});
+
+test("a forced password change cannot be dismissed and says why", () => {
+  const app = source("../src/App.jsx");
+  const modal = source("../src/ui/PasswordModal.jsx");
+  assert.match(app, /const mustChange = !!user\.must_change_password/);
+  assert.match(app, /mandatory=\{mustChange\}/);
+  // 닫을 수 있게 두면 아무것도 안 되는 빈 화면만 남는다.
+  assert.match(modal, /if \(mandatory\) return;/);
+  assert.match(modal, /\{!mandatory && <button type="button" className="sm" onClick=\{onClose\}>취소<\/button>\}/);
+  // 왜 떴는지가 유일한 설명이므로 흐린 보조 텍스트로 두지 않는다.
+  assert.match(modal, /\{notice && <p className="modal-notice">\{notice\}<\/p>\}/);
+  assert.match(app, /INITIAL_ADMIN\.txt/);
+});
+
+test("an import that failed verification is not reported as a clean success", () => {
+  const flagged = formatImportSummary({
+    imported: 1, groupCount: 1, succeededGroups: 1, fileCount: 1, selectedXmlCount: 1,
+    counts: { new: 2, closed: 0 },
+    reviews: [{ file: "weekly.udp_identify.xml", mark: "재실행 권장", why: "NSE 결과가 없습니다." }],
+  });
+  assert.match(flagged, /검증 \[재실행 권장\] weekly\.udp_identify\.xml/);
+  assert.match(flagged, /NSE 결과가 없습니다/);
+
+  const clean = formatImportSummary({
+    imported: 1, groupCount: 1, succeededGroups: 1, fileCount: 1, selectedXmlCount: 1,
+    counts: { new: 2, closed: 0 }, reviews: [],
+  });
+  assert.doesNotMatch(clean, /검증/, "정상 결과에까지 딱지를 붙이면 신호가 죽는다");
+});
+
+test("a scan whose range was never recorded says so instead of showing a default", () => {
+  // 예전에는 명령 표기가 argv 가 아니면 무조건 'TCP · 기본 1000개' 로 그려서, 전 포트
+  // TCP+UDP 단계 스캔이 상위 1000개 TCP 스캔으로 보였다.
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /const unknown = !\(summary\.protocols \|\| \[\]\)\.length/);
+  assert.match(scans, /is-unknown/);
+  assert.match(source("../src/styles.css"), /\.scan-scope-ports\.is-unknown/);
+});
+
+test("long lists let the reader choose how much fits on one page", () => {
+  const findings = source("../src/views/Findings.jsx");
+  const history = source("../src/views/History.jsx");
+  assert.ok(PAGE_SIZES.includes(200) && PAGE_SIZES.at(-1) >= 5000);
+  assert.match(findings, /<PageSize value=\{pageSize\}/);
+  // 예전에는 200건에서 잘린 채 총 건수만 보여 줘, 그 뒤가 있는지도 알 수 없었다.
+  assert.match(history, /<PageSize value=\{size\}/);
+  assert.match(history, /feed\.items\.length < feed\.total/);
+});
+
+test("an imported run is drawn exactly like one that ran in the web UI", () => {
+  // 단독 스캐너로 돌렸다는 이유로 이력에서 덜 보여 줄 이유가 없다. 타임라인이 이미
+  // 목록 응답에 실려 오면 추가 요청 없이 그대로 그린다.
+  assert.equal(shouldLoadStages({ status: "done", name: "가져오기: weekly 자동 스캔 묶음",
+                                  stages_json: [{ stage: "tcp_discovery" }] }), false);
+  // 타임라인이 없는 단계 스캔은 여전히 받아온다.
+  assert.equal(shouldLoadStages({ status: "done", command: "단계스캔(엔진) · TCP 443" }), true);
+  const scans = source("../src/views/Scans.jsx");
+  // 엔진 단계와 가져오기 단계를 같은 라벨 표에서 그린다.
+  assert.match(scans, /tcp_discovery: "TCP 발견", tcp_identify: "TCP 식별", udp_identify: "UDP 식별"/);
+  assert.match(scans, /withPersistedStages\(prev, list\)/);
+});
+
+test("a running scan says which batch and stage it is on", () => {
+  // 퍼센트 하나만 보이면 몇 분째 같은 숫자를 보면서 진행 중인지 멈춘 것인지 알 수 없다.
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /\{p\.stage && <span className="pill info"/);
+  assert.match(scans, /p\.batch_label/);
+  assert.match(scans, /p\.stage_hosts \? <span className="muted">· 대상/);
+  assert.match(scans, /p\.hosts_up != null \? <span className="muted">· 응답/);
+  // 배치 번호는 사람이 세는 방식(1부터)이되 총 개수를 넘지 않는다(마지막 배치에서 N+1/N 방지).
+  assert.match(scans, /배치 \$\{Math\.min\(p\.batches_done \+ 1, total\)\}\/\$\{total\}/);
+  assert.match(scans, /\(\$\{p\.batch_size\}대씩\)/);
+});
+
+test("a finished batched scan still says how it was split", () => {
+  // 배치 구성이 실행 중에만 보이면, 이력을 나중에 읽는 사람에게는 없는 정보와 같다.
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /function BatchNote\(\{ scan, progress \}\)/);
+  assert.match(scans, /if \(!scan\.batch_total \|\| scan\.batch_total <= 1\) return null;/);
+  assert.match(scans, /배치 \{scan\.batch_total\}\/\{scan\.batch_total\} · \{scan\.batch_size\}대씩/);
+  assert.match(scans, /<BatchNote scan=\{s\}/);
+});
+
+test("a finding shows the compliance basis for its own risk grade", () => {
+  // 분류가 붙인 KISA/NIS 참조와 조직규칙 비고는 이미 저장·전송되는데, 여태 '위험·컴플라이언스'
+  // 프리셋을 따로 골라야만 보였다. 정작 발견을 열어 본 자리에 없으면 감사 근거를 확인하려고
+  // 표로 되돌아가야 한다 - 수집해 놓고 쓰지 않는 데이터의 전형이다.
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /\(finding\.compliance_json \|\| \[\]\)\.length > 0/);
+  assert.match(view, /컴플라이언스 근거/);
+  // 근거 없이 빈 상자를 띄우면 화면만 시끄러워진다.
+  assert.doesNotMatch(view, /컴플라이언스 근거[\s\S]{0,400}수집된 근거가 부족/);
+  // 관측 근거(어떻게 열렸다고 판단했나)와 다른 축이므로 자리를 나눠 둔다.
+  assert.match(view, /용도 근거 \(이 포트가 무엇이고 왜 열렸나\)/);
+});
+
+test("a finding can be assigned to someone from its own drawer", () => {
+  // 배정은 라이프사이클의 한 단계(누가 조치하는가)인데 조작 수단이 화면에 없었다.
+  // API(PATCH owner_user_id)와 감사 이벤트(ASSIGN)는 이미 있었다.
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /api\("\/users\/assignable"\)/);
+  assert.match(view, /배정 담당자/);
+  // 빈 선택은 '배정 해제'다. undefined 를 보내면 서버가 '건드리지 않음'으로 읽는다.
+  assert.match(view, /body\.owner_user_id = assignee === "" \? null : Number\(assignee\)/);
+  // 편집 권한이 없어도 현재 배정은 보여야 한다.
+  assert.match(view, /finding\.assignee_name[\s\S]{0,120}배정: \{finding\.assignee_name\}/);
+  // 자산대장 담당자와 배정 담당자는 다른 축이므로 컬럼도 라벨도 나눈다.
+  const cols = source("../src/lib/columns.js");
+  assert.match(cols, /key: "owner", label: "담당자\(자산대장\)"/);
+  assert.match(cols, /key: "assignee", label: "배정 담당자"/);
+});
+
+test("an observed exposure is shown as the fact that drove the grade", () => {
+  // 익명 FTP 와 잠긴 FTP 가 같은 발견으로 보이던 것이 여기서 갈린다.
+  const view = source("../src/views/Findings.jsx");
+  assert.match(view, /\(finding\.exposure_json \|\| \[\]\)\.length > 0/);
+  assert.match(view, /노출 관측 \(스캔이 확인한 사실\)/);
+  // 등급을 올린 근거이므로 컴플라이언스 근거 바로 위에 온다.
+  assert.ok(view.indexOf("노출 관측 (스캔이 확인한 사실)") < view.indexOf("컴플라이언스 근거"));
+  // 표·내보내기에서도 조회할 수 있어야 '익명 FTP만' 같은 작업이 된다.
+  const cols = source("../src/lib/columns.js");
+  assert.match(cols, /key: "exposure", label: "노출 관측"/);
+  assert.ok(PRESETS.find((p) => p.id === "p_risk").cols.includes("exposure"));
 });

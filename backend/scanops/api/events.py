@@ -15,6 +15,7 @@ from ..db import get_db
 from ..models import Finding, FindingEvent, User
 from ..schemas import EventFeed, EventFeedItem
 from .deps import current_user
+from .findings import parse_needle
 
 router = APIRouter()
 
@@ -36,7 +37,13 @@ def event_feed(
     if type:
         q = q.filter(FindingEvent.type == type)
     if host:
-        q = q.filter(Finding.host_ip == host)
+        # 다른 필터와 같은 규칙: `!10.0.0.5` 는 그 호스트를 뺀 나머지. 화면마다 규칙이
+        # 다르면 못 외운다. 부분일치로 두는 이유는 대역 일부를 빼는 일이 잦아서다.
+        needle, negate = parse_needle(host.strip())
+        if needle:
+            pattern = f"%{needle}%"
+            q = q.filter(Finding.host_ip.notlike(pattern) if negate
+                         else Finding.host_ip.like(pattern))
     if since:
         q = q.filter(FindingEvent.created_at >= since)
     if until:

@@ -11,23 +11,28 @@ import ipaddress
 import json
 import logging
 import re
+import shutil
 import threading
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import SessionLocal, get_db
-from ..models import ACTIVE_FINDING_STATES, Finding, ScanRun, User
+from ..models import ACTIVE_FINDING_STATES, Finding, FindingEvent, ScanRun, User
 from ..schemas import IngestSummary, KnownResultsIn, RawCommandIn, ScanOut, ScanRunIn
 from ..uploads import read_limited
-from ..scanning import chunker, engine_runner, nmap_runner, scan_options, scope, taxonomy
+from ..scanning import (
+    chunker, engine_runner, nmap_runner, scan_options, scan_summary, scope, taxonomy,
+    xml_verdict,
+)
 from ..scanning.presets import PRESETS
 from ..scanning.ingest import ingest
-from ..scanning.nmap_parse import parse_xml, probed_identity, scan_start, up_hosts
+from ..scanning.nmap_parse import observed_at, parse_xml, probed_identity, up_hosts
 from .audit import record
 from .deps import current_user, require_role
 
@@ -74,6 +79,13 @@ AUTO_STAGE_LABELS = {
     "tcp_identify": "발견된 TCP 포트 용도/서비스 식별",
     "udp_identify": "주요 UDP 서비스 식별",
 }
+# 합성 스냅샷 표식 — 이 값이 붙은 XML 은 원본 스캔 결과가 아니다.
+SNAPSHOT_MARK = "1"
+SNAPSHOT_REJECT = (
+    "ScanOps 가 만든 스냅샷 XML 은 다시 가져올 수 없습니다. 여러 산출물을 하나로 합치면서 "
+    "개별 관측 시각이 사라져, 원본 결과처럼 인입하면 과거 관측이 최신 관측으로 둔갑합니다. "
+    "원본 단계 XML(scan_N.<단계>.xml)이나 스캐너 결과 폴더를 가져오세요."
+)
 STAGE_FILE_RE = re.compile(r"^(?P<base>.+)\.(?P<stage>tcp_discovery|tcp_identify|udp_identify)\.xml$", re.I)
 # 중단본 표식 — 스캐너(scanops_scanner.INTERRUPTED_*)와 같은 문자열이어야 한다.
 INTERRUPTED_DIR_NAME = "interrupted"
@@ -130,6 +142,7 @@ def _validate_structured_scan(
     # Keep Nmap's target-injection/IPv6 contract aligned with saved engine specs, then
     # require the narrower IPv4 address/CIDR grammar used by exclusions.
     nmap_runner.validate_targets(body.exclude)
+    scan_options.validate_ports(body.exclude_ports or "")
     excludes = scope.parse_excludes(body.exclude)
     if body.workflow == "auto":
         tcp_spec = nmap_runner.auto_tcp_port_spec(body.ports)
@@ -139,6 +152,26 @@ def _validate_structured_scan(
     elif uses_manual_preset and not body.options and body.preset not in PRESETS:
         raise ValueError(f"알 수 없는 프리셋: {body.preset}")
     return hosts, excludes
+
+
+def _host_timeouts(body) -> dict:
+    """요청의 두 상한을 단계별 상한으로 편다. 빈 값이면 그 단계는 기본값을 쓴다.
+
+    사용자에게는 프로토콜당 하나씩만 받는다(TCP·UDP). 정상 호스트가 걸리지 않는 상한이
+    프로토콜마다 다르기 때문에 하나로 묶지 않고, 그렇다고 sweep/식별까지 네 개를 물어보면
+    쓰이지 않는 손잡이만 늘어난다. 명시된 값은 그 프로토콜의 두 단계에 함께 적용한다.
+
+    빈 문자열은 '지정 없음'이고 "0" 이 명시적 끄기다. 값 검증은 엔진 spec 이 한다
+    (validate_host_timeout) - 여기서 조용히 정규화하면 잘못된 값이 미적용으로 둔갑한다.
+    """
+    tcp = (getattr(body, "host_timeout", "") or "").strip()
+    udp = (getattr(body, "udp_host_timeout", "") or "").strip()
+    limits = {}
+    if tcp:
+        limits["tcp"] = limits["service"] = tcp
+    if udp:
+        limits["udp"] = limits["service_udp"] = udp
+    return limits
 
 
 def _effective_hosts(hosts: list[str], excludes: list[str]) -> list[str]:
@@ -339,9 +372,40 @@ def _port_tokens(port_spec: str, proto: str) -> list[str]:
     return out
 
 
-def _port_scope(port_spec: str, proto: str) -> set[int] | None:
-    """None means all ports for the protocol were scanned."""
-    tokens = _port_tokens(port_spec, proto)
+def _exclude_tokens(port_spec: str, proto: str) -> list[str]:
+    """제외 스펙 전용 토큰화 - **접두사가 없으면 모든 프로토콜에 적용**한다.
+
+    nmap 포트 문법은 접두사 없는 번호를 스캔 중인 protocol list 전부에 넣고,
+    ``--exclude-ports`` 도 ``-p`` 와 같은 문법을 쓴다. 실측으로 확인했다 -
+    ``-p T:80,U:53 --exclude-ports 53`` 은 UDP scaninfo 를 ``numservices=0`` 으로 만들지만
+    ``--exclude-ports T:53`` 은 UDP 53 을 그대로 스캔한다.
+
+    스캔 범위 파싱(_port_tokens)은 접두사 없는 토큰을 TCP 로만 본다. 그쪽은 앱이 T:/U: 를
+    명시해 넘기는 자리라 그대로 두고, 제외만 nmap 의미에 맞춘다 - 안 그러면 화면이 예시로
+    먼저 보여 주는 ``9100, 515, 631`` 같은 표기가 UDP 를 전혀 보호하지 못한다.
+    """
+    current = ""
+    out: list[str] = []
+    for raw in (port_spec or "").replace(" ", "").split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        if ":" in item:
+            prefix, value = item.split(":", 1)
+            if prefix.upper() in {"T", "U"}:
+                current = prefix.upper()
+                item = value
+        if not item:
+            continue
+        # 접두사가 나오기 전 구간은 두 프로토콜 모두에 걸린다. 접두사가 한 번 나오면
+        # 그 뒤로는 nmap 과 같이 다음 접두사까지 그 프로토콜에만 걸린다.
+        if not current or current == proto.upper():
+            out.append(item)
+    return out
+
+
+def _expand_port_tokens(tokens: list[str]) -> set[int] | None:
+    """토큰 -> 포트 집합. ``None`` = 전 포트."""
     if not tokens:
         return set()
     ports: set[int] = set()
@@ -362,6 +426,11 @@ def _port_scope(port_spec: str, proto: str) -> set[int] | None:
             except ValueError:
                 continue
     return ports
+
+
+def _port_scope(port_spec: str, proto: str) -> set[int] | None:
+    """None means all ports for the protocol were scanned."""
+    return _expand_port_tokens(_port_tokens(port_spec, proto))
 
 
 def is_interrupted_upload(filename: str | None) -> bool:
@@ -424,8 +493,47 @@ def _finding_key(f: dict) -> str:
     return f"{f['host_ip']}|{f['port']}|{f['proto']}"
 
 
+def _observed_after(last_seen: datetime | None, as_of: datetime) -> bool:
+    """이 발견이 ``as_of`` 보다 나중에 관측됐는가. 시각을 모르면 False(기존 판정 유지).
+
+    SQLite 는 UTC DateTime 을 tzinfo 없이 돌려주므로 비교 전에 UTC 로 맞춘다 - 안 맞추면
+    naive/aware 비교가 TypeError 로 인입 전체를 죽인다.
+    """
+    if last_seen is None:
+        return False
+    seen = last_seen if last_seen.tzinfo else last_seen.replace(tzinfo=timezone.utc)
+    moment = as_of if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
+    return seen > moment
+
+
+def _excluded_port_scope(exclude_ports: str, proto: str) -> set[int] | None | set:
+    """제외한 포트 범위. ``None`` = 그 프로토콜 전체 제외, ``set()`` = 제외 없음.
+
+    제외는 **관측하지 않겠다**는 선언이다. 그러므로 닫힘 후보에서도 빠져야 한다 - 전선에서만
+    빼고 후보에 남겨 두면, 프로브를 한 번도 보내지 않은 포트를 '부재를 확인했다'며 닫는다.
+    운영자가 보호하려고 뺀 포트가 오히려 조용히 사라지는, 정확히 거꾸로 된 결과다.
+    """
+    if not (exclude_ports or "").strip():
+        return set()
+    return _expand_port_tokens(_exclude_tokens(exclude_ports, proto))
+
+
+def _is_excluded(port: int, excluded: set[int] | None | set) -> bool:
+    return excluded is None or port in excluded
+
+
 def _auto_scope_keys(db: Session, scanned_hosts: set[str], findings: list[dict],
-                     tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set) -> set[str]:
+                     tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set,
+                     as_of: datetime | None = None,
+                     tcp_excluded: set[int] | None | set = frozenset(),
+                     udp_excluded: set[int] | None | set = frozenset()) -> set[str]:
+    """관측 범위 안의 닫힘 후보. ``as_of`` 는 이 결과가 관측된 시각이다.
+
+    그보다 **나중에** 관측된 발견은 후보가 아니다. 이 결과는 그때 그 포트가 없었다고 말할
+    뿐, 그 뒤에 열린 것에 대해서는 아무 말도 하지 않는다. ingest() 는 같은 판단을
+    `_is_older` 로 하지만, 후보 집합은 병합 XML 의 closed 목록에도 그대로 쓰이므로 여기서
+    빼지 않으면 DB 는 지켜도 증거 파일이 반대로 말한다.
+    """
     keys = {_finding_key(f) for f in findings}
     if not scanned_hosts:
         return keys
@@ -435,13 +543,39 @@ def _auto_scope_keys(db: Session, scanned_hosts: set[str], findings: list[dict],
         rows.extend(db.query(Finding).filter(
             Finding.state.in_(ACTIVE_FINDING_STATES), Finding.host_ip.in_(hosts[start:start + 500])
         ).all())
+    if as_of is not None:
+        rows = [row for row in rows if not _observed_after(row.last_seen, as_of)]
     for row in rows:
         proto = (row.proto or "").lower()
-        if proto == "tcp" and (tcp_scope is None or row.port in tcp_scope):
+        if (proto == "tcp" and (tcp_scope is None or row.port in tcp_scope)
+                and not _is_excluded(row.port, tcp_excluded)):
             keys.add(row.finding_key)
-        if proto == "udp" and (udp_scope is None or row.port in udp_scope):
+        if (proto == "udp" and (udp_scope is None or row.port in udp_scope)
+                and not _is_excluded(row.port, udp_excluded)):
             keys.add(row.finding_key)
     return keys
+
+
+def _saved_stage_scope(saved_spec: dict, proto: str) -> set[int] | None | set:
+    """저장된 엔진 spec 이 '이 프로토콜에서 무엇을 스캔하기로 했는가'.
+
+    ``None`` = 전 포트, ``set()`` = 닫힘 근거 없음. 구형 spec 은 닫힘 후보 목록
+    (``scanops.scope_keys``)을 저장하지 않았지만, **무엇을 스캔하기로 했는지**는 그대로
+    들고 있다. 그 경계를 버리고 host 단위로 닫으면 스캔한 적도 없는 포트가 '닫힘 +
+    정상처리'로 인증된다 - 되돌리기 가장 어려운 미탐이다.
+
+    활성인데 포트 범위가 비어 있으면 무엇을 봤는지 알 수 없다. 전 포트로 넘겨짚지 않고
+    닫지 않는 쪽으로 판정한다(엔진 spec 검증은 그런 조합을 애초에 거부하므로, 여기 걸리는
+    것은 손상됐거나 손으로 만든 spec 뿐이다).
+    """
+    stage = (saved_spec.get("stages") or {}).get(proto) or {}
+    if not stage.get("enabled", True):
+        return set()
+    ports = str(stage.get("ports") or "").strip()
+    if not ports:
+        return set()
+    prefix = "T" if proto == "tcp" else "U"
+    return _port_scope(f"{prefix}:{ports}", prefix)
 
 
 def _prefer_identified(primary: list[dict], fallback: list[dict]) -> list[dict]:
@@ -463,7 +597,13 @@ def _key_parts(key: str) -> tuple[str, int, str]:
 
 def _port_el(finding: dict) -> ET.Element:
     port = ET.Element("port", protocol=finding.get("proto") or "tcp", portid=str(finding.get("port") or "0"))
-    ET.SubElement(port, "state", state=finding.get("state") or "open")
+    # reason 을 빠뜨리면 다운로드·재인입되는 감사 산출물에서만 근거가 '미관측'으로 조용히
+    # 바뀐다 — 화면에는 보이는데 증거 파일에는 없는 상태가 된다. nmap 자체 XML 도 --reason
+    # 표시 옵션과 무관하게 <state reason=".."> 를 늘 보존한다.
+    state_attrs = {"state": finding.get("state") or "open"}
+    if finding.get("reason"):
+        state_attrs["reason"] = str(finding["reason"])
+    ET.SubElement(port, "state", **state_attrs)
     svc_attrs = {
         k: str(v)
         for k, v in {
@@ -504,6 +644,11 @@ def _write_merged_xml(db: Session, xml_path: Path, findings: list[dict], scanned
     root = ET.Element(
         "nmaprun",
         scanner="scanops",
+        # 이 파일은 nmap 산출물이 아니라 **여러 산출물을 합친 스냅샷**이다. nmap XML 은 문서
+        # 단위 시각 하나만 표현할 수 있어서, 서로 다른 시각에 관측한 열림을 한 파일로 합치면
+        # 개별 관측 시각이 사라진다. 그 상태로 다시 가져오면 과거 관측이 최신 노출로 둔갑한다
+        # - 그래서 원본처럼 재인입되지 않도록 표식을 남긴다.
+        scanops_snapshot=SNAPSHOT_MARK,
         args="scanops bundled import",
         start=str(int(when.timestamp())),
         startstr=when.isoformat(),
@@ -563,7 +708,8 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
                    tcp_scope: set[int] | None | set, udp_scope: set[int] | None | set,
                    scan_date: datetime | None = None, raw_xml_path: Path | None = None,
                    closure_hosts: set[str] | None = None,
-                   closure_scope_keys: set[str] | None = None) -> dict:
+                   closure_scope_keys: set[str] | None = None,
+                   absence_at: dict | None = None) -> dict:
     enriched = taxonomy.enrich_all(db, findings)
     scope_keys = (
         closure_scope_keys
@@ -574,18 +720,33 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
             enriched,
             tcp_scope,
             udp_scope,
+            # 가져온 XML 은 파일 안의 시각이 곧 관측 시각이라, 지난 날짜의 XML 을 오늘 올리는
+            # 일이 정상 경로다. ingest() 는 _is_older 로 그 뒤 관측을 지키지만 후보 집합은
+            # 병합 XML 의 closed 목록에도 쓰이므로 여기서도 잘라야 둘이 같은 말을 한다.
+            as_of=scan_date,
         )
     )
-    if raw_xml_path is not None:
-        _write_merged_xml(db, raw_xml_path, enriched, scanned_hosts, scope_keys, scan_date)
-        scan.raw_xml_path = str(raw_xml_path)
+    # 인입을 먼저 하고 **실제로 닫힌 키만** 증거 XML 에 적는다. 후보 전체를 미리 닫힘으로
+    # 쓰면, 인입이 시각·커버리지를 근거로 살려 둔 발견까지 증거 파일에는 닫힘으로 남아
+    # DB 와 정반대로 증언한다.
+    closed_keys: set[str] = set()
+    applied_keys: set[str] = set()
     counts = ingest(
         db, scan.id, enriched, scanned_hosts, scope_keys=scope_keys,
-        scan_date=scan_date, commit=False,
+        scan_date=scan_date, absence_at=absence_at,
+        closed_keys=closed_keys, applied_keys=applied_keys, commit=False,
     )
+    if raw_xml_path is not None:
+        applied = [f for f in enriched if _finding_key(f) in applied_keys]
+        _write_merged_xml(db, raw_xml_path, applied, scanned_hosts,
+                          {_finding_key(f) for f in applied} | closed_keys, scan_date)
+        scan.raw_xml_path = str(raw_xml_path)
     from .assets import match_assets
     match_assets(db, commit=False)
-    scan.host_count = len({f["host_ip"] for f in enriched})
+    # '호스트' 는 이 스캔이 **관측한** 호스트 수다. 발견이 있는 호스트만 세면 열린 포트가
+    # 없던 호스트가 통째로 사라져, 같은 대역을 웹에서 돌렸을 때(engine 은 scanned 를 센다)와
+    # 숫자가 달라진다. 가져온 결과라고 해서 다르게 셀 이유가 없다.
+    scan.host_count = len(scanned_hosts) or len({f["host_ip"] for f in enriched})
     scan.port_count = len(enriched)
     scan.status = "done"
     scan.finished_at = datetime.now(timezone.utc)
@@ -695,6 +856,22 @@ def _checked_stage(scan_id: int, argv: list[str], log_path: Path) -> None:
         raise _WorkerFailure("nmap_failed")
 
 
+def _mark_stage(scan_id: int, state: dict, stage: str, hosts: int = 0) -> None:
+    """지금 어느 단계를 돌고 있는지 sidecar 에 남긴다.
+
+    자동 스캔은 배치 하나 안에서 발견 -> 식별 -> UDP 를 순서대로 돈다. 그 사실을 남기지
+    않으면 화면은 nmap 이 뱉는 퍼센트 하나만 볼 수 있어서, 몇 분째 같은 숫자를 보면서
+    '무엇을 하는 중인지' 알 수 없다.
+    """
+    state["stage"] = stage
+    if hosts:
+        state["stage_hosts"] = hosts
+    try:
+        chunker.write_state(_basename(scan_id), state)
+    except OSError:
+        logger.warning("failed to record scan %s stage", scan_id, exc_info=True)
+
+
 def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, state: dict) -> bool:
     """Run discovery -> identify -> UDP for one batch, then ingest the final observations once."""
     ports = state.get("ports", "")
@@ -722,6 +899,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             ),
             state.get("exclude"), state.get("exclude_ports", ""),
         )
+        _mark_stage(scan_id, state, "tcp_discovery", len(batch))
         _checked_stage(scan_id, argv, discovery_log)
         discovery_xml = nmap_runner.xml_of(discovery_base)
         if not discovery_xml.exists():
@@ -742,6 +920,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
                 ),
                 state.get("exclude"), state.get("exclude_ports", ""),
             )
+            _mark_stage(scan_id, state, "tcp_identify", len(discovery_live or batch))
             _checked_stage(scan_id, argv, identify_log)
             identify_xml = nmap_runner.xml_of(identify_base)
             if not identify_xml.exists():
@@ -767,6 +946,8 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             ),
             state.get("exclude"), state.get("exclude_ports", ""),
         )
+        _mark_stage(scan_id, state, "udp_identify",
+                    len(batch if udp_all_targets else (discovery_live or batch)))
         _checked_stage(scan_id, argv, udp_log)
         udp_xml = nmap_runner.xml_of(udp_base)
         if not udp_xml.exists():
@@ -1049,43 +1230,89 @@ def _validate_engine_scope_keys(saved_spec: dict) -> None:
     effective_hosts = set(scope.apply_excludes(chunker.expand_targets(targets), excludes))
     tcp_ports = _engine_stage_port_scope(saved_spec, "tcp")
     udp_ports = _engine_stage_port_scope(saved_spec, "udp")
+    excluded = {proto: _excluded_port_scope(saved_spec.get("exclude_ports", ""), prefix)
+                for proto, prefix in (("tcp", "T"), ("udp", "U"))}
     for host, port, proto in parsed_keys:
         port_scope = tcp_ports if proto == "tcp" else udp_ports
         if host not in effective_hosts or (port_scope is not None and port not in port_scope):
             raise ValueError(
                 "저장된 단계 스캔 닫힘 범위(scope_keys)가 유효 스캔 범위를 벗어났습니다."
             )
+        # 손으로 고친 spec 이 제외 포트를 닫힘 후보로 되돌리는 것을 막는다.
+        if _is_excluded(port, excluded.get(proto, frozenset())):
+            raise ValueError(
+                "저장된 단계 스캔 닫힘 범위(scope_keys)에 제외한 포트가 들어 있습니다."
+            )
+
+
+def _read_engine_spec(out_dir: Path) -> dict | None:
+    """진행 표시에 쓰는 spec 읽기 — 없거나 깨졌으면 None(진행을 넘겨짚지 않는다)."""
+    try:
+        return _load_engine_spec(out_dir / "spec.json")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _target_label(hosts: list[str]) -> str:
+    """현재 배치를 한 줄로. 64개를 다 적으면 표가 무너지므로 대표 하나와 개수만."""
+    if not hosts:
+        return ""
+    return hosts[0] if len(hosts) == 1 else f"{hosts[0]} 외 {len(hosts) - 1}대"
+
+
+def _scan_started_at(scan: ScanRun):
+    started = scan.started_at
+    if started is not None and started.tzinfo is None:
+        # SQLite reloads UTC DateTime values without tzinfo; timestamp() would otherwise apply
+        # the Windows local offset and move this phase backwards in the heatmap chronology.
+        started = started.replace(tzinfo=timezone.utc)
+    return started
 
 
 def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
-                          scope_keys: set[str] | None,
-                          force_scanned_hosts: bool) -> dict:
-    """Persist staged findings and the equivalent authoritative heatmap snapshot."""
+                          scope_keys: set[str],
+                          force_scanned_hosts: bool, saved_spec: dict | None = None) -> dict:
+    """Persist staged findings and the equivalent authoritative heatmap snapshot.
+
+    ``scope_keys`` 는 언제나 명시적 집합이다. 구형 spec(저장된 목록이 없는 실행)은 호출자가
+    미리 stages 의 포트/프로토콜 경계로 후보를 세워 넘긴다 - ``None`` 을 받아 host 단위로
+    닫는 경로는 스캔하지 않은 포트까지 '닫힘 + 정상처리'로 만들어서 없앴다.
+    """
     findings, scanned_hosts = engine_runner.collect_results(
         out_dir, scope_keys=scope_keys, force_scanned_hosts=force_scanned_hosts,
     )
-    if scope_keys is None:
-        # Backward-compatible old specs used host-wide closure. Capture those same active keys
-        # before ingest mutates them so the synthetic XML records every resulting close.
-        snapshot_scope = _auto_scope_keys(db, scanned_hosts, findings, None, None)
-    else:
-        # Explicit scope_keys are the completed scan's authority, independent of discovery.
-        # They were built from effective targets, so excluded hosts are absent by construction.
-        snapshot_scope = set(scope_keys)
     merged_path = _settings.scans_dir / f"scan_{scan.id}.xml"
-    snapshot_date = scan.started_at
-    if snapshot_date is not None and snapshot_date.tzinfo is None:
-        # SQLite reloads UTC DateTime values without tzinfo; timestamp() would otherwise apply
-        # the Windows local offset and move this phase backwards in the heatmap chronology.
-        snapshot_date = snapshot_date.replace(tzinfo=timezone.utc)
+    # 부재(닫힘)를 주장할 수 있는 시점은 authority sweep 이 **끝난** 시각이다. 시작 시각을
+    # 쓰면 /24 처럼 몇 시간 도는 스캔에서 그 사이 다른 스캔이 남긴 결과가 더 새것으로
+    # 판정되어, 이 스캔이 나중에 실제로 확인한 열린 포트가 통째로 버려진다 - 노출을 숨기는
+    # 미탐이다. 산출물이 시각을 말하지 않을 때만 시작 시각으로 되돌아간다.
+    snapshot_date = None
+    if saved_spec is not None:
+        snapshot_date = engine_runner.authority_observed_at(
+            out_dir, saved_spec, force_scanned_hosts)
+    if snapshot_date is None:
+        snapshot_date = _scan_started_at(scan)
+    # 인입을 **먼저** 하고, 실제로 닫힌 키만 증거 XML 에 적는다. 예전에는 scope_keys 전체를
+    # '닫힘'으로 미리 써 버려서, 인입이 시각·커버리지를 근거로 살려 둔 발견까지 증거 파일에는
+    # 닫힘으로 남았다 - DB 와 증거가 정반대로 증언한다. 닫힌 행도 그대로 남아 있으므로
+    # 순서를 바꿔도 서비스명 등 표시값은 그대로 읽힌다.
+    closed_keys: set[str] = set()
+    applied_keys: set[str] = set()
+    counts = engine_runner.ingest_results(
+        db, scan, out_dir, scope_keys=scope_keys,
+        force_scanned_hosts=force_scanned_hosts, scan_date=snapshot_date,
+        spec=saved_spec, closed_keys=closed_keys, applied_keys=applied_keys, commit=False,
+    )
+    # 열림도 닫힘과 같은 조건이어야 한다. 인입이 '더 새로운 관측이 있다'며 버린 open 을
+    # 증거에는 그대로 적으면, 그 파일이 DB 가 거절한 과거 관측을 최신 노출로 되살린다.
+    applied = [f for f in findings if _finding_key(f) in applied_keys]
     _write_merged_xml(
-        db, merged_path, findings, scanned_hosts, snapshot_scope, scan_date=snapshot_date,
+        db, merged_path, applied, scanned_hosts,
+        {_finding_key(f) for f in applied} | closed_keys,
+        scan_date=snapshot_date,
     )
     scan.raw_xml_path = str(merged_path)
-    return engine_runner.ingest_results(
-        db, scan, out_dir, scope_keys=scope_keys,
-        force_scanned_hosts=force_scanned_hosts, commit=False,
-    )
+    return counts
 
 
 def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
@@ -1156,15 +1383,93 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
     if not engine_runner.is_done(out_dir):
         _fail(scan_id, "engine_incomplete")
         return
+    # 닫힘 권한은 산출물 완결성으로 판정한다 — 단독 스캐너와 같은 계약이다.
+    # rc=0 · stages_done 에 job 이 있어도 nmap 이 XML 을 끝맺지 못했거나 아예 만들지 못했을 수
+    # 있다. 그 상태로 닫으면 '못 본 포트'가 '닫힌 포트'가 되고, 닫힘은 status 까지 '정상처리'로
+    # 바꾸므로 되돌리기 가장 어려운 미탐이 된다. 그래서 '있는 파일'이 아니라 '만들기로 한 집합'과
+    # 대조하고, 열림을 정하는 산출물(authority)과 상세만 채우는 산출물(enrichment)을 가른다.
+    report = engine_runner.artifact_report(out_dir, saved_spec, force_scanned_hosts)
+    unfinished = report["authority_missing"] + report["authority_broken"]
+    # NSE/소켓 오류는 이와 다른 축이다. 스크립트 소켓 하나가 bind 에 실패해도(WSAEACCES 10013)
+    # nmap 은 포트 결과를 온전히 내고 rc=0 으로 끝난다. 그런 실행에서 닫힘 권한을 빼면 사라진
+    # 서비스가 영영 닫히지 않아 오탐이 쌓인다 — 사실만 남기고 권한은 건드리지 않는다.
+    problems = engine_runner.log_problems(out_dir / "engine.log")
     db = SessionLocal()
     try:
         scan = db.get(ScanRun, scan_id)
         if scan is not None:
-            _commit_engine_ingest(db, scan, out_dir, scope_keys, force_scanned_hosts)
-            scan.status = "done"
+            # 산출물이 완결됐다는 것과 '이 호스트의 포트를 봤다'는 것은 다른 사실이다.
+            # sn discovery 에서 호스트가 응답하지 않으면 live 가 비고 sweep 이 아예 돌지
+            # 않는데, 그때 기대 산출물은 discovery 하나뿐이라 완결성 검사가 공허하게
+            # 통과한다. 그 상태로 scope_keys 를 그대로 닫으면 패킷을 한 번도 보내지 않은
+            # 포트가 전부 '닫힘 + 정상처리'가 된다 - 관측하지 못한 것을 없다고 말하는,
+            # 이 PR 이 내내 막아 온 바로 그 오류다.
+            legacy_scope = scope_keys is None
+            if legacy_scope:
+                # 구형 spec 은 닫힘 후보 **목록**만 없을 뿐, 무엇을 스캔하기로 했는지는
+                # stages 에 남아 있다. 그 경계로 후보를 세워 명시적 집합으로 만든다 -
+                # 여기서 None 을 그대로 흘려보내면 인입이 host 단위로 닫아, 스캔하지도
+                # 않은 포트와 비활성 프로토콜까지 '닫힘 + 정상처리'가 된다.
+                # 호스트 축은 기존과 같이 실제 관측한 호스트로만 한정한다.
+                # 후보를 **마감 시점의 현재 DB** 에서 만들므로, 그 스캔이 끝난 뒤에 새로
+                # 관측된 발견까지 딸려 들어온다. 이 결과는 그때 그 포트가 없었다고 말할 뿐
+                # 그 뒤에 열린 것에 대해서는 아무 말도 하지 않는다 - 실행 시각으로 잘라낸다.
+                scope_keys = _auto_scope_keys(
+                    db,
+                    engine_runner.observed_hosts(out_dir, saved_spec, force_scanned_hosts),
+                    [],
+                    _saved_stage_scope(saved_spec, "tcp"),
+                    _saved_stage_scope(saved_spec, "udp"),
+                    as_of=scan.started_at,
+                    # 저장된 spec 의 제외도 같이 읽는다 - 마감·재개가 후보를 다시 세우므로
+                    # 여기서 빠뜨리면 실행 시점에 뺀 포트가 마감 때 되살아나 닫힌다.
+                    tcp_excluded=_excluded_port_scope(saved_spec.get("exclude_ports", ""), "T"),
+                    udp_excluded=_excluded_port_scope(saved_spec.get("exclude_ports", ""), "U"),
+                )
+            closing = (set() if unfinished
+                       else engine_runner.observed_scope(
+                           scope_keys, out_dir, saved_spec, force_scanned_hosts))
+            # 구형 spec 의 후보는 실행 전 스냅샷이 아니라 관측한 호스트에서 세운 것이라
+            # '빠진 건수'를 셀 기준이 없다. 없는 숫자를 지어내지 않는다.
+            unobserved = (0 if unfinished or legacy_scope
+                          else len(scope_keys) - len(closing))
+            _commit_engine_ingest(
+                db, scan, out_dir,
+                closing,                               # 빈 집합 = 닫힘 후보 없음
+                force_scanned_hosts,
+                saved_spec,
+            )
+            scan.status = "partial" if unfinished else "done"
             scan.finished_at = datetime.now(timezone.utc)
-            scan.failure_code = ""
-            scan.failure_message = ""
+            if unfinished:
+                scan.failure_code = "nmap_xml_incomplete"
+                scan.failure_message = (
+                    "nmap 이 결과 XML 을 끝맺지 못했습니다 — 관측이 불완전해 닫힘 판정에서 "
+                    f"제외했습니다. ({', '.join(unfinished[:3])})"
+                )
+            else:
+                # done 인데 failure_* 를 쓰는 자리가 아니다. 이 코드는 '실패'가 아니라
+                # '부가 증거가 덜 찼다'는 참고이며, UI 도 실패 원인과 다른 라벨로 그린다.
+                degraded = (report["enrichment_missing"] or report["enrichment_broken"]
+                            or problems)
+                scan.failure_code = "nse_degraded" if degraded else ""
+                scan.failure_message = (
+                    "NSE/소켓 오류 또는 서비스 상세 산출물 손상이 있었습니다 — 포트 결과는 "
+                    f"온전하지만 스크립트 결과는 일부 빠졌을 수 있습니다. ({str(degraded[0])[:120]})"
+                    if degraded else ""
+                )
+                if unobserved:
+                    # 미관측과 NSE 저하는 **다른 축**이다. 하나로 뭉치면 둘이 겹쳤을 때
+                    # '포트 결과는 온전하다'고 반대로 말하게 된다 — 실제로는 그 호스트의
+                    # 포트를 아예 못 봤다. 코드는 더 중요한 사실(포트 미관측)을 가리키고,
+                    # 메시지는 두 사실을 모두 싣는다.
+                    scan.failure_code = "observation_incomplete"
+                    note = (f"응답하지 않은 호스트가 있어 발견 {unobserved}건은 관측하지 "
+                            "못했습니다 - 관측하지 않은 포트는 닫지 않습니다.")
+                    scan.failure_message = (
+                        f"{note} 또한 NSE/서비스 상세 산출물도 일부 빠졌습니다."
+                        if degraded else note
+                    )
             db.commit()
     except Exception:
         logger.exception("failed to ingest staged scan %s result", scan_id)
@@ -1462,12 +1767,36 @@ def _validate_import_manifest(manifest_bytes: bytes, payloads: list[dict]) -> di
     return authorities
 
 
+def is_scanops_snapshot(xml_bytes: bytes) -> bool:
+    """ScanOps 가 합성한 스냅샷인가(원본 nmap 산출물이 아님).
+
+    표식(scanops_snapshot)은 이번 버전부터 붙는다. 그 이전에 만들어져 이미 반출된 파일에는
+    없지만, `_write_merged_xml` 은 처음부터 ``scanner="scanops"`` 를 써 왔다 - 그리고 nmap 은
+    자기 산출물에 언제나 ``scanner="nmap"`` 을 쓴다. 단독 스캐너 결과도 nmap 이 직접 쓴
+    파일이라 마찬가지다. 그래서 이 값 하나로 구형 합성물을 원본과 충돌 없이 가려낼 수 있다.
+    업그레이드 이후에도 과거 반출물이 그대로 돌아오는 경로가 열려 있으면, 이 수정이 겨냥한
+    '과거 관측 -> 최신 노출' 둔갑이 그대로 재현된다.
+    """
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return False
+    if root.tag != "nmaprun":
+        return False
+    return bool(root.get("scanops_snapshot")) or (root.get("scanner") or "").lower() == "scanops"
+
+
 def _prepare_import_xml(xml_bytes: bytes, filename: str | None = None) -> tuple:
     """Parse every XML-derived value before creating a ScanRun or writing a file."""
+    if is_scanops_snapshot(xml_bytes):
+        raise _InvalidImportXML(SNAPSHOT_REJECT)
     try:
-        scan_date = scan_start(xml_bytes)
+        # 시작 시각이 아니라 **관측을 끝낸** 시각이다. 몇 시간 도는 스캔에서 시작 시각을 쓰면
+        # 그 사이 다른 스캔이 남긴 결과가 더 새것으로 판정되어, 이 XML 이 나중에 확인한
+        # 열린 포트가 통째로 버려진다(observed_at = finished, 없으면 start).
+        scan_date = observed_at(xml_bytes)
         stage = (_stage_file_info(filename) or ("", ""))[1]
-        findings = parse_xml(xml_bytes)
+        findings = [{**f, "observed_at": scan_date} for f in parse_xml(xml_bytes)]
         # 두 근거 중 하나라도 'sweep' 이라고 하면 식별 미관측으로 받는다. 파일명은 단계
         # 계약이라 정확하지만 이름이 바뀌면 뚫리고, XML 인자는 이름과 무관하게 남는다.
         sweep_only = stage == "tcp_discovery" or probed_identity(xml_bytes) is False
@@ -1531,6 +1860,40 @@ def result_fingerprint(xml_payloads: list[bytes]) -> str:
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
+def _absence_from_xml(xml_bytes: bytes, hosts: set[str], when) -> dict:
+    """이 XML 이 부재를 증명할 수 있는 ``(host, proto)`` 범위와 그 시각.
+
+    커버 범위를 XML 의 host 목록에서 읽으면 안 된다 - ``--open`` 으로 돌린 산출물은 열린
+    포트가 없는 호스트를 아예 싣지 않는데, 닫힘 판정이 필요한 것이 정확히 그 호스트들이다.
+    그래서 범위는 호출자가 아는 것(manifest 의 closure_targets, 없으면 up 호스트)을 쓴다.
+    """
+    tcp, udp = xml_verdict.scan_scope(xml_bytes)
+    protos = [p for p, spec in (("tcp", tcp), ("udp", udp)) if spec]
+    return {(host, proto): when for host in hosts for proto in protos}
+
+
+def _import_command(name: str, xml_bytes: bytes) -> str:
+    """가져온 XML 의 '명령 표기' — 파일이 스스로 밝힌 범위를 정규 꼬리표로 붙인다."""
+    tcp, udp = xml_verdict.scan_scope(xml_bytes)
+    return f"가져온 XML · {name}  ·  {scan_summary.scope_note(tcp, udp)}"
+
+
+def _import_review(scan: ScanRun, reviews: list[dict]) -> None:
+    """자동 검증 결과를 스캔 행에 남긴다 — 실패가 아니라 '참고'다.
+
+    닫힘 권한은 산출물 완결성 계약이 따로 정한다. 여기서 하는 일은 사람이 따로 도구를 돌리지
+    않아도 '이 결과를 그대로 믿어도 되는가'를 보게 하는 것뿐이다. 그래서 status 는 건드리지
+    않고 참고 코드만 붙인다.
+    """
+    flagged = [r for r in reviews if not r["usable"]]
+    if not flagged:
+        return
+    worst = xml_verdict.worst(flagged)
+    others = f" 외 {len(flagged) - 1}건" if len(flagged) > 1 else ""
+    scan.failure_code = "import_unverified"
+    scan.failure_message = f"[{worst['mark']}] {worst['file']}{others} - {worst['why']}"[:256]
+
+
 def _import_single_xml(
     db: Session,
     user: User,
@@ -1543,11 +1906,15 @@ def _import_single_xml(
     sdate, findings, scanned_hosts, tcp_scope, udp_scope = _prepare_import_xml(xml_bytes, name)
     scan = ScanRun(name=f"가져오기: {name}", status="running", created_by=user.id,
                    source_fingerprint=result_fingerprint([xml_bytes]))
+    stage = (_stage_file_info(name) or ("", ""))[1]
+    # 가져온 스캔의 범위는 추측할 필요가 없다 - nmap 이 <scaninfo services=> 에 적어 둔다.
+    # 이걸 읽지 않으면 이력이 명령 없음을 이유로 nmap 기본값(상위 1000개 TCP)을 가정해,
+    # UDP 만 스캔한 XML 도 'TCP · 기본 1000개' 로 표시된다.
+    scan.command = _import_command(name, xml_bytes)
     db.add(scan)
     db.commit()
     if sdate is not None:
         scan.started_at = sdate
-    stage = (_stage_file_info(name) or ("", ""))[1]
     xml_path = _settings.scans_dir / f"scan_{scan.id}.xml"
     artifact_paths = [xml_path]
     try:
@@ -1570,121 +1937,315 @@ def _import_single_xml(
             scan_date=sdate,
             raw_xml_path=xml_path if stage == "tcp_discovery" else None,
             closure_hosts=closure_hosts,
+            absence_at=_absence_from_xml(
+                xml_bytes,
+                scanned_hosts if closure_hosts is None else closure_hosts,
+                sdate,
+            ),
         )
     except Exception:
         _fail_import(db, scan.id, artifact_paths)
         raise
+    reviews = [xml_verdict.review(xml_bytes, name, stage)]
+    _import_review(scan, reviews)
+    db.commit()
     record(db, user, "SCAN_IMPORT", target=name, detail=f"#{scan.id}")
-    return {"scan_id": scan.id, "name": scan.name, "counts": counts, "files": [name]}
+    return {"scan_id": scan.id, "name": scan.name, "counts": counts,
+            "files": [name], "reviews": reviews}
 
 
-def _import_stage_bundle(db: Session, user: User, base: str, stages: dict[str, dict]) -> dict:
+def _stage_artifact_name(scan_id: int, stage: str, batch: int, many: bool) -> str:
+    """단계 산출물 파일명. 배치가 여럿이면 배치 번호로 갈라야 서로 덮어쓰지 않는다."""
+    return f"scan_{scan_id}.b{batch}.{stage}.xml" if many else f"scan_{scan_id}.{stage}.xml"
+
+
+def _import_timeline(batches: list[tuple[str, dict]], prepared: list[dict]) -> list[dict]:
+    """가져온 실행의 단계 타임라인 — 웹에서 돌린 단계 스캔과 같은 모양으로 보이게 한다.
+
+    단독 스캐너로 돌린 결과라고 해서 이력에서 덜 보여 줄 이유가 없다. 어떤 단계를 어느
+    배치에서 돌렸고 무엇을 찾았는지는 XML 이 다 들고 있다.
+    """
+    timeline = []
+    for index, (base, stages) in enumerate(batches):
+        for stage in ("tcp_discovery", "tcp_identify", "udp_identify"):
+            values = prepared[index].get(stage)
+            if values is None:
+                continue
+            _date, findings, hosts, _tcp, _udp = values
+            counts = {"live": len(hosts), "open_ports": len(findings)}
+            timeline.append({
+                "stage": stage,
+                "status": "done",
+                "percent": 100,
+                "seconds": None,
+                "counts": counts,
+                "batch": index,
+                "base": Path(base.replace("\\", "/")).name,
+            })
+    return timeline
+
+
+class _ImportAccumulator:
+    """여러 배치의 단계 산출물을 한 스캔으로 합친다.
+
+    배치마다 같은 규칙을 반복하는 자리라, 단계별 처리를 한 곳에 모아 둔다. 포트 범위는
+    배치마다 같지만(같은 실행이므로) 첫 배치에서 읽은 값을 유지하고, ``None``(=전 포트)은
+    빈 집합보다 넓으므로 덮어쓰지 않는다.
+    """
+
+    def __init__(self) -> None:
+        self.scanned_hosts: set[str] = set()
+        self.closure_scope_keys: set[str] = set()
+        # (host, proto) -> 그 부재를 확인한 시각. 배치·단계마다 다르므로 실행 전체의 min/max
+        # 하나로 뭉치면 다른 배치의 시각을 빌려 오게 된다.
+        self.absence_at: dict = {}
+        self.tcp_scope: set[int] | None | set = set()
+        self.udp_scope: set[int] | None | set = set()
+        self._discovery: list[dict] = []
+        self._identified: list[dict] = []
+        self._udp: list[dict] = []
+
+    @staticmethod
+    def _widen(current, incoming):
+        if current is None or incoming is None:
+            return None                       # 전 포트가 한 번이라도 나오면 전 포트다
+        return set(current) | set(incoming)
+
+    def add_batch(self, db: Session, stages: dict[str, dict], prepared: dict) -> None:
+        for stage, bucket, is_udp in (
+            ("tcp_discovery", self._discovery, False),
+            ("tcp_identify", self._identified, False),
+            ("udp_identify", self._udp, True),
+        ):
+            values = prepared.get(stage)
+            if values is None:
+                continue
+            stage_date, findings, hosts, stage_tcp_scope, stage_udp_scope = values
+            self.scanned_hosts |= hosts
+            bucket.extend(findings)
+            item = stages[stage]
+            covered = hosts if item.get("closure_hosts") is None else item["closure_hosts"]
+            for key, when in _absence_from_xml(item["bytes"], covered, stage_date).items():
+                current = self.absence_at.get(key)
+                if key not in self.absence_at or (
+                    when is not None and (current is None or when > current)
+                ):
+                    self.absence_at[key] = when
+            if is_udp:
+                self.udp_scope = self._widen(self.udp_scope, stage_udp_scope)
+                tcp_arg, udp_arg = set(), stage_udp_scope
+            else:
+                self.tcp_scope = self._widen(self.tcp_scope, stage_tcp_scope)
+                tcp_arg, udp_arg = stage_tcp_scope, set()
+            self.closure_scope_keys |= _auto_scope_keys(
+                db,
+                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
+                findings,
+                tcp_arg,
+                udp_arg,
+            )
+
+    def findings(self) -> list[dict]:
+        # 식별 결과가 있으면 그것을, 없으면 sweep 이 증명한 열림을 남긴다.
+        return [*_prefer_identified(self._identified, self._discovery), *self._udp]
+
+
+def _import_stage_bundle(db: Session, user: User, display: str,
+                         batches: list[tuple[str, dict[str, dict]]]) -> dict:
+    """단독 스캐너 실행 하나 = 스캔 이력 한 줄.
+
+    예전에는 배치마다, 심지어 단계 하나만 남은 배치마다 별도 ScanRun 이 생겼다. /24 스캔은
+    열린 포트가 없는 배치가 대부분이라 tcp_discovery 파일 하나짜리 행이 이력을 가득 채웠고,
+    그 행들은 아무것도 말해 주지 않으면서 자리만 차지했다. 웹에서 돌린 단계 스캔은 배치가
+    몇 개든 한 줄이므로, 가져온 실행도 같아야 한다.
+    """
     # Validate and derive every stage before the first DB/file side effect. One malformed
     # member invalidates the unit atomically instead of leaving a failed row and partial files.
-    prepared = {
-        stage: _prepare_import_xml(item["bytes"], item["name"])
-        for stage, item in stages.items()
-    }
-    dates = [values[0] for values in prepared.values() if values[0] is not None]
+    prepared = [
+        {stage: _prepare_import_xml(item["bytes"], item["name"])
+         for stage, item in stages.items()}
+        for _base, stages in batches
+    ]
+    dates = [values[0] for per_batch in prepared for values in per_batch.values()
+             if values[0] is not None]
     sdate = min(dates) if dates else None
-    display = Path(base.replace("\\", "/")).name
+    all_items = [item for _base, stages in batches for item in stages.values()]
     scan = ScanRun(name=f"가져오기: {display} 자동 스캔 묶음", status="running", created_by=user.id,
-                   source_fingerprint=result_fingerprint(
-                       [item["bytes"] for item in stages.values()]))
-    scan.command = "자동 스캔 XML 묶음 · TCP 발견 → TCP 식별 → UDP 식별"
+                   source_fingerprint=result_fingerprint([item["bytes"] for item in all_items]))
+    # 묶음의 범위는 구성 XML 이 스스로 밝힌 것을 합친 것이다(단계마다 프로토콜이 다르다).
+    bundle_tcp, bundle_udp = set(), set()
+    for item in all_items:
+        tcp, udp = xml_verdict.scan_scope(item["bytes"])
+        if tcp:
+            bundle_tcp.add(tcp)
+        if udp:
+            bundle_udp.add(udp)
+    batch_note = f" · {len(batches)}배치" if len(batches) > 1 else ""
+    scan.command = (
+        f"자동 스캔 XML 묶음 · TCP 발견 → TCP 식별 → UDP 식별{batch_note}  ·  "
+        + scan_summary.scope_note(",".join(sorted(bundle_tcp)), ",".join(sorted(bundle_udp)))
+    )
     db.add(scan)
     db.commit()
     if sdate is not None:
         scan.started_at = sdate
 
+    many = len(batches) > 1
     merged_path = _settings.scans_dir / f"scan_{scan.id}.xml"
     artifact_paths = [
         merged_path,
         *(
-            _settings.scans_dir / f"scan_{scan.id}.{stage}.xml"
+            _settings.scans_dir / _stage_artifact_name(scan.id, stage, index, many)
+            for index, (_base, stages) in enumerate(batches)
             for stage in stages
         ),
     ]
     try:
-        scanned_hosts: set[str] = set()
-        closure_scope_keys: set[str] = set()
-        tcp_scope: set[int] | None | set = set()
-        udp_scope: set[int] | None | set = set()
-        tcp_discovery_findings: list[dict] = []
-        tcp_identified_findings: list[dict] = []
-        udp_findings: list[dict] = []
+        acc = _ImportAccumulator()
+        for index, (_base, stages) in enumerate(batches):
+            for stage, item in stages.items():
+                (_settings.scans_dir / _stage_artifact_name(
+                    scan.id, stage, index, many)).write_bytes(item["bytes"])
+            acc.add_batch(db, stages, prepared[index])
 
-        for stage, item in stages.items():
-            (_settings.scans_dir / f"scan_{scan.id}.{stage}.xml").write_bytes(item["bytes"])
-
-        if values := prepared.get("tcp_discovery"):
-            _date, findings, hosts, stage_tcp_scope, _stage_udp_scope = values
-            scanned_hosts |= hosts
-            tcp_scope = stage_tcp_scope
-            tcp_discovery_findings = findings
-            item = stages["tcp_discovery"]
-            closure_scope_keys |= _auto_scope_keys(
-                db,
-                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
-                findings,
-                stage_tcp_scope,
-                set(),
-            )
-        if values := prepared.get("tcp_identify"):
-            _date, findings, hosts, stage_tcp_scope, _stage_udp_scope = values
-            scanned_hosts |= hosts
-            if tcp_scope == set():
-                tcp_scope = stage_tcp_scope
-            tcp_identified_findings = findings
-            item = stages["tcp_identify"]
-            closure_scope_keys |= _auto_scope_keys(
-                db,
-                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
-                findings,
-                stage_tcp_scope,
-                set(),
-            )
-        if values := prepared.get("udp_identify"):
-            _date, findings, hosts, _stage_tcp_scope, stage_udp_scope = values
-            scanned_hosts |= hosts
-            udp_scope = stage_udp_scope
-            udp_findings = findings
-            item = stages["udp_identify"]
-            closure_scope_keys |= _auto_scope_keys(
-                db,
-                hosts if item.get("closure_hosts") is None else item["closure_hosts"],
-                findings,
-                set(),
-                stage_udp_scope,
-            )
-
-        tcp_findings = _prefer_identified(tcp_identified_findings, tcp_discovery_findings)
-        findings = [*tcp_findings, *udp_findings]
-        if not scanned_hosts:
-            scanned_hosts = {f["host_ip"] for f in findings if f.get("host_ip")}
+        findings = acc.findings()
+        scanned_hosts = acc.scanned_hosts or {
+            f["host_ip"] for f in findings if f.get("host_ip")
+        }
 
         counts = _commit_ingest(
             db,
             scan,
             findings,
             scanned_hosts,
-            tcp_scope,
-            udp_scope,
+            acc.tcp_scope,
+            acc.udp_scope,
             scan_date=sdate,
             raw_xml_path=merged_path,
-            closure_scope_keys=closure_scope_keys,
+            closure_scope_keys=acc.closure_scope_keys,
+            absence_at=acc.absence_at,
         )
     except Exception:
         _fail_import(db, scan.id, artifact_paths)
         raise
-    files = [stages[k]["name"] for k in sorted(stages)]
+    files = [item["name"] for _base, stages in batches for item in stages.values()]
+    reviews = [xml_verdict.review(item["bytes"], item["name"], stage)
+               for _base, stages in batches for stage, item in sorted(stages.items())]
+    _import_review(scan, reviews)
+    # 웹에서 돌린 단계 스캔과 같은 타임라인을 남긴다 - 이력에서 둘이 다르게 보일 이유가 없다.
+    scan.stages_json = _import_timeline(batches, prepared)
+    db.commit()
     record(db, user, "SCAN_IMPORT_BUNDLE", target=display, detail=f"#{scan.id} · {len(files)} files")
-    return {"scan_id": scan.id, "name": scan.name, "counts": counts, "files": files}
+    return {"scan_id": scan.id, "name": scan.name, "counts": counts,
+            "files": sorted(files), "reviews": reviews}
 
 
 @router.get("", response_model=list[ScanOut])
 def list_scans(_: User = Depends(current_user), db: Session = Depends(get_db)):
-    return db.query(ScanRun).order_by(ScanRun.id.desc()).all()
+    rows = db.query(ScanRun).order_by(ScanRun.id.desc()).all()
+    return [
+        ScanOut.model_validate(row).model_copy(update={
+            "summary": scan_summary.summarize_command(row.command, row.targets),
+        })
+        for row in rows
+    ]
+
+
+@router.delete("/{scan_id}")
+def delete_scan(
+    scan_id: int,
+    user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """스캔 이력 1건 삭제 — 그 스캔이 유일한 근거인 발견도 함께 지운다.
+
+    '함께 지운다'의 범위를 좁게 잡는다. 발견은 여러 스캔에 걸쳐 살아 있는 물건이라,
+    이 스캔에서 '다시 관측'되기만 한 발견까지 지우면 사람이 달아 둔 상태·담당자·메모와
+    그 이전 이력까지 사라진다. 그래서 **첫 관측도 마지막 관측도 이 스캔인 발견**만 지우고,
+    살아남는 발견은 이 스캔을 가리키던 참조만 끊는다(유령 ID 방지).
+
+    실행 중인 스캔은 거절한다 — 워커가 아직 같은 행과 파일을 쓰고 있다.
+    """
+    scan = db.get(ScanRun, scan_id)
+    if scan is None:
+        raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
+    if scan.status in {"running", "canceling"}:
+        raise HTTPException(
+            status_code=409,
+            detail="실행 중인 스캔은 삭제할 수 없습니다. 먼저 중지하세요.",
+        )
+
+    # '이 스캔만이 근거인 발견'을 골라낸다. 예전에는 first·last 가 **둘 다 이 스캔**인
+    # 행만 봤는데, 그러면 여러 스캔에 걸친 발견은 마지막 스캔을 지울 때 참조만 NULL 로
+    # 끊긴다. 그 뒤에 남은 스캔을 지워도 조건(first==last==scan_id)에 걸리지 않아, 결국
+    # **모든 스캔을 지워도 발견은 영영 남는다** - 게다가 가리키는 스캔이 없으니 지울 방법도
+    # 사라진다. 조건은 '이 스캔을 지우고 나면 이 발견을 가리키는 스캔이 하나도 없는가'다.
+    # NULL 은 `IN (NULL, 1)` 에 걸리지 않는다(SQL 에서 NULL 비교는 참이 아니라 '모름'이다).
+    # in_ 로 적으면 이미 참조가 끊긴 행이 조용히 빠져 고치려던 버그가 그대로 남는다.
+    def _gone(column):
+        return or_(column.is_(None), column == scan_id)
+
+    owned_ids = [
+        row.id for row in db.query(Finding.id).filter(
+            or_(Finding.first_scan_id == scan_id, Finding.last_scan_id == scan_id),
+            _gone(Finding.first_scan_id), _gone(Finding.last_scan_id),
+        ).all()
+    ]
+    # 위 버그로 이미 참조가 모두 끊긴 발견들. 어떤 스캔도 이들을 뒷받침하지 않으므로
+    # 화면에 남아 있으면 '근거 없는 열린 포트'가 된다. 조용히 지우지 않고 건수를 감사와
+    # 응답에 남긴다 - 지운 사실이 보여야 사람이 확인할 수 있다.
+    stranded_ids = [
+        row.id for row in db.query(Finding.id).filter(
+            Finding.first_scan_id.is_(None), Finding.last_scan_id.is_(None),
+        ).all()
+    ]
+    owned_ids = list(dict.fromkeys(owned_ids + stranded_ids))
+    for start in range(0, len(owned_ids), 500):
+        chunk = owned_ids[start:start + 500]
+        db.query(FindingEvent).filter(FindingEvent.finding_id.in_(chunk)).delete(
+            synchronize_session=False)
+        db.query(Finding).filter(Finding.id.in_(chunk)).delete(synchronize_session=False)
+    # 살아남는 발견/이벤트가 사라진 스캔을 가리키지 않게 한다.
+    kept_events = db.query(FindingEvent).filter(FindingEvent.scan_id == scan_id).update(
+        {FindingEvent.scan_id: None}, synchronize_session=False)
+    db.query(Finding).filter(Finding.first_scan_id == scan_id).update(
+        {Finding.first_scan_id: None}, synchronize_session=False)
+    db.query(Finding).filter(Finding.last_scan_id == scan_id).update(
+        {Finding.last_scan_id: None}, synchronize_session=False)
+
+    db.delete(scan)
+    stranded_note = f" (근거 없이 남아 있던 {len(stranded_ids)}건 포함)" if stranded_ids else ""
+    record(db, user, "SCAN_DELETE", target=str(scan_id),
+           detail=f"발견 {len(owned_ids)}건 삭제{stranded_note}")
+    # 파일은 커밋이 끝난 뒤에 지운다. 먼저 지우면 커밋이 실패했을 때 DB 행은 살아 있는데
+    # 그 행이 가리키는 증거 파일만 사라져, 되돌릴 수도 확인할 수도 없는 상태가 된다.
+    artifacts = _scan_artifact_paths(scan)
+    db.commit()
+    _remove_paths(artifacts)
+    return {"scan_id": scan_id, "findings_deleted": len(owned_ids),
+            "stranded_removed": len(stranded_ids),
+            "events_detached": int(kept_events or 0)}
+
+
+def _scan_artifact_paths(scan: ScanRun) -> list[Path]:
+    """이 스캔이 남긴 파일/폴더 경로. 삭제 전에 미리 모아 둔다 — 커밋 뒤에는 ORM 객체의
+    속성을 더 읽을 수 없기 때문이다(만료된 인스턴스)."""
+    paths = [Path(v) for v in (scan.raw_xml_path, scan.log_path) if v]
+    paths.append(_settings.scans_dir / f"scan_{scan.id}")
+    return paths
+
+
+def _remove_paths(paths: list[Path]) -> None:
+    """파일 정리. 실패해도 예외를 올리지 않는다 — DB 는 이미 커밋됐고, 여기서 실패해도
+    남는 것은 고아 파일뿐이라 되돌리는 것보다 로그를 남기고 넘어가는 편이 안전하다."""
+    for path in paths:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("failed to remove scan artifact %s", path, exc_info=True)
 
 
 @router.get("/options")
@@ -1751,7 +2312,8 @@ async def import_xml(
         logger.exception("failed to import XML")
         record(db, user, "SCAN_IMPORT", target=file.filename or "", detail="실패", ok=False)
         raise HTTPException(status_code=500, detail=_FAILURE_MESSAGES["import_failed"])
-    return IngestSummary(scan_id=result["scan_id"], counts=result["counts"])
+    return IngestSummary(scan_id=result["scan_id"], counts=result["counts"],
+                         reviews=result.get("reviews", []))
 
 
 @router.post("/import-bundle")
@@ -1818,12 +2380,25 @@ async def import_xml_bundle(
             continue
         base, stage = info
         grouped.setdefault(base, {})[stage] = item
-    for base, stages in grouped.items():
-        if len(stages) >= 2:
-            units.append({"kind": "bundle", "sort": base, "base": base, "stages": stages})
+    if grouped:
+        if manifests:
+            # manifest 하나 = 단독 스캐너 실행 하나. 배치가 몇 개든 이력에는 한 줄이어야
+            # 웹에서 돌린 단계 스캔과 같아진다. 예전에는 배치마다 행이 생겼고, 열린 포트가
+            # 없어 tcp_discovery 파일 하나만 남은 배치까지 각자 행을 차지해서 이력이
+            # 아무 말도 하지 않는 줄로 가득 찼다.
+            run_name = Path(manifests[0]["name"].replace("\\", "/")).name
+            run_name = run_name[:-len(".manifest.json")] if run_name.lower().endswith(
+                ".manifest.json") else run_name
+            units.append({
+                "kind": "bundle", "sort": run_name, "base": run_name,
+                "batches": sorted(grouped.items(), key=lambda kv: kv[0].lower()),
+            })
         else:
-            only = next(iter(stages.values()))
-            units.append({"kind": "single", "sort": only["name"], "item": only})
+            # manifest 가 없으면 어떤 파일들이 한 실행인지 단언할 근거가 없다. 파일명 base 로만
+            # 묶고, 그 이상은 넘겨짚지 않는다.
+            for base, stages in sorted(grouped.items(), key=lambda kv: kv[0].lower()):
+                units.append({"kind": "bundle", "sort": base, "base": base,
+                              "batches": [(base, stages)]})
 
     total = _zero_counts()
     imported = []
@@ -1832,7 +2407,9 @@ async def import_xml_bundle(
     for unit in sorted(units, key=lambda u: str(u["sort"]).lower()):
         if skip_known:
             payload_bytes = ([unit["item"]["bytes"]] if unit["kind"] == "single"
-                             else [member["bytes"] for member in unit["stages"].values()])
+                             else [member["bytes"]
+                                   for _base, stages in unit["batches"]
+                                   for member in stages.values()])
             fingerprint = result_fingerprint(payload_bytes)
             # **성공한 인입만** 이미 가져온 것으로 본다. _fail_import 는 실패해도 지문을 남긴 채
             # status="failed" 로 행을 보존하므로, 상태를 보지 않으면 일시적인 디스크/DB 오류 한 번이
@@ -1844,7 +2421,8 @@ async def import_xml_bundle(
                 continue
         try:
             if unit["kind"] == "bundle":
-                result = _import_stage_bundle(db, user, unit["base"], unit["stages"])
+                result = _import_stage_bundle(
+                    db, user, Path(unit["base"].replace("\\", "/")).name, unit["batches"])
             else:
                 item = unit["item"]
                 if "closure_hosts" in item:
@@ -1943,14 +2521,21 @@ def run_scan(
         # 명령 표기는 대표(타겟·-oA 제외) — 호스트 수/배치 수를 덧붙여 가독.
         if body.workflow == "auto":
             stages = []
-            if nmap_runner.auto_tcp_port_spec(body.ports):
+            tcp_spec = nmap_runner.auto_tcp_port_spec(body.ports)
+            udp_spec = nmap_runner.auto_udp_port_spec(body.ports)
+            if tcp_spec:
                 stages.extend([AUTO_STAGE_LABELS["tcp_discovery"], AUTO_STAGE_LABELS["tcp_identify"]])
-            if nmap_runner.auto_udp_port_spec(body.ports):
+            if udp_spec:
                 label = AUTO_STAGE_LABELS["udp_identify"]
                 if body.udp_all_targets:
                     label += "(전체 타깃)"
                 stages.append(label)
-            scan.command = f"자동 스캔 · {' → '.join(stages)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
+            # 설명 문구만 남기면 이력 요약이 이것을 argv 로 오인해 '기본 1000개 TCP' 라고
+            # 단언한다. 실제 범위는 여기서만 알 수 있으므로 함께 적는다.
+            scan.command = (
+                f"자동 스캔 · {' → '.join(stages)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
+                f"  ·  {scan_summary.scope_note(tcp_spec, udp_spec)}"
+            )
         else:
             parts, skip = [], False
             for t in argv0:
@@ -1966,6 +2551,10 @@ def run_scan(
             scan.command = f"{' '.join(parts)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
         if excludes:
             scan.command += f"  ·  제외 {', '.join(excludes)}"
+        # 배치 구성은 실행이 끝나면 sidecar 와 함께 사라진다. 이력이 나중에도 '어떻게
+        # 돌았는지'를 말할 수 있게 스캔 행에 남긴다.
+        scan.batch_total = len(batches)
+        scan.batch_size = max((len(b) for b in batches), default=0)
         db.commit()
         db.refresh(scan)
         threading.Thread(target=_chunk_worker, args=(scan.id,), daemon=True).start()
@@ -2057,18 +2646,31 @@ def run_staged(
             scan.id, hosts if body.discovery == "pn" else body.targets,
             excludes, body.options, body.ports,
             body.nse, out_dir, body.batch_size, discovery=body.discovery,
+            exclude_ports=body.exclude_ports,
+            host_timeouts=_host_timeouts(body),
         )
         tcp_scope = _port_scope(nmap_runner.auto_tcp_port_spec(body.ports), "T")
         udp_scope = (_port_scope(nmap_runner.auto_udp_port_spec(body.ports), "U")
                      if "udp" in body.options else set())
         spec["scanops"] = {
             # Empty is meaningful: this scan must not close any pre-existing finding.
-            "scope_keys": sorted(_auto_scope_keys(db, set(hosts), [], tcp_scope, udp_scope)),
+            # 제외한 포트는 프로브를 보내지 않으므로 닫힘 후보에서도 빼야 한다.
+            "scope_keys": sorted(_auto_scope_keys(
+                db, set(hosts), [], tcp_scope, udp_scope,
+                tcp_excluded=_excluded_port_scope(body.exclude_ports, "T"),
+                udp_excluded=_excluded_port_scope(body.exclude_ports, "U"),
+            )),
         }
         (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
         scan.command = f"{engine_runner.describe(spec)}  ·  {len(hosts)}호스트"
         if excludes:
             scan.command += f"  ·  제외 {', '.join(excludes)}"
+        # 엔진도 같은 대역을 배치로 나눠 sweep 한다(stage-tcp-b0.xml …). 청킹 스캔과 같은
+        # 자리에 같은 뜻으로 남겨야 이력에서 둘을 나란히 읽을 수 있다.
+        scan.batch_size = int(spec.get("batch_size") or 0)
+        scan.batch_total = (
+            -(-len(hosts) // scan.batch_size) if scan.batch_size and hosts else 0
+        )
         db.commit()
         db.refresh(scan)
         threading.Thread(target=_engine_worker, args=(scan.id,), daemon=True).start()
@@ -2272,6 +2874,19 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
     has_batches = bool(state) and "batches" in state
     total = len(state["batches"]) if has_batches else 1
     done = state.get("cursor", 0) if has_batches else (1 if scan.status == "done" else 0)
+    # 단계 엔진에는 sidecar cursor 가 없다. 배치 진행은 산출물이 기록하고 있으므로 그걸 센다.
+    engine_dir = _settings.scans_dir / f"scan_{scan_id}"
+    if not has_batches and scan.batch_total:
+        total = scan.batch_total
+        saved_spec = _read_engine_spec(engine_dir)
+        # 분자와 분모는 같은 모집단이어야 한다. batch_total 은 discovery 이전의 전체 대상으로
+        # 센 값이고, swept_batches 는 live 로 실제 만들어진 산출물을 센다. 그대로 나란히 두면
+        # 없는 배치를 진행 중이라고 말한다 - live 를 알게 된 뒤에는 그쪽으로 갈아탄다.
+        if saved_spec and (live_total := engine_runner.swept_total(engine_dir, saved_spec)):
+            total = live_total
+        done = (total if scan.status == "done"
+                else engine_runner.swept_batches(engine_dir, saved_spec) if saved_spec else 0)
+        has_batches = True
     in_batch = (prog["percent"] or 0) / 100.0
     if scan.status == "done":
         overall = 100.0
@@ -2285,6 +2900,16 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
     if scan.status == "running" and done >= 1 and active > 0 and total:
         avg = active / done
         eta = max(0, round(avg * (total - done - in_batch)))
+    # 지금 무엇을 보고 있는지. 퍼센트 하나만으로는 몇 분째 같은 숫자를 보면서 진행 중인지
+    # 멈춘 것인지조차 알 수 없다 - 현재 배치가 어느 대역이고 어느 단계인지를 함께 준다.
+    batch_hosts: list[str] = []
+    # 배치 대역은 sidecar 에만 있다. 단계 엔진은 batch_total 로 진행만 세므로(state 없음)
+    # 여기서 대역까지 지어내지 않는다.
+    stored = (state or {}).get("batches")
+    if isinstance(stored, list) and 0 <= done < len(stored):
+        current = stored[done]
+        batch_hosts = [str(h) for h in current] if isinstance(current, list) else []
+    started = _scan_started_at(scan)
     prog.update({
         "scan_id": scan.id,
         "status": scan.status,
@@ -2295,6 +2920,15 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
         "batches_done": done,
         "overall_percent": overall,
         "eta_seconds": eta,
+        "stage": (state or {}).get("stage", ""),
+        "stage_hosts": (state or {}).get("stage_hosts") or None,
+        "batch_hosts": len(batch_hosts),
+        "batch_size": scan.batch_size or (len(batch_hosts) or None),
+        "batch_label": _target_label(batch_hosts),
+        "elapsed_seconds": (
+            round((datetime.now(timezone.utc) - started).total_seconds())
+            if started is not None and scan.status in ("running", "canceling") else None
+        ),
     })
     return prog
 

@@ -4,7 +4,7 @@ import { formatImportSummary, prepareImportGroups, runImportGroups } from "../li
 import { splitScanTokens } from "../lib/scanTargets.js";
 import { useToast } from "../ui/Toast.jsx";
 import ScanOptions from "../ui/ScanOptions.jsx";
-import { scanKind, scanStatus, shouldLoadStages } from "../lib/scanStatus.js";
+import { scanKind, scanNotice, scanStatus, shouldLoadStages } from "../lib/scanStatus.js";
 
 const isActive = (s) => s === "running" || s === "canceling";
 
@@ -61,6 +61,7 @@ export default function Scans({ user }) {
   const [progress, setProgress] = useState({});   // { [scanId]: { percent, etc, remaining, elapsed, hosts_up } }
   const [targets, setTargets] = useState("");
   const [exclude, setExclude] = useState("");
+  const [excludePorts, setExcludePorts] = useState("");
   const [name, setName] = useState("");
   const [opt, setOpt] = useState({ workflow: "auto", options: [], ports: "", nse: [], command: "" });
   const [batchSize, setBatchSize] = useState(256);
@@ -81,6 +82,8 @@ export default function Scans({ user }) {
   const [expanded, setExpanded] = useState(() => new Set());
   const toast = useToast();
   const canRun = user.role === "admin" || user.role === "auditor";
+  // 삭제는 발견(다른 사람이 달아 둔 상태·담당자·메모 포함)까지 지우므로 admin 만.
+  const canDelete = user.role === "admin";
 
   function load() {
     api("/scans").then(async (list) => {
@@ -175,13 +178,13 @@ export default function Scans({ user }) {
   })();
 
   // 실행 전 예상 — 타겟/제외/옵션/포트/배치크기가 바뀌면 디바운스로 /estimate 호출.
-  const estKey = JSON.stringify({ t: targetList, x: excludeList, w: opt.workflow, o: opt.options, p: opt.ports, b: batchSize, s: staged });
+  const estKey = JSON.stringify({ t: targetList, x: excludeList, xp: excludePorts, w: opt.workflow, o: opt.options, p: opt.ports, b: batchSize, s: staged });
   useEffect(() => {
     if (!canRun || !targetList.length) { setEst(null); return; }
     setEst(null);
     let alive = true;
     const id = setTimeout(() => {
-      api("/scans/estimate", { method: "POST", json: { targets: targetList, exclude: excludeList, workflow: opt.workflow, options: opt.options, ports: opt.ports, batch_size: batchSize, staged } })
+      api("/scans/estimate", { method: "POST", json: { targets: targetList, exclude: excludeList, exclude_ports: excludePorts, workflow: opt.workflow, options: opt.options, ports: opt.ports, batch_size: batchSize, staged } })
         .then((e) => { if (alive) setEst(e); })
         .catch(() => { if (alive) setEst(null); });
     }, 400);
@@ -196,7 +199,10 @@ export default function Scans({ user }) {
       const summary = await runImportGroups(plan, async (group) => (
         uploadMany("/scans/import-bundle", group.files)
       ));
-      toast(formatImportSummary(summary), summary.hasFailures ? { type: "err" } : undefined);
+      // 검증에 걸린 파일이 있으면 성공 토스트로 흘려보내지 않는다 - 눈에 남아야 한다.
+      const flagged = (summary.reviews || []).length > 0;
+      toast(formatImportSummary(summary),
+            summary.hasFailures || flagged ? { type: "err" } : undefined);
       if (summary.succeededGroups) load();
     } catch (e) {
       toast(e.message, { type: "err" });
@@ -268,8 +274,8 @@ export default function Scans({ user }) {
     setBusy(true);
     const endpoint = staged ? "/scans/run-staged" : "/scans/run";
     const body = staged
-      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, batch_size: batchSize, discovery }
-      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, batch_size: batchSize };
+      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize, discovery }
+      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize };
     api(endpoint, { method: "POST", json: body })
       .then((s) => { toast(`${staged ? "단계 " : ""}스캔 시작됨 · #${s.id} (백그라운드 — 진행은 아래 표)`); setTargets(""); setExclude(""); setName(""); load(); })
       .catch((e2) => toast(e2.message, { type: "err" }))
@@ -279,6 +285,23 @@ export default function Scans({ user }) {
   function stopScan(id) {
     api(`/scans/${id}/stop`, { method: "POST" })
       .then(() => { toast(`#${id} 중지 요청 — 다음날 [이어하기]로 재개 가능`); load(); })
+      .catch((e) => toast(e.message, { type: "err" }));
+  }
+
+  function deleteScan(scan) {
+    // 되돌릴 수 없는 삭제라 무엇이 함께 지워지는지 먼저 말한다.
+    const ok = window.confirm(
+      `스캔 #${scan.id} "${scan.name || "이름 없음"}" 을 삭제할까요?\n\n`
+      + "이 스캔에서만 발견된 항목은 발견 관리에서 함께 삭제됩니다.\n"
+      + "다른 스캔에서도 관측된 발견은 남습니다. 되돌릴 수 없습니다.",
+    );
+    if (!ok) return;
+    api(`/scans/${scan.id}`, { method: "DELETE" })
+      .then((r) => {
+        toast(`#${scan.id} 삭제됨 — 발견 ${r.findings_deleted}건 함께 삭제`);
+        setExpanded((prev) => { const next = new Set(prev); next.delete(scan.id); return next; });
+        load();
+      })
       .catch((e) => toast(e.message, { type: "err" }));
   }
 
@@ -335,7 +358,8 @@ export default function Scans({ user }) {
           </div>
 
           <div className="scan-run-row">
-            <button className="primary scan-run" disabled={busy || (rawMode ? !rawCmd.trim() : !targetList.length)}
+            <button className="primary scan-run"
+                    disabled={busy || (rawMode ? !rawCmd.trim() : !targetList.length)}
                     onClick={runScan}
                     title={rawMode ? "명령을 입력하면 실행할 수 있습니다" : "대상을 입력하면 실행할 수 있습니다"}>
               {busy ? "시작 중…" : "스캔 실행"}
@@ -380,6 +404,20 @@ export default function Scans({ user }) {
               <div id="scan-exclude-help" className="muted scan-hint">
                 공백·쉼표·줄바꿈으로 구분합니다. 제외 대상은 스캔과 닫힘 판정 범위에서 빠집니다.
                 {rawMode && " 직접 명령의 --exclude 와 합쳐 하나의 옵션으로 전달됩니다."}
+              </div>
+
+              <label className="cb-label" htmlFor="scan-exclude-ports" style={{ marginTop: 12 }}>
+                제외할 포트 (선택)
+              </label>
+              <input id="scan-exclude-ports" aria-describedby="scan-exclude-ports-help"
+                     style={{ width: "100%" }} placeholder="예: 9100, 515, 631"
+                     value={excludePorts} onChange={(e) => setExcludePorts(e.target.value)} />
+              <div id="scan-exclude-ports-help" className="muted scan-hint">
+                포트 지정과 같은 문법입니다(<code>9100</code>, <code>1-1024</code>,
+                {" "}<code>U:53</code>). 프린터 같은 장비가 스캔에 반응해 문제를 일으키는 포트를 뺄 때
+                씁니다.{" "}
+                실행되는 모든 nmap 명령에서 빠집니다 — 단계별 정밀 스캔도 발견·TCP·UDP·서비스
+                네 단계 전부에 적용됩니다.
               </div>
             </section>
 
@@ -440,7 +478,7 @@ export default function Scans({ user }) {
         <div style={{ overflowX: "auto" }}>
           <table className="tbl">
             <thead><tr>
-              <th>ID</th><th>이름</th><th>명령</th><th>상태</th>
+              <th>ID</th><th>이름</th><th>스캔 범위</th><th>상태</th>
               <th style={{ minWidth: 220 }}>진행</th><th>호스트</th><th>포트</th><th>작업</th>
             </tr></thead>
             <tbody>
@@ -455,14 +493,25 @@ export default function Scans({ user }) {
                   <tr>
                     <td className="mono">{s.id}</td>
                     <td>{s.name}<div><span className="tag">{kind.label}</span></div></td>
-                    <td className="mono" style={{ fontSize: 11, maxWidth: 300, whiteSpace: "normal", color: "var(--muted)" }}>{s.command}</td>
+                    <td style={{ maxWidth: 260, whiteSpace: "normal" }}><ScanScope summary={s.summary} /></td>
                     <td style={{ whiteSpace: "normal", minWidth: 150 }}>
                       <span className={`pill ${st.cls}`}>{st.label}</span>
                       {s.failure_message && <div className="scan-failure">{s.failure_message}</div>}
                     </td>
-                    <td>{stages[s.id]?.stages?.length
-                      ? <StageTimeline s={stages[s.id]} />
-                      : isActive(s.status) ? <Progress p={p} /> : <span className="muted">—</span>}</td>
+                    <td>
+                      {stages[s.id]?.stages?.length
+                        ? <StageTimeline s={stages[s.id]} />
+                        : isActive(s.status) ? <Progress p={p} /> : null}
+                      {/* StageTimeline 은 단계 칩·전체 % 막대만 그린다 — 배치 x/y·경과는 Progress 에만
+                          있어 진행 중 단계 스캔에서 사라졌다. /progress 는 엔진 스캔에도 배치·경과를
+                          채워 주므로(배치는 swept_batches) 그걸 StageTimeline 아래에 되살린다. */}
+                      {stages[s.id]?.stages?.length && isActive(s.status)
+                        ? <StagedRunMeta p={p} /> : null}
+                      {/* 배치 구성은 끝난 뒤에도 '이 스캔이 어떻게 돌았는지'를 말해 준다. */}
+                      <BatchNote scan={s} progress={isActive(s.status) ? p : null} />
+                      {!stages[s.id]?.stages?.length && !isActive(s.status) && !s.batch_total
+                        ? <span className="muted">—</span> : null}
+                    </td>
                     <td className="mono">{s.host_count}</td>
                     <td className="mono">{s.port_count}</td>
                     <td>
@@ -476,6 +525,9 @@ export default function Scans({ user }) {
                               aria-controls={`scan-detail-${s.id}`} onClick={() => toggleDetails(s)}>
                         {expanded.has(s.id) ? "상세 닫기" : "상세"}
                       </button>
+                      {canDelete && !isActive(s.status) && (
+                        <button className="sm danger" onClick={() => deleteScan(s)}>삭제</button>
+                      )}
                     </td>
                   </tr>
                   {expanded.has(s.id) && (
@@ -494,7 +546,75 @@ export default function Scans({ user }) {
   );
 }
 
+// 이력 표의 '스캔 범위' — 명령줄 대신 어디를·어떤 포트를·무슨 프로토콜로 봤는지만.
+// 원문 명령은 [상세]에 그대로 남는다(필요한 사람은 거기서 본다).
+function ScanScope({ summary }) {
+  if (!summary) return <span className="muted">—</span>;
+  // 프로토콜을 모르면 뱃지를 달지 않는다. 예전에는 명령 표기가 argv 가 아니면 무조건
+  // 'TCP · 기본 1000개' 로 그려서, 전 포트 TCP+UDP 단계 스캔이 상위 1000개 TCP 스캔으로
+  // 보였다 - 스캔하지 않은 범위를 봤다고 말하고 실제 범위는 감추는 이중 오류였다.
+  const unknown = !(summary.protocols || []).length;
+  const partial = summary.excluded_ports || summary.excluded_hosts;
+  return (
+    <div className="scan-scope">
+      <div className="scan-scope-target">{summary.targets}</div>
+      <div className="scan-scope-line">
+        {(summary.protocols || []).map((p) => (
+          <span key={p} className={`tag proto-${p.toLowerCase()}`}>{p}</span>
+        ))}
+        <span className={`scan-scope-ports${partial ? " is-partial" : ""}${unknown ? " is-unknown" : ""}`}
+              title={unknown ? "이 실행의 명령 표기에 스캔 범위가 남아 있지 않습니다 (이 기능 이전에 실행된 스캔)" : undefined}>
+          {summary.ports}
+        </span>
+      </div>
+      {partial && (
+        <div className="scan-scope-excluded">
+          {summary.excluded_ports && <>포트 제외 <code>{summary.excluded_ports}</code></>}
+          {summary.excluded_ports && summary.excluded_hosts && " · "}
+          {summary.excluded_hosts && <>대상 제외 <code>{summary.excluded_hosts}</code></>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // 진행률 막대 — 전체 진행(배치 누적)을 막대로, 배치 카운트 + 현재 배치 ETC/경과를 보조로.
+// 배치 구성 한 줄 — 실행 중이면 Progress 가 x/y 를 이미 그리므로 크기만, 끝난 뒤에는 둘 다.
+function BatchNote({ scan, progress }) {
+  if (!scan.batch_total || scan.batch_total <= 1) return null;
+  if (progress) {
+    return progress.batch_size ? null : (
+      <div className="mono muted" style={{ fontSize: 11 }}>{scan.batch_size}대씩</div>
+    );
+  }
+  return (
+    <div className="mono muted" style={{ fontSize: 11, marginTop: 2 }}>
+      배치 {scan.batch_total}/{scan.batch_total} · {scan.batch_size}대씩
+    </div>
+  );
+}
+
+// 단계 스캔 보조줄 — StageTimeline 은 단계 칩만 그리므로, /progress 가 엔진 스캔에도 채워 주는
+// 배치 x/y·크기·경과를 여기서 되살린다. ETA·대상수는 엔진 스캔에서 백엔드가 아직 비워 주므로
+// (sidecar 의존) 지어내지 않는다 — 있는 값만 정직하게 보여준다.
+function StagedRunMeta({ p }) {
+  if (!p) return null;
+  const total = p.batches_total || 1;
+  const parts = [];
+  // done+1 을 '현재 배치'로 쓰면 없는 배치를 진행 중이라고 말한다 - sweep 이 다 끝나고 서비스
+  // 단계가 도는 중에도 다음 배치를 가리키고, 프로토콜별 최솟값이라 TCP 만 도는 동안에는 0 이다.
+  // 센 것만 정직하게 적는다: 끝난 배치 수.
+  if (total > 1) parts.push(`배치 ${Math.min(p.batches_done, total)}/${total} 완료`);
+  if (total > 1 && p.batch_size) parts.push(`${p.batch_size}대씩`);
+  if (p.elapsed_seconds != null) parts.push(`경과 ${fmtDur(p.elapsed_seconds)}`);
+  if (!parts.length) return null;
+  return (
+    <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
+      {parts.join(" · ")}
+    </div>
+  );
+}
+
 function Progress({ p }) {
   if (!p) return <span className="muted">…</span>;
   const overall = p.overall_percent != null ? p.overall_percent : null;
@@ -513,16 +633,32 @@ function Progress({ p }) {
       </div>
       <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
         {known ? `${overall}%` : "준비 중"}
-        {total > 1 ? ` · 배치 ${p.batches_done}/${total}` : ""}
+        {total > 1 ? ` · 배치 ${Math.min(p.batches_done + 1, total)}/${total}` : ""}
+        {total > 1 && p.batch_size ? ` (${p.batch_size}대씩)` : ""}
         {p.eta_seconds != null ? ` · ~남음 ${fmtDur(p.eta_seconds)}` : (p.remaining ? ` · 남음 ${p.remaining}` : "")}
-        {p.elapsed ? ` · 경과 ${p.elapsed}` : ""}
+        {p.elapsed_seconds != null ? ` · 경과 ${fmtDur(p.elapsed_seconds)}` : (p.elapsed ? ` · 경과 ${p.elapsed}` : "")}
       </div>
+      {/* 퍼센트 하나만 보이면 몇 분째 같은 숫자를 보면서 진행 중인지 멈춘 것인지 알 수 없다.
+          지금 어느 대역의 어느 단계를 보고 있는지가 그 답이다. */}
+      {(p.stage || p.batch_label) && (
+        <div style={{ fontSize: 11, marginTop: 3, display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+          {p.stage && <span className="pill info" style={{ fontSize: 10.5 }}>{STAGE_LABEL[p.stage] || p.stage}</span>}
+          {p.batch_label && <span className="mono muted">{p.batch_label}</span>}
+          {p.stage_hosts ? <span className="muted">· 대상 {p.stage_hosts}대</span> : null}
+          {p.hosts_up != null ? <span className="muted">· 응답 {p.hosts_up}대</span> : null}
+        </div>
+      )}
     </div>
   );
 }
 
 // 단계 타임라인 — 단계분리 엔진 스캔의 발견/TCP/UDP/서비스 진행을 색 칩으로(이벤트 기반).
-const STAGE_LABEL = { discovery: "발견", tcp: "TCP", udp: "UDP", service: "서비스" };
+// 엔진 단계(discovery/tcp/udp/service)와 자동 스캔·가져오기 단계(tcp_discovery/…)를 한 표에서
+// 함께 그린다. 가져온 결과라고 해서 이름을 다르게 부를 이유가 없다.
+const STAGE_LABEL = {
+  discovery: "발견", tcp: "TCP", udp: "UDP", service: "서비스",
+  tcp_discovery: "TCP 발견", tcp_identify: "TCP 식별", udp_identify: "UDP 식별",
+};
 const STAGE_CLS = { pending: "info", running: "info", done: "low", stopped: "medium", error: "high" };
 
 function stageLabel(stage) {
@@ -572,8 +708,10 @@ function StageTimeline({ s }) {
 
 function ScanDetails({ scan, detail }) {
   const kind = detail?.kind === "staged" ? "단계 엔진" : scanKind(scan).label;
-  const failureMessage = detail?.failure_message || scan.failure_message;
-  const failureCode = detail?.failure_code || scan.failure_code;
+  const notice = scanNotice({
+    failure_message: detail?.failure_message || scan.failure_message,
+    failure_code: detail?.failure_code || scan.failure_code,
+  });
   return (
     <div className="scan-detail">
       <div className="row">
@@ -583,10 +721,16 @@ function ScanDetails({ scan, detail }) {
       {detail?.stages?.length
         ? <StageTimeline s={detail} />
         : <div className="muted">{detail?.timeline_available === false ? "저장된 단계 이벤트가 없습니다." : "단계 정보를 불러오는 중…"}</div>}
-      {failureMessage && (
-        <div className="scan-failure-detail">
-          <b>실패 원인</b> {failureMessage}
-          {failureCode && <code>{failureCode}</code>}
+      {notice && (
+        <div className={`scan-failure-detail ${notice.tone}`}>
+          <b>{notice.title}</b> {notice.message}
+          {notice.code && <code>{notice.code}</code>}
+        </div>
+      )}
+      {scan.command && (
+        <div className="scan-detail-command">
+          <b>실행한 명령</b>
+          <code className="mono">{scan.command}</code>
         </div>
       )}
     </div>

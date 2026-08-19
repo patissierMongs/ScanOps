@@ -553,7 +553,9 @@ export default function ScanOptions({
                       <input type="checkbox" checked={on} onChange={() => toggleNse(s.key)} />
                       <span>
                         <b className="mono">{s.key}</b>
-                        {s.nmap_default === false && <em>주의</em>}
+                        {/* 기본 해제인 이유는 위험한 것(⚠)과 '돌 곳이 없는 것'(UDP 전용) 두 가지라
+                            배지는 사실만 말하고, 구체적인 이유는 desc 가 설명한다. */}
+                        {s.nmap_default === false && <em>기본 아님</em>}
                         {s.desc && <small>{s.desc}</small>}
                       </span>
                     </label>

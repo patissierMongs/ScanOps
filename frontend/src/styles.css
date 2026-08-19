@@ -219,6 +219,8 @@ input::placeholder { color: oklch(0.72 0.01 262); }
 .scan-failure { margin-top: 5px; color: var(--high); font-size: 11.5px; line-height: 1.35; }
 .scan-detail { padding: 10px 12px; background: var(--surface-2); border-radius: 8px; white-space: normal; }
 .scan-failure-detail { margin-top: 8px; padding: 8px 10px; color: var(--high); background: var(--high-bg); border-radius: 7px; }
+/* 완료된 스캔의 참고 문구 — 실패와 같은 붉은색으로 그리면 '포트 관측은 온전하다'는 사실이 묻힌다. */
+.scan-failure-detail.notice { color: var(--medium); background: var(--medium-bg); }
 .scan-failure-detail code { margin-left: 8px; color: var(--ink-soft); }
 .pre { background: var(--surface-2); border: 1px solid var(--line); padding: 13px; border-radius: 10px; white-space: pre-wrap; font-family: var(--mono); font-size: 12px; margin-top: 12px; }
 
@@ -355,3 +357,119 @@ button.scan-run { padding: 9px 22px; font-size: 14px; }
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line-soft); font-size: 12.5px;
 }
+
+/* ---------- 스캔 이력: 명령줄 대신 '스캔 범위' 요약 ---------- */
+.scan-scope { display: flex; flex-direction: column; gap: 3px; }
+.scan-scope-target { font-family: var(--mono); font-size: 12px; }
+.scan-scope-line { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.scan-scope-ports { font-size: 11.5px; color: var(--ink-soft); }
+/* 전체가 아니라 '전체에서 일부 뺀' 스캔 — 개수보다 그 사실이 중요하므로 색으로 알린다. */
+.scan-scope-ports.is-partial { color: oklch(0.5 0.13 65); background: var(--medium-bg);
+  padding: 1px 7px; border-radius: 6px; font-weight: 600; }
+.scan-scope-excluded { font-size: 11px; color: var(--muted); }
+.scan-scope-excluded code { font-size: 10.5px; }
+.tag.proto-tcp { color: var(--accent-ink); background: var(--accent-bg); border-color: transparent; }
+.tag.proto-udp { color: oklch(0.45 0.12 300); background: oklch(0.95 0.04 300); border-color: transparent; }
+.scan-detail-command { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.scan-detail-command code { font-size: 11px; color: var(--muted); word-break: break-all; }
+button.sm.danger { color: var(--high); border-color: var(--high-bg); }
+button.sm.danger:hover { background: var(--high-bg); }
+
+/* ---------- 발견 관리: 요소별 색상 인디케이터(파스텔) ---------- */
+.color-toggles { display: flex; align-items: center; gap: 10px; font-size: 12px;
+  padding: 3px 9px; border: 1px solid var(--line); border-radius: 8px; }
+.color-toggles .muted { font-size: 11px; }
+.tbl td.tone-high { background: var(--high-bg); }
+.tbl td.tone-medium { background: var(--medium-bg); }
+.tbl td.tone-low { background: var(--low-bg); }
+/* 포트 번호 관례로 짐작한 식별 — 관측값과 같은 무게로 읽히면 안 되므로 주황 계열 파스텔. */
+.tbl td.tone-guess { background: oklch(0.955 0.04 60); color: oklch(0.45 0.11 60); }
+
+/* ── 표 가로 스크롤 프록시 ────────────────────────────────────────────────────
+   기본 가로 스크롤바는 스크롤 영역의 맨 아래, 즉 200행 아래에 생긴다. 오른쪽 컬럼을 보려면
+   페이지 끝까지 내려가 바를 잡고 다시 올라와야 해서 사실상 못 쓴다. 같은 영역을 조종하는
+   바를 화면 아래에 붙여 두고, 그때만 원래 바를 숨겨 둘이 겹치지 않게 한다. */
+.table-scroller { position: relative; }
+.table-scroll { overflow-x: auto; }
+.table-scroll.has-proxy { scrollbar-width: none; }
+.table-scroll.has-proxy::-webkit-scrollbar { height: 0; }
+
+.table-scrollbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin-top: 2px;
+  padding: 3px 0;
+  background: var(--surface);
+  border-top: 1px solid var(--line-soft);
+  /* 넘치는 표가 있다는 사실 자체가 눈에 들어와야 한다 — 얇은 회색 선이면 아무도 못 찾는다. */
+  scrollbar-width: auto;
+}
+.table-scrollbar-span { height: 1px; }
+.table-scrollbar::-webkit-scrollbar { height: 12px; }
+.table-scrollbar::-webkit-scrollbar-track { background: var(--line-soft); border-radius: 8px; }
+.table-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--accent);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.table-scrollbar::-webkit-scrollbar-thumb:hover { border-width: 2px; }
+
+/* ── 긴 값(핑거프린트) 셀 ──────────────────────────────────────────────────
+   평소에는 두 줄로 접어 두고, 마우스를 올리면 그 자리에서 펼친다. 팝업이 아니라 셀이
+   늘어나는 것이라 커서가 벗어나면 즉시 원래대로 돌아온다 — 클릭도 닫기도 필요 없다. */
+.tbl td:has(> .pre-cell) { white-space: normal; vertical-align: top; }
+.pre-cell {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+  line-height: 1.4;
+  max-width: 460px;
+  max-height: 2.8em;
+  overflow: hidden;
+  background: var(--line-soft);
+  border-radius: 6px;
+  padding: 6px 8px;
+  cursor: zoom-in;
+  transition: max-height .12s ease;
+}
+.pre-cell.is-empty { background: none; padding: 0; }
+.pre-cell:hover, .pre-cell:focus-visible {
+  max-height: 22em;
+  overflow: auto;
+  cursor: auto;
+  /* 펼쳐진 동안만 아래 행 위로 떠서 옆 컬럼을 밀지 않는다. */
+  position: relative;
+  z-index: 2;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
+}
+
+/* 규칙이 '허용'으로 정한 발견 — 숨겨진 이유가 정상처리와 다르다는 것을 표에서도 보여준다. */
+.tag.allowed { color: var(--muted); border-color: var(--line); }
+
+/* 숫자·값 자체가 링크인 자리(규칙의 매칭 건수 등) — 버튼처럼 보이면 표가 시끄러워진다. */
+.linklike {
+  background: none; border: none; padding: 0; font: inherit;
+  color: var(--high); cursor: pointer; text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.linklike:hover { color: var(--accent); }
+
+/* 모달 안내문 — 왜 이 창이 떴는지 한 줄로. 강제 변경처럼 닫을 수 없는 창에서는 이 문장이
+   유일한 설명이라, 흐린 보조 텍스트로 두면 안 된다. */
+.modal-notice {
+  margin: 0 0 4px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--accent-bg);
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+
+/* 범위를 알 수 없는 실행 — 실제 범위와 같은 무게로 그리면 '기본값으로 스캔했다'로 읽힌다. */
+.scan-scope-ports.is-unknown { color: var(--muted); font-style: italic; }

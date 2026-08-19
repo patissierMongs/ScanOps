@@ -12,6 +12,7 @@ import datetime as dt
 import hashlib
 import ipaddress
 import json
+import locale
 import os
 import re
 import shlex
@@ -46,19 +47,31 @@ PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 제외: ssl-enum-ciphers·ntp-monlist·dns-recursion·vnc-title
 # DB 찌르는 스크립트(oracle-tns-version·ms-sql-info 등)는 장애 위험(티베로 등 호환DB 다운)으로 기본 제외.
 # fingerprint-strings: -sV 가 식별 못 한 포트의 원시 응답을 찍어 사람이 판단 → 미식별 포트 조사용.
-# TCP 식별용(2단계): TCP portrule 스크립트만. UDP portrule(snmp/nbstat/ike 등)은 UDP_NSE_SCRIPTS 로 분리.
+# TCP 식별용(2단계): TCP portrule 스크립트만. UDP 식별 단계는 NSE 를 아예 쓰지 않는다(아래 주석).
 DEFAULT_NSE_SCRIPTS = (
     "http-headers,http-server-header,http-title,ssl-cert,"
     "tls-alpn,ssh-hostkey,smb-os-discovery,smb-protocols,"
     "rdp-ntlm-info,sip-methods,rpcinfo,banner,"
     "ftp-anon,ftp-syst,telnet-encryption,dns-nsid,vnc-info,fingerprint-strings"
 )
-# UDP 식별용(3단계): UDP 기본 포트(53·111·123·137·161·500·5060 등)에 실제 매칭되는 스크립트만.
-# rpcinfo 는 UDP 111(포트맵퍼)에서 RPC/NFS(2049) 프로그램 매핑 → 정체 파악에 유효.
-# 부작용 제외: dhcp-discover(리스 요청)·snmp-interfaces(장황·느림)·ntp-monlist(증폭).
-UDP_NSE_SCRIPTS = (
-    "snmp-info,snmp-sysdescr,nbstat,ike-version,dns-nsid,ntp-info,sip-methods,rpcinfo"
-)
+# UDP 식별 단계(3단계)에는 NSE 를 붙이지 않는다 — 얻는 게 없고 잃을 게 있다.
+#
+# 얻는 게 없다: 서버 파서가 발견에 반영하는 NSE 는 _REMARK_PATTERNS/_tls_evidence/
+# fingerprint 세 경로뿐인데(ssl-cert·smb-os-discovery·rdp-ntlm-info·http-*·
+# fingerprint-strings), 전부 TCP 스크립트다. UDP 쪽 스크립트(snmp-*·nbstat·ntp-info·
+# dns-nsid·sip-methods·rpcinfo) 출력은 nse_json 에 원문으로 저장만 되고 읽는 코드가 없다.
+# nbstat 은 패턴표에 있지만 host script 라 <hostscript> 로 나가고, 파서는 <port>/<script>
+# 만 읽으므로 실제로는 걸리지 않는다.
+#
+# 잃을 게 있다: 출발지 포트를 직접 bind 하는 UDP 스크립트는 Windows 스캔 호스트에서 그 포트를
+# 이미 점유한 서비스와 충돌한다(ike-version↔IKEEXT 의 UDP 500 이 확인된 사례).
+#   NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed (IOD#..)
+# 가 호스트마다 쏟아지고 NSE 가 99% 근처에서 정리되지 못한 채(Trying to delete NSI ...)
+# 끝난다. 그렇게 끝난 단계는 닫힘 권한을 잃어(관측 전용) 사라진 UDP 서비스가 영영 안 닫히고,
+# nmap 이 XML 을 끝맺지 못하면 그 단계 결과가 통째로 격리된다.
+#
+# 포트 상태와 -sV 서비스 식별은 NSE 가 아니라 포트스캔에서 나오므로 이 결정으로 미탐·오탐
+# 판정은 달라지지 않는다. UDP NSE 가 필요하면 정밀 프로파일(phase1)이나 --scripts 로 명시한다.
 # 발견 단계 호스트 디스커버리: ICMP 막은 서버도 흔한 서비스 포트로 잡고, 죽은 IP 는 건너뛴다
 # (-Pn 전수보다 듬성한 대역에서 빠르고 누락 적음). -sS 라 raw 소켓(관리자) 전제.
 # probe 조합: -PE(ICMP echo) + -PS(SYN) + -PA(ACK). SYN엔 침묵해도 ICMP/ACK엔 답하는 호스트를
@@ -89,7 +102,6 @@ AUTO_TCP_IDENTIFY_FLAGS = [
 AUTO_UDP_IDENTIFY_FLAGS = [
     "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
     "--max-retries", "2", "-p", f"U:{UDP_DEFAULT_PORTS}",
-    "--script", UDP_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
 AUTO_STAGES = [
     ("tcp_discovery", "TCP 전체 포트 발견"),
@@ -113,7 +125,7 @@ PRESETS: dict[str, list[str]] = {
         "-T4", "--max-retries", "2", "--min-hostgroup", "64",
         "--max-parallelism", "100", "--defeat-rst-ratelimit",
         "-p", PRECISION_PORTS,
-        "--script", DEFAULT_NSE_SCRIPTS + "," + UDP_NSE_SCRIPTS,
+        "--script", DEFAULT_NSE_SCRIPTS,
     ],
 }
 
@@ -185,11 +197,11 @@ NSE_PROTO: dict[str, str] = {
     "telnet-encryption": "tcp", "dns-recursion": "both", "dns-nsid": "both",
     "vnc-info": "tcp", "vnc-title": "tcp",
 }
-# 프리셋의 '기본 NSE' — 이 스캐너가 실제로 쓰는 TCP/UDP 기본 세트의 합집합에서 파생시킨다.
-# 상수를 따로 적으면 기본값을 바꿀 때 조용히 어긋나므로 파생으로 묶어 둔다.
+# 프리셋의 '기본 NSE' — 이 스캐너가 실제로 쓰는 기본 세트에서 파생시킨다. 상수를 따로 적으면
+# 기본값을 바꿀 때 조용히 어긋나므로 파생으로 묶어 둔다. UDP 식별 단계는 NSE 를 쓰지 않으므로
+# TCP 기본 세트가 곧 전체다(웹의 scan_options.NSE_DEFAULT_KEYS 와 같은 집합이어야 한다).
 DEFAULT_PRESET_NSE = [
-    key for key in NSE_PROTO
-    if key in set(DEFAULT_NSE_SCRIPTS.split(",")) | set(UDP_NSE_SCRIPTS.split(","))
+    key for key in NSE_PROTO if key in set(DEFAULT_NSE_SCRIPTS.split(","))
 ]
 
 # 웹 UI 가 기본으로 켜 두는 옵션 집합(scan_options.DEFAULT_KEYS 사본). --workflow auto 를
@@ -215,6 +227,9 @@ FASTER_TIMING_FLAGS = {"-T4", "-T5"}
 GENTLE_MAX_PARALLELISM = "10"
 GENTLE_MIN_HOSTGROUP = "16"
 GENTLE_MAX_RETRIES = "1"
+# UDP 식별이 죽었을 때 한 번 갈아 끼울 nsock 엔진(nmap#3138 유지관리자 우회책).
+# select 는 동시 소켓 수 제약이 있지만 UDP 식별은 포트 수가 적어 무해하다.
+UDP_RETRY_ENGINE = "select"
 GENTLE_MAX_RATE_DEFAULT = "150"   # packets/sec
 GENTLE_HOST_TIMEOUT_DEFAULT = "30m"
 # 허용 강도 — 파서 choices 와 state 재검증이 같은 목록을 쓴다.
@@ -626,9 +641,18 @@ def validate_stats_every(value: str) -> str:
     return value
 
 
-def validate_host_timeout(value: str) -> str:
-    """호스트당 상한. 빈 값/0 이면 미적용. 그 외는 nmap 시간 형식(15m 등)."""
-    value = (value if value is not None else "").strip()
+def validate_host_timeout(value: object) -> str:
+    """호스트당 상한. 빈 값/0 이면 미적용. 그 외는 nmap 시간 형식(15m 등).
+
+    None 은 '끄기'가 아니라 거절이다. 이 값은 저강도(gentle)가 노후 장비를 지키려고 켜 두는
+    안전 제어라, 손상됐거나 미래 버전이 쓴 state 의 `"host_timeout": null` 을 조용히 ""(미적용)
+    으로 바꾸면 보호하려던 장비를 무한정 붙잡게 된다. 끄고 싶으면 ""/0 을 명시해야 한다.
+    (지정 없음 센티널인 None 은 create_plan 이 강도별 기본값으로 먼저 바꾼 뒤 여기 들어온다.)"""
+    if not isinstance(value, str):
+        raise ValueError(
+            f"--host-timeout 값이 문자열이 아닙니다: {value!r}. "
+            "끄려면 0 또는 빈 값을 명시하세요.")
+    value = value.strip()
     if value in ("", "0"):
         return ""
     if not STATS_RE.match(value):
@@ -899,12 +923,15 @@ def stage_scripts(scripts: str, stage_id: str) -> str:
 
     - 발견(tcp_discovery)에는 NSE 를 붙이지 않는다. 이 단계의 목적은 '열린 포트를 빨리 좁히는 것'이라
       스크립트를 얹으면 이득 없이 느려진다(웹 자동 스캔의 발견 단계도 동일).
-    - 식별 단계는 portrule 이 맞는 프로토콜만: TCP 식별에 snmp/nbstat, UDP 식별에 http-* 를 보내도
-      매칭되지 않아 시간만 쓴다. 화이트리스트에 없는 이름은 사용자가 명시한 것이므로 그대로 통과시킨다.
+    - UDP 식별에도 붙이지 않는다. 발견에 반영되는 NSE 가 전부 TCP 스크립트라 얻는 게 없는 반면,
+      출발지 포트 충돌로 NSE 정리가 실패하면 단계 전체가 닫힘 권한을 잃는다(AUTO_UDP_IDENTIFY_FLAGS
+      위 주석). 프로토콜별로 갈리는 규칙이 아니라 단계 규칙이므로 여기 한 곳에서 끊는다.
+    - TCP 식별은 portrule 이 맞는 것만: snmp/nbstat 같은 UDP 전용을 보내도 매칭되지 않아 시간만 쓴다.
+      화이트리스트에 없는 이름은 사용자가 명시한 것이므로 그대로 통과시킨다.
     """
-    if stage_id == "tcp_discovery":
+    if stage_id in ("tcp_discovery", "udp_identify"):
         return ""
-    protocol = "udp" if stage_id == "udp_identify" else "tcp"
+    protocol = "tcp"
     keep = [s for s in (scripts or "").split(",")
             if s and NSE_PROTO.get(s, "both") in (protocol, "both")]
     return ",".join(keep)
@@ -1105,15 +1132,66 @@ def mark_interrupted_outputs(base: Path) -> list[str]:
     return renamed
 
 
-def run_nmap_process(cmd: list[str]) -> int:
+# NSE/소켓이 매끄럽게 돌지 못했다는 표식. XML 에는 남지 않고 stdout 에만 나온다.
+#   NSOCK ERROR       : 소켓 하나를 열지 못함(예: UDP 500 bind 실패 → WSAEACCES 10013)
+#   Trying to delete NSI: nmap 이 자기 이벤트 장부를 정리하지 못함
+#   QUITTING!         : 치명적 오류로 중단
+#
+# **이 표식은 포트 관측의 완결성을 부정하지 않는다.** 실측(Windows, nmap 7.99/Npcap 1.87)에서
+#   nmap -sU -Pn -n -p 500 --script ike-version --max-retries 0 127.0.0.1
+# 은 `Bind to 0.0.0.0:500 failed (10013)` 을 네 번 찍고도 "Nmap done" 과 rc=0 으로 끝났다.
+# 스크립트 소켓 하나가 실패했을 뿐 포트 결과는 온전했다. 그런 실행에서 닫힘 권한을 빼앗으면
+# 사라진 서비스가 영영 닫히지 않아 오탐이 쌓인다 — 미탐을 막으려다 반대쪽으로 넘어지는 것이다.
+#
+# 그래서 판정을 둘로 나눈다.
+#   포트 관측 완결성 : rc=0 · XML 파싱 가능 · <finished exit="success"> · 대상 커버리지
+#                      (import_contract_unit 의 객관적 조건. 이것만이 닫힘 권한을 준다)
+#   부가 증거 완결성 : 아래 표식 → nse_degraded. NSE 결과를 완전하다고 믿지 않는다는 뜻일 뿐,
+#                      포트 관측 권한과 --resume 판정에는 관여하지 않는다.
+NMAP_NSE_PROBLEM_MARKERS = ("NSOCK ERROR", "Trying to delete NSI", "QUITTING!")
+NMAP_UNCLEAN_MARKERS = NMAP_NSE_PROBLEM_MARKERS   # 예전 이름(외부 참조 호환)
+_UNCLEAN_KEEP = 5          # state 에 남길 표본 줄 수(로그 전체를 담지 않는다)
+
+
+def decode_output(raw: bytes, fallback: str = "") -> str:
+    """nmap 한 줄을 사람이 읽을 수 있는 문자열로.
+
+    출력에는 두 인코딩이 섞인다. 우리가 찍는 한글은 UTF-8 이고, nmap 이 Windows API 에서
+    받아 그대로 뱉는 오류 문구(WSAEACCES 10013 등)는 시스템 ANSI 코드페이지다. 한쪽으로
+    고정하면 반대쪽 줄이 통째로 깨져, 정작 원인을 알려주는 문장을 못 읽는다.
+    """
+    if isinstance(raw, str):
+        return raw
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode(fallback or locale.getpreferredencoding(False) or "utf-8", "replace")
+
+
+def run_nmap_process(cmd: list[str], problems: list[str] | None = None) -> int:
     """nmap 한 번 실행. 정지 신호를 받으면 곧바로 죽이지 않고 잠깐 기다린다.
 
     터미널 Ctrl+C 와 GUI [중지]는 프로세스 그룹 전체에 신호를 보내므로 nmap 도 같은 신호를
     이미 받은 상태다. nmap 은 그때 진행분을 -oA 파일로 마저 쓰고 종료하는데, 여기서 바로
     kill 하면 그 부분 결과가 통째로 사라진다. 유예 후에도 살아 있으면 단계적으로 종료한다.
+
+    출력은 그대로 흘려보내면서(운영자가 진행을 봐야 한다) 정상 종료를 부정하는 표식만
+    problems 에 모은다. 표식이 XML 에 없기 때문에 여기서 보지 않으면 볼 곳이 없다.
     """
-    proc = subprocess.Popen(cmd, shell=False)
+    # 이진 모드라 line buffering 은 쓸 수 없다(경고만 나고 무시된다). 기본 버퍼링에서도
+    # readline 은 개행이 도착하는 즉시 반환하므로 진행 표시가 밀리지 않는다.
+    proc = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
     try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = decode_output(raw)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if problems is not None and len(problems) < _UNCLEAN_KEEP:
+                stripped = line.strip()
+                if any(marker in stripped for marker in NMAP_UNCLEAN_MARKERS):
+                    problems.append(stripped[:200])
         return proc.wait()
     except KeyboardInterrupt:
         try:
@@ -1310,7 +1388,10 @@ def run_stage_name(stage_id: str) -> str:
 def stage_succeeded(plan: dict, batch_index: int, stage_id: str) -> bool:
     for run in plan.get("runs", []):
         run_batch = run.get("batch_index", run.get("index"))
-        if run_batch == batch_index and run.get("stage_id", "") == stage_id and run.get("returncode") == 0 and not run.get("skipped"):
+        if (run_batch == batch_index and run.get("stage_id", "") == stage_id
+                and run.get("returncode") == 0 and not run.get("skipped")
+                # 예전 state 에는 clean 키가 없다 — 그때는 종전대로 성공으로 본다.
+                and run.get("clean", True)):
             # 성공으로 기록됐어도 '.xml 산출물'이 사라졌으면 재스캔되도록 성공으로 보지 않는다(QA-041).
             # manifest 가 광고하는 것은 .xml 이므로, .nmap/.gnmap 형제가 남아있어도 .xml 이 없으면 vanished 로
             # 본다 — 그렇지 않으면 .xml 만 지워졌을 때 재실행이 안 돼 importable 결과가 영구 손실된다(QA-051).
@@ -2063,6 +2144,14 @@ def load_plan(path: str, nmap_override: str = "", dry_run: bool = False,
     plan["exclude_ports"] = resumed_value(plan, "exclude_ports", "", validate_exclude_ports)
     plan["intensity"] = resumed_value(plan, "intensity", "normal", validate_intensity)
     plan["max_rate"] = resumed_value(plan, "max_rate", "", validate_max_rate)
+    # host_timeout 도 같은 안전 제어다 — 저강도가 노후 장비를 지키려고 켜 두는 호스트당 상한이라,
+    # 검증에서 빠지면 `"host_timeout": null` 한 줄로 -T3·속도상한은 남은 채 상한만 조용히 풀린다.
+    # 구버전 호환 기본값은 방금 확정한 강도에서 계산해야 gentle 재개가 30m 을 잃지 않는다(GH-48).
+    plan["host_timeout"] = resumed_value(
+        plan, "host_timeout",
+        validate_host_timeout(
+            GENTLE_HOST_TIMEOUT_DEFAULT if plan["intensity"] == "gentle" else HOST_TIMEOUT_DEFAULT),
+        validate_host_timeout)
     raw_targets = plan.get("raw_targets")
     if raw_targets is None:
         raw_targets = saved_batch_targets
@@ -2164,6 +2253,9 @@ def import_contract_unit(plan: dict, run: dict, xml_path: Path) -> dict:
     authoritative = bool(
         run.get("returncode") == 0
         and not run.get("skipped")
+        # NSE/소켓이 정리되지 못한 채 끝난 단계는 관측이 불완전하다. 그 상태로 닫힘 권한을
+        # 주면 '못 본 포트'가 '닫힌 포트'로 기록된다 — 되돌리기 가장 어려운 미탐.
+        and run.get("clean", True)
         and not plan.get("host_timeout")
         and stage_id in {"single", "tcp_discovery", "udp_identify"}
         and targets_complete
@@ -2290,6 +2382,25 @@ def failed_runs(plan: dict) -> list[dict]:
     return [r for r in latest_runs(plan) if not r.get("skipped") and r.get("returncode") not in (0, None)]
 
 
+def degraded_runs(plan: dict) -> list[dict]:
+    """포트 관측은 끝냈지만 NSE/소켓이 매끄럽지 못했던 단계들.
+
+    실패(rc≠0)와도, 미완결(clean=False)과도 다르다. 이쪽은 '포트는 다 봤는데 스크립트
+    결과를 다 믿지는 말라'는 뜻이라 닫힘 권한을 건드리지 않는다 — 사람에게 알리기만 한다."""
+    return [
+        run for run in latest_runs(plan)
+        if not run.get("skipped") and run.get("returncode") == 0 and run.get("nse_degraded")
+    ]
+
+
+def unclean_runs(plan: dict) -> list[dict]:
+    """결과물로 믿을 수 없는 단계들(중단·XML 미완결). 이쪽만 마감 상태를 partial 로 만든다."""
+    return [
+        run for run in latest_runs(plan)
+        if not run.get("skipped") and run.get("returncode") == 0 and not run.get("clean", True)
+    ]
+
+
 def importable_xml(plan: dict, include_discovery_fallback: bool = False) -> list[str]:
     """Importable XML, including completed authoritative units with zero observed hosts.
 
@@ -2374,8 +2485,11 @@ def finalize_plan(plan: dict, state_path: Path, zip_outputs: bool) -> int:
     # discovery 만 성공한 경우(identify 산출물 0)에도 성공한 discovery XML 을 구제 fallback 으로 인정한다.
     # 살아있는 호스트와 열린 포트를 찾고도 'failed'(exit 1, "모든 단계 실패")로 버려지던 문제를 막는다(QA-038).
     importable = importable_xml(plan, include_discovery_fallback=True)
+    # 정상 종료를 부정하는 출력을 낸 단계도 'done' 으로 마감하지 않는다. 결과는 쓸 수 있지만
+    # 온전하지 않으므로, 이력에서 그 사실이 보여야 사람이 다시 돌릴지 판단할 수 있다.
+    incomplete = bool(failed) or bool(unclean_runs(plan))
     if importable:
-        status = "partial" if failed else "done"
+        status = "partial" if incomplete else "done"
     else:
         status = "failed" if failed else "done"
     plan["status"] = status
@@ -2411,6 +2525,22 @@ def print_scan_summary(plan: dict, failed: list[dict], status: str) -> None:
             f"실패(rc={run.get('returncode')}) — 부분 결과만 반영됩니다.",
             file=sys.stderr,
         )
+    for run in unclean_runs(plan):
+        name = run.get("stage_name") or run.get("stage_id") or "scan"
+        print(
+            f"warning: {name} 이(가) 끝까지 정상 종료하지 못했습니다 — 관측이 불완전해 "
+            "닫힘 판정에서 제외합니다(--resume 으로 다시 시도할 수 있습니다).",
+            file=sys.stderr,
+        )
+    for run in degraded_runs(plan):
+        name = run.get("stage_name") or run.get("stage_id") or "scan"
+        print(
+            f"note: {name} 에서 NSE/소켓 오류가 있었습니다 — 포트 결과는 온전하지만 "
+            "스크립트 결과는 일부 빠졌을 수 있습니다.",
+            file=sys.stderr,
+        )
+        for line in run.get("nmap_problems", [])[:3]:
+            print(f"  nmap: {line}", file=sys.stderr)
     if not failed and f["live_hosts"] == 0 and f["open_tcp"] == 0 and f["open_udp"] == 0:
         if f["importable"]:
             print(
@@ -2432,6 +2562,12 @@ def print_scan_summary(plan: dict, failed: list[dict], status: str) -> None:
         print("error: 사용할 수 있는 스캔 결과가 없습니다(모든 단계 실패).", file=sys.stderr)
 
 
+def _stage_xml_truncated(base: Path) -> bool:
+    """단계 산출물 XML 이 존재하는데 파싱되지 않는가(= 끝맺지 못한 채 끊김)."""
+    xml = Path(str(base) + ".xml")
+    return xml.exists() and not xml_parse_ok(xml)
+
+
 def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", tcp_ports: list[int] | None = None,
                    targets: list[str] | None = None) -> int:
     cmd = build_command(plan, idx, stage_id, tcp_ports, targets)
@@ -2441,13 +2577,45 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     stage_label = f" {run_stage_name(stage_id)}" if stage_id else ""
     print(f"[{idx + 1}/{len(plan['batches'])}]{stage_label} {display_command(cmd)}", flush=True)
     interrupted = False
+    problems: list[str] = []
+    retried_engine = ""
     try:
-        rc = run_nmap_process(cmd)
+        rc = run_nmap_process(cmd, problems)
+        # UDP 식별이 죽으면 다른 nsock 엔진으로 한 번만 다시 시도한다.
+        # nsock 은 epoll → kqueue → poll → iocp → select 순으로 고르므로(nsock_engines.c)
+        # Windows 기본은 poll 이다. nmap#3138 의 poll 결함은 7.98 에서 고쳐졌지만, 같은
+        # 실패가 또 나면 그 수정이 불완전하거나 다른 경로라는 뜻이라 유지관리자가 제시한
+        # 우회책(select)을 그대로 쓴다. poll 을 명시하는 것은 기본값 재지정이라 무의미하다.
+        if stage_id == "udp_identify" and (rc != 0 or _stage_xml_truncated(base)):
+            retry_cmd = list(cmd)
+            retry_cmd[1:1] = ["--nsock-engine", UDP_RETRY_ENGINE]
+            print(f"    UDP 식별이 실패했습니다(rc={rc}) — {UDP_RETRY_ENGINE} 엔진으로 "
+                  f"한 번 다시 시도합니다.", flush=True)
+            print(f"    {display_command(retry_cmd)}", flush=True)
+            retry_problems: list[str] = []
+            retry_rc = run_nmap_process(retry_cmd, retry_problems)
+            # 재시도가 더 나으면 그 결과를 채택한다. 아니면 원래 실패를 그대로 남긴다 —
+            # 재시도가 실패했다고 첫 실행보다 나쁘게 기록할 이유는 없다.
+            if retry_rc == 0 and not _stage_xml_truncated(base):
+                rc, problems = retry_rc, retry_problems
+                retried_engine = UDP_RETRY_ENGINE
     except KeyboardInterrupt:
         # 중단도 '일어난 일'이라 기록한다. 기록하지 않으면 중간까지 스캔한 부분 결과가
         # state 에 없는 유령 파일로 남고, 재개 후 온전한 결과에 덮어써진다.
         interrupted, rc = True, 130
-    files = mark_interrupted_outputs(base) if interrupted else existing_outputs(base)
+    # nmap 이 XML 을 끝맺지 못한 채 죽으면(NSE 도중 크래시 등) `</nmaprun>` 이 없어 파싱조차
+    # 안 된다. 그런 파일이 결과 폴더에 남아 있으면 사람이 '결과가 나왔네' 하고 가져오려다
+    # 오류를 만나고, 무엇보다 완주한 결과와 섞인다. 중단본과 같은 취급으로 격리한다 —
+    # 사용자가 정한 규칙(부분 결과는 인입하지 않는다)이 원인과 무관하게 성립해야 한다.
+    truncated = not interrupted and _stage_xml_truncated(base)
+    # 표식(problems)과 XML 미완결(truncated)은 다른 사실이다. 앞은 '부가 증거가 덜 찼다',
+    # 뒤는 '이 실행 자체를 믿을 수 없다'. 섞으면 스크립트 소켓 하나가 실패한 정상 실행까지
+    # 재실행 대상·닫힘 권한 박탈로 넘어간다.
+    nse_degraded = bool(problems)
+    if truncated:
+        problems.insert(0, "nmap 이 XML 을 끝맺지 못했습니다(파일이 중간에서 끊김).")
+    files = (mark_interrupted_outputs(base)
+             if interrupted or truncated else existing_outputs(base))
     run = {
         "index": idx,
         "batch_index": idx,
@@ -2457,6 +2625,15 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
         "finished_at": now_iso(),
         "returncode": rc,
         "interrupted": interrupted,
+        # clean = 이 실행을 결과물로 믿을 수 있는가(중단·XML 미완결이면 False). 닫힘 권한과
+        # --resume 재시도 판정이 이 값을 본다.
+        "clean": not (interrupted or truncated),
+        # nse_degraded = 포트 관측은 온전하지만 NSE/소켓이 매끄럽지 못했다. 보고용이고
+        # 닫힘 권한에는 관여하지 않는다(NMAP_NSE_PROBLEM_MARKERS 주석 참고).
+        "nse_degraded": nse_degraded,
+        "nmap_problems": problems,
+        # 어떤 nsock 엔진으로 성공했는지 — 기본 엔진이 죽는 환경인지 추적하는 유일한 기록이다.
+        "nsock_engine_retry": retried_engine,
         "command": cmd,
         "scan_targets": scan_targets,
         "scan_targets_complete": targets_complete,

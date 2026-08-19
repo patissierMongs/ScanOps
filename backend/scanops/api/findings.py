@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import get_db
 from ..identity import display_identity
+from ..observation import current_reason, exposure_text
 from ..models import (
     ACTIVE_FINDING_STATES, FINDING_STATUSES, RISK_LABELS_KO,
     Finding, FindingEvent, ScanRun, User,
@@ -56,6 +57,11 @@ def _purpose_evidence(f: Finding) -> list[str]:
     return ev
 
 
+def _exposure(f: Finding) -> str:
+    """관측된 노출 사실을 한 줄로 - 표·필터·내보내기에서 '익명 FTP만' 같은 조회가 되게."""
+    return exposure_text(f.exposure_json)
+
+
 def _compliance(f: Finding) -> str:
     return "; ".join(f"{c.get('std')}:{c.get('ref')}" for c in (f.compliance_json or []))
 
@@ -68,6 +74,12 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("port", "포트", lambda f: f.port),
     ("proto", "프로토콜", lambda f: f.proto),
     ("state", "상태", lambda f: f.state),
+    # 같은 open 이라도 응답을 받아 확인한 것과 무응답으로 추정한 것은 다르다.
+    # 상태만 내보내면 받는 사람은 그 차이를 알 방법이 없다.
+    ("state_evidence", "상태 근거", lambda f: f.state_evidence),
+    # 현재 상태를 뒷받침하지 않는 원문(닫힌 행에 남은 예전 syn-ack)은 내보내지 않는다 —
+    # '근거 원문'이라는 이름 옆에 두면 읽는 사람이 현재 상태의 근거로 읽는다.
+    ("reason", "근거 원문", lambda f: current_reason(f.state, f.reason)),
     ("display_identity", "표시 식별", lambda f: display_identity(
         server=f.server, product=f.product, version=f.version, service=f.service,
         identification=f.identification,
@@ -88,11 +100,15 @@ COLUMNS: list[tuple[str, str, object]] = [
     ("status", "운영상태", lambda f: f.status),
     ("reopened", "재발", lambda f: "재발" if f.reopened else ""),
     ("dept", "부서", lambda f: f.dept),
-    ("owner", "담당자", lambda f: f.owner),
+    ("owner", "담당자(자산대장)", lambda f: f.owner),
+    # 배정 담당자는 자산대장 담당자와 다른 축이다. 표에서 둘을 구분해야 '누가 조치하는가'를
+    # 필터·내보내기로도 추적할 수 있다.
+    ("assignee", "배정 담당자", lambda f: f.assignee_name),
     ("contact", "연락처", lambda f: f.contact),
     ("deadline", "마감", lambda f: f.deadline.strftime("%Y-%m-%d") if f.deadline else ""),
     ("first_seen", "등록 날짜", lambda f: f.first_seen.strftime("%Y-%m-%d")),
     ("last_seen", "스캔 날짜", lambda f: f.last_seen.strftime("%Y-%m-%d")),
+    ("exposure", "노출 관측", _exposure),
     ("compliance", "컴플라이언스근거", _compliance),
     ("purpose", "용도근거", lambda f: " · ".join(_purpose_evidence(f))),
     ("manual_note", "메모", lambda f: f.manual_note),
@@ -143,11 +159,48 @@ def _cell(finding: Finding, key: str) -> str:
         return ""
 
 
-def _matches(finding: Finding, needle: str, exact: bool) -> bool:
-    """모든 컬럼의 '보이는 값' 중 하나라도 맞으면 통과. 첫 일치에서 멈춘다."""
+# 제외 검색 접두사. `!ssh` = ssh 가 아닌 것만. 목록에서 몇 건을 빼고 보는 일이 훨씬 잦은데
+# 그때마다 '아닌 것'을 표현할 방법이 없어 눈으로 걸러야 했다. `!!` 는 문자 그대로의 `!` 다
+# (제외를 도입하면서 `!` 로 시작하는 값 자체를 검색할 길이 막히면 안 된다).
+NEGATE = "!"
+
+
+def parse_needle(text: str) -> tuple[str, bool]:
+    """검색어 -> (실제 검색어, 제외 여부)."""
+    if text.startswith(NEGATE * 2):
+        return text[1:], False
+    if text.startswith(NEGATE):
+        return text[1:], True
+    return text, False
+
+
+def _hit(finding: Finding, needle: str, exact: bool) -> bool:
     if exact:
         return any(_cell(finding, key).strip().casefold() == needle for key in _SEARCH_ORDER)
     return any(needle in _cell(finding, key).casefold() for key in _SEARCH_ORDER)
+
+
+def _matches(finding: Finding, raw: str, exact: bool) -> bool:
+    """모든 컬럼의 '보이는 값' 중 하나라도 맞으면 통과. 첫 일치에서 멈춘다.
+
+    `!` 로 시작하면 뒤집는다 - 어느 컬럼에도 맞지 않는 행만 남는다. 제외를 '일치하는 컬럼이
+    하나라도 있으면 버린다'로 읽는 것이 사람이 기대하는 동작이다(어느 한 컬럼에만 없으면
+    통과시키면 사실상 아무것도 걸러지지 않는다).
+    """
+    needle, negate = parse_needle(raw)
+    if not needle:
+        return True
+    return _hit(finding, needle, exact) != negate
+
+
+def _column_hit(finding: Finding, key: str, raw: str, exact: bool) -> bool:
+    """컬럼 필터 한 칸. 전체 검색과 같은 `!` 규칙을 쓴다 - 규칙이 칸마다 다르면 못 외운다."""
+    text, negate = parse_needle(raw)
+    if not text:
+        return True
+    value = _cell(finding, key)
+    hit = value.strip().casefold() == text if exact else text in value.casefold()
+    return hit != negate
 
 
 def _parse_filters(raw: str) -> dict[str, str]:
@@ -203,7 +256,7 @@ def _overdue_before(today: str):
 
 def _view_rows(db: Session, *, status=None, risk=None, host=None, q=None, state="open",
                dept=None, match="contains", filters="", sort="", direction="asc",
-               hide_normal=False, overdue_only=False, today=""):
+               hide_normal=False, hide_allowed=False, overdue_only=False, today=""):
     """목록·내보내기 공통 뷰 — 표에 보이는 값 그대로 필터·정렬한다.
 
     '표 = 내보내기' 불변식을 지키려면 계산 컬럼(표시 식별·용도근거·컴플라이언스)도 같은 기준으로
@@ -216,6 +269,10 @@ def _view_rows(db: Session, *, status=None, risk=None, host=None, q=None, state=
     rows = _filtered(db, status, risk, host, None, state, dept).all()
     if hide_normal:
         rows = [f for f in rows if f.status != "정상처리"]
+    if hide_allowed:
+        # 조직이 '허용'으로 정한 발견만 접는다. 정상처리(사람이 조치를 끝냈다)와는 다른 축이라
+        # 토글도 따로 둔다 - 하나로 묶으면 둘 중 무엇 때문에 안 보이는지 알 수 없다.
+        rows = [f for f in rows if not f.allowed]
     if overdue_only:
         limit_day = _overdue_before(today)
         rows = [f for f in rows if f.deadline is not None and f.deadline.date() < limit_day]
@@ -224,11 +281,8 @@ def _view_rows(db: Session, *, status=None, risk=None, host=None, q=None, state=
         exact_cols = match == "exact"
         rows = [
             f for f in rows
-            if all(
-                (_cell(f, key).strip().casefold() == text) if exact_cols
-                else (text in _cell(f, key).casefold())
-                for key, text in column_filters.items()
-            )
+            if all(_column_hit(f, key, text, exact_cols)
+                   for key, text in column_filters.items())
         ]
     needle = (q or "").strip().casefold()
     if needle:
@@ -254,6 +308,7 @@ def list_findings(
     sort: str = "",
     dir: str = "asc",
     hide_normal: bool = False,
+    hide_allowed: bool = True,
     overdue_only: bool = False,
     today: str = "",
     limit: int = 0,
@@ -276,7 +331,8 @@ def list_findings(
         raise HTTPException(status_code=400, detail="dir 은 asc 또는 desc 여야 합니다.")
     rows = _view_rows(db, status=status, risk=risk, host=host, q=q, state=state, dept=dept,
                       match=match, filters=filters, sort=sort, direction=dir,
-                      hide_normal=hide_normal, overdue_only=overdue_only, today=today)
+                      hide_normal=hide_normal, hide_allowed=hide_allowed,
+                      overdue_only=overdue_only, today=today)
     response.headers["X-Total-Count"] = str(len(rows))
     if limit > 0:
         rows = rows[max(0, offset):max(0, offset) + limit]
@@ -307,6 +363,7 @@ def export_findings(
     sort: str = "",
     dir: str = "asc",
     hide_normal: bool = False,
+    hide_allowed: bool = True,
     overdue_only: bool = False,
     today: str = "",
     _: User = Depends(current_user),
@@ -320,7 +377,8 @@ def export_findings(
     # 목록과 같은 뷰 함수를 쓴다 — 화면에서 걸러 본 것과 내보낸 것이 달라지면 안 된다.
     rows = _view_rows(db, status=status, risk=risk, host=host, q=q, state=state,
                       match=match, filters=filters, sort=sort, direction=dir,
-                      hide_normal=hide_normal, overdue_only=overdue_only, today=today)
+                      hide_normal=hide_normal, hide_allowed=hide_allowed,
+                      overdue_only=overdue_only, today=today)
 
     if fmt == "xlsx":
         import openpyxl

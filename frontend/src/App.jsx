@@ -68,7 +68,14 @@ export default function App() {
 }
 
 function Shell({ user, onLogout }) {
+  // 남이 정해 준 비밀번호를 쓰는 동안 서버는 모든 작업 API 를 403 으로 막는다. 화면이
+  // 그대로 열려 있으면 사용자는 전부 오류만 보게 되므로, 변경 창만 띄우고 취소는 막는다.
+  const mustChange = !!user.must_change_password;
   const [view, setView] = useState("dashboard");
+  // 다른 화면에서 '이 조건으로 발견을 보자'며 넘어올 때 싣고 오는 필터. 화면 전환과 필터
+  // 적용이 따로 놀면 사용자가 이동 후 조건을 다시 입력해야 한다.
+  const [findingsFocus, setFindingsFocus] = useState(null);
+  const focusFindings = (next) => { setFindingsFocus(next); setView("findings"); setNavOpen(false); };
   const [openCount, setOpenCount] = useState(null);
   const [pwOpen, setPwOpen] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
@@ -93,9 +100,9 @@ function Shell({ user, onLogout }) {
 
   const views = {
     dashboard: <Dashboard onNav={(next) => { setView(next); setNavOpen(false); }} />,
-    findings: <Findings user={user} />,
+    findings: <Findings user={user} focus={findingsFocus} onFocusApplied={() => setFindingsFocus(null)} />,
     heatmap: <Heatmap />,
-    rules: <Rules user={user} />,
+    rules: <Rules user={user} onShowMatches={focusFindings} />,
     history: <History />,
     assets: <Assets user={user} />,
     notify: <Notifications user={user} />,
@@ -217,9 +224,13 @@ function Shell({ user, onLogout }) {
         <ErrorBoundary key={view}>{views[view]}</ErrorBoundary>
       </div>
     </div>
-    {pwOpen && (
+    {(pwOpen || mustChange) && (
       <PasswordModal
-        title="비밀번호 변경"
+        title={mustChange ? "비밀번호를 변경해야 합니다" : "비밀번호 변경"}
+        mandatory={mustChange}
+        notice={mustChange
+          ? "처음 발급받은 비밀번호로는 작업할 수 없습니다. 변경하면 발급 안내 파일(INITIAL_ADMIN.txt)도 자동으로 삭제됩니다."
+          : ""}
         requireCurrent
         onClose={() => setPwOpen(false)}
         onSuccess={onLogout}

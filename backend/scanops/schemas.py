@@ -25,6 +25,17 @@ class UserOut(BaseModel):
     role: str
     display_name: str
     is_active: int
+    # 남이 정해 준 비밀번호를 아직 쓰고 있는가 - 화면이 이 값으로 강제 변경 창을 띄운다.
+    must_change_password: int = 0
+
+
+class AssigneeOut(BaseModel):
+    """배정 후보 — 이름표에 필요한 최소한만. 역할·활성여부·생성일은 담당자를 고르는 데
+    필요 없고, admin 전용 목록을 auditor 에게 열어 줄 이유도 없다."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    username: str
+    display_name: str
 
 
 class UserCreate(BaseModel):
@@ -59,6 +70,12 @@ class ScanRunIn(BaseModel):
     staged: bool = False           # estimate가 단계 엔진의 프로토콜 조합을 검증할 때만 사용
     discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
     udp_all_targets: bool = False  # auto: UDP 식별을 discovery live host 가 아닌 원본 타깃 전체로(-Pn)
+    # 호스트당 상한(nmap --host-timeout). TCP 와 UDP 를 **따로** 받는다 — 정상 호스트가
+    # 걸리지 않는 상한이 프로토콜마다 다르기 때문이다(TCP 는 포트 수, UDP 는 ICMP 율제한이
+    # 소요를 지배한다). 빈 값이면 단계별 기본값(scan_options.HOST_TIMEOUT_DEFAULTS).
+    # "0" 은 명시적 끄기다. None 은 받지 않는다 - 안전 제어가 조용히 풀리면 안 된다(#48).
+    host_timeout: str = ""
+    udp_host_timeout: str = ""
 
 
 class KnownResultsIn(BaseModel):
@@ -108,14 +125,23 @@ class ScanOut(BaseModel):
     finished_at: datetime | None
     host_count: int
     port_count: int
+    # 배치로 나눠 돌렸으면 몇 덩어리를 몇 대씩. 0 이면 배치 정보가 없는 실행이다.
+    batch_total: int = 0
+    batch_size: int = 0
     stages_json: list | None = None
     failure_code: str = ""
     failure_message: str = ""
+    # 이력 표가 명령줄 대신 보여주는 요약(어디를·어떤 포트를·TCP/UDP). 서버가 실행된 argv 에서
+    # 뽑으므로 표와 상세가 같은 근거를 본다. 원문 명령은 command 로 상세에서만 펼친다.
+    summary: dict | None = None
 
 
 class IngestSummary(BaseModel):
     scan_id: int
     counts: dict
+    # 가져오기 자동 검증 결과 — [{file, mark, why, usable}]. 사람이 따로 도구를 돌리지 않아도
+    # '이 결과를 그대로 믿어도 되는가'를 그 자리에서 보게 한다.
+    reviews: list[dict] = []
 
 
 # ---- audit ----
@@ -140,6 +166,9 @@ class FindingOut(BaseModel):
     port: int
     proto: str
     state: str
+    reason: str = ""              # nmap --reason 원문(syn-ack/no-response…)
+    state_evidence: str = ""      # 그 근거의 해석 — 응답 확인 / 무응답 추정 / 미관측
+    needs_confirmation: bool = False
     service: str
     product: str
     version: str
@@ -153,11 +182,18 @@ class FindingOut(BaseModel):
     category: str
     usage: str
     risk_level: str
+    # 조직 규칙이 '허용'으로 정한 발견 - 화면이 기본으로 접고 토글로 펼친다.
+    allowed: int = 0
     remarks: str
     compliance_json: list | None
+    # NSE 가 관측한 노출 사실 [{"kind","detail"}]. 등급을 올린 근거는 compliance_json 에도
+    # 함께 남지만, 화면이 '무엇이 관측됐나' 를 따로 강조할 수 있게 원본도 내린다.
+    exposure_json: list | None = None
     status: str
     reopened: int
     owner_user_id: int | None
+    # 배정된 담당자 이름. id 만 내려 주면 화면이 사용자 목록을 다시 받아 맞춰야 한다.
+    assignee_name: str = ""
     deadline: datetime | None
     dept: str
     contact: str

@@ -17,6 +17,9 @@ _EXCLUDE_RANGE_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})-(\d{1,3
 _PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
 _NSE_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 _TIMINGS = {"-T0", "-T1", "-T2", "-T3", "-T4", "-T5"}
+# 호스트당 상한(nmap --host-timeout). 단독 스캐너 validate_host_timeout 과 같은 문법이며
+# 세 경로가 어긋나지 않는지는 백엔드 계약 테스트가 검사한다.
+_HOST_TIMEOUT_RE = re.compile(r"^\d+[smh]?$")
 
 # standalone auto 스캔과 공유하는 기본 발견/동시성 정책.
 DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"
@@ -24,15 +27,30 @@ DISCOVERY_PA = "-PA80,443,3389"
 DEFAULT_MIN_HOSTGROUP = 64
 DEFAULT_MAX_PARALLELISM = 100
 DEFAULT_NSE_SCRIPT_TIMEOUT = "10s"
+# 식별 단계 동시 실행 상한. 프로세스가 늘면 스캔 서버의 소켓·CPU 를 그만큼 쓰므로,
+# '느려서 못 쓰는' 문제를 '서버가 죽는' 문제로 바꾸지 않도록 위쪽을 막아 둔다.
+_MAX_SERVICE_WORKERS = 32
 
 # nmapParser 기본 UDP 포트 집합(원본 one-liner 계승)
 DEFAULT_UDP_PORTS = ("7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,"
                      "514,520,623,1900,2049,4500,5060,5353,5355,11211")
 # 서비스 probe 기본 NSE — 타겟형(portrule 안 맞으면 자동 skip). 원본의 20종 전수 대신 핵심만.
 # DB 찌르는 스크립트(redis-info·oracle-tns-version·ms-sql-info 등)는 장애 위험으로 기본 제외.
-DEFAULT_NSE = ["banner", "http-headers", "http-title", "http-server-header",
-               "ssl-cert", "ssh-hostkey", "ftp-anon",
-               "smb-os-discovery", "snmp-info"]
+# spec 이 stages.service.nse 를 지정하지 않았을 때의 **폴백**이다. 운영 경로(웹)는
+# engine_runner.build_job_spec 이 scan_options.NSE_DEFAULT_KEYS 를 항상 채워 넣으므로 여기까지
+# 오지 않는다. 그래도 목록이 달랐던 탓에 "단계 스캔은 이 스크립트를 안 돌린다"는 잘못된 결론이
+# 실제로 나왔다 - 안 쓰이는 기본값이라도 다르면 읽는 사람을 속인다.
+#
+# 그래서 웹·단독과 **같은 집합**으로 맞춘다. 세 곳이 어긋나지 않는지는 백엔드 계약 테스트가
+# 검사한다(tests/test_layer_contracts.py). 엔진은 백엔드를 import 하지 않는 독립 패키지라
+# 파생시킬 수 없어서, 사본을 두되 드리프트를 테스트로 막는 방식이다.
+#
+# UDP 식별 단계는 NSE 를 붙이지 않으므로(_probe_protocol 이 tcp 일 때만 --script 를 싣는다)
+# 이 목록은 TCP 식별에만 쓰인다.
+DEFAULT_NSE = ["banner", "dns-nsid", "fingerprint-strings", "ftp-anon", "ftp-syst",
+               "http-headers", "http-server-header", "http-title", "rdp-ntlm-info",
+               "rpcinfo", "sip-methods", "smb-os-discovery", "smb-protocols",
+               "ssh-hostkey", "ssl-cert", "telnet-encryption", "tls-alpn", "vnc-info"]
 
 
 @dataclass
@@ -41,6 +59,7 @@ class DiscoveryStage:
     mode: str = "sn"          # sn=핑 스윕 / pn=발견 생략(타겟 전체 live 취급)
     timing: str = "-T4"
     max_retries: int = 2
+    host_timeout: str = ""    # "" = 미적용
 
 
 @dataclass
@@ -51,6 +70,7 @@ class TcpStage:
     timing: str = "-T4"
     min_rate: int = 0         # 0=강제 하한 없음; 명시된 경우에만 --min-rate 적용
     max_retries: int = 2
+    host_timeout: str = ""    # "" = 미적용
 
 
 @dataclass
@@ -59,6 +79,8 @@ class UdpStage:
     ports: str = DEFAULT_UDP_PORTS
     timing: str = "-T4"
     max_retries: int = 2
+    host_timeout: str = ""    # "" = 미적용. TCP 와 별개 값이다 — 같이 묶으면 UDP 의
+                              # ICMP 율제한 지연 특성에 맞춰 TCP 까지 늘어난다.
 
 
 @dataclass
@@ -70,6 +92,12 @@ class ServiceStage:
     nse: list = field(default_factory=lambda: list(DEFAULT_NSE))
     max_retries: int = 2
     confirm: bool = False      # 2-pass — 1차에 안 잡히면 retries↑ 재확인(재스캔용)
+    host_timeout: str = ""     # "" = 미적용
+    udp_host_timeout: str = "" # UDP probe 전용 상한(비면 host_timeout 을 따른다)
+    # 식별 단계에서 동시에 돌릴 호스트 수. 이 단계는 프로세스마다 타깃이 1개라 nmap 자신의
+    # 호스트 병렬성(--min-hostgroup)을 못 쓴다 - 직렬로 두면 호스트 수에 소요가 그대로 비례한다.
+    # 재스캔(닫힘 권한이 걸린 경로)은 1 로 강제해 실패 시 즉시 중단하는 의미를 지킨다.
+    workers: int = 8
 
 
 _STAGE_CLASSES = {"discovery": DiscoveryStage, "tcp": TcpStage, "udp": UdpStage, "service": ServiceStage}
@@ -97,6 +125,25 @@ def _validate_exclude(value) -> None:
         raise ValueError(f"잘못된 제외 대상 IPv4/CIDR입니다: {value!r}") from exc
     if network.version != 4:
         raise ValueError(f"IPv6 제외 대상은 아직 지원하지 않습니다: {value!r}")
+
+
+def validate_host_timeout(value: object, label: str = "host_timeout") -> str:
+    """호스트당 상한. 빈 값/0 이면 미적용. 그 외는 nmap 시간 형식(15m 등).
+
+    ``None`` 은 '끄기'가 아니라 **거절**이다 — 단독 스캐너 validate_host_timeout 과 같은
+    이유다(#48). 이 값은 한 호스트가 실행 전체를 붙잡는 것을 막는 안전 제어라, 손상됐거나
+    미래 버전이 쓴 spec 의 ``"host_timeout": null`` 을 조용히 ""(미적용)으로 바꾸면 막으려던
+    지연이 그대로 돌아온다. 끄고 싶으면 ""/0 을 명시해야 한다.
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{label} 값이 문자열이 아닙니다: {value!r}. 끄려면 0 또는 빈 값을 명시하세요.")
+    value = value.strip()
+    if value in ("", "0"):
+        return ""
+    if not _HOST_TIMEOUT_RE.fullmatch(value):
+        raise ValueError(f"{label} 값은 30s, 15m 같은 nmap 시간 형식이어야 합니다(끄려면 0): {value!r}")
+    return value
 
 
 def _validate_ports(value: str, label: str) -> None:
@@ -132,6 +179,9 @@ class JobSpec:
     job_id: str = "job"
     targets: list = field(default_factory=list)
     exclude: list = field(default_factory=list)
+    # 모든 단계에서 뺄 포트(nmap --exclude-ports). 프린터처럼 스캔에 반응해 문제를
+    # 일으키는 포트를 제외하는 안전 컨트롤이라 한 단계라도 새면 의미가 없다.
+    exclude_ports: str = ""
     out_dir: str = "."
     batch_size: int = 256
     sudo: str = "auto"        # auto(POSIX 비root면 sudo) / always / never
@@ -151,6 +201,7 @@ class JobSpec:
             job_id=d.get("job_id", "job"),
             targets=list(d.get("targets", [])),
             exclude=list(d.get("exclude", [])),
+            exclude_ports=str(d.get("exclude_ports", "") or ""),
             out_dir=d.get("out_dir", "."),
             batch_size=int(d.get("batch_size", 256)),
             sudo=d.get("sudo", "auto"),
@@ -165,6 +216,7 @@ class JobSpec:
     def to_dict(self) -> dict:
         return {
             "job_id": self.job_id, "targets": self.targets, "exclude": self.exclude,
+            "exclude_ports": self.exclude_ports,
             "out_dir": self.out_dir, "batch_size": self.batch_size, "sudo": self.sudo,
             "targets_ports": self.targets_ports,
             "rescan_units": self.rescan_units,
@@ -181,6 +233,8 @@ class JobSpec:
             _validate_exclude(t)
         for label, p in (("tcp", self.tcp.ports), ("udp", self.udp.ports)):
             _validate_ports(p, label)
+        if self.exclude_ports.strip():
+            _validate_ports(self.exclude_ports, "제외 포트")
         if self.tcp.enabled and not self.tcp.ports.strip():
             raise ValueError("TCP 단계가 활성화되었지만 포트가 비어 있습니다.")
         if self.udp.enabled and not self.udp.ports.strip():
@@ -192,6 +246,23 @@ class JobSpec:
                           ("service", self.service.timing)):
             if tm not in _TIMINGS:
                 raise ValueError(f"허용되지 않는 {label} 타이밍: {tm!r}")
+        # 상한은 단계마다 별개 값이다. 여기서 정규화까지 해 두면 pipeline 은 문자열이
+        # 비었는지만 보면 된다.
+        self.discovery.host_timeout = validate_host_timeout(
+            self.discovery.host_timeout, "discovery.host_timeout")
+        self.tcp.host_timeout = validate_host_timeout(self.tcp.host_timeout, "tcp.host_timeout")
+        self.udp.host_timeout = validate_host_timeout(self.udp.host_timeout, "udp.host_timeout")
+        self.service.host_timeout = validate_host_timeout(
+            self.service.host_timeout, "service.host_timeout")
+        self.service.udp_host_timeout = validate_host_timeout(
+            self.service.udp_host_timeout, "service.udp_host_timeout")
+        try:
+            self.service.workers = int(self.service.workers)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"service.workers 는 정수여야 합니다: {self.service.workers!r}") from exc
+        if not 1 <= self.service.workers <= _MAX_SERVICE_WORKERS:
+            raise ValueError(
+                f"service.workers 는 1-{_MAX_SERVICE_WORKERS} 여야 합니다: {self.service.workers}")
         for n in self.service.nse:
             if not _NSE_RE.match(n):
                 raise ValueError(f"허용되지 않는 NSE 스크립트명: {n!r}")

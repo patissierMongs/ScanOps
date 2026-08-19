@@ -5,11 +5,14 @@ nmapParser 의 검증된 로직을 포팅한 것.
 """
 from __future__ import annotations
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 from . import fingerprints
+
+logger = logging.getLogger(__name__)
 
 # (script_id 부분일치, 라벨, 정규식) — NSE 출력에서 한 줄 핵심 추출
 _REMARK_PATTERNS = [
@@ -33,10 +36,233 @@ _SERVER_SOURCES = (
     ("fingerprint-strings", re.compile(r"(?im)^[ \t]*server:[ \t]*([^\r\n]+)")),
 )
 
+# ── 노출 신호 ────────────────────────────────────────────────────────────────
+# 이미 돌리고 있는 NSE 가 '이 포트가 왜 위험한가' 를 이미 말하고 있는데, 여태 remarks 문자열
+# 한 줄로만 남아 등급에도 필터에도 쓰이지 못했다. 익명 FTP 와 잠긴 FTP 가 같은 발견이었다.
+#
+# 여기서는 **관측된 사실만** 뽑는다. 등급을 정하는 것은 taxonomy 의 일이다(관측과 판단을
+# 섞지 않는다). 스크립트가 실패로 끝났으면 아무 말도 하지 않는다 - nse_failed 가 거른다.
+_SMB_V1_RE = re.compile(r"(?i)\bSMBv1\b")
+# nmap 은 `Not valid after: 2026-08-18T23:59:59` 처럼 **시각까지** 낸다. 날짜만 잘라 읽고
+# 자정으로 되돌리면 오늘 만료되는 인증서가 하루 내내 이미 만료된 것으로 잡힌다.
+_CERT_EXPIRY_RE = re.compile(r"(?i)Not valid after:\s*(\S+)")
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_CERT_SUBJECT_RE = re.compile(r"(?i)^Subject:\s*(.+)$", re.M)
+_CERT_ISSUER_RE = re.compile(r"(?i)^Issuer:\s*(.+)$", re.M)
+_CERT_BITS_RE = re.compile(r"(?i)Public Key bits:\s*(\d+)")
+_CERT_KEYTYPE_RE = re.compile(r"(?i)Public Key type:\s*(\S+)")
+# 알고리즘별 최소 키 길이. 같은 비트수가 알고리즘마다 전혀 다른 강도를 뜻하므로
+# 하나의 임계값을 전부에 들이대면 안 된다 - NIST SP 800-57 Part 1 Rev.5 가 요구하는
+# 112비트 보안 강도 기준으로, RSA/DSA/DH 는 2048, ECC 는 224 다. EC 256(P-256)은
+# 128비트 강도로 RSA 3072 급이라 약한 키가 아니다.
+_KEY_MIN_BITS = {"rsa": 2048, "dsa": 2048, "dh": 2048, "ec": 224, "ecdsa": 224}
+_VNC_TYPES_RE = re.compile(r"(?i)^\s*Security types:\s*(.*)$")
+
+
+def _vnc_accepts_no_auth(output: str) -> bool:
+    """vnc-info 가 인증 없음을 보고했는가.
+
+    nmap 은 목록을 라벨 **다음 줄들**에 들여써서 낸다::
+
+        Security types:
+          None (1)
+
+    그래서 한 줄짜리 정규식으로는 잡히지 않는다(실측으로 확인). 라벨 뒤에 이어지는
+    더 들여쓴 블록만 훑어서, 다른 곳의 'None' 을 잘못 집지 않게 한다.
+    """
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
+        match = _VNC_TYPES_RE.match(line)
+        if not match:
+            continue
+        if re.search(r"(?i)\bNone\b", match.group(1)):
+            return True
+        indent = len(line) - len(line.lstrip())
+        for follower in lines[index + 1:]:
+            if not follower.strip():
+                continue
+            if len(follower) - len(follower.lstrip()) <= indent:
+                break          # 블록이 끝났다
+            if re.search(r"(?i)\bNone\b", follower):
+                return True
+    return False
+
+
+def _cert_deadline(text: str) -> datetime | None:
+    """ssl-cert 의 유효기간 끝 시각. 읽지 못하면 None - 그때는 만료를 주장하지 않는다.
+
+    nmap 은 초 단위까지 낸다(`2026-08-18T23:59:59`). 빌드에 따라 `Z` 나 오프셋이 붙을 수
+    있어 ISO 8601 로 읽고, 시간대가 없으면 nmap 의 출력대로 UTC 로 본다.
+
+    날짜만 있는 경우에는 **그날 끝**으로 본다. 자정으로 읽으면 그날 하루가 통째로 '이미
+    만료' 가 되는데, 만료는 등급을 올리는 신호라 모르는 쪽으로 기울여야 한다.
+    """
+    stamp = (text or "").strip()
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if _DATE_ONLY_RE.match(stamp):
+        parsed = parsed.replace(hour=23, minute=59, second=59)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+# hostrule NSE 는 포트가 아니라 **호스트**에 대한 사실이라 nmap 이 <hostscript> 에 싣는다.
+# 파서는 <port> 밑만 읽고 있어서 그 출력이 통째로 사라졌다 - smb-protocols(SMBv1)와
+# smb-os-discovery(OS·컴퓨터명)가 여기 걸린다. 실측으로 확인했다: hostrule 스크립트의 출력은
+# <port> 밑에 0건, <hostscript> 밑에 1건으로 나온다.
+#
+# finding 은 포트 단위라 어딘가에는 붙여야 하는데, 아무 포트에나 붙이면 80/tcp 에
+# 'SMBv1 지원'이 뜬다. 그 사실이 가리키는 서비스의 포트에만 붙인다.
+_HOSTSCRIPT_PORTS = {
+    "smb-os-discovery": frozenset({139, 445}),
+    "smb-protocols": frozenset({139, 445}),
+    "smb2-security-mode": frozenset({139, 445}),
+    "nbstat": frozenset({137}),
+}
+
+
+def host_scripts(host) -> list[dict]:
+    """<hostscript> 밑의 스크립트 출력. 없으면 빈 목록."""
+    return [{"id": s.get("id") or "", "output": s.get("output") or ""}
+            for block in host.findall("hostscript")
+            for s in block.findall("script")]
+
+
+# finding 하나가 실을 수 있는 NSE 증거의 상한. 가져오기 XML 은 외부에서 온 입력이라
+# 파싱 **후** 크기도 묶어야 한다(업로드 상한은 파싱 전 입력에만 걸린다).
+_MAX_NSE_SCRIPTS = 64
+_MAX_NSE_BYTES = 64 * 1024
+
+
+def host_scripts_for_port(scripts: list[dict], port: int) -> list[dict]:
+    """이 포트에 귀속시킬 호스트 스크립트 - **매핑이 있는 것만.**
+
+    처음에는 표에 없는 스크립트를 '조용히 버리지 않으려고' 모든 포트에 붙였다. 그건 보존이
+    아니라 **없는 귀속을 지어내는 것**이었다 - hostrule 은 정의상 포트 인자를 받지 않으므로
+    (nmap NSE 문서) '어느 포트인지 모른다'가 '모든 포트의 사실'이 될 수는 없다. 22/tcp 와
+    443/tcp 에 같은 증거가 붙고, 열린 포트 512개 + 64KiB 출력 하나로 저장량이 288배가 됐다.
+
+    모르는 것은 붙이지 않되 **조용히 버리지도 않는다** - 호출자가 로그로 남긴다.
+    """
+    out = []
+    for script in scripts:
+        wanted = _HOSTSCRIPT_PORTS.get(str(script.get("id") or "").lower())
+        if wanted is not None and port in wanted:
+            out.append(script)
+    return out
+
+
+def unmapped_host_scripts(scripts: list[dict]) -> list[str]:
+    """귀속 규칙이 없어 finding 에 싣지 못한 hostrule 스크립트 id."""
+    return sorted({str(s.get("id") or "") for s in scripts
+                   if str(s.get("id") or "").lower() not in _HOSTSCRIPT_PORTS})
+
+
+def cap_nse(nse: list[dict]) -> list[dict]:
+    """finding 하나가 지는 증거량을 묶는다. 잘렸으면 **잘렸다고 적는다.**
+
+    조용히 자르면 읽는 사람이 그것을 전체로 오해한다 - 이 PR 이 내내 지킨 규칙이 여기에도
+    똑같이 걸린다.
+    """
+    out: list[dict] = []
+    budget = _MAX_NSE_BYTES
+    for script in nse[:_MAX_NSE_SCRIPTS]:
+        text = str(script.get("output") or "")
+        size = len(text.encode("utf-8", "replace"))
+        if size <= budget:
+            out.append(script)
+            budget -= size
+            continue
+        if budget > 0:
+            out.append({**script,
+                        "output": text.encode("utf-8", "replace")[:budget].decode("utf-8", "ignore")
+                                  + f"\n… (증거 상한 {_MAX_NSE_BYTES} bytes 로 잘림)"})
+        budget = 0
+        break
+    dropped = len(nse) - len(out)
+    if dropped > 0:
+        out.append({"id": "scanops-evidence-capped",
+                    "output": f"증거 상한으로 스크립트 {dropped}건을 싣지 않았습니다."})
+    return out
+
+
+def _cert_signals(output: str) -> list[dict]:
+    """ssl-cert 출력에서 만료·자체발급·약한 키를 뽑는다. CN 만 쓰고 나머지를 버리던 자리다."""
+    out: list[dict] = []
+    if match := _CERT_EXPIRY_RE.search(output):
+        expiry = match.group(1)
+        deadline = _cert_deadline(expiry)
+        if deadline is not None and deadline < datetime.now(timezone.utc):
+            out.append({"kind": "cert_expired", "detail": f"인증서 만료됨 (유효기간 {expiry} 까지)"})
+    subject = _CERT_SUBJECT_RE.search(output)
+    issuer = _CERT_ISSUER_RE.search(output)
+    if subject and issuer and subject.group(1).strip() == issuer.group(1).strip():
+        # RFC 5280 3.2 는 issuer=subject 를 **self-issued** 로 정의하고, 그 인증서 안의
+        # 공개키로 서명이 검증될 때만 self-signed 라고 구분한다. ssl-cert 문자열에는 서명
+        # 검증 결과가 없으므로 '자가서명'은 관측보다 강한 결론이다 - 같은 DN 을 쓰는 사설
+        # CA 가 발급한 인증서도 여기 걸린다(실측으로 openssl verify 통과가 확인됐다).
+        out.append({"kind": "self_issued",
+                    "detail": "발급자와 주체가 같음(자체 발급) - 서명 검증은 이 출력으로 확인 불가"})
+    # 키 길이는 **알고리즘과 함께** 읽어야 뜻이 생긴다. nmap 은 두 줄을 나란히 내는데
+    # type 을 읽지 않고 2048 을 전부에 적용하면, 흔한 P-256 인증서가 전부 약한 키가 된다
+    # (EC 384 조차 그랬다 - RSA 2048 보다 강한 키다).
+    keytype = match.group(1).strip().lower() if (match := _CERT_KEYTYPE_RE.search(output)) else ""
+    floor = _KEY_MIN_BITS.get(keytype)
+    if floor and (bits := _CERT_BITS_RE.search(output)):
+        try:
+            size = int(bits.group(1))
+        except ValueError:
+            size = 0
+        if 0 < size < floor:
+            out.append({"kind": "weak_key",
+                        "detail": f"약한 공개키 {keytype.upper()} {size}bit ({floor} 미만)"})
+    # 모르는 알고리즘(Ed25519 등)은 판정하지 않는다. 그 곡선들은 256bit 로 128비트 강도를
+    # 내므로, 비트수만 보고 약하다고 하면 정확히 거꾸로 말하게 된다.
+    return out
+
+
+def exposure_signals(nse: list[dict] | None) -> list[dict]:
+    """NSE 출력 -> 구조화된 노출 사실 목록. 판단이 아니라 관측만 담는다.
+
+    `[{"kind": ..., "detail": "사람이 읽는 근거"}]`. kind 는 taxonomy 가 등급을 올릴 때
+    쓰는 기계 판독용 키이고, detail 은 화면·내보내기에 그대로 실린다.
+    """
+    signals: list[dict] = []
+    for script in (nse or []):
+        if not isinstance(script, dict):
+            continue
+        sid = str(script.get("id") or "").lower()
+        output = str(script.get("output") or "")
+        if not output or nse_failed(output):
+            continue
+        if sid == "ftp-anon" and "anonymous ftp login allowed" in output.lower():
+            signals.append({"kind": "anon_access", "detail": "익명 FTP 로그인 허용"})
+        elif sid == "telnet-encryption" and "does not support encryption" in output.lower():
+            signals.append({"kind": "plaintext", "detail": "Telnet 암호화 미지원(평문 전송)"})
+        elif sid == "smb-protocols" and _SMB_V1_RE.search(output):
+            signals.append({"kind": "legacy_protocol", "detail": "SMBv1 지원(레거시 프로토콜)"})
+        elif sid == "vnc-info" and _vnc_accepts_no_auth(output):
+            signals.append({"kind": "no_auth", "detail": "VNC 인증 없음(Security type None)"})
+        elif sid == "ssl-cert":
+            signals.extend(_cert_signals(output))
+    # 같은 사실이 여러 스크립트에서 겹쳐 나올 수 있다.
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for signal in signals:
+        if signal["kind"] in seen:
+            continue
+        seen.add(signal["kind"])
+        unique.append(signal)
+    return unique
+
+
 _NSE_FAILURE_RE = re.compile(r"(?i)^\s*ERROR:\s*(?:Script execution failed|Header request failed)\b")
 
 
-def _nse_failed(output: object) -> bool:
+def nse_failed(output: object) -> bool:
     """Nmap이 NSE 실패로 표준화한 출력은 관측값으로 취급하지 않는다."""
     return bool(_NSE_FAILURE_RE.match(str(output or "")))
 
@@ -52,7 +278,7 @@ def extract_server(nse: list[dict] | None) -> str:
             if wanted not in str(script.get("id") or "").lower():
                 continue
             output = script.get("output")
-            if _nse_failed(output):
+            if nse_failed(output):
                 continue
             for match in regex.finditer(str(output or "")):
                 value = " ".join(match.group(1).strip(" \t,").split())
@@ -70,7 +296,7 @@ def server_observed(nse: list[dict] | None) -> bool:
         if not isinstance(script, dict):
             continue
         script_id = str(script.get("id") or "").lower()
-        if _nse_failed(script.get("output")):
+        if nse_failed(script.get("output")):
             continue
         if "http-server-header" in script_id or "http-headers" in script_id:
             # A successful direct header probe is authoritative even when the header is absent.
@@ -129,7 +355,7 @@ def pretty_fingerprint(raw: str) -> str:
 
 
 def _extract_key_line(script_id: str, output: str) -> str:
-    if not output or _nse_failed(output):
+    if not output or nse_failed(output):
         return ""
     sid = (script_id or "").lower()
     for sid_match, label, regex in _REMARK_PATTERNS:
@@ -191,6 +417,34 @@ def scan_start(source) -> datetime | None:
         return None
 
 
+def scan_finished(source) -> datetime | None:
+    """이 XML 이 관측을 **끝낸** 시각(<runstats><finished time="epoch">) → UTC. 없으면 None.
+
+    시작 시각과 완료 시각은 다른 사실이다. /24 스캔은 몇 시간을 돌기도 하므로, 시작 시각을
+    관측 시각으로 쓰면 그 사이에 다른 스캔이 남긴 결과가 이 스캔보다 '새것'으로 판정된다.
+    반대로 이 스캔이 실제로는 더 나중에 확인한 열린 포트가 '오래된 관측'으로 버려진다 -
+    노출을 숨기는 미탐이다. 그래서 최신성 판단에는 완료 시각을 쓴다.
+    """
+    root = _root_of(source)
+    for finished in root.findall("./runstats/finished"):
+        raw = finished.get("time")
+        if not raw:
+            continue
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
+    return None
+
+
+def observed_at(source) -> datetime | None:
+    """이 XML 의 관측 시각 — 완료 시각이 있으면 그것, 없으면 시작 시각."""
+    try:
+        return scan_finished(source) or scan_start(source)
+    except ET.ParseError:
+        return None
+
+
 def probed_identity(source) -> bool | None:
     """이 XML 이 '서비스 식별까지 관측한 실행'인가. 판단 불가면 None.
 
@@ -222,23 +476,52 @@ def _enables_version_detection(token: str) -> bool:
     return token.startswith("-s") and not token.startswith("--") and "V" in token[2:]
 
 
+def _host_ip(host) -> str | None:
+    """host 요소의 IP - MAC 은 타깃/스코프로 새면 안 되므로 제외한다."""
+    addr_el = host.find("address[@addrtype='ipv4']")
+    if addr_el is None:
+        for a in host.findall("address"):
+            if (a.get("addrtype") or "").lower() != "mac":
+                addr_el = a
+                break
+    return addr_el.get("addr") if addr_el is not None else None
+
+
+def timed_out_hosts(source) -> set[str]:
+    """``--host-timeout`` 으로 nmap 이 **포기한** 호스트.
+
+    nmap 은 그 호스트를 ``<host timedout="true">`` 로 적고 ``<ports>`` 를 통째로 생략한다.
+    실행 자체는 ``finished exit="success"`` 로 끝난다 - 실측으로 확인했다.
+
+    그래서 이 표식을 읽지 않으면 '살아 있고(up) 열린 포트가 하나도 없다' 로 보여, 그 호스트의
+    기존 발견이 전부 닫힘 + 정상처리가 된다. **패킷을 끝까지 보내지 않은 호스트**인데
+    부재를 확인했다고 말하는 셈이다.
+
+    단독 스캐너는 저강도에서 ``--host-timeout 30m`` 을 기본으로 켠다. 노후 장비를 지키려고
+    고른 설정이 정확히 그 장비의 발견을 지우게 되므로, 가져오기 경로에서 특히 중요하다.
+    """
+    ips: set[str] = set()
+    for host in _root_of(source).findall("host"):
+        if host.get("timedout") == "true" and (ip := _host_ip(host)):
+            ips.add(ip)
+    return ips
+
+
 def up_hosts(source) -> set[str]:
-    """이번 스캔에서 살아있던(up) 호스트 IP 집합 — 닫힘 판정 범위에 사용."""
+    """이번 스캔에서 살아있던(up) 호스트 IP 집합 — 닫힘 판정 범위에 사용.
+
+    타임아웃으로 포기한 호스트는 뺀다 - up 이지만 **관측을 마치지 못한** 호스트다.
+    """
     root = _root_of(source)
     ips: set[str] = set()
     for host in root.findall("host"):
         status = host.find("status")
         if status is not None and status.get("state") != "up":
             continue
-        # IP 만 — MAC(addrtype="mac")이 타깃/스코프로 새지 않게 ipv4 우선, 없으면 첫 비-MAC 주소.
-        addr_el = host.find("address[@addrtype='ipv4']")
-        if addr_el is None:
-            for a in host.findall("address"):
-                if (a.get("addrtype") or "").lower() != "mac":
-                    addr_el = a
-                    break
-        if addr_el is not None:
-            ips.add(addr_el.get("addr"))
+        if host.get("timedout") == "true":
+            continue
+        if ip := _host_ip(host):
+            ips.add(ip)
     return ips
 
 
@@ -256,6 +539,12 @@ def parse_xml(source) -> list[dict]:
         hostname = hn_el.get("name") if hn_el is not None else ""
         times = host.find("times")
         rtt = times.get("srtt") if times is not None else ""
+        hostrule_nse = host_scripts(host)
+        if unmapped := unmapped_host_scripts(hostrule_nse):
+            # 붙일 포트를 모르는 hostrule 결과. 지어내서 붙이지 않되, 사라졌다는 사실은 남긴다 -
+            # 소비처가 생기면 _HOSTSCRIPT_PORTS 에 귀속 규칙을 더하면 된다.
+            logger.info("귀속 규칙이 없는 hostscript 를 finding 에 싣지 않았습니다: %s (host=%s)",
+                        ", ".join(unmapped), host_ip)
 
         ports = host.find("ports")
         if ports is None:
@@ -263,6 +552,11 @@ def parse_xml(source) -> list[dict]:
         for port in ports.findall("port"):
             st = port.find("state")
             state = st.get("state") if st is not None else "open"
+            # nmap 이 이 상태를 무엇을 보고 정했는지(syn-ack·conn-refused·no-response…).
+            # 모든 단계가 --reason 을 이미 싣고 있어 XML 에 늘 있는데 여태 버리고 있었다.
+            # 'open' 안에서도 syn-ack(응답을 받음)과 no-response(안 받고 추정)는 증거 강도가
+            # 다르다 — 이 구분이 open|filtered 를 정직하게 표시하기 위한 최소 재료다.
+            reason = (st.get("reason") if st is not None else "") or ""
             # 발견 = 열린 포트만. 닫힘/필터는 인입하지 않는다(닫힘은 '부재'로 판정).
             # nmap 을 --open 없이 돌려 닫힌 포트가 XML 에 섞여도 안전.
             if not state.startswith("open"):
@@ -270,6 +564,8 @@ def parse_xml(source) -> list[dict]:
             svc = port.find("service")
             nse = [{"id": s.get("id") or "", "output": s.get("output") or ""}
                    for s in port.findall("script")]
+            nse += host_scripts_for_port(hostrule_nse, int(port.get("portid")))
+            nse = cap_nse(nse)
             cpe = ";".join(c.text or "" for c in (svc.findall("cpe") if svc is not None else []))
             detail = _detail(svc)
             service = (svc.get("name") if svc is not None else "") or ""
@@ -289,6 +585,7 @@ def parse_xml(source) -> list[dict]:
                 "port": int(port.get("portid")),
                 "proto": port.get("protocol") or "tcp",
                 "state": state,
+                "reason": reason,
                 "service": service,
                 "product": product,
                 "version": (svc.get("version") if svc is not None else "") or "",
@@ -300,6 +597,8 @@ def parse_xml(source) -> list[dict]:
                 "rtt": rtt or "",
                 "identification": _identification(svc),
                 "nse_json": nse,
+                # 이미 돌린 NSE 가 말한 노출 사실. 관측만 담고 등급은 taxonomy 가 정한다.
+                "exposure_json": exposure_signals(nse),
                 "remarks": remarks,
             })
     return findings

@@ -3,6 +3,8 @@
 import { RISK_LABEL } from "./format.js";
 
 const fmtDate = (v) => (v ? String(v).slice(0, 10) : "");
+const joinExposure = (list) =>
+  (list || []).map((s) => s.detail || s.kind).filter(Boolean).join(" · ");
 const joinCompliance = (list) =>
   (list || []).map((c) => `${c.std}:${c.ref}`).join("; ");
 
@@ -10,6 +12,29 @@ const joinCompliance = (list) =>
 // 예: 8770 → "apple-iphoto". 실제로 도는 건 uvicorn 인데도 그렇다. 이 이름은 관측이 아니라
 // '그 포트는 보통 이거였다'는 관례일 뿐이므로, 관측값과 같은 무게로 보여주면 안 된다.
 export const isGuessedService = (finding) => finding?.identification === "추측";
+
+// 같은 '열림'이라도 syn-ack(응답을 받아 확인)과 no-response(못 받고 추정)는 증거 강도가
+// 다르다. UDP 는 응답 없는 포트가 예외가 아니라 다수라, 이 구분을 안 보여주면 추정을
+// 관측처럼 읽게 된다. 판정은 서버(observation.py)가 하고 여기서는 표시만 정한다.
+export const needsConfirmation = (finding) => Boolean(finding?.needs_confirmation);
+
+/** 상태 + 근거를 한 줄로. 근거가 확인이면 굳이 덧붙이지 않는다(모든 행에 붙으면 신호가 죽는다). */
+export function stateWithEvidence(finding) {
+  const state = finding?.state || "";
+  const evidence = finding?.state_evidence || "";
+  if (!evidence || evidence === "응답 확인") return state;
+  return `${state} (${evidence})`;
+}
+
+// 부재로 닫힌 행에는 열려 있던 시절의 reason 이 provenance 로 남아 있다. 그걸 현재 상태
+// 옆에 그대로 보여 주면 'closed · syn-ack' 이 되어 읽는 사람이 둘을 잇는다.
+const STALE_EVIDENCE = new Set(["부재로 판정", "미관측"]);
+
+/** 현재 상태를 뒷받침하는 근거 원문만. 아니면 빈 문자열(서버 observation.current_reason 과 같은 규칙). */
+export function currentReason(finding) {
+  if (STALE_EVIDENCE.has(finding?.state_evidence || "")) return "";
+  return finding?.reason || "";
+}
 
 export function observedIdentity(finding) {
   const productVersion = [finding?.product, finding?.version].filter(Boolean).join(" ");
@@ -71,6 +96,8 @@ export const ALL_COLUMNS = [
   { key: "port", label: "포트", get: (f) => f.port, mono: true, num: true },
   { key: "proto", label: "프로토콜", get: (f) => f.proto },
   { key: "state", label: "상태", get: (f) => f.state },
+  { key: "state_evidence", label: "상태 근거", get: (f) => f.state_evidence || "" },
+  { key: "reason", label: "근거 원문", get: (f) => f.reason || "", mono: true },
   { key: "display_identity", label: "주 식별", get: (f) => primaryServiceIdentity(f) },
   { key: "server", label: "Server", get: (f) => f.server },
   { key: "service", label: "서비스", get: (f) => f.service },
@@ -85,11 +112,16 @@ export const ALL_COLUMNS = [
   { key: "usage", label: "용도", get: (f) => f.usage },
   { key: "risk_level", label: "위험등급", get: (f) => RISK_LABEL[f.risk_level] || f.risk_level, badge: "risk" },
   { key: "remarks", label: "비고", get: (f) => f.remarks },
+  // 관측된 노출 사실(익명 접근·평문·레거시·인증서 문제). 등급을 올린 근거이기도 하다.
+  { key: "exposure", label: "노출 관측", get: (f) => joinExposure(f.exposure_json) },
   { key: "compliance", label: "컴플라이언스근거", get: (f) => joinCompliance(f.compliance_json) },
   { key: "status", label: "운영상태", get: (f) => f.status, badge: "status" },
   { key: "reopened", label: "재발", get: (f) => (f.reopened ? "재발" : "") },
   { key: "dept", label: "부서", get: (f) => f.dept },
-  { key: "owner", label: "담당자", get: (f) => f.owner },
+  { key: "owner", label: "담당자(자산대장)", get: (f) => f.owner },
+  // 배정 담당자 — '이 발견을 조치할 사람'. 자산대장 담당자(그 자산을 관리하는 사람)와
+  // 다른 축이라 라벨도 컬럼도 나눈다.
+  { key: "assignee", label: "배정 담당자", get: (f) => f.assignee_name },
   { key: "contact", label: "연락처", get: (f) => f.contact, mono: true },
   { key: "deadline", label: "마감", get: (f) => fmtDate(f.deadline), mono: true },
   { key: "first_seen", label: "등록 날짜", get: (f) => fmtDate(f.first_seen), mono: true },
@@ -111,7 +143,7 @@ export const PRESETS = [
   { id: "p_report", name: "표준 보고서", cols: ["host_ip", "hostname", "port", "proto", "display_identity", "service", "risk_level", "status", "dept", "first_seen", "last_seen"] },
   { id: "p_ports", name: "포트 인벤토리", cols: ["host_ip", "port", "proto", "state", "display_identity", "service"] },
   { id: "p_finger", name: "서비스 핑거프린트", cols: ["host_ip", "port", "display_identity", "server", "service", "product", "version", "banner", "cpe", "fingerprint"] },
-  { id: "p_risk", name: "위험·컴플라이언스", cols: ["host_ip", "port", "display_identity", "service", "risk_level", "category", "compliance", "status", "deadline"] },
+  { id: "p_risk", name: "위험·컴플라이언스", cols: ["host_ip", "port", "display_identity", "service", "risk_level", "exposure", "category", "compliance", "status", "deadline"] },
   { id: "p_min", name: "최소 (CSV)", cols: ["host_ip", "port", "display_identity"] },
 ];
 

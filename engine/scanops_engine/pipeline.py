@@ -5,13 +5,38 @@ run-state 재개 + 중지. 재스캔(targets_ports)이면 발견·찾기를 건�
 """
 from __future__ import annotations
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import nmaprun
 from .spec import (DEFAULT_MAX_PARALLELISM, DEFAULT_MIN_HOSTGROUP,
                    DEFAULT_NSE_SCRIPT_TIMEOUT, DISCOVERY_PA, DISCOVERY_PS)
 from .state import RunState
+
+
+# UDP 식별이 죽었을 때 한 번 갈아 끼울 nsock 엔진. nmap#3138 의 유지관리자 우회책이며
+# select 는 동시 소켓 수에 제약이 있지만, UDP 식별은 이미 열린 포트 하나만 다루므로 무해하다.
+_UDP_RETRY_ENGINE = "select"
+# 실패한 UDP 묶음을 포트별로 쪼갤 때의 상한. 넘으면 쪼개지 않고 그 실행을 저하로 남긴다 —
+# 죽은 실행이 포트를 많이 물고 있으면 쪼개는 것 자체가 프로세스 폭증이 된다.
+_MAX_SPLIT_UNITS = 32
+
+
+class _LockedSink:
+    """식별 단계를 동시에 돌리면 이벤트가 여러 스레드에서 나온다.
+
+    싱크는 JSONL 한 줄씩을 쓰는데, 잠그지 않으면 줄이 서로 섞여 읽는 쪽이 파싱에 실패한다.
+    직렬로 돌 때는 락이 사실상 비용이 없으므로 항상 감싼다.
+    """
+
+    def __init__(self, inner, lock):
+        self._inner, self._lock = inner, lock
+
+    def emit(self, *args, **kwargs):
+        with self._lock:
+            self._inner.emit(*args, **kwargs)
 
 
 def _batches(items, size):
@@ -22,7 +47,8 @@ def _batches(items, size):
 class Pipeline:
     def __init__(self, spec, sink, nmap):
         self.spec = spec
-        self.sink = sink
+        self._lock = threading.Lock()
+        self.sink = _LockedSink(sink, self._lock)
         self.nmap = nmap
         self.out = Path(spec.out_dir)
         self.out.mkdir(parents=True, exist_ok=True)
@@ -31,7 +57,12 @@ class Pipeline:
         self.open_map = self.state.get("open_map") or {}
 
     # ── 공통 ──
-    def _nmap(self, stage, args, base) -> dict:
+    def _nmap(self, stage, args, base, fatal=True) -> dict:
+        """``fatal=False`` 면 rc!=0 을 기록만 하고 counts["errors"] 를 올리지 않는다.
+
+        run() 은 errors 로 job status 를 정하므로, 격리된 enrichment 실패까지 여기서 세면
+        실패를 격리한 의미가 없어진다 — 실행 전체가 그대로 failed 가 된다.
+        """
         r = nmaprun.run(self.nmap, args, base, sudo_mode=self.spec.sudo,
                         progress=lambda p: self.sink.emit("stage_progress", stage=stage, percent=p),
                         stop_requested=self.state.stopped)
@@ -40,9 +71,36 @@ class Pipeline:
                 "stage_done", stage=stage, seconds=r["seconds"], counts={"stopped": True},
             )
         elif r["rc"] != 0:
-            self.counts["errors"] += 1
-            self.sink.emit("error", stage=stage, rc=r["rc"], cmd=" ".join(map(str, r["cmd"])))
+            if fatal:
+                with self._lock:
+                    self.counts["errors"] += 1
+            self.sink.emit("error", stage=stage, rc=r["rc"], fatal=fatal,
+                           cmd=" ".join(map(str, r["cmd"])))
         return r
+
+    def _record_coverage(self, artifact, proto, role, hosts, ports, finished) -> None:
+        """이 nmap 실행이 **무엇을 · 어디까지 · 어떤 자격으로** 훑었는지 기록한다.
+
+        지금까지 백엔드는 이 사실을 산출물 glob 과 배치 슬라이스(``live[i*b:(i+1)*b]``)로
+        되짚었다. 되짚기는 규칙이 바뀌는 순간 조용히 틀리고, ``--open`` 때문에 열린 포트가
+        없는 호스트는 XML 에 아예 안 나타나서 '훑었는가'를 파일에서 읽을 수도 없다.
+        그래서 **만든 쪽이 적어 둔다** - 이 저장소가 이미 쓰는 규칙이다
+        (scan_summary 의 범위 꼬리표: "만든 쪽이 적어 준 값이 파싱보다 먼저").
+
+        ``role`` 이 핵심이다. 같은 stage3 XML 이라도 전체 스캔에서는 enrichment 이고
+        포트 재스캔에서는 그 자체가 authority 다. 역할을 안 적으면 읽는 쪽이 파일 이름으로
+        추측하게 되고, 그러면 완결된 TCP sweep 의 권한을 enrichment 타임아웃 하나가 빼앗는다.
+        """
+        entry = {"artifact": artifact, "proto": proto, "role": role,
+                 "hosts": list(hosts), "ports": ports, "finished": bool(finished)}
+        # 식별 단계는 동시에 돌 수 있고 이건 read-modify-write 라, 잠그지 않으면 기록이
+        # 통째로 사라진다 - 그러면 그 산출물이 커버한 호스트가 '훑지 않음'이 되어
+        # (fail-closed 방향이긴 하지만) 닫아야 할 것을 못 닫는다.
+        with self._lock:
+            log = list(self.state.get("coverage") or [])
+            log.append(entry)
+            self.state.set("coverage", log)
+            self.state.save()
 
     def _save(self):
         self.state.set("open_map", self.open_map)
@@ -51,7 +109,30 @@ class Pipeline:
     def _exclude_args(self) -> list:
         # Nmap 7.99는 반복 --exclude 를 누적하지 않고 마지막 값만 적용한다.
         # 검증된 토큰을 단일 comma-list로 전달해야 모든 제외가 보장된다.
-        return ["--exclude", ",".join(self.spec.exclude)] if self.spec.exclude else []
+        args = ["--exclude", ",".join(self.spec.exclude)] if self.spec.exclude else []
+        # 포트 제외는 **모든 단계**에 실어야 한다. 한 단계라도 빠지면 그 단계가 그 포트를
+        # 건드리고, 안전 컨트롤로서는 의미가 없어진다. 발견 단계는 -sn 이라 포트를 안 보지만
+        # 그래도 같이 싣는다(실측: nmap 이 거부하지 않는다) - 나중에 발견 방식이 바뀌어도
+        # 제외가 조용히 새지 않게 하려는 것이다.
+        if self.spec.exclude_ports.strip():
+            args += ["--exclude-ports", self.spec.exclude_ports.strip()]
+        return args
+
+    @staticmethod
+    def _timeout_args(value: str) -> list:
+        """``--host-timeout`` — 한 호스트가 실행 전체를 붙잡는 것을 막는다.
+
+        단계마다 **별개 값**을 받는다. TCP 전수 스캔은 65535 포트를 훑는 반면 UDP 는 포트 수가
+        훨씬 적은 대신 ICMP 율제한에 걸려 느려지므로, 정상 호스트가 걸리지 않는 상한이 서로
+        다르다. 한 값으로 묶으면 둘 중 하나는 반드시 틀린다 - 느린 쪽에 맞추면 빠른 쪽의
+        트러블메이커를 못 걸러 내고, 빠른 쪽에 맞추면 정상 호스트를 포기한다.
+
+        nmap 은 상한을 넘긴 호스트만 포기하고 실행 자체는 ``exit="success"`` 로 끝내며,
+        그 호스트를 XML 에 ``<host timedout="true">`` 로 남긴다(포트 표는 쓰지 않는다).
+        그래서 '포기당한 호스트'는 부재를 말할 자격이 없다 - 그 판정은 백엔드가
+        coverage 기록으로 한다(run-state 의 coverage 배열).
+        """
+        return ["--host-timeout", value] if value else []
 
     def _tcp_scan_flag(self) -> str:
         return {"syn": "-sS", "connect": "-sT"}[self.spec.tcp.scan_type]
@@ -117,12 +198,15 @@ class Pipeline:
                 "--reason", "--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP),
                 "--max-retries", str(sp.max_retries),
                 "--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
+        args += self._timeout_args(sp.host_timeout)
         args += self._exclude_args()
         args += list(self.spec.targets)
         base = self.out / "stage0-discovery"
         r = self._nmap("discovery", args, base)
         if r.get("stopped") or r["rc"] != 0:
             return []
+        self._record_coverage("stage0-discovery.xml", "", "discovery",
+                              self.spec.targets, "", True)
         live = nmaprun.hosts_up(Path(str(base) + ".xml"))
         self.counts["live"] = len(live)
         self.sink.emit("hosts_up", stage="discovery", hosts=live, count=len(live))
@@ -152,12 +236,17 @@ class Pipeline:
                 if sp.min_rate > 0:
                     args += ["--min-rate", str(sp.min_rate)]
             args += ["-p", sp.ports]
+            args += self._timeout_args(sp.host_timeout)
             args += self._exclude_args()
             args += batch
             base = self.out / f"stage-{proto}-b{bi}"
             r = self._nmap(proto, args, base)
             secs += r["seconds"]
-            if r.get("stopped") or r["rc"] != 0:
+            ok = not r.get("stopped") and r["rc"] == 0
+            # 되짚기가 아니라 명령줄에 실제로 올린 batch 를 그대로 적는다.
+            self._record_coverage(f"stage-{proto}-b{bi}.xml", proto, "authority",
+                                  batch, sp.ports, ok)
+            if not ok:
                 return False
             found = nmaprun.open_ports(Path(str(base) + ".xml"), proto=proto)
             for ip, ports in found.items():
@@ -172,7 +261,8 @@ class Pipeline:
         return True
 
     # ── Stage 3: 서비스 probe (호스트별 열린 포트에만) ──
-    def _probe_protocol(self, ip, proto, ports, sp, confirm, retries=None, tag=""):
+    def _probe_protocol(self, ip, proto, ports, sp, confirm, retries=None, tag="",
+                        isolate=False):
         """Probe one protocol per Nmap process.
 
         Mixed ``-sS -sU`` service scans can turn TCP ports proven open by the sweep into
@@ -193,45 +283,131 @@ class Pipeline:
             args.append("--version-light")
         args += ["--open", "--reason", sp.timing, "--max-retries",
                  str(retries if retries is not None else sp.max_retries), "-p", pspec]
-        if sp.nse:
+        # NSE 는 TCP probe 에만. 발견에 반영되는 스크립트가 전부 TCP 이고(UDP 쪽 출력은 저장만 되고
+        # 읽는 코드가 없다), 출발지 포트를 bind 하는 UDP 스크립트는 스캔 호스트의 서비스와 충돌해
+        # (ike-version↔IKEEXT 의 UDP 500) NSE 정리 실패로 그 실행을 통째로 못 믿게 만든다.
+        if sp.nse and proto == "tcp":
             args += ["--script", ",".join(sp.nse),
                      "--script-timeout", DEFAULT_NSE_SCRIPT_TIMEOUT]
+        limit = (sp.udp_host_timeout or sp.host_timeout) if proto == "udp" else sp.host_timeout
+        args += self._timeout_args(limit)
         args += self._exclude_args()
         args.append(ip)
         suffix = tag or proto
         base = self.out / f"stage3-{ip.replace('.', '_')}-{suffix}{'-confirm' if confirm else ''}"
-        r = self._nmap("service", args, base)
+        r = self._nmap("service", args, base, fatal=not isolate)
         ok = not r.get("stopped") and r["rc"] == 0
+        # UDP 식별이 죽었을 때 한 번만 다른 nsock 엔진으로 다시 시도한다.
+        # nsock 은 epoll → kqueue → poll → iocp → select 순으로 고르므로(nsock_engines.c)
+        # Windows 기본은 poll 이다. nmap#3138 의 poll 결함은 7.98 에서 고쳐졌지만, 같은
+        # 실패가 또 나면 그 수정이 불완전하거나 다른 경로라는 뜻이라 유지관리자가 제시한
+        # 우회책(select/iocp)을 그대로 쓴다. poll 을 명시하는 것은 기본값 재지정이라 무의미하다.
+        if not ok and not r.get("stopped") and proto == "udp" and not self.state.stopped():
+            self.sink.emit("service_retry", stage="service", ip=ip, engine=_UDP_RETRY_ENGINE)
+            r = self._nmap("service", ["--nsock-engine", _UDP_RETRY_ENGINE] + args, base,
+                           fatal=not isolate)
+            ok = not r.get("stopped") and r["rc"] == 0
+        # 역할은 실행 종류가 정한다. 포트 재스캔은 stage3 가 **유일한** 관측이라 authority 이고,
+        # 전체 스캔은 sweep 이 이미 개폐를 확정했으므로 stage3 는 enrichment 다. 이걸 파일
+        # 이름으로 추측하면 완결된 sweep 의 권한을 stage3 타임아웃 하나가 빼앗는다.
+        role = ("authority" if (self.spec.rescan_units or self.spec.targets_ports)
+                else "enrichment")
+        self._record_coverage(base.name + ".xml", proto, role, [ip], pspec, ok)
         rows = nmaprun.services(Path(str(base) + ".xml")) if ok else []
         for row in rows:
             self.sink.emit("service", stage="service", confirm=confirm,
                            **{k: row[k] for k in ("ip", "port", "proto", "service", "product", "version")})
         return r["seconds"], rows, ok
 
-    def _probe_host(self, ip, m, sp, tag=""):
-        """Probe all present protocols; completion is atomic at the host/unit boundary."""
-        seconds, rows = 0.0, []
+    def _split_units(self, proto, ports, tag):
+        """**실패한 뒤에만** 쪼갤 단위. 정상 경로는 묶어서 한 프로세스로 돌린다.
+
+        무조건 포트별로 나누면 프로세스가 폭증한다. UDP 무응답 포트는 nmap 이 ``open|filtered``
+        로 보고하고 ``nmaprun.open_ports()`` 가 그것도 open_map 에 넣으므로, 방화벽이 조용히
+        버리는 대역에서는 스캔한 포트가 **전부** 후보가 된다 — 기본 27포트 × /24 면 수천 개
+        프로세스다. 고치려던 '안 끝남'을 오히려 악화시킨다.
+
+        그래서 순서를 뒤집는다. 묶어서 한 번 돌리고, **그 실행이 비정상 종료했을 때만** 쪼갠다.
+        건강한 실행은 프로세스 하나로 끝나고, 죽는 실행에서만 피해를 포트 단위로 줄인다.
+
+        쪼갤 때도 상한을 둔다. 죽은 실행이 포트를 많이 물고 있으면 그만큼 프로세스가 늘어나는
+        건 마찬가지라, 상한을 넘으면 쪼개지 않고 그 실행 전체를 저하로 남긴다.
+        """
+        if proto != "udp" or len(ports) <= 1 or len(ports) > _MAX_SPLIT_UNITS:
+            return []
+        return [([port], f"{tag}{port}") for port in ports]
+
+    def _probe_host(self, ip, m, sp, tag="", isolate_failures=False):
+        """Probe all present protocols.
+
+        ``isolate_failures`` 는 stage3 가 enrichment 인 전체 스캔에서만 켠다. 그때 식별
+        프로세스 하나가 죽는 것은 '이 포트의 부가 정보를 못 얻었다'는 뜻이지 '포트 관측이
+        틀렸다'는 뜻이 아니다. 그런데도 지금까지는 그 하나가 호스트 전체, 나아가 stage 전체를
+        중단시켜 **뒤따르는 호스트가 통째로 식별되지 못했다** — 사용자가 겪은 'UDP 가 오류
+        내며 안 끝남'의 실제 지점이다.
+
+        저하된 호스트는 service_done 에 넣지 않지만, 그것으로 **재개가 되지는 않는다** —
+        errors=0 이라 job 이 done 으로 마감되고 /resume 은 is_done 을 거절한다. 다시 얻으려면
+        해당 발견을 골라 타겟 재스캔을 돌려야 한다(발견 관리 → 재스캔).
+
+        재스캔에서는 stage3 가 유일한 폐쇄 근거이므로 이 격리를 켜지 않는다. 거기서는 실패가
+        곧 '판단할 수 없음'이고, 그대로 권위를 박탈해야 한다.
+        """
+        seconds, rows, degraded = 0.0, [], False
         for proto in ("tcp", "udp"):
             ports = m.get(proto, [])
             if not ports:
                 continue
-            proto_tag = tag or proto
-            elapsed, found, ok = self._probe_protocol(
-                ip, proto, ports, sp, confirm=False, tag=proto_tag,
-            )
+            unit_tag = tag or proto
+            elapsed, found, ok = self._probe_unit(ip, proto, ports, sp, unit_tag, isolate_failures)
             seconds += elapsed
             rows.extend(found)
+            if ok:
+                continue
+            # 중지는 저하가 아니다 — 사용자가 멈춘 것이므로 어떤 모드에서도 즉시 끝낸다.
+            if self.state.stopped() or not isolate_failures:
+                return seconds, rows, False
+            # 묶음이 죽었다 — 이제서야 포트별로 쪼개 피해를 줄인다. 정상 경로는 여기 오지 않는다.
+            units = self._split_units(proto, ports, unit_tag)
+            if units:
+                self.sink.emit("service_split", stage="service", ip=ip, proto=proto,
+                               units=len(units))
+            # 묶음이 죽은 시점에 이미 저하다. 쪼개서 **전부** 되살렸을 때만 취소한다 —
+            # 쪼갤 대상이 없으면(포트 1개, 상한 초과) 그대로 저하로 남아야 한다.
+            recovered = 0
+            for unit_ports, split_tag in units:
+                elapsed, found, ok = self._probe_unit(
+                    ip, proto, unit_ports, sp, split_tag, isolate_failures)
+                seconds += elapsed
+                rows.extend(found)
+                if self.state.stopped():
+                    return seconds, rows, False
+                recovered += 1 if ok else 0
+            if not units or recovered < len(units):
+                degraded = True
+        if degraded:
+            # stage 와 job 은 계속 간다 — 산출물이 비면 artifact_report 가 enrichment_missing
+            # 으로 잡아 done + nse_degraded 가 되고, 폐쇄 권위는 sweep 이 그대로 쥔다.
+            self.sink.emit("service_degraded", stage="service", ip=ip)
+            return seconds, rows, False
+        return seconds, rows, True
+
+    def _probe_unit(self, ip, proto, ports, sp, unit_tag, isolate):
+        """한 단위(포트 묶음 또는 포트 하나)를 base + 필요 시 confirm 까지 돌린다."""
+        seconds, rows = 0.0, []
+        elapsed, found, ok = self._probe_protocol(
+            ip, proto, ports, sp, confirm=False, tag=unit_tag, isolate=isolate)
+        seconds += elapsed
+        rows.extend(found)
+        if not ok:
+            return seconds, rows, False
+        if sp.confirm and not found:
+            elapsed, confirmed, ok = self._probe_protocol(
+                ip, proto, ports, sp, confirm=True, retries=6, tag=unit_tag, isolate=isolate)
+            seconds += elapsed
+            rows.extend(confirmed)
             if not ok:
                 return seconds, rows, False
-            # Confirm independently: a TCP result must not suppress an empty UDP retry.
-            if sp.confirm and not found:
-                elapsed, confirmed, ok = self._probe_protocol(
-                    ip, proto, ports, sp, confirm=True, retries=6, tag=proto_tag,
-                )
-                seconds += elapsed
-                rows.extend(confirmed)
-                if not ok:
-                    return seconds, rows, False
         return seconds, rows, True
 
     def _service(self):
@@ -239,18 +415,46 @@ class Pipeline:
         targets = {ip: m for ip, m in self.open_map.items() if m.get("tcp") or m.get("udp")}
         self.sink.emit("stage_start", stage="service", hosts=len(targets))
         secs, nsvc = 0.0, 0
-        for ip in sorted(targets, key=nmaprun._ipkey):
+        # targets_ports 재스캔은 stage3 가 유일한 폐쇄 근거다 — 거기서는 실패를 격리하지
+        # 않는다. 전체 스캔에서는 sweep 이 이미 개방 여부의 권위를 쥐고 있으므로 식별
+        # 실패는 enrichment 저하로만 남긴다.
+        isolate = not self.spec.targets_ports
+        # 이 단계는 프로세스마다 타깃이 1개라 nmap 자신의 호스트 병렬성을 쓸 수 없다.
+        # 직렬로 두면 소요가 호스트 수에 그대로 비례한다 - /24 한 대역이면 nmap 프로세스
+        # 수백 개를 하나씩 세우고 기다리는 셈이고, 호스트당 상한을 걸어 둔 만큼 느린
+        # 호스트의 대기시간도 그대로 더해진다.
+        #
+        # 닫힘 권한이 걸린 재스캔은 1 로 강제한다. 거기서는 실패가 곧 '판단할 수 없음'이라
+        # 그 자리에서 멈춰야 하는데, 동시에 여러 개를 띄워 두면 이미 시작한 것들의 처리를
+        # 어떻게 할지가 애매해진다 - 권한 경로에서 애매함을 만들지 않는다.
+        workers = max(1, int(sp.workers)) if isolate else 1
+        pending = [ip for ip in sorted(targets, key=nmaprun._ipkey)
+                   if not self.state.service_done(ip)]
+        for group in _batches(pending, workers):
             if self.state.stopped():
-                self.sink.emit("stage_done", stage="service", seconds=round(secs, 2), counts={"stopped": True})
+                self.sink.emit("stage_done", stage="service", seconds=round(secs, 2),
+                               counts={"stopped": True})
                 return
-            if self.state.service_done(ip):
-                continue
-            s1, rows, ok = self._probe_host(ip, targets[ip], sp)
-            secs += s1
-            nsvc += len(rows)
-            if not ok:
-                return False
-            self.state.mark_service_done(ip)
+            if len(group) == 1:
+                done = [(group[0], *self._probe_host(group[0], targets[group[0]], sp,
+                                                     isolate_failures=isolate))]
+            else:
+                with ThreadPoolExecutor(max_workers=len(group)) as pool:
+                    futures = [(ip, pool.submit(self._probe_host, ip, targets[ip], sp,
+                                                isolate_failures=isolate)) for ip in group]
+                    done = [(ip, *future.result()) for ip, future in futures]
+            # 상태 변경은 여기서만 한다 - 순서를 고정해야 재개·이벤트가 결정적으로 남는다.
+            for ip, s1, rows, ok in done:
+                secs += s1
+                nsvc += len(rows)
+                if not ok:
+                    # 격리 모드에서는 이 호스트만 건너뛰고 나머지 호스트의 식별을 계속한다.
+                    # 예전에는 여기서 stage 를 통째로 중단해, nmap 하나가 죽으면 뒤따르는
+                    # 호스트가 전부 식별되지 못한 채 실행이 끝났다.
+                    if not isolate or self.state.stopped():
+                        return False
+                    continue
+                self.state.mark_service_done(ip)
             self._save()
         self.counts["services"] = nsvc
         self.sink.emit("stage_done", stage="service", seconds=round(secs, 2), counts={"services": nsvc})

@@ -20,12 +20,13 @@ import math
 import os
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from ..config import get_settings
-from . import nmap_runner, process_control, scan_options, taxonomy
+from . import nmap_parse, nmap_runner, process_control, scan_options, scan_summary, taxonomy
 from .ingest import ingest
-from .nmap_parse import parse_xml
+from .nmap_parse import observed_at, parse_xml
 
 _settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -90,7 +91,8 @@ def ensure_available() -> Path:
 
 def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options: list[str],
                    ports: str, nse: list[str] | None, out_dir: Path, batch_size: int,
-                   discovery: str = "sn", rescan_units: list | None = None) -> dict:
+                   discovery: str = "sn", rescan_units: list | None = None,
+                   exclude_ports: str = "", host_timeouts: dict | None = None) -> dict:
     """ScanOps 옵션 키를 엔진 단계 설정으로 매핑. 스캔 기법/타이밍/버전강도/UDP/NSE 를 단계로 분배.
 
     one-liner 옵션(노핑·기법)은 엔진이 단계별로 알아서 처리하므로 그대로 옮기지 않는다.
@@ -102,6 +104,11 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
         raise ValueError("TCP Connect 단계 스캔은 UDP 스캔과 함께 실행할 수 없습니다.")
     timing = next((_TIMING[k] for k in ("t0", "t1", "t2", "t3", "fast", "t5") if k in opt), "-T4")
     max_retries = 2
+    # 호스트당 상한 — 단계마다 별개 값이다. 호출자가 안 주면 공용 레지스트리의 기본값을 쓴다.
+    # 여기서 문자열로 정규화해 두면 spec.validate() 가 문법만 확인하면 된다("" = 미적용).
+    limits = dict(scan_options.HOST_TIMEOUT_DEFAULTS)
+    limits.update({k: v for k, v in (host_timeouts or {}).items()
+                   if k in limits and isinstance(v, str)})
     # The engine has protocol-specific stages, so its ``-p`` value does not need Nmap's
     # T:/U: selector used by the legacy combined workflow.
     tcp_spec = nmap_runner.auto_tcp_port_spec(ports)
@@ -115,11 +122,16 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
         "timing": timing,
         "max_retries": max_retries,
         "nse": list(scan_options.NSE_DEFAULT_KEYS if nse is None else nse),
+        "host_timeout": limits["service"],
+        "udp_host_timeout": limits["service_udp"],
+        "workers": scan_options.SERVICE_WORKERS_DEFAULT,
     }
     spec: dict = {
         "job_id": f"scan_{scan_id}",
         "targets": list(targets),
         "exclude": list(exclude or []),
+        # 포트 제외는 엔진이 모든 단계 인자에 싣는다(pipeline._exclude_args).
+        "exclude_ports": (exclude_ports or "").strip(),
         "out_dir": str(out_dir),
         "batch_size": int(batch_size),
         "sudo": "auto",
@@ -132,9 +144,11 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
             },
             "tcp": {"enabled": bool(tcp_spec), "ports": tcp_ports, "timing": timing,
                     "scan_type": "connect" if "connect" in opt else "syn",
-                    "min_rate": 0, "max_retries": max_retries},
+                    "min_rate": 0, "max_retries": max_retries,
+                    "host_timeout": limits["tcp"]},
             "udp": {"enabled": "udp" in opt and bool(udp_spec), "ports": udp_ports,
-                    "timing": timing, "max_retries": max_retries},
+                    "timing": timing, "max_retries": max_retries,
+                    "host_timeout": limits["udp"]},
             "service": service,
         },
     }
@@ -163,13 +177,37 @@ def rescan_targets(findings: list[tuple]) -> tuple[list, set]:
     return units, keys
 
 
+def _unit_scope(units) -> tuple[str, str]:
+    """재스캔 단위 목록 -> (TCP 포트 표기, UDP 포트 표기)."""
+    ports: dict[str, list[int]] = {"tcp": [], "udp": []}
+    for unit in units or []:
+        try:
+            proto = str(unit.get("proto") or "tcp").lower()
+            ports.setdefault(proto, []).append(int(unit["port"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return (",".join(str(p) for p in sorted(set(ports["tcp"]))),
+            ",".join(str(p) for p in sorted(set(ports["udp"]))))
+
+
 def describe(spec: dict) -> str:
-    """명령 표기용 사람이 읽는 요약."""
+    """명령 표기용 사람이 읽는 요약 + 기계 판독용 범위 꼬리표.
+
+    꼬리표(`범위: T:… U:…`)가 없으면 이력 요약이 이 문장을 nmap argv 로 오인해 '기본 1000개
+    TCP' 라고 단언한다. 전 포트 TCP+UDP 스캔이 상위 1000개 TCP 스캔으로 보이는 셈이다.
+    무엇을 스캔했는지는 spec 이 알고 있으므로, 아는 쪽이 적어 준다.
+    """
     if spec.get("rescan_units"):
-        return f"타겟 재스캔(엔진) · {len(spec['rescan_units'])}건 개별(IP:포트별) · Stage3"
+        tcp, udp = _unit_scope(spec["rescan_units"])
+        head = f"타겟 재스캔(엔진) · {len(spec['rescan_units'])}건 개별(IP:포트별) · Stage3"
+        return f"{head}  ·  {scan_summary.scope_note(tcp, udp)}"
     if spec.get("targets_ports"):
         n = sum(len(v) for v in spec["targets_ports"].values())
-        return f"타겟 재스캔(엔진) · {len(spec['targets_ports'])}호스트 / {n}포트 · Stage3"
+        tcp = ",".join(str(p) for p in sorted({
+            int(p) for ports in spec["targets_ports"].values() for p in ports
+        }))
+        head = f"타겟 재스캔(엔진) · {len(spec['targets_ports'])}호스트 / {n}포트 · Stage3"
+        return f"{head}  ·  {scan_summary.scope_note(tcp, '')}"
     st = spec["stages"]
     bits = [f"발견 {st['discovery']['mode']}"]
     if st["tcp"]["enabled"]:
@@ -177,7 +215,11 @@ def describe(spec: dict) -> str:
     if st["udp"]["enabled"]:
         bits.append(f"UDP {st['udp']['ports']}")
     bits.append("서비스 --version-all" if st["service"]["version_all"] else "서비스 -sV")
-    return "단계스캔(엔진) · " + " · ".join(bits)
+    note = scan_summary.scope_note(
+        st["tcp"]["ports"] if st["tcp"]["enabled"] else "",
+        st["udp"]["ports"] if st["udp"]["enabled"] else "",
+    )
+    return "단계스캔(엔진) · " + " · ".join(bits) + f"  ·  {note}"
 
 
 def spawn(spec_path: Path, out_dir: Path, log_path: Path) -> subprocess.Popen:
@@ -205,6 +247,506 @@ def _rs_path(out_dir) -> Path:
 
 def _stop_path(out_dir) -> Path:
     return Path(out_dir) / "stop-requested"
+
+
+# ── 산출물 완결성 → 닫힘 권한 ────────────────────────────────────────────────
+#
+# 엔진 파서(collect_results)는 XML 이 없거나 ParseError 면 그 파일을 빈 목록으로 취급하고
+# 넘어간다. 그 상태로 닫힘을 진행하면 '못 본 포트'가 '닫힌 포트'가 되고, 닫힘은 상태까지
+# '정상처리'로 바꾸므로 되돌리기 가장 어려운 미탐이 된다.
+#
+# 그래서 **있는 파일만 훑지 않고 "이번 실행이 만들기로 한 집합"과 대조**한다. rc=0 이고
+# stages_done 에 job 이 있어도 파일이 아예 없을 수 있는데, glob 만으로는 그게 안 보인다.
+#
+# 역할을 둘로 가른다 — 섞으면 한쪽 오류가 반대쪽 오류를 만든다.
+#   authority  : 무엇이 열려 있는지를 정하는 산출물(discovery·sweep). 부재/잘림 → 닫힘 권한 박탈
+#   enrichment : 서비스 상세(stage3). 부재/잘림 → 증거만 불완전, 닫힘 권한은 유지
+# 단 재스캔(rescan_units·targets_ports)에는 sweep 이 없고 stage3 가 유일한 근거이므로
+# 그때는 stage3 가 authority 다.
+
+
+def _xml_run_finished(path: Path) -> bool:
+    """단독 스캐너 xml_run_completed 와 같은 계약(호스트 수 대조는 엔진이 배치별로 쪼개
+    실행하므로 제외). 파싱되고 <runstats><finished exit="success"> 가 정확히 하나여야 한다."""
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return False
+    finished = root.findall("./runstats/finished")
+    return len(finished) == 1 and finished[0].get("exit") == "success"
+
+
+def _stage3_path(out: Path, ip: str, tag: str, confirm: bool = False) -> Path:
+    """pipeline._probe_protocol 의 이름 규칙."""
+    return out / f"stage3-{str(ip).replace('.', '_')}-{tag}{'-confirm' if confirm else ''}.xml"
+
+
+def _probe_found_nothing(path: Path) -> bool:
+    """1차 probe 가 빈손이었는가 — 엔진이 확인 패스를 도는 조건(pipeline._probe_host)."""
+    try:
+        return not parse_xml(path.read_bytes())
+    except Exception:                       # 못 읽으면 이미 broken 으로 잡힌다
+        return False
+
+
+def _stage3_expected(out: Path, ip: str, tag: str, confirm_enabled: bool) -> list[Path]:
+    """base + (필요하면) 확인 패스.
+
+    확인 패스는 **1차가 빈손일 때만** 돈다(`sp.confirm and not found`). 그래서 base 를 실제로
+    읽어 같은 조건을 재현한다 — 무조건 기대하면 1차에서 찾은 정상 실행이 전부 부재 판정된다.
+    """
+    base = _stage3_path(out, ip, tag)
+    expected = [base]
+    if (confirm_enabled and base.exists() and _xml_run_finished(base)
+            and _probe_found_nothing(base)):
+        expected.append(_stage3_path(out, ip, tag, confirm=True))
+    return expected
+
+
+def _rescan_authority_xml(out: Path, spec: dict) -> list[Path]:
+    """재스캔의 기대 산출물 — pipeline._rescan_units/_service 의 이름 규칙을 따른다.
+
+    재스캔에는 sweep 이 없어 stage3 가 유일한 근거다. 그래서 확인 패스 산출물도 authority 다
+    — 운영 재스캔 spec 은 build_job_spec 이 service.confirm=True 로 만든다.
+    """
+    confirm = bool(((spec.get("stages") or {}).get("service") or {}).get("confirm", False))
+    expected: list[Path] = []
+    for unit in spec.get("rescan_units") or []:
+        try:
+            ip = str(unit["ip"])
+            port, proto = int(unit["port"]), str(unit.get("proto") or "tcp")
+        except (KeyError, TypeError, ValueError):
+            continue
+        expected += _stage3_expected(out, ip, f"{proto}{port}", confirm)   # tag=f"{proto}{port}"
+    for ip in (spec.get("targets_ports") or {}):
+        expected += _stage3_expected(out, ip, "tcp", confirm)
+    return expected
+
+
+def expected_enrichment_xml(out_dir, spec: dict) -> list[Path]:
+    """전체 스캔에서 서비스 probe 가 만들기로 한 stage3 집합.
+
+    있는 파일만 훑으면 'probe 는 돌았는데 XML 을 못 만든' 경우가 증거 손실인 채로 정상 완료로
+    숨는다. open_map(=sweep 이 연 포트)과 service 설정에서 기대 집합을 세운다.
+    """
+    return [path for group in _enrichment_units(out_dir, spec) for path in group[0]]
+
+
+# 엔진이 실패한 UDP 묶음을 포트별로 쪼갤 때의 상한(pipeline._MAX_SPLIT_UNITS 와 같은 값).
+# 넘으면 엔진이 쪼개지 않으므로 대체 산출물도 존재하지 않는다.
+_MAX_SPLIT_UNITS = 32
+
+
+def _enrichment_units(out_dir, spec: dict) -> list[tuple[list[Path], list[Path]]]:
+    """(ip, proto) 마다 (묶음 산출물, 대체 가능한 분할 산출물).
+
+    정상 경로는 프로토콜당 한 프로세스라 묶음 파일 하나가 나온다. 그 묶음이 죽으면 엔진이
+    포트별로 쪼개 다시 돌리므로(pipeline._split_units), **쪼갠 것이 전부 완결되면 얻을 증거는
+    같다.** 묶음 이름만 기대하면 완전 복구를 '증거 손실'로 오탐한다 — 최초 묶음이 실패했다는
+    사실은 service_retry/service_split 이벤트가 이미 남긴다.
+
+    대체 집합은 엔진이 실제로 쪼갤 수 있는 조건(UDP · 2개 이상 · 상한 이내)일 때만 만든다.
+    """
+    out = Path(out_dir)
+    svc = ((spec.get("stages") or {}).get("service") or {})
+    if not svc.get("enabled", True):
+        return []
+    confirm = bool(svc.get("confirm", False))
+    open_map = _read_state(out).get("open_map") or {}
+    units: list[tuple[list[Path], list[Path]]] = []
+    for ip, protos in sorted((open_map or {}).items()):
+        if not isinstance(protos, dict):
+            continue
+        for proto in ("tcp", "udp"):
+            raw = protos.get(proto)
+            if not raw:
+                continue
+            grouped = _stage3_expected(out, ip, proto, confirm)
+            ports = sorted({int(p) for p in raw})
+            split: list[Path] = []
+            if proto == "udp" and 1 < len(ports) <= _MAX_SPLIT_UNITS:
+                for port in ports:
+                    split += _stage3_expected(out, ip, f"{proto}{port}", confirm)
+            units.append((grouped, split))
+    return units
+
+
+def _complete(paths: list[Path]) -> bool:
+    return bool(paths) and all(p.exists() and _xml_run_finished(p) for p in paths)
+
+
+def expected_authority_xml(out_dir, spec: dict, force_scanned_hosts: bool = False) -> list[Path]:
+    """이번 실행이 만들기로 한 authority 산출물."""
+    out = Path(out_dir)
+    if force_scanned_hosts:
+        return _rescan_authority_xml(out, spec)
+    # discovery 를 먼저 세운다. 이게 깨졌으면 live 자체가 오염이라 아래 계산은 의미가 없다 —
+    # 그래도 목록에 들어가 있으므로 완결성 검사에서 걸려 권한이 박탈된다.
+    # 단 -Pn(mode="pn")·비활성 이면 엔진이 nmap 을 돌리지 않고 타깃을 그대로 live 로 쓴다
+    # (pipeline._discovery). 만들지도 않는 파일을 기대하면 정상 실행이 전부 partial 이 된다.
+    disc = (spec.get("stages") or {}).get("discovery") or {}
+    runs_discovery = disc.get("enabled", True) and disc.get("mode", "sn") != "pn"
+    expected = [out / "stage0-discovery.xml"] if runs_discovery else []
+    state = _read_state(out)
+    live = [h for h in (state.get("live") or []) if isinstance(h, str)]
+    if not live:
+        # 생존 0 이면 엔진이 sweep 을 아예 돌리지 않는다(pipeline.run).
+        return expected
+    batch = max(1, int(spec.get("batch_size") or 256))
+    count = -(-len(live) // batch)          # ceil — pipeline._batches 와 같은 분할
+    stages = spec.get("stages") or {}
+    for proto in ("tcp", "udp"):
+        if (stages.get(proto) or {}).get("enabled", True):
+            expected += [out / f"stage-{proto}-b{i}.xml" for i in range(count)]
+    return expected
+
+
+def absence_times(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dict:
+    """``(host, proto) -> 그 호스트의 부재를 확인한 시각``.
+
+    '이 포트가 없다' 는 **그 호스트를 실제로 훑은 산출물**만 할 수 있는 말이다. 실행 전체의
+    max(finished) 하나로 뭉치면 00:00 에 끝난 배치의 부재가 02:00 권한을 얻어, 그 사이
+    01:00 에 다른 스캔이 새로 관측한 열린 포트를 닫는다.
+
+    커버 범위를 산출물의 host 목록에서 읽을 수는 없다 - sweep 은 ``--open`` 으로 돌기
+    때문에 열린 포트가 없는 호스트는 XML 에 아예 나타나지 않는다(그런데 닫힘 판정이
+    필요한 것이 정확히 그 호스트들이다). 그래서 엔진이 배치를 나눈 규칙(pipeline._batches:
+    live 를 순서대로 batch_size 씩)을 그대로 되짚어 배치 i 가 맡은 호스트를 세운다.
+    """
+    out = Path(out_dir)
+    times: dict[tuple[str, str], object] = {}
+    if force_scanned_hosts:
+        confirm = bool(((spec.get("stages") or {}).get("service") or {}).get("confirm", False))
+
+        def completed_for(ip: str, paths: list[Path]) -> list[Path]:
+            """이 authority 단위가 실제로 끝까지 관측한 산출물만 돌려준다.
+
+            선택 재스캔은 같은 host/proto라도 포트마다 별도 XML을 만든다. 따라서 timeout을
+            host 하나의 verdict로 합치면 뒤 포트가 앞 포트의 판정을 덮어쓴다. base/confirm을
+            포함한 바로 그 단위의 산출물만 판정해야 한다.
+            """
+            if not paths or any(not path.exists() or not _xml_run_finished(path) for path in paths):
+                return []
+            try:
+                if any(ip in nmap_parse.timed_out_hosts(path.read_bytes()) for path in paths):
+                    return []
+            except (OSError, ET.ParseError):
+                return []
+            return paths
+
+        for unit in spec.get("rescan_units") or []:
+            try:
+                ip = str(unit["ip"])
+                port, proto = int(unit["port"]), str(unit.get("proto") or "tcp").lower()
+            except (KeyError, TypeError, ValueError):
+                continue
+            # 선택 재스캔은 포트마다 별도 산출물을 만든다. 22 를 훑은 XML 은 443 의 부재를
+            # 증명하지 못하므로 포트까지 키에 넣는다 - (ip, proto) 로 뭉치면 늦게 끝난
+            # 포트의 시각을 다른 포트가 빌려 쓴다.
+            paths = completed_for(ip, _stage3_expected(out, ip, f"{proto}{port}", confirm))
+            if not paths:
+                continue
+            stamps = [s for s in (observed_at(path.read_bytes()) for path in paths)
+                      if s is not None]
+            times[(ip, port, proto)] = max(stamps) if stamps else None
+        # targets_ports 는 한 XML 이 그 호스트의 여러 포트를 실제로 함께 훑으므로 산출물
+        # 범위가 곧 (ip, tcp) 다. 여기서까지 포트로 쪼개면 있지도 않은 구분을 만든다.
+        for ip in (spec.get("targets_ports") or {}):
+            paths = completed_for(str(ip), _stage3_expected(out, str(ip), "tcp", confirm))
+            if not paths:
+                continue
+            stamps = [s for s in (observed_at(path.read_bytes()) for path in paths)
+                      if s is not None]
+            times[(str(ip), "tcp")] = max(stamps) if stamps else None
+        return times
+
+    live = [h for h in (_read_state(out).get("live") or []) if isinstance(h, str)]
+    stages = spec.get("stages") or {}
+    batch = max(1, int(spec.get("batch_size") or 256))
+
+    def _recorded():
+        """생산자가 적어 둔 커버리지 — 산출물마다 명령줄에 올린 호스트가 그대로 남아 있다."""
+        for entry in coverage_entries(out):
+            if entry.get("role") != "authority":
+                continue
+            proto = str(entry.get("proto") or "")
+            if proto not in ("tcp", "udp"):
+                continue
+            hosts = [h for h in (entry.get("hosts") or []) if isinstance(h, str)]
+            yield proto, out / str(entry.get("artifact") or ""), hosts
+
+    def _slices():
+        """구형 out_dir 폴백 — 엔진의 배치 규칙(live 를 순서대로 batch_size 씩)을 되짚는다.
+
+        되짚기는 규칙이 바뀌면 조용히 어긋나고 재시도처럼 부분집합을 훑은 실행을 표현하지
+        못한다. 그래서 새 실행은 위의 기록을 쓰고, 이 경로는 기록이 없는 옛 실행 전용이다.
+        """
+        for proto in ("tcp", "udp"):
+            if not (stages.get(proto) or {}).get("enabled", True):
+                continue
+            for index in range(-(-len(live) // batch)):
+                yield (proto, out / f"stage-{proto}-b{index}.xml",
+                       live[index * batch:(index + 1) * batch])
+
+    covers = list(_recorded()) if coverage_entries(out) else (list(_slices()) if live else [])
+    # 포기 판정도 프로토콜별이다. 한 집합으로 뭉치면 UDP 타임아웃이 TCP 의 시각까지 지운다.
+    gave_up = {proto: timed_out_hosts(out, proto) for proto in ("tcp", "udp")}
+    for proto, path, hosts in covers:
+        if not path.exists():
+            continue
+        try:
+            when = observed_at(path.read_bytes())
+        except OSError:
+            continue
+        for host in hosts:
+            if host in gave_up[proto]:
+                continue
+            key = (host, proto)
+            current = times.get(key)
+            # 시각이 없는 산출물도 '훑었다' 는 사실은 남긴다(값 None = 시각 미상).
+            if key not in times or (when is not None and (current is None or when > current)):
+                times[key] = when
+    return times
+
+
+def swept_batches(out_dir, spec: dict) -> int:
+    """모든 활성 프로토콜에 대해 sweep 이 끝난 배치 수.
+
+    엔진도 대역을 배치로 나눠 돈다(stage-tcp-b0.xml …). 청킹 스캔은 sidecar 에 cursor 가
+    있지만 엔진에는 없어서, 진행 화면이 배치 진행을 아예 말하지 못했다. 파일이 곧 진행
+    기록이므로 그것을 센다 - TCP 는 끝나고 UDP 가 도는 중이면 그 배치는 아직 '끝난' 것이
+    아니므로 프로토콜별 완료 수의 **최솟값**을 쓴다.
+    """
+    out = Path(out_dir)
+    stages = spec.get("stages") or {}
+    counts = []
+    for proto in ("tcp", "udp"):
+        if not (stages.get(proto) or {}).get("enabled", True):
+            continue
+        counts.append(sum(
+            1 for path in out.glob(f"stage-{proto}-b*.xml") if _xml_run_finished(path)
+        ))
+    return min(counts) if counts else 0
+
+
+def coverage_entries(out_dir) -> list[dict]:
+    """엔진이 nmap 을 돌리며 적어 둔 커버리지 기록(run-state 의 ``coverage``).
+
+    각 항목은 nmap 프로세스 **하나**를 뜻한다 — ``{artifact, proto, role, hosts, ports,
+    finished}``. ``hosts`` 는 그 실행의 **명령줄에 실제로 올린** 목록이라, 되짚기(배치
+    슬라이스·glob)와 달리 규칙이 바뀌어도 어긋나지 않는다.
+
+    구형 out_dir(이 기록이 생기기 전에 돈 실행)은 빈 목록이며, 호출자는 되짚기 폴백을 쓴다.
+    """
+    return [e for e in (_read_state(Path(out_dir)).get("coverage") or []) if isinstance(e, dict)]
+
+
+def _authority_entries(out_dir, proto: str | None, force_scanned_hosts: bool) -> list[dict]:
+    """부재를 말할 자격이 있는 산출물만. **역할**이 판단 기준이고 파일 이름이 아니다.
+
+    전체 스캔에서 개폐를 확정하는 것은 sweep 이고 stage3 는 enrichment 다. 포트 재스캔에서는
+    stage3 가 유일한 관측이라 그것이 authority 다. 이 구분을 안 하면 완결된 TCP sweep 의
+    권한을 stage3 타임아웃 하나가 빼앗는다(그리고 그 반대 방향도 똑같이 틀린다).
+    """
+    entries = [e for e in coverage_entries(out_dir) if e.get("role") == "authority"]
+    if not force_scanned_hosts and proto:
+        entries = [e for e in entries if e.get("proto") == proto]
+    return entries
+
+
+def _legacy_timed_out_hosts(out_dir) -> set[str]:
+    """커버리지 기록이 없는 구형 out_dir 용 되짚기.
+
+    역할·프로토콜을 구분하지 못하므로 **보수적으로 합집합**이다. 새 실행은 여기 오지 않는다.
+    """
+    out = Path(out_dir)
+    hosts: set[str] = set()
+    for pattern in ("stage-tcp-b*.xml", "stage-udp-b*.xml", "stage3-*.xml", "stage0-discovery.xml"):
+        for path in sorted(out.glob(pattern)):
+            try:
+                hosts |= nmap_parse.timed_out_hosts(path.read_bytes())
+            except (OSError, ET.ParseError):
+                continue
+    return hosts
+
+
+def timed_out_hosts(out_dir, proto: str | None = None,
+                    force_scanned_hosts: bool = False) -> set[str]:
+    """``--host-timeout`` 으로 포기당해 **부재를 말할 자격이 없는** 호스트.
+
+    판정은 산출물 하나 단위다. 같은 호스트를 여러 authority 산출물이 덮으면 **마지막 것이
+    이긴다** — 한 번 포기됐다는 이유로 영구히 자격을 잃으면, 재시도가 성공해도 그 관측을
+    쓰지 못한다. 읽을 수 없는 산출물은 그 실행이 아무것도 관측하지 못한 것으로 본다(fail-closed).
+    """
+    out = Path(out_dir)
+    if not coverage_entries(out):
+        # 기록 자체가 없는 구형 out_dir 일 때만 되짚는다. '해당 역할의 항목이 없다' 를 폴백
+        # 조건으로 쓰면, 기록은 있는데 그 역할이 없는 정상 실행이 조용히 옛 합집합으로
+        # 되돌아간다 - 고치려던 바로 그 오류다.
+        return _legacy_timed_out_hosts(out)
+    verdict: dict[str, bool] = {}
+    entries = _authority_entries(out, proto, force_scanned_hosts)
+    for entry in entries:
+        path = out / str(entry.get("artifact") or "")
+        covered = [h for h in (entry.get("hosts") or []) if isinstance(h, str)]
+        try:
+            gave_up = nmap_parse.timed_out_hosts(path.read_bytes())
+        except (OSError, ET.ParseError):
+            gave_up = set(covered)
+        for host in covered:
+            verdict[host] = host in gave_up
+    return {host for host, gone in verdict.items() if gone}
+
+
+def swept_total(out_dir, spec: dict) -> int:
+    """sweep 이 실제로 만들 배치 수 - **swept_batches 와 같은 모집단**에서 센다.
+
+    실행 전에 세어 둔 배치 수(ScanRun.batch_total)는 discovery **이전**의 전체 대상 수로
+    나눈 값이다. 반면 엔진이 실제로 도는 배치는 discovery 를 통과한 live 를 나눈 것이라,
+    둘을 분자·분모로 같이 쓰면 존재하지 않는 배치를 진행 중이라고 말하게 된다
+    (/24 256대 중 1대만 live 면 실제 배치는 b0 하나인데 분모는 4가 된다).
+
+    live 를 아직 모르면 0 - 그때는 호출자가 실행 전 추정치를 그대로 쓴다.
+    """
+    live = [h for h in (_read_state(Path(out_dir)).get("live") or []) if isinstance(h, str)]
+    size = int(spec.get("batch_size") or 0)
+    if not live or size <= 0:
+        return 0
+    return -(-len(live) // size)
+
+
+def observed_hosts(out_dir, spec: dict, force_scanned_hosts: bool = False,
+                   proto: str | None = None) -> set[str]:
+    """이 실행이 **실제로 포트를 관측한** 호스트.
+
+    산출물이 모두 완결됐다는 것과 '이 호스트의 포트를 봤다'는 것은 다른 사실이다.
+    sn discovery 에서 호스트가 응답하지 않으면 live 가 비고, sweep 은 아예 실행되지 않는다
+    (pipeline.run 이 live 를 sweep 입력으로 쓴다). 그때 기대 산출물은 discovery 하나뿐이라
+    완결성 검사는 **공허하게 통과**한다 - 그 상태로 scope_keys 를 그대로 닫으면 그 호스트의
+    포트에 패킷을 한 번도 보내지 않고 전부 '닫힘 + 정상처리'가 된다.
+
+    nmap 문서도 host discovery 가 엄격한 방화벽 뒤의 호스트를 놓칠 수 있고, 기본 포트 스캔은
+    up 으로 판정된 호스트에만 수행된다고 명시한다. 그러므로 discovery 미응답은 '포트가 닫혔다'가
+    아니라 '아무것도 관측하지 못했다'이다.
+
+    -Pn 은 pipeline._discovery 가 targets 를 그대로 live 로 넣으므로 같은 규칙으로 덮인다.
+    """
+    out = Path(out_dir)
+    if force_scanned_hosts:
+        # 재스캔 authority는 포트 단위일 수 있다. 한 포트가 timeout이어도 같은 호스트의 다른
+        # 포트는 정상 완료할 수 있으므로, 실제 권한 단위가 하나라도 남은 호스트만 돌려준다.
+        return {str(key[0]) for key in absence_times(out, spec, True)}
+    # live 는 discovery 가 살아 있다고 본 목록일 뿐이다. 그중 sweep 이 타임아웃으로 포기한
+    # 호스트는 포트를 끝까지 보지 못했으므로 부재를 말할 자격이 없다.
+    live = {h for h in (_read_state(out).get("live") or []) if isinstance(h, str)}
+    return live - timed_out_hosts(out, proto)
+
+
+def observed_scope(scope_keys: set | None, out_dir, spec: dict,
+                   force_scanned_hosts: bool = False) -> set | None:
+    """닫힘 후보 중 이 실행이 실제로 관측한 호스트의 것만 남긴다.
+
+    ``None`` 은 '후보 없음'이 아니라 **닫힘 후보 목록이 없는 구형 spec** 이라는 뜻이므로
+    빈 집합으로 바꾸지 않고 그대로 돌려준다. 운영 경로에서는 워커가 그 전에 stages 의
+    포트/프로토콜 경계로 후보를 세워 명시적 집합으로 만들어 넘기므로 여기 None 이 오지
+    않는다 - 이 분기는 그 순서가 깨졌을 때 실행 결과를 통째로 잃지 않기 위한 방어다.
+    None 과 set() 을 같은 것으로 다루면 안 된다.
+    """
+    if scope_keys is None:
+        return None
+    if force_scanned_hosts:
+        authority = absence_times(out_dir, spec, True)
+        kept = set()
+        for key in scope_keys:
+            parts = str(key).split("|")
+            if len(parts) < 3:
+                continue
+            host, proto = parts[0], parts[2]
+            try:
+                exact = (host, int(parts[1]), proto)
+            except ValueError:
+                continue
+            if exact in authority or (host, proto) in authority:
+                kept.add(key)
+        return kept
+    # 전체 스캔에서는 프로토콜마다 authority 산출물이 다르다. 한 집합으로 뭉치면 UDP sweep
+    # 타임아웃 하나가 완결된 TCP sweep 의 권한까지 빼앗는다 - 그러면 사라진 TCP 포트가
+    # 영원히 열린 채로 남는다(닫지 못하는 쪽의 오류).
+    by_proto = {proto: observed_hosts(out_dir, spec, False, proto)
+                for proto in ("tcp", "udp")}
+    kept = set()
+    for key in scope_keys:
+        parts = str(key).split("|")
+        host = parts[0]
+        proto = parts[2] if len(parts) > 2 else "tcp"
+        if host in by_proto.get(proto, by_proto["tcp"]):
+            kept.add(key)
+    return kept
+
+
+def artifact_report(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dict:
+    """기대 산출물 대비 실제 산출물. authority 가 하나라도 어긋나면 닫으면 안 된다."""
+    out = Path(out_dir)
+    expected = expected_authority_xml(out, spec, force_scanned_hosts)
+    missing = [p.name for p in expected if not p.exists()]
+    broken = [p.name for p in expected if p.exists() and not _xml_run_finished(p)]
+    enrichment_missing: list[str] = []
+    enrichment_broken: list[str] = []
+    if not force_scanned_hosts:
+        # 전체 스캔에서 stage3 는 enrichment 다. 어긋나도 sweep 의 안전한 권한을 뺏지 않지만,
+        # 증거가 빠졌다는 사실은 남겨야 한다 — 안 그러면 손실이 정상 완료로 숨는다.
+        units = _enrichment_units(out, spec)
+        seen: set[str] = set()
+        for grouped, split in units:
+            seen |= {p.name for p in grouped} | {p.name for p in split}
+            # 묶음이 온전하면 그것으로 끝. 아니면 쪼갠 집합이 **전부** 완결됐는지 본다 —
+            # 그때 얻은 증거는 묶음과 같으므로 저하가 아니다.
+            if _complete(grouped) or _complete(split):
+                continue
+            enrichment_missing += [p.name for p in grouped if not p.exists()]
+            enrichment_broken += [p.name for p in grouped
+                                  if p.exists() and not _xml_run_finished(p)]
+            # 쪼갠 것 중 일부만 살아났으면 그 부분 손실도 남긴다.
+            enrichment_broken += [p.name for p in split
+                                  if p.exists() and not _xml_run_finished(p)]
+        # 기대 집합 밖의 산출물(확인 패스 등)도 깨졌으면 증거 저하로 센다.
+        enrichment_broken = sorted(set(enrichment_broken) | {
+            p.name for p in out.glob("stage3-*.xml")
+            if p.name not in seen and not _xml_run_finished(p)})
+    return {"authority_missing": missing, "authority_broken": broken,
+            "enrichment_missing": enrichment_missing,
+            "enrichment_broken": enrichment_broken}
+
+
+# nmap 이 NSE/소켓을 매끄럽게 돌리지 못했다고 알리는 표식. XML 에는 남지 않고 로그로만 나온다.
+# 단독 스캐너(scanops_scanner.NMAP_NSE_PROBLEM_MARKERS)와 같은 목록이어야 두 경로가 같이 움직인다.
+UNCLEAN_MARKERS = ("NSOCK ERROR", "Trying to delete NSI", "QUITTING!")
+_UNCLEAN_KEEP = 5
+_UNCLEAN_TAIL_BYTES = 256 * 1024
+
+
+def log_problems(log_path: Path) -> list[str]:
+    """실행 로그에서 정상 종료를 부정하는 줄을 찾는다.
+
+    rc=0 이고 XML 이 exit="success" 여도 NSE/소켓이 정리되지 못한 채 끝날 수 있다.
+    그 사실은 로그에만 있으므로 여기서 보지 않으면 볼 곳이 없다 — 그대로 두면 '못 본
+    포트'가 '닫힌 포트'로 기록된다.
+    """
+    try:
+        data = Path(log_path).read_bytes()[-_UNCLEAN_TAIL_BYTES:]
+    except OSError:
+        return []
+    # nmap 이 Windows API 에서 받아 뱉는 오류 문구는 ANSI 코드페이지라 UTF-8 로 못 읽는다.
+    # 표식 자체는 ASCII 이므로 replace 로 읽어도 탐지에는 지장이 없다.
+    text = data.decode("utf-8", "replace")
+    found: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and any(marker in stripped for marker in UNCLEAN_MARKERS):
+            found.append(stripped[:200])
+            if len(found) >= _UNCLEAN_KEEP:
+                break
+    return found
 
 
 def _read_state(out_dir) -> dict:
@@ -360,40 +902,86 @@ def collect_results(out_dir, scope_keys: set | None = None,
         scanned.update(key.split("|", 1)[0] for key in scope_keys)
 
     by_key: dict[tuple, dict] = {}
+    # 파일마다 관측 시각이 다르다. 배치가 여러 개면 b0 과 b7 사이에 몇 시간이 벌어지기도
+    # 하므로, 스캔 하나의 시각으로 뭉뚱그리면 실제 순서와 어긋난다.
     if not force_scanned_hosts:
         # Service probing is enrichment, not authority over a successful open-port sweep.
         # In particular, a flaky mixed/Windows probe must not close a port just proven open.
         for pattern in ("stage-tcp-b*.xml", "stage-udp-b*.xml"):
             for x in sorted(out.glob(pattern)):
                 try:
-                    fallback = parse_xml(x.read_bytes())
+                    raw = x.read_bytes()
+                    fallback = parse_xml(raw)
                 except Exception:
                     continue
+                seen_at = observed_at(raw)
                 for f in fallback:
+                    f["observed_at"] = seen_at
                     # Sweep proves openness only. It has not run the service/NSE probes and
                     # therefore must not erase an existing identity when stage3 misses a key.
                     f["identity_observed"] = False
                     by_key.setdefault((f["host_ip"], f["port"], f["proto"]), f)
     for x in sorted(out.glob("stage3-*.xml")):
         try:
-            fnd = parse_xml(x.read_bytes())
+            raw = x.read_bytes()
+            fnd = parse_xml(raw)
         except Exception:
             continue
+        seen_at = observed_at(raw)
         for f in fnd:
+            f["observed_at"] = seen_at
             by_key[(f["host_ip"], f["port"], f["proto"])] = f   # confirm/base 중복 제거(존재값 우선)
     return list(by_key.values()), scanned
 
 
+def authority_observed_at(out_dir, spec: dict, force_scanned_hosts: bool = False):
+    """부재(닫힘)를 주장할 수 있는 시점 — authority 산출물이 **모두** 끝난 시각.
+
+    '이 포트가 없다'는 마지막 authority sweep 이 끝나야 할 수 있는 말이다. 시작 시각을 쓰면
+    실행 중에 다른 스캔이 새로 연 포트를 과거의 부재로 닫고, 반대로 이 스캔이 나중에 확인한
+    열림을 오래된 것으로 버린다. 읽을 수 있는 시각이 하나도 없으면 None 을 돌려주어
+    호출자가 스캔 시각으로 되돌아가게 한다.
+    """
+    times = []
+    for path in expected_authority_xml(out_dir, spec, force_scanned_hosts):
+        try:
+            when = observed_at(path.read_bytes())
+        except OSError:
+            continue
+        if when is not None:
+            times.append(when)
+    return max(times) if times else None
+
+
 def ingest_results(db, scan, out_dir, scope_keys: set | None = None,
-                   force_scanned_hosts: bool = False, *, commit: bool = True) -> dict:
-    """단계별 XML → finding 인입. 명시적 scope_keys는 완료 스캔의 closure 권한."""
+                   force_scanned_hosts: bool = False, scan_date=None, spec: dict | None = None,
+                   closed_keys: set | None = None, applied_keys: set | None = None,
+                   *, commit: bool = True) -> dict:
+    """단계별 XML → finding 인입. 명시적 scope_keys는 완료 스캔의 closure 권한.
+
+    ``spec`` 은 어느 산출물이 어떤 호스트를 훑었는지 되짚는 데 쓴다(absence_times). 없으면
+    키별 부재 시각을 세우지 않고 실행 시각 하나로 판단한다 - 예전 동작이다.
+
+    ``scan_date`` 는 이 결과가 **언제 관측된 것인가**다. 며칠 전 끝난 실행을 지금 마감하는
+    경로(finalize/resume)에서 이걸 넘기지 않으면 인입 시각이 '지금'이 되어, ingest() 의
+    out-of-order 방어(_is_older)가 한 번도 발동하지 않는다. 그러면 그 스캔이 끝난 뒤에
+    새로 관측된 포트가 과거의 부재를 근거로 닫힌다 - 시간이 거꾸로 흐른다.
+    """
     findings, scanned = collect_results(
         out_dir, scope_keys=scope_keys, force_scanned_hosts=force_scanned_hosts,
     )
 
     enriched = taxonomy.enrich_all(db, findings)
     counts = ingest(
-        db, scan.id, enriched, scanned, scope_keys=scope_keys, commit=False,
+        db, scan.id, enriched, scanned, scope_keys=scope_keys,
+        scan_date=scan_date,
+        # spec 이 없으면 어느 산출물이 무엇을 커버했는지 계산할 근거가 없다. 그때는 빈 맵을
+        # 넘겨 '아무것도 커버하지 않았다' 로 읽히게 하는 대신, 키별 정보 없음(None)으로 둔다.
+        absence_at=(absence_times(out_dir, spec, force_scanned_hosts)
+                    if spec is not None else None),
+        closed_keys=closed_keys,
+        applied_keys=applied_keys,
+        commit=False,
     )
     from ..api.assets import match_assets
     match_assets(db, commit=False)

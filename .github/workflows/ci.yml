@@ -9,6 +9,9 @@ jobs:
   backend:
     name: backend (pytest)
     runs-on: ubuntu-latest
+    # 의존성 설치까지 15분으로 자르면 Ubuntu mirror 지연이 테스트 실패처럼 보인다. 잡에는
+    # 설치 여유를 주고, 실제 고아 프로세스 위험은 아래 pytest 단계 자체의 상한으로 막는다.
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -28,6 +31,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
       - name: Run tests
+        # 실제 프로세스를 띄우는 테스트가 멈춰도 Actions 기본값인 6시간을 잡아먹지 않는다.
+        timeout-minutes: 15
         working-directory: backend
         run: python -m pytest -q
 

@@ -4,17 +4,26 @@ import { downloadFile } from "../lib/download.js";
 import { useToast } from "../ui/Toast.jsx";
 import ColumnBuilder from "../ui/ColumnBuilder.jsx";
 import ScanOptions from "../ui/ScanOptions.jsx";
+import TableScroller from "../ui/TableScroller.jsx";
+import PageSize from "../ui/PageSize.jsx";
 import {
   COLUMN_MAP, PRESETS, DEFAULT_PRESET_ID, cellValue,
   primaryServiceIdentity, secondaryServiceIdentity,
+  currentReason, needsConfirmation, stateWithEvidence,
 } from "../lib/columns.js";
 import { deadlinePatchValue } from "../lib/findingPatch.js";
+import {
+  COLOR_ELEMENTS, COLOR_KEY, cellTone, loadColorFlags,
+} from "../lib/findingColors.js";
 import { dday, STATUS_CLASS, RISK_LABEL } from "../lib/format.js";
+import { FILTER_HINT } from "../lib/filterText.js";
 
 const COLS_KEY = "scanops_cols";
 const CUSTOM_KEY = "scanops_custom_presets";
-// 한 번에 그리는 행 수. 발견이 수천 건이어도 DOM 이 그만큼 커지지 않게 서버 페이지로 끊는다.
-const PAGE_SIZE = 200;
+// 한 번에 그리는 행 수의 기본값. 발견이 수천 건이어도 DOM 이 그만큼 커지지 않게 서버
+// 페이지로 끊되, 전체를 한 화면에서 보고 싶은 경우가 있어 사용자가 늘릴 수 있다.
+const DEFAULT_PAGE_SIZE = 200;
+const SIZE_KEY = "scanops_page_size";
 // 브라우저 로컬 날짜(YYYY-MM-DD) — 마감초과 판정 기준을 서버 UTC 가 아니라 사용자 기준으로 맞춘다.
 const localToday = () => {
   const d = new Date();
@@ -22,7 +31,7 @@ const localToday = () => {
 };
 const loadJSON = (k, fb) => { try { return JSON.parse(localStorage.getItem(k)) ?? fb; } catch { return fb; } };
 
-export default function Findings({ user }) {
+export default function Findings({ user, focus = null, onFocusApplied }) {
   const initial = PRESETS.find((p) => p.id === DEFAULT_PRESET_ID).cols;
   const [cols, setCols] = useState(() => loadJSON(COLS_KEY, initial));
   const [displayModes, setDisplayModes] = useState(() => loadJSON("scanops_colmodes", {}));
@@ -37,13 +46,23 @@ export default function Findings({ user }) {
   const [colFilters, setColFilters] = useState({});  // {컬럼키: 검색어}
   const [sort, setSort] = useState({ key: "", dir: "asc" });
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(() => Number(loadJSON(SIZE_KEY, DEFAULT_PAGE_SIZE)) || DEFAULT_PAGE_SIZE);
   // 한글 IME 조합 중인지 — 조합 단계마다 질의가 나가지 않게 막는 플래그.
   const composing = useRef(false);
   const [imeTick, setImeTick] = useState(0);   // 조합 종료 시점에 질의를 한 번 깨우는 용도
   const [risk, setRisk] = useState("");
+  // 색상 인디케이터 — 무엇을 색으로 알릴지 사람마다 다르다. 요소별로 켜고 끄고, 선택은 남긴다.
+  const [colorFlags, setColorFlags] = useState(() => loadColorFlags(localStorage));
+  useEffect(() => {
+    try { localStorage.setItem(COLOR_KEY, JSON.stringify(colorFlags)); } catch { /* 저장 실패는 무시 */ }
+  }, [colorFlags]);
+  const toggleColor = (key) => setColorFlags((prev) => ({ ...prev, [key]: !prev[key] }));
   const [status, setStatus] = useState("");
   const [overdueOnly, setOverdueOnly] = useState(false);
   const [hideNormal, setHideNormal] = useState(true);
+  // 허용(조직 규칙이 '허용'으로 정한 발견)은 정상처리와 다른 축이다. 하나로 묶으면 둘 중
+  // 무엇 때문에 안 보이는지 알 수 없어, 토글도 건수도 따로 둔다.
+  const [hideAllowed, setHideAllowed] = useState(true);
   const [selected, setSelected] = useState(() => new Set());
   const [confirmId, setConfirmId] = useState(null);
   const [rescanDrawer, setRescanDrawer] = useState(null);
@@ -67,22 +86,39 @@ export default function Findings({ user }) {
     // 이 두 토글도 서버가 걸러야 한다. 페이지를 자른 뒤 화면에서 걸러내면 조건에 맞는 행이
     // 뒷 페이지에 남아 첫 페이지가 빈 것처럼 보이고, 건수·내보내기도 화면과 어긋난다.
     if (hideNormal) qs.set("hide_normal", "true");
+    qs.set("hide_allowed", hideAllowed ? "true" : "false");
     if (overdueOnly) qs.set("overdue_only", "true");
     // 마감초과 판정은 사용자 로컬 날짜 기준이어야 화면의 'N일 초과' 표시와 일치한다.
     if (overdueOnly) qs.set("today", localToday());
     return qs;
-  }, [match, cols, risk, status, q, colFilters, sort, hideNormal, overdueOnly]);
+  }, [match, cols, risk, status, q, colFilters, sort, hideNormal, hideAllowed, overdueOnly]);
 
   function load(targetPage = page) {
     const qs = new URLSearchParams(queryString);
-    qs.set("limit", String(PAGE_SIZE));
-    qs.set("offset", String(targetPage * PAGE_SIZE));
+    qs.set("limit", String(pageSize));
+    qs.set("offset", String(targetPage * pageSize));
     setLoading(true);
     api(`/findings?${qs.toString()}`, { raw: true })
       .then(({ body, total: count }) => { setFindings(body); setTotal(count); })
       .catch((e) => toast(e.message, { type: "err" }))
       .finally(() => setLoading(false));
   }
+
+  // 다른 화면(규칙 등)이 조건을 싣고 넘어온 경우 한 번만 적용한다. 적용 후 즉시 비우지
+  // 않으면 사용자가 필터를 손으로 바꿔도 다음 렌더에서 되돌아온다.
+  useEffect(() => {
+    if (!focus) return;
+    setQ("");
+    setRisk("");
+    setStatus("");
+    setOverdueOnly(false);
+    setColFilters(focus.filters || {});
+    setMatch(focus.match || "contains");
+    setHideNormal(focus.hideNormal ?? true);
+    setHideAllowed(focus.hideAllowed ?? true);
+    setPage(0);
+    onFocusApplied?.();
+  }, [focus]);
 
   // 입력 중 매 글자마다 서버를 때리지 않도록 살짝 늦춘다(검색어·컬럼 필터).
   // 한글 조합 중에는 아예 보내지 않는다 — 'ㄴ', '나', '남'… 조합 단계마다 질의하면
@@ -91,14 +127,15 @@ export default function Findings({ user }) {
     if (composing.current) return;
     const timer = setTimeout(() => { setPage(0); load(0); }, 250);
     return () => clearTimeout(timer);
-  }, [queryString.toString(), imeTick]);
+  }, [queryString.toString(), imeTick, pageSize]);
   useEffect(() => { load(page); }, [page]);
 
   // 필터는 전부 서버가 페이지를 자르기 전에 적용한다 — 여기서 다시 거르면 페이지와 어긋난다.
   const view = findings;
 
   const filterCount = Object.values(colFilters).filter((v) => v.trim()).length
-    + (q.trim() ? 1 : 0) + (risk ? 1 : 0) + (status ? 1 : 0) + (overdueOnly ? 1 : 0);
+    + (q.trim() ? 1 : 0) + (risk ? 1 : 0) + (status ? 1 : 0) + (overdueOnly ? 1 : 0)
+    + (hideAllowed ? 0 : 1);
 
   function clearFilters() {
     setQ("");
@@ -106,6 +143,7 @@ export default function Findings({ user }) {
     setRisk("");
     setStatus("");
     setOverdueOnly(false);
+    setHideAllowed(true);
     setSort({ key: "", dir: "asc" });
     setPage(0);
   }
@@ -226,7 +264,8 @@ export default function Findings({ user }) {
 
       <div className="panel">
         <div className="row" style={{ marginBottom: 12 }}>
-          <input style={{ flex: 1, minWidth: 180 }} placeholder="모든 컬럼 검색" value={q}
+          <input style={{ flex: 1, minWidth: 180 }} placeholder="모든 컬럼 검색 (!로 시작하면 제외)"
+                 title={FILTER_HINT} value={q}
                  {...imeProps} onChange={(e) => setQ(e.target.value)} />
           <div className="seg" title="일부 포함: 검색어가 들어간 값 / 정확히: 값 전체가 검색어와 같음">
             <button type="button" className={match === "contains" ? "on" : ""}
@@ -248,10 +287,25 @@ export default function Findings({ user }) {
             <input type="checkbox" checked={hideNormal} onChange={(e) => setHideNormal(e.target.checked)} />
             정상처리 제외
           </label>
+          <label className="row" style={{ gap: 5 }}
+                 title="규칙에서 '허용'으로 정한 발견을 접습니다. 정상처리와는 다른 축입니다.">
+            <input type="checkbox" checked={hideAllowed} onChange={(e) => setHideAllowed(e.target.checked)} />
+            허용 제외
+          </label>
           <label className="row" style={{ gap: 5 }}>
             <input type="checkbox" checked={overdueOnly} onChange={(e) => setOverdueOnly(e.target.checked)} />
             마감초과만
           </label>
+          <div className="color-toggles" role="group" aria-label="색상 표시">
+            <span className="muted">색상</span>
+            {COLOR_ELEMENTS.map((el) => (
+              <label key={el.key} className="row" style={{ gap: 4 }}>
+                <input type="checkbox" checked={!!colorFlags[el.key]}
+                       onChange={() => toggleColor(el.key)} />
+                {el.label}
+              </label>
+            ))}
+          </div>
           <button className="sm" onClick={clearFilters} disabled={!filterCount && !sort.key}
                   title="검색어·컬럼 필터·위험/상태·정렬을 모두 초기화">
             필터 제거{filterCount ? ` (${filterCount})` : ""}
@@ -270,7 +324,7 @@ export default function Findings({ user }) {
           )}
         </div>
 
-        <div style={{ overflowX: "auto" }}>
+        <TableScroller label="발견 목록 가로 스크롤">
           <table className="tbl">
             <thead>
               <tr>
@@ -292,13 +346,14 @@ export default function Findings({ user }) {
                 <th></th>
                 {cols.map((k) => (
                   <th key={k}>
-                    <input value={colFilters[k] || ""} placeholder="필터"
-                           aria-label={`${COLUMN_MAP[k]?.label || k} 필터`} {...imeProps}
+                    <input value={colFilters[k] || ""} placeholder="필터" title={FILTER_HINT}
+                           aria-label={`${COLUMN_MAP[k]?.label || k} 필터 — ${FILTER_HINT}`} {...imeProps}
                            onChange={(e) => setColFilter(k, e.target.value)} />
                   </th>
                 ))}
                 <th>
-                  <input value={colFilters.deadline || ""} placeholder="필터" aria-label="마감 필터"
+                  <input value={colFilters.deadline || ""} placeholder="필터" title={FILTER_HINT}
+                         aria-label={`마감 필터 — ${FILTER_HINT}`}
                          {...imeProps} onChange={(e) => setColFilter("deadline", e.target.value)} />
                 </th>
                 {canEdit && <th></th>}
@@ -311,15 +366,20 @@ export default function Findings({ user }) {
                 </td></tr>
               ) : view.map((f) => {
                 const dl = dday(f.deadline);
-                // 금지/마감초과 → 연한 빨강, 처리중 → 연한 노랑(빨강 우선).
-                const bg = (f.risk_level === "banned" || dl.over) ? "var(--high-bg)"
-                         : f.status === "처리중" ? "var(--medium-bg)" : null;
+                // 금지/마감초과 → 연한 빨강, 처리중 → 연한 노랑(빨강 우선). 각 요소는 토글로 끌 수 있다.
+                const bg = (colorFlags.risk && f.risk_level === "banned") || (colorFlags.deadline && dl.over)
+                  ? "var(--high-bg)"
+                  : (colorFlags.status && f.status === "처리중") ? "var(--medium-bg)" : null;
                 return (
                   <tr key={f.id} className="click" style={bg ? { background: bg } : null}>
                     <td onClick={(e) => e.stopPropagation()}>
                       <input type="checkbox" checked={selected.has(f.id)} onChange={() => toggleSel(f.id)} />
                     </td>
-                    {cols.map((k) => <td key={k} onClick={() => openDrawer(f)}>{renderCell(f, k, displayModes)}</td>)}
+                    {cols.map((k) => (
+                      <td key={k} className={cellTone(f, k, colorFlags)} onClick={() => openDrawer(f)}>
+                        {renderCell(f, k, displayModes)}
+                      </td>
+                    ))}
                     <td onClick={() => openDrawer(f)}>
                       <span className={"dday " + dl.cls} style={{ color: dl.over ? "var(--high)" : undefined }}>{dl.text}</span>
                     </td>
@@ -335,16 +395,21 @@ export default function Findings({ user }) {
               })}
             </tbody>
           </table>
-        </div>
+        </TableScroller>
 
         <div className="row" style={{ marginTop: 10, alignItems: "center" }}>
           <span className="muted" style={{ fontSize: 12 }}>
-            {total === 0 ? "0건" : `${total.toLocaleString()}건 중 ${(page * PAGE_SIZE + 1).toLocaleString()}–${Math.min((page + 1) * PAGE_SIZE, total).toLocaleString()}`}
+            {total === 0 ? "0건" : `${total.toLocaleString()}건 중 ${(page * pageSize + 1).toLocaleString()}–${Math.min((page + 1) * pageSize, total).toLocaleString()}`}
             {loading ? " · 불러오는 중…" : ""}
           </span>
           <div style={{ flex: 1 }} />
+          <PageSize value={pageSize} onChange={(n) => {
+            setPageSize(n);
+            localStorage.setItem(SIZE_KEY, JSON.stringify(n));
+            setPage(0);
+          }} />
           <button className="sm" disabled={page === 0 || loading} onClick={() => setPage((p) => Math.max(0, p - 1))}>이전</button>
-          <button className="sm" disabled={(page + 1) * PAGE_SIZE >= total || loading} onClick={() => setPage((p) => p + 1)}>다음</button>
+          <button className="sm" disabled={(page + 1) * pageSize >= total || loading} onClick={() => setPage((p) => p + 1)}>다음</button>
         </div>
       </div>
 
@@ -487,13 +552,11 @@ function RescanDrawer({ targets, onClose, onDone, toast }) {
 function renderCell(finding, key, displayModes) {
   const col = COLUMN_MAP[key];
   const val = cellValue(finding, key);
-  // 여러 줄 값(핑거프린트 등): 줄바꿈 보존 + 높이 제한 스크롤 박스로 깔끔하게.
+  // 여러 줄 값(핑거프린트 등): 평소에는 접어 두고, 마우스를 올리면 그 자리에서 펼친다.
+  // 팝업이 아니라 셀 자체가 늘어나므로 커서가 벗어나면 바로 원래 크기로 돌아온다 —
+  // 읽는 동안 다른 행을 가리지 않고, 클릭·고정 같은 추가 조작도 필요 없다.
   if (col?.pre) return (
-    <pre className="mono" style={{
-      margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all",
-      maxHeight: 160, overflow: "auto", fontSize: 11, lineHeight: 1.4,
-      maxWidth: 460, background: "var(--line-soft, rgba(127,127,127,.08))", borderRadius: 6, padding: val ? "6px 8px" : 0,
-    }}>{val}</pre>
+    <pre className={"mono pre-cell" + (val ? "" : " is-empty")}>{val}</pre>
   );
   if (!col?.badge) return <span className={col?.mono ? "mono" : undefined}>{val}</span>;
   const mode = displayModes[key] || "badge";
@@ -503,6 +566,10 @@ function renderCell(finding, key, displayModes) {
     <span>
       <span className={"pill " + (STATUS_CLASS[finding.status] || "info")}>{val}</span>
       {finding.reopened ? <span className="tag" style={{ marginLeft: 4, color: "var(--high)" }}>재발</span> : null}
+      {/* 규칙이 허용한 건은 평소 접혀 있다. 펼쳐 봤을 때 왜 보이는지가 표에서 바로 읽혀야
+          정상처리와 헷갈리지 않는다. */}
+      {finding.allowed
+        ? <span className="tag allowed" style={{ marginLeft: 4 }}>허용</span> : null}
     </span>
   );
   return <span>{val}</span>;
@@ -523,10 +590,22 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
   const [status, setStatus] = useState(finding.status);
   const [deadline, setDeadline] = useState(finding.deadline ? String(finding.deadline).slice(0, 10) : "");
   const [note, setNote] = useState(finding.manual_note || "");
+  // 배정은 라이프사이클의 한 단계인데(누가 조치하는가) 여태 조작 수단이 없었다. API·감사
+  // 이벤트(ASSIGN)는 이미 있었고 화면에만 빠져 있었다.
+  const [assignee, setAssignee] = useState(
+    finding.owner_user_id == null ? "" : String(finding.owner_user_id));
+  const [people, setPeople] = useState([]);
+  useEffect(() => {
+    if (!canEdit) return;
+    api("/users/assignable").then(setPeople).catch(() => setPeople([]));
+  }, [canEdit]);
 
   function save() {
     const body = { status, deadline: deadlinePatchValue(deadline) };
     body.manual_note = note;
+    // 빈 선택은 '배정 해제'다. undefined 로 보내면 서버가 '건드리지 않음'으로 읽어
+    // 해제할 방법이 사라진다.
+    body.owner_user_id = assignee === "" ? null : Number(assignee);
     api(`/findings/${finding.id}`, { method: "PATCH", json: body })
       .then(() => { toast("저장됨"); onSaved(); })
       .catch((e) => toast(e.message, { type: "err" }));
@@ -543,7 +622,18 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
           {finding.reopened ? <span className="tag" style={{ color: "var(--high)" }}>재발</span> : null}
           <span className="tag">{finding.category || "미분류"}</span>
           <span className="tag">{finding.identification}</span>
+          {/* 열려 있다고 확인한 게 아니라 무응답으로 추정한 건이면 그 사실을 먼저 보여 준다. */}
+          {needsConfirmation(finding)
+            ? <span className="tag" style={{ color: "var(--medium)" }}>재확인 필요</span> : null}
           {finding.dept && <span className="tag">{finding.dept}</span>}
+          {finding.assignee_name
+            ? <span className="tag">배정: {finding.assignee_name}</span> : null}
+        </div>
+
+        {/* 관측 근거 — '이 포트가 열려 있다고 어떻게 판단했나'. 용도 근거(무엇인가)와 다른 축이다. */}
+        <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+          관측 근거: {stateWithEvidence(finding)}
+          {currentReason(finding) ? <span className="mono"> · {currentReason(finding)}</span> : null}
         </div>
 
         {/* 용도 근거 — '왜 열렸나/무엇인가' 추정 근거(역DNS·서비스·NSE 추출 등). 관리자 통보의 핵심. */}
@@ -561,6 +651,37 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
           {finding.owner && <div className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>담당(자산대장): {finding.owner}{finding.contact ? ` · ${finding.contact}` : ""}</div>}
         </div>
 
+        {/* 노출 관측 — NSE 가 실제로 확인한 사실. 익명 FTP 와 잠긴 FTP 가 같은 발견으로
+            보이던 것이 여기서 갈린다. 등급을 올린 근거이기도 해서 바로 위에 둔다. */}
+        {(finding.exposure_json || []).length > 0 && (
+          <div className="panel" style={{ boxShadow: "none", marginBottom: 12,
+                                          background: "var(--high-bg)" }}>
+            <div className="cb-label" style={{ marginTop: 0 }}>노출 관측 (스캔이 확인한 사실)</div>
+            <ul style={{ margin: "4px 0 0", paddingLeft: 18, fontSize: 12.5, lineHeight: 1.6 }}>
+              {finding.exposure_json.map((s, i) => <li key={i}>{s.detail || s.kind}</li>)}
+            </ul>
+          </div>
+        )}
+
+        {/* 컴플라이언스 근거 — '왜 이 등급인가'. 분류가 붙인 KISA/NIS 참조와 조직규칙 비고가
+            여기 저장돼 있는데, 여태 '위험·컴플라이언스' 프리셋을 따로 골라야만 보였다.
+            정작 발견을 열어 본 자리에 없으면 감사 근거를 확인하려고 표로 되돌아가야 한다. */}
+        {(finding.compliance_json || []).length > 0 && (
+          <div className="panel" style={{ boxShadow: "none", marginBottom: 12 }}>
+            <div className="cb-label" style={{ marginTop: 0 }}>
+              컴플라이언스 근거 (왜 {RISK_LABEL[finding.risk_level] || finding.risk_level} 등급인가)
+            </div>
+            <ul style={{ margin: "4px 0 0", paddingLeft: 18, fontSize: 12.5, lineHeight: 1.6 }}>
+              {finding.compliance_json.map((c, i) => (
+                <li key={i}>
+                  <span className="tag">{c.std}</span>{" "}
+                  <span>{c.ref}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {canEdit && (
           <div className="panel" style={{ boxShadow: "none" }}>
             <div className="row">
@@ -571,6 +692,15 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
               </label>
               <label className="field">마감
                 <input type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
+              </label>
+              <label className="field">배정 담당자
+                <select value={assignee} onChange={(e) => setAssignee(e.target.value)}
+                        title="이 발견을 조치할 사람. 자산대장 담당자와는 다른 축입니다.">
+                  <option value="">(미배정)</option>
+                  {people.map((p) => (
+                    <option key={p.id} value={String(p.id)}>{p.display_name || p.username}</option>
+                  ))}
+                </select>
               </label>
             </div>
             <label className="field" style={{ marginTop: 8 }}>메모
