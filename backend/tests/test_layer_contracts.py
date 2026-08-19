@@ -678,8 +678,8 @@ def test_every_engine_stage_carries_its_own_host_timeout(tmp_path):
 
     pipe._nmap = fake
     pipe._discovery()
-    pipe._sweep("tcp", ["10.0.0.1"])
-    pipe._sweep("udp", ["10.0.0.1"])
+    pipe._sweep_batch("tcp", 0, ["10.0.0.1"])
+    pipe._sweep_batch("udp", 0, ["10.0.0.1"])
     pipe._probe_protocol("10.0.0.1", "tcp", [443], spec.service, confirm=False)
     pipe._probe_protocol("10.0.0.1", "udp", [53], spec.service, confirm=False)
 
@@ -716,7 +716,8 @@ def test_the_engine_records_what_each_nmap_process_covered(tmp_path):
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
 
     pipe._nmap = fake
-    pipe._sweep("tcp", ["10.0.0.1", "10.0.0.2", "10.0.0.3"])
+    for bi, batch in enumerate([["10.0.0.1", "10.0.0.2"], ["10.0.0.3"]]):
+        pipe._sweep_batch("tcp", bi, batch)
 
     log = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))["coverage"]
     sweeps = [e for e in log if e["role"] == "authority"]
@@ -993,3 +994,131 @@ def test_a_rescan_still_probes_one_host_at_a_time(tmp_path):
     pipe._nmap = fake
     pipe._service()
     assert peak == 1, "재스캔은 직렬이어야 한다"
+
+
+# ── 배치는 sweep 부터 식별까지 끝내고 다음 배치로 간다 ──────────────────────
+def test_a_batch_is_finished_before_the_next_one_starts(tmp_path):
+    """예전에는 TCP sweep 을 전 배치에 대해 끝내고, UDP sweep 을 전 배치에 대해 끝내고,
+    그제서야 식별을 돌았다. 그래서 호스트가 100대를 넘으면 식별이 시작되기까지 아무 서비스
+    정보도 나오지 않았고, 중간에 멈추면 그때까지의 결과가 포트 목록에서 끝났다.
+
+    배치 단위로 닫으면 배치 하나가 끝날 때마다 **완성된** 결과가 나온다.
+    """
+    pipe, spec = _pipeline(tmp_path, {
+        "job_id": "j", "targets": ["10.0.0.1", "10.0.0.2"], "out_dir": str(tmp_path),
+        "batch_size": 1,
+        "stages": {"tcp": {"enabled": True, "ports": "1-65535"},
+                   "udp": {"enabled": True, "ports": "53"},
+                   "service": {"nse": []}},
+    })
+    order = []
+
+    def fake(stage, args, base, fatal=True):
+        name = pathlib_Path(base).name
+        order.append(name)
+        host = str(args[-1])
+        proto = "udp" if "-sU" in args else "tcp"
+        port = 53 if proto == "udp" else 22
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml(host, proto, port))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._scan_batches(["10.0.0.1", "10.0.0.2"])
+
+    # 배치 0 의 모든 일이 배치 1 의 첫 일보다 먼저 끝나야 한다.
+    b0 = [i for i, n in enumerate(order) if "b0" in n or "10_0_0_1" in n]
+    b1 = [i for i, n in enumerate(order) if "b1" in n or "10_0_0_2" in n]
+    assert b0 and b1 and max(b0) < min(b1), f"배치가 섞여 있다: {order}"
+    # 그리고 배치 안에서는 sweep 이 식별보다 먼저다 - 식별은 sweep 이 찾은 포트를 쓴다.
+    assert order.index("stage-tcp-b0") < order.index("stage3-10_0_0_1-tcp")
+
+
+def test_identify_only_covers_the_ports_that_batch_actually_found(tmp_path):
+    """식별은 전체 포트 범위를 다시 훑지 않는다 - 그 배치에서 열린 포트만 본다.
+
+    여기가 새면 전수 스캔을 두 번 하는 셈이 되어 소요가 배로 늘어난다.
+    """
+    pipe, spec = _pipeline(tmp_path, {
+        "job_id": "j", "targets": ["10.0.0.1"], "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": True, "ports": "1-65535"},
+                   "service": {"nse": []}},
+    })
+    seen = {}
+
+    def fake(stage, args, base, fatal=True):
+        seen[pathlib_Path(base).name] = list(map(str, args))
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1", "tcp", 22))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._scan_batches(["10.0.0.1"])
+
+    sweep = seen["stage-tcp-b0"]
+    assert sweep[sweep.index("-p") + 1] == "1-65535", "sweep 은 전수 그대로"
+    probe = seen["stage3-10_0_0_1-tcp"]
+    assert probe[probe.index("-p") + 1] == "T:22", "식별은 그 배치가 찾은 포트만"
+
+
+def test_hosts_nmap_gave_up_on_are_collected_for_a_later_scan(tmp_path):
+    """포기당한 호스트는 따로 모아 둬야 나중에 그 호스트만 다시 돌릴 수 있다.
+
+    안 남기면 '왜 이 대역만 결과가 비지?' 를 알아낼 방법이 없다. 그리고 재시도로 끝까지
+    훑으면 목록에서 빠져야 한다 - 한 번 걸렸다고 영구 낙인이 아니다.
+    """
+    import json
+
+    from scanops.scanning import engine_runner
+
+    pipe, spec = _pipeline(tmp_path, {
+        "job_id": "j", "targets": ["10.0.0.1"], "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": True, "ports": "22", "host_timeout": "5m"},
+                   "service": {"enabled": False}},
+    })
+
+    def timed_out(stage, args, base, fatal=True):
+        pathlib_Path(str(base) + ".xml").write_bytes(_timedout_only_xml("10.0.0.1"))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = timed_out
+    pipe._sweep_batch("tcp", 0, ["10.0.0.1"])
+    assert json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))["gave_up"] \
+        == ["10.0.0.1"]
+    assert engine_runner.gave_up_hosts(tmp_path) == ["10.0.0.1"]
+    # 그 호스트는 이 실행에서 부재를 말할 자격도 없다.
+    assert engine_runner.timed_out_hosts(tmp_path, "tcp") == {"10.0.0.1"}
+
+    def clean(stage, args, base, fatal=True):
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1"))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = clean
+    pipe._sweep_batch("tcp", 1, ["10.0.0.1"])
+    assert engine_runner.gave_up_hosts(tmp_path) == [], "끝까지 훑었으면 목록에서 빠진다"
+
+
+def test_a_resumed_scan_skips_batches_it_already_finished(tmp_path):
+    """중지·이어가기 경계가 배치다 - 끝낸 배치의 sweep 도 식별도 다시 돌지 않는다."""
+    spec_dict = {
+        "job_id": "j", "targets": ["10.0.0.1", "10.0.0.2"], "out_dir": str(tmp_path),
+        "batch_size": 1,
+        "stages": {"tcp": {"enabled": True, "ports": "22"}, "service": {"nse": []}},
+    }
+    pipe, _ = _pipeline(tmp_path, spec_dict)
+    calls = []
+
+    def fake(stage, args, base, fatal=True):
+        calls.append(pathlib_Path(base).name)
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml(str(args[-1])))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._scan_batches(["10.0.0.1", "10.0.0.2"])
+    first = list(calls)
+    assert first, "첫 실행이 아무 일도 하지 않았다"
+
+    # 같은 out_dir 로 다시 - 이미 끝낸 배치는 건너뛴다.
+    resumed, _ = _pipeline(tmp_path, spec_dict)
+    calls.clear()
+    resumed._nmap = fake
+    resumed._scan_batches(["10.0.0.1", "10.0.0.2"])
+    assert calls == [], f"이미 끝낸 배치를 다시 돌았다: {calls}"

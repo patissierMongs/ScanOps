@@ -2929,6 +2929,9 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
             round((datetime.now(timezone.utc) - started).total_seconds())
             if started is not None and scan.status in ("running", "canceling") else None
         ),
+        # 호스트당 상한을 넘겨 포기당한 호스트. 이 실행에서는 부재를 말할 자격이 없고
+        # 나중에 따로 다시 스캔할 대상이라, 진행 상황과 함께 꺼내 볼 수 있어야 한다.
+        "gave_up": engine_runner.gave_up_hosts(_settings.scans_dir / _basename(scan.id)),
     })
     return prog
 

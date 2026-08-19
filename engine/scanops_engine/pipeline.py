@@ -148,25 +148,18 @@ class Pipeline:
                 self._rescan_units()
         else:
             if self.spec.targets_ports:
+                # 타겟 포트 재스캔 — 여기서는 stage3 가 유일한 폐쇄 근거라 호스트 단위로 간다.
                 for ip, ports in self.spec.targets_ports.items():
                     self.open_map.setdefault(ip, {})["tcp"] = sorted({int(p) for p in ports})
                 self._save()
+                if (self.counts["errors"] == 0 and self.spec.service.enabled
+                        and not self.state.stopped()):
+                    self._service()
             else:
                 live = self._discovery()
                 if live and not self.state.stopped() and self.counts["errors"] == 0:
-                    if self.spec.tcp.enabled and not self.state.done("tcp"):
-                        ok = self._sweep("tcp", live)
-                        if ok and not self.state.stopped():
-                            self.state.mark_done("tcp")
-                        self._save()
-                    if (self.counts["errors"] == 0 and self.spec.udp.enabled
-                            and not self.state.done("udp") and not self.state.stopped()):
-                        ok = self._sweep("udp", live)
-                        if ok and not self.state.stopped():
-                            self.state.mark_done("udp")
-                        self._save()
-            if self.counts["errors"] == 0 and self.spec.service.enabled and not self.state.stopped():
-                self._service()
+                    # 전체 스캔은 배치마다 sweep → 식별까지 끝내고 다음 배치로 간다.
+                    self._scan_batches(live)
         secs = round(time.time() - t0, 2)
         status = ("stopped" if self.state.stopped()
                   else "failed" if self.counts["errors"] else "done")
@@ -216,60 +209,153 @@ class Pipeline:
         self.state.save()
         return live
 
-    # ── Stage 1/2: TCP·UDP 찾기 ──
-    def _sweep(self, proto, live) -> bool:
-        sp = self.spec.tcp if proto == "tcp" else self.spec.udp
-        self.sink.emit("stage_start", stage=proto, hosts=len(live), ports=sp.ports)
-        secs, total_open = 0.0, 0
+    # ── Stage 1/2/3: 배치마다 sweep → 식별까지 끝내고 다음 배치로 ──
+    def _scan_batches(self, live) -> bool:
+        """한 배치를 **끝까지** 처리하고 다음 배치로 간다.
+
+        예전에는 TCP sweep 을 전 배치에 대해 끝내고, UDP sweep 을 전 배치에 대해 끝내고,
+        그 다음에야 식별을 호스트 하나씩 돌았다. 그래서 식별이 시작될 때까지 아무 서비스
+        정보도 나오지 않았고, 중간에 멈추면 그때까지의 결과가 포트 목록에서 끝났다.
+        배치 단위로 닫으면 배치 하나가 끝날 때마다 완성된 결과가 나오고, 중지·이어가기도
+        같은 경계를 쓴다.
+
+        식별은 그 배치에서 **실제로 열린 포트만** 본다. 전체 포트 범위를 다시 훑지 않는다.
+        """
+        sp = self.spec.service
+        sweeps = [p for p in ("tcp", "udp")
+                  if (self.spec.tcp if p == "tcp" else self.spec.udp).enabled]
+        # sweep 을 끈 채 이어가는 실행(이미 open_map 이 있는 경우)도 식별은 돌아야 한다.
+        # sweep 목록만 보면 그 실행이 통째로 아무 일도 하지 않는다.
+        protos = [p for p in ("tcp", "udp")
+                  if p in sweeps or any((m or {}).get(p) for m in self.open_map.values())]
+        for proto in sweeps:
+            stage_spec = self.spec.tcp if proto == "tcp" else self.spec.udp
+            self.sink.emit("stage_start", stage=proto, hosts=len(live), ports=stage_spec.ports)
+        if sp.enabled:
+            self.sink.emit("stage_start", stage="service", hosts=len(live))
+        secs = {"tcp": 0.0, "udp": 0.0, "service": 0.0}
+        opened = {"tcp": 0, "udp": 0}
+        nsvc = 0
+
+        def finish(stopped=False):
+            for proto in sweeps:
+                nhosts = sum(1 for m in self.open_map.values() if m.get(proto))
+                self.counts["open_tcp" if proto == "tcp" else "open_udp"] = opened[proto]
+                self.sink.emit(
+                    "stage_done", stage=proto, seconds=round(secs[proto], 2),
+                    counts={"stopped": True} if stopped
+                    else {"open_ports": opened[proto], "hosts": nhosts})
+            if sp.enabled:
+                self.counts["services"] = nsvc
+                self.sink.emit(
+                    "stage_done", stage="service", seconds=round(secs["service"], 2),
+                    counts={"stopped": True} if stopped else {"services": nsvc})
+
         for bi, batch in enumerate(_batches(live, self.spec.batch_size)):
             if self.state.stopped():
-                self.sink.emit("stage_done", stage=proto, seconds=round(secs, 2), counts={"stopped": True})
-                return
-            args = [("-sU" if proto == "udp" else self._tcp_scan_flag()),
-                    "-Pn", "-n", "--open",
-                    sp.timing, "--reason", "--max-retries", str(sp.max_retries)]
-            if proto == "tcp":
-                args += ["--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP)]
-                if self.spec.tcp.scan_type == "syn":
-                    args.append("--defeat-rst-ratelimit")
-                args += ["--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
-                if sp.min_rate > 0:
-                    args += ["--min-rate", str(sp.min_rate)]
-            args += ["-p", sp.ports]
-            args += self._timeout_args(sp.host_timeout)
-            args += self._exclude_args()
-            args += batch
-            base = self.out / f"stage-{proto}-b{bi}"
-            r = self._nmap(proto, args, base)
-            secs += r["seconds"]
-            ok = not r.get("stopped") and r["rc"] == 0
-            # 되짚기가 아니라 명령줄에 실제로 올린 batch 를 그대로 적는다.
-            self._record_coverage(f"stage-{proto}-b{bi}.xml", proto, "authority",
-                                  batch, sp.ports, ok)
-            if not ok:
+                finish(stopped=True)
                 return False
-            found = nmaprun.open_ports(Path(str(base) + ".xml"), proto=proto)
-            for ip, ports in found.items():
-                self.open_map.setdefault(ip, {})[proto] = ports
-                total_open += len(ports)
-                self.sink.emit("ports_open", stage=proto, ip=ip, ports=ports)
-            self._save()
-        self.counts["open_tcp" if proto == "tcp" else "open_udp"] = total_open
-        nhosts = sum(1 for m in self.open_map.values() if m.get(proto))
-        self.sink.emit("stage_done", stage=proto, seconds=round(secs, 2),
-                       counts={"open_ports": total_open, "hosts": nhosts})
+            batch_probed, batch_failed = set(), set()
+            for proto in protos:
+                if proto in sweeps and not self.state.batch_done(f"{proto}:{bi}"):
+                    elapsed, found = self._sweep_batch(proto, bi, batch)
+                    secs[proto] += elapsed
+                    if found is None:
+                        finish(stopped=self.state.stopped())
+                        return False
+                    opened[proto] += sum(len(v) for v in found.values())
+                    self.state.mark_batch_done(f"{proto}:{bi}")
+                    self._save()
+                if not sp.enabled or self.state.batch_done(f"svc-{proto}:{bi}"):
+                    continue
+                elapsed, rows, probed, failed = self._service_batch(proto, bi, batch, sp)
+                secs["service"] += elapsed
+                nsvc += len(rows)
+                batch_probed |= probed
+                batch_failed |= failed
+                if self.state.stopped():
+                    finish(stopped=True)
+                    return False
+                self.state.mark_batch_done(f"svc-{proto}:{bi}")
+                self._save()
+            # 이 배치의 **모든** 프로토콜을 끝낸 뒤에 찍는다. 프로토콜 하나가 끝날 때마다
+            # 찍으면 TCP 만 끝낸 호스트가 UDP 식별 실패와 무관하게 완료로 남는다.
+            for ip in sorted(batch_probed - batch_failed, key=nmaprun._ipkey):
+                self.state.mark_service_done(ip)
+            if batch_probed:
+                self._save()
+        for proto in sweeps:
+            self.state.mark_done(proto)
+        finish()
+        self._save()
         return True
 
-    # ── Stage 3: 서비스 probe (호스트별 열린 포트에만) ──
-    def _probe_protocol(self, ip, proto, ports, sp, confirm, retries=None, tag="",
-                        isolate=False):
-        """Probe one protocol per Nmap process.
+    def _sweep_batch(self, proto, bi, batch):
+        """배치 하나의 포트 스윕. 반환: (초, {ip: [열린 포트]}) — 실패/중지면 두 번째가 None."""
+        sp = self.spec.tcp if proto == "tcp" else self.spec.udp
+        args = [("-sU" if proto == "udp" else self._tcp_scan_flag()),
+                "-Pn", "-n", "--open",
+                sp.timing, "--reason", "--max-retries", str(sp.max_retries)]
+        if proto == "tcp":
+            args += ["--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP)]
+            if self.spec.tcp.scan_type == "syn":
+                args.append("--defeat-rst-ratelimit")
+            args += ["--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
+            if sp.min_rate > 0:
+                args += ["--min-rate", str(sp.min_rate)]
+        args += ["-p", sp.ports]
+        args += self._timeout_args(sp.host_timeout)
+        args += self._exclude_args()
+        args += batch
+        base = self.out / f"stage-{proto}-b{bi}"
+        r = self._nmap(proto, args, base)
+        ok = not r.get("stopped") and r["rc"] == 0
+        # 되짚기가 아니라 명령줄에 실제로 올린 batch 를 그대로 적는다.
+        self._record_coverage(f"stage-{proto}-b{bi}.xml", proto, "authority",
+                              batch, sp.ports, ok)
+        if not ok:
+            return r["seconds"], None
+        xml = Path(str(base) + ".xml")
+        # 상한을 넘겨 포기당한 호스트는 따로 모은다 - 이 실행에서는 부재를 말할 자격이 없고,
+        # 나중에 그 호스트들만 다시 스캔할 대상 목록이 된다.
+        gave_up = nmaprun.timed_out(xml)
+        with self._lock:
+            self.state.add_gave_up(gave_up)
+            self.state.clear_gave_up([h for h in batch if h not in set(gave_up)])
+        if gave_up:
+            self.sink.emit("hosts_gave_up", stage=proto, hosts=gave_up, count=len(gave_up))
+        found = nmaprun.open_ports(xml, proto=proto)
+        for ip, ports in found.items():
+            self.open_map.setdefault(ip, {})[proto] = ports
+            self.sink.emit("ports_open", stage=proto, ip=ip, ports=ports)
+        self._save()
+        return r["seconds"], found
 
-        Mixed ``-sS -sU`` service scans can turn TCP ports proven open by the sweep into
-        filtered/no-response on Windows. Keeping protocol ownership separate also lets TCP
-        retain ``--version-all`` without applying that noisy intensity to UDP.
+    def _service_batch(self, proto, bi, batch, sp):
+        """그 배치의 호스트만, **그 배치에서 실제로 열린 포트만** 식별한다.
+
+        호스트별로 프로세스를 나누는 것은 유지한다 - 한 호스트의 UDP 포트 하나가 nmap 을
+        죽여도 같은 배치의 다른 호스트를 끌고 들어가지 않고, 죽은 실행만 포트별로 쪼개
+        증거를 되살릴 수 있다(_probe_host). 대신 직렬로 돌지 않고 동시에 돌린다.
         """
-        pspec = ("T:" if proto == "tcp" else "U:") + ",".join(map(str, ports))
+        targets = {}
+        for ip in batch:
+            ports = (self.open_map.get(ip) or {}).get(proto) or []
+            if ports:
+                targets[ip] = {proto: ports}
+        if not targets:
+            return 0.0, [], set(), set()
+        # 배치 재개는 batches_done 이 담당한다. 여기서 호스트를 done 으로 찍으면 프로토콜
+        # 한쪽만 끝낸 호스트가 완료로 남는다.
+        return self._probe_hosts(sorted(targets, key=nmaprun._ipkey), targets, sp,
+                                 isolate=True, mark_done=False)
+
+    # ── Stage 3: 서비스 probe (그 배치에서 실제로 열린 포트에만) ──
+    def _probe_args(self, proto, pspec, sp, retries=None) -> list:
+        """식별 nmap 인자 — 호스트 하나든 배치든 **같은 명령**이어야 한다.
+
+        여기가 갈리면 재스캔에서 본 서비스와 전체 스캔에서 본 서비스가 달라진다.
+        """
         if proto == "tcp":
             # standalone 과 같이 TCP identify 에서는 역방향 DNS를 허용한다.
             args = [self._tcp_scan_flag(), "-Pn", "-sV"]
@@ -292,6 +378,19 @@ class Pipeline:
         limit = (sp.udp_host_timeout or sp.host_timeout) if proto == "udp" else sp.host_timeout
         args += self._timeout_args(limit)
         args += self._exclude_args()
+        return args
+
+
+    def _probe_protocol(self, ip, proto, ports, sp, confirm, retries=None, tag="",
+                        isolate=False):
+        """Probe one protocol per Nmap process.
+
+        Mixed ``-sS -sU`` service scans can turn TCP ports proven open by the sweep into
+        filtered/no-response on Windows. Keeping protocol ownership separate also lets TCP
+        retain ``--version-all`` without applying that noisy intensity to UDP.
+        """
+        pspec = ("T:" if proto == "tcp" else "U:") + ",".join(map(str, ports))
+        args = self._probe_args(proto, pspec, sp, retries)
         args.append(ip)
         suffix = tag or proto
         base = self.out / f"stage3-{ip.replace('.', '_')}-{suffix}{'-confirm' if confirm else ''}"
@@ -410,31 +509,28 @@ class Pipeline:
                 return seconds, rows, False
         return seconds, rows, True
 
-    def _service(self):
-        sp = self.spec.service
-        targets = {ip: m for ip, m in self.open_map.items() if m.get("tcp") or m.get("udp")}
-        self.sink.emit("stage_start", stage="service", hosts=len(targets))
-        secs, nsvc = 0.0, 0
-        # targets_ports 재스캔은 stage3 가 유일한 폐쇄 근거다 — 거기서는 실패를 격리하지
-        # 않는다. 전체 스캔에서는 sweep 이 이미 개방 여부의 권위를 쥐고 있으므로 식별
-        # 실패는 enrichment 저하로만 남긴다.
-        isolate = not self.spec.targets_ports
-        # 이 단계는 프로세스마다 타깃이 1개라 nmap 자신의 호스트 병렬성을 쓸 수 없다.
-        # 직렬로 두면 소요가 호스트 수에 그대로 비례한다 - /24 한 대역이면 nmap 프로세스
-        # 수백 개를 하나씩 세우고 기다리는 셈이고, 호스트당 상한을 걸어 둔 만큼 느린
-        # 호스트의 대기시간도 그대로 더해진다.
-        #
-        # 닫힘 권한이 걸린 재스캔은 1 로 강제한다. 거기서는 실패가 곧 '판단할 수 없음'이라
-        # 그 자리에서 멈춰야 하는데, 동시에 여러 개를 띄워 두면 이미 시작한 것들의 처리를
-        # 어떻게 할지가 애매해진다 - 권한 경로에서 애매함을 만들지 않는다.
+    def _probe_hosts(self, pending, targets, sp, isolate, mark_done=True):
+        """호스트들을 **동시에** 식별한다. 반환: (초, rows).
+
+        이 단계는 nmap 프로세스마다 타깃이 1개라 nmap 자신의 호스트 병렬성(--min-hostgroup)을
+        쓸 수 없다. 직렬로 두면 소요가 호스트 수에 그대로 비례한다 - /24 한 대역이면 프로세스
+        수백 개를 하나씩 세우고 기다리는 셈이고, 호스트당 상한을 걸어 둔 만큼 느린 호스트의
+        대기시간까지 그대로 더해진다.
+
+        닫힘 권한이 걸린 재스캔(``isolate=False``)은 1 로 강제한다. 거기서는 실패가 곧
+        '판단할 수 없음'이라 그 자리에서 멈춰야 하는데, 여러 개를 띄워 두면 이미 시작한
+        것들의 처리가 애매해진다 - 권한 경로에 애매함을 만들지 않는다.
+
+        ``mark_done`` 은 이 호출이 그 호스트의 **모든** 프로토콜을 덮을 때만 켠다. 배치
+        경로는 프로토콜마다 따로 부르므로, 여기서 찍으면 TCP 만 끝낸 호스트가 UDP 식별
+        실패와 무관하게 '완료'로 남는다 - 재개가 그 호스트를 건너뛴다.
+        """
         workers = max(1, int(sp.workers)) if isolate else 1
-        pending = [ip for ip in sorted(targets, key=nmaprun._ipkey)
-                   if not self.state.service_done(ip)]
-        for group in _batches(pending, workers):
+        secs, rows = 0.0, []
+        probed, failed = set(), set()
+        for group in _batches(list(pending), workers):
             if self.state.stopped():
-                self.sink.emit("stage_done", stage="service", seconds=round(secs, 2),
-                               counts={"stopped": True})
-                return
+                return secs, rows, probed, failed
             if len(group) == 1:
                 done = [(group[0], *self._probe_host(group[0], targets[group[0]], sp,
                                                      isolate_failures=isolate))]
@@ -444,20 +540,42 @@ class Pipeline:
                                                 isolate_failures=isolate)) for ip in group]
                     done = [(ip, *future.result()) for ip, future in futures]
             # 상태 변경은 여기서만 한다 - 순서를 고정해야 재개·이벤트가 결정적으로 남는다.
-            for ip, s1, rows, ok in done:
-                secs += s1
-                nsvc += len(rows)
+            for ip, elapsed, found, ok in done:
+                secs += elapsed
+                rows.extend(found)
+                probed.add(ip)
                 if not ok:
+                    failed.add(ip)
                     # 격리 모드에서는 이 호스트만 건너뛰고 나머지 호스트의 식별을 계속한다.
                     # 예전에는 여기서 stage 를 통째로 중단해, nmap 하나가 죽으면 뒤따르는
                     # 호스트가 전부 식별되지 못한 채 실행이 끝났다.
                     if not isolate or self.state.stopped():
-                        return False
+                        return secs, rows, probed, failed
                     continue
-                self.state.mark_service_done(ip)
+                if mark_done:
+                    self.state.mark_service_done(ip)
             self._save()
-        self.counts["services"] = nsvc
-        self.sink.emit("stage_done", stage="service", seconds=round(secs, 2), counts={"services": nsvc})
+        return secs, rows, probed, failed
+
+    def _service(self):
+        """타겟 포트 재스캔의 식별 단계 — 전체 스캔은 배치 안에서 식별까지 끝낸다."""
+        sp = self.spec.service
+        targets = {ip: m for ip, m in self.open_map.items() if m.get("tcp") or m.get("udp")}
+        self.sink.emit("stage_start", stage="service", hosts=len(targets))
+        # targets_ports 재스캔은 stage3 가 유일한 폐쇄 근거다 — 거기서는 실패를 격리하지
+        # 않는다. 전체 스캔에서는 sweep 이 이미 개방 여부의 권위를 쥐고 있으므로 식별
+        # 실패는 enrichment 저하로만 남긴다.
+        isolate = not self.spec.targets_ports
+        pending = [ip for ip in sorted(targets, key=nmaprun._ipkey)
+                   if not self.state.service_done(ip)]
+        secs, rows, _probed, _failed = self._probe_hosts(pending, targets, sp, isolate)
+        if self.state.stopped():
+            self.sink.emit("stage_done", stage="service", seconds=round(secs, 2),
+                           counts={"stopped": True})
+            return
+        self.counts["services"] = len(rows)
+        self.sink.emit("stage_done", stage="service", seconds=round(secs, 2),
+                       counts={"services": len(rows)})
         return True
 
     # ── 발견(IP:포트)별 개별 재스캔 — 항목마다 nmap 1개(그 ip·그 포트만) ──
