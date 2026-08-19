@@ -352,9 +352,40 @@ def _port_tokens(port_spec: str, proto: str) -> list[str]:
     return out
 
 
-def _port_scope(port_spec: str, proto: str) -> set[int] | None:
-    """None means all ports for the protocol were scanned."""
-    tokens = _port_tokens(port_spec, proto)
+def _exclude_tokens(port_spec: str, proto: str) -> list[str]:
+    """제외 스펙 전용 토큰화 - **접두사가 없으면 모든 프로토콜에 적용**한다.
+
+    nmap 포트 문법은 접두사 없는 번호를 스캔 중인 protocol list 전부에 넣고,
+    ``--exclude-ports`` 도 ``-p`` 와 같은 문법을 쓴다. 실측으로 확인했다 -
+    ``-p T:80,U:53 --exclude-ports 53`` 은 UDP scaninfo 를 ``numservices=0`` 으로 만들지만
+    ``--exclude-ports T:53`` 은 UDP 53 을 그대로 스캔한다.
+
+    스캔 범위 파싱(_port_tokens)은 접두사 없는 토큰을 TCP 로만 본다. 그쪽은 앱이 T:/U: 를
+    명시해 넘기는 자리라 그대로 두고, 제외만 nmap 의미에 맞춘다 - 안 그러면 화면이 예시로
+    먼저 보여 주는 ``9100, 515, 631`` 같은 표기가 UDP 를 전혀 보호하지 못한다.
+    """
+    current = ""
+    out: list[str] = []
+    for raw in (port_spec or "").replace(" ", "").split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        if ":" in item:
+            prefix, value = item.split(":", 1)
+            if prefix.upper() in {"T", "U"}:
+                current = prefix.upper()
+                item = value
+        if not item:
+            continue
+        # 접두사가 나오기 전 구간은 두 프로토콜 모두에 걸린다. 접두사가 한 번 나오면
+        # 그 뒤로는 nmap 과 같이 다음 접두사까지 그 프로토콜에만 걸린다.
+        if not current or current == proto.upper():
+            out.append(item)
+    return out
+
+
+def _expand_port_tokens(tokens: list[str]) -> set[int] | None:
+    """토큰 -> 포트 집합. ``None`` = 전 포트."""
     if not tokens:
         return set()
     ports: set[int] = set()
@@ -375,6 +406,11 @@ def _port_scope(port_spec: str, proto: str) -> set[int] | None:
             except ValueError:
                 continue
     return ports
+
+
+def _port_scope(port_spec: str, proto: str) -> set[int] | None:
+    """None means all ports for the protocol were scanned."""
+    return _expand_port_tokens(_port_tokens(port_spec, proto))
 
 
 def is_interrupted_upload(filename: str | None) -> bool:
@@ -459,7 +495,7 @@ def _excluded_port_scope(exclude_ports: str, proto: str) -> set[int] | None | se
     """
     if not (exclude_ports or "").strip():
         return set()
-    return _port_scope(exclude_ports, proto)
+    return _expand_port_tokens(_exclude_tokens(exclude_ports, proto))
 
 
 def _is_excluded(port: int, excluded: set[int] | None | set) -> bool:

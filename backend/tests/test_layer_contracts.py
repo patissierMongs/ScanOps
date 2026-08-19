@@ -506,3 +506,55 @@ def test_a_staged_scan_saves_a_closure_scope_without_the_excluded_ports(client, 
         assert spec["exclude_ports"] == "T:9100"
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
+
+
+def test_an_unqualified_exclusion_protects_both_protocols(client):
+    """nmap 은 접두사 없는 번호를 스캔 중인 protocol list 전부에 적용한다.
+
+    실측으로 확인했다 - `-p T:80,U:53 --exclude-ports 53` 은 UDP scaninfo 가
+    `numservices=0` 이 되지만, `--exclude-ports T:53` 은 UDP 53 을 그대로 스캔한다.
+    화면이 예시로 먼저 보여 주는 표기(`9100, 515, 631`)가 접두사 없는 형식이라, 여기서
+    갈리면 일반 경로에서 UDP 가 통째로 보호되지 않는다.
+    """
+    from scanops.api.scans import _auto_scope_keys, _excluded_port_scope, _port_scope
+    from scanops.db import SessionLocal
+    from scanops.models import Finding
+
+    db = SessionLocal()
+    try:
+        db.add(Finding(finding_key="127.0.0.1|53|tcp", host_ip="127.0.0.1",
+                       port=53, proto="tcp", state="open", service="domain"))
+        db.add(Finding(finding_key="127.0.0.1|53|udp", host_ip="127.0.0.1",
+                       port=53, proto="udp", state="open", service="domain"))
+        db.add(Finding(finding_key="127.0.0.1|80|tcp", host_ip="127.0.0.1",
+                       port=80, proto="tcp", state="open", service="http"))
+        db.commit()
+
+        scope_t, scope_u = _port_scope("T:53,80", "T"), _port_scope("U:53", "U")
+
+        def candidates(exclude):
+            return _auto_scope_keys(
+                db, {"127.0.0.1"}, [], scope_t, scope_u,
+                tcp_excluded=_excluded_port_scope(exclude, "T"),
+                udp_excluded=_excluded_port_scope(exclude, "U"),
+            )
+
+        # 접두사 없음 - 두 프로토콜 모두 보호된다.
+        assert candidates("53") == {"127.0.0.1|80|tcp"}
+        # T: 로 한정하면 UDP 는 그대로 후보다(nmap 과 같은 의미).
+        assert candidates("T:53") == {"127.0.0.1|53|udp", "127.0.0.1|80|tcp"}
+        assert candidates("U:53") == {"127.0.0.1|53|tcp", "127.0.0.1|80|tcp"}
+        # 접두사가 한 번 나오면 그 뒤로는 그 프로토콜에만 걸린다.
+        assert candidates("80,T:53") == {"127.0.0.1|53|udp"}
+        # 제외가 없으면 전부 후보 - 과잉 보호로 넘어가지 않는다.
+        assert candidates("") == {"127.0.0.1|53|tcp", "127.0.0.1|53|udp", "127.0.0.1|80|tcp"}
+    finally:
+        db.close()
+
+
+def test_the_scan_range_parser_keeps_its_own_unqualified_rule():
+    """제외 의미를 고치면서 스캔 범위 해석까지 바꾸면 안 된다 - 다른 계약이다."""
+    from scanops.api.scans import _port_scope
+
+    assert _port_scope("80", "T") == {80}
+    assert _port_scope("80", "U") == set(), "스캔 범위는 앱이 T:/U: 를 명시해 넘긴다"
