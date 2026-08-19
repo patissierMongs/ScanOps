@@ -460,10 +460,29 @@ def test_an_excluded_port_is_not_a_closure_candidate(client):
         db.close()
 
 
-def test_a_staged_scan_saves_a_closure_scope_without_the_excluded_ports(client):
-    """실행 시점에 저장되는 scope_keys 자체에 제외가 반영돼야 마감·재개도 안전하다."""
+def test_a_staged_scan_saves_a_closure_scope_without_the_excluded_ports(client, monkeypatch):
+    """실행 시점에 저장되는 scope_keys 자체에 제외가 반영돼야 마감·재개도 안전하다.
+
+    워커는 띄우지 않는다 - 이 파일이 보는 것은 '무엇을 저장했는가'이고, 실제 엔진을 돌리면
+    산출물 디렉터리가 세션 내내 남는다. 임시 데이터 경로는 세션 공유인데 DB 는 테스트마다
+    초기화돼 스캔 ID 가 1부터 다시 시작하므로, 남은 scan_N/ 을 뒤 테스트가 자기 것으로
+    주워 간다(실제로 resume 테스트를 CI 에서 깨뜨렸다).
+    """
+    import shutil
+
+    from scanops.api import scans as scans_api
+    from scanops.config import get_settings
     from scanops.db import SessionLocal
     from scanops.models import Finding
+
+    class _NoThread:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", _NoThread)
 
     headers = _auth(client)
     db = SessionLocal()
@@ -478,11 +497,12 @@ def test_a_staged_scan_saves_a_closure_scope_without_the_excluded_ports(client):
     started = client.post("/api/scans/run-staged", headers=headers, json=_scan_body(
         targets=["10.4.4.4"], ports="T:80,9100", exclude_ports="T:9100"))
     assert started.status_code == 200, started.text
-
-    from scanops.config import get_settings
-    spec = json.loads((get_settings().scans_dir / f"scan_{started.json()['id']}"
-                       / "spec.json").read_text(encoding="utf-8"))
-    keys = set(spec["scanops"]["scope_keys"])
-    assert "10.4.4.4|9100|tcp" not in keys, "제외한 포트가 저장된 닫힘 범위에 남았다"
-    assert "10.4.4.4|80|tcp" in keys
-    assert spec["exclude_ports"] == "T:9100"
+    out_dir = get_settings().scans_dir / f"scan_{started.json()['id']}"
+    try:
+        spec = json.loads((out_dir / "spec.json").read_text(encoding="utf-8"))
+        keys = set(spec["scanops"]["scope_keys"])
+        assert "10.4.4.4|9100|tcp" not in keys, "제외한 포트가 저장된 닫힘 범위에 남았다"
+        assert "10.4.4.4|80|tcp" in keys
+        assert spec["exclude_ports"] == "T:9100"
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
