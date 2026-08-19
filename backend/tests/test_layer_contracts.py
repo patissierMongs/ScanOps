@@ -558,3 +558,56 @@ def test_the_scan_range_parser_keeps_its_own_unqualified_rule():
 
     assert _port_scope("80", "T") == {80}
     assert _port_scope("80", "U") == set(), "스캔 범위는 앱이 T:/U: 를 명시해 넘긴다"
+
+
+# ── 타임아웃으로 포기한 호스트는 부재를 말할 자격이 없다 ─────────────────────
+_TIMEDOUT_XML = (
+    '<?xml version="1.0"?><nmaprun scanner="nmap">'
+    '<scaninfo type="syn" protocol="tcp" numservices="2" services="22,443"/>'
+    '<host timedout="true"><status state="up" reason="user-set"/>'
+    '<address addr="10.0.0.9" addrtype="ipv4"/><times srtt="1000"/></host>'
+    '<host><status state="up" reason="syn-ack"/><address addr="10.0.0.1" addrtype="ipv4"/>'
+    '<ports><port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/>'
+    '<service name="ssh"/></port></ports></host>'
+    '<runstats><finished exit="success"/><hosts up="2" down="0" total="2"/></runstats>'
+    "</nmaprun>"
+).encode("utf-8")
+
+
+def test_a_host_nmap_gave_up_on_is_not_treated_as_observed():
+    """`--host-timeout` 으로 포기한 호스트는 up 이지만 관측을 마치지 못했다.
+
+    nmap 은 `<host timedout="true">` 로 적고 `<ports>` 를 통째로 생략하며, 실행 자체는
+    `finished exit="success"` 로 끝난다. 표식을 읽지 않으면 '살아 있고 열린 포트가 없다'로
+    보여 그 호스트의 기존 발견이 전부 닫힘 + 정상처리가 된다.
+
+    단독 스캐너는 저강도에서 `--host-timeout 30m` 을 기본으로 켠다 - 노후 장비를 지키려고
+    고른 설정이 정확히 그 장비의 발견을 지우는 자리다.
+    """
+    from scanops.scanning.nmap_parse import parse_xml, timed_out_hosts, up_hosts
+
+    assert timed_out_hosts(_TIMEDOUT_XML) == {"10.0.0.9"}
+    assert up_hosts(_TIMEDOUT_XML) == {"10.0.0.1"}, "포기한 호스트는 닫힘 판정에서 뺀다"
+    # 정상 호스트의 관측은 그대로 살아 있어야 한다(과잉 보수로 넘어가지 않는다).
+    assert [f["host_ip"] for f in parse_xml(_TIMEDOUT_XML)] == ["10.0.0.1"]
+
+
+def test_the_engine_denies_absence_authority_to_a_timed_out_host(tmp_path):
+    """엔진은 커버리지를 배치 슬라이스로 되짚으므로 observed_hosts 만 막으면 절반만 막힌다."""
+    import json
+
+    from scanops.scanning import engine_runner
+
+    out = tmp_path / "scan_1"
+    out.mkdir()
+    (out / "run-state.json").write_text(
+        json.dumps({"live": ["10.0.0.1", "10.0.0.9"]}), encoding="utf-8")
+    (out / "stage-tcp-b0.xml").write_bytes(_TIMEDOUT_XML)
+    spec = {"batch_size": 64, "stages": {"tcp": {"enabled": True}, "udp": {"enabled": False}}}
+
+    assert engine_runner.timed_out_hosts(out) == {"10.0.0.9"}
+    assert engine_runner.observed_hosts(out, spec) == {"10.0.0.1"}
+
+    absence = engine_runner.absence_times(out, spec)
+    assert ("10.0.0.1", "tcp") in absence, "관측을 마친 호스트는 부재를 말할 수 있다"
+    assert ("10.0.0.9", "tcp") not in absence, "포기한 호스트에 부재 권한을 주면 안 된다"

@@ -476,23 +476,52 @@ def _enables_version_detection(token: str) -> bool:
     return token.startswith("-s") and not token.startswith("--") and "V" in token[2:]
 
 
+def _host_ip(host) -> str | None:
+    """host 요소의 IP - MAC 은 타깃/스코프로 새면 안 되므로 제외한다."""
+    addr_el = host.find("address[@addrtype='ipv4']")
+    if addr_el is None:
+        for a in host.findall("address"):
+            if (a.get("addrtype") or "").lower() != "mac":
+                addr_el = a
+                break
+    return addr_el.get("addr") if addr_el is not None else None
+
+
+def timed_out_hosts(source) -> set[str]:
+    """``--host-timeout`` 으로 nmap 이 **포기한** 호스트.
+
+    nmap 은 그 호스트를 ``<host timedout="true">`` 로 적고 ``<ports>`` 를 통째로 생략한다.
+    실행 자체는 ``finished exit="success"`` 로 끝난다 - 실측으로 확인했다.
+
+    그래서 이 표식을 읽지 않으면 '살아 있고(up) 열린 포트가 하나도 없다' 로 보여, 그 호스트의
+    기존 발견이 전부 닫힘 + 정상처리가 된다. **패킷을 끝까지 보내지 않은 호스트**인데
+    부재를 확인했다고 말하는 셈이다.
+
+    단독 스캐너는 저강도에서 ``--host-timeout 30m`` 을 기본으로 켠다. 노후 장비를 지키려고
+    고른 설정이 정확히 그 장비의 발견을 지우게 되므로, 가져오기 경로에서 특히 중요하다.
+    """
+    ips: set[str] = set()
+    for host in _root_of(source).findall("host"):
+        if host.get("timedout") == "true" and (ip := _host_ip(host)):
+            ips.add(ip)
+    return ips
+
+
 def up_hosts(source) -> set[str]:
-    """이번 스캔에서 살아있던(up) 호스트 IP 집합 — 닫힘 판정 범위에 사용."""
+    """이번 스캔에서 살아있던(up) 호스트 IP 집합 — 닫힘 판정 범위에 사용.
+
+    타임아웃으로 포기한 호스트는 뺀다 - up 이지만 **관측을 마치지 못한** 호스트다.
+    """
     root = _root_of(source)
     ips: set[str] = set()
     for host in root.findall("host"):
         status = host.find("status")
         if status is not None and status.get("state") != "up":
             continue
-        # IP 만 — MAC(addrtype="mac")이 타깃/스코프로 새지 않게 ipv4 우선, 없으면 첫 비-MAC 주소.
-        addr_el = host.find("address[@addrtype='ipv4']")
-        if addr_el is None:
-            for a in host.findall("address"):
-                if (a.get("addrtype") or "").lower() != "mac":
-                    addr_el = a
-                    break
-        if addr_el is not None:
-            ips.add(addr_el.get("addr"))
+        if host.get("timedout") == "true":
+            continue
+        if ip := _host_ip(host):
+            ips.add(ip)
     return ips
 
 

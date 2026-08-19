@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from ..config import get_settings
-from . import nmap_runner, process_control, scan_options, scan_summary, taxonomy
+from . import nmap_parse, nmap_runner, process_control, scan_options, scan_summary, taxonomy
 from .ingest import ingest
 from .nmap_parse import observed_at, parse_xml
 
@@ -438,6 +438,9 @@ def absence_times(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dic
     live = [h for h in (_read_state(out).get("live") or []) if isinstance(h, str)]
     if not live:
         return times
+    # 커버리지를 배치 슬라이스로 되짚기 때문에, 타임아웃 호스트도 그 배치에 들어 있다는
+    # 이유만으로 '훑었다' 가 된다. observed_hosts 만 막으면 절반만 막힌다.
+    gave_up = timed_out_hosts(out)
     batch = max(1, int(spec.get("batch_size") or 256))
     stages = spec.get("stages") or {}
     for proto in ("tcp", "udp"):
@@ -452,6 +455,8 @@ def absence_times(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dic
             except OSError:
                 continue
             for host in live[index * batch:(index + 1) * batch]:
+                if host in gave_up:
+                    continue
                 key = (host, proto)
                 current = times.get(key)
                 # 시각이 없는 산출물도 '훑었다' 는 사실은 남긴다(값 None = 시각 미상).
@@ -478,6 +483,23 @@ def swept_batches(out_dir, spec: dict) -> int:
             1 for path in out.glob(f"stage-{proto}-b*.xml") if _xml_run_finished(path)
         ))
     return min(counts) if counts else 0
+
+
+def timed_out_hosts(out_dir) -> set[str]:
+    """이 실행에서 ``--host-timeout`` 으로 포기된 호스트.
+
+    엔진은 산출물이 여러 개라 파일마다 읽어 합친다. 한 배치에서라도 포기됐으면 그 호스트는
+    관측을 마치지 못한 것이다 - 부재를 말할 자격이 없다.
+    """
+    out = Path(out_dir)
+    hosts: set[str] = set()
+    for pattern in ("stage-tcp-b*.xml", "stage-udp-b*.xml", "stage3-*.xml", "stage0-discovery.xml"):
+        for path in sorted(out.glob(pattern)):
+            try:
+                hosts |= nmap_parse.timed_out_hosts(path.read_bytes())
+            except (OSError, ET.ParseError):
+                continue
+    return hosts
 
 
 def swept_total(out_dir, spec: dict) -> int:
@@ -517,7 +539,10 @@ def observed_hosts(out_dir, spec: dict, force_scanned_hosts: bool = False) -> se
         hosts = {str(u.get("ip")) for u in (spec.get("rescan_units") or []) if u.get("ip")}
         hosts |= {str(ip) for ip in (spec.get("targets_ports") or {})}
         return hosts
-    return {h for h in (_read_state(out).get("live") or []) if isinstance(h, str)}
+    # live 는 discovery 가 살아 있다고 본 목록일 뿐이다. 그중 sweep 이 타임아웃으로 포기한
+    # 호스트는 포트를 끝까지 보지 못했으므로 부재를 말할 자격이 없다.
+    live = {h for h in (_read_state(out).get("live") or []) if isinstance(h, str)}
+    return live - timed_out_hosts(out)
 
 
 def observed_scope(scope_keys: set | None, out_dir, spec: dict,
