@@ -70,6 +70,12 @@ class ScanRunIn(BaseModel):
     staged: bool = False           # estimate가 단계 엔진의 프로토콜 조합을 검증할 때만 사용
     discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
     udp_all_targets: bool = False  # auto: UDP 식별을 discovery live host 가 아닌 원본 타깃 전체로(-Pn)
+    # 호스트당 상한(nmap --host-timeout). TCP 와 UDP 를 **따로** 받는다 — 정상 호스트가
+    # 걸리지 않는 상한이 프로토콜마다 다르기 때문이다(TCP 는 포트 수, UDP 는 ICMP 율제한이
+    # 소요를 지배한다). 빈 값이면 단계별 기본값(scan_options.HOST_TIMEOUT_DEFAULTS).
+    # "0" 은 명시적 끄기다. None 은 받지 않는다 - 안전 제어가 조용히 풀리면 안 된다(#48).
+    host_timeout: str = ""
+    udp_host_timeout: str = ""
 
 
 class KnownResultsIn(BaseModel):

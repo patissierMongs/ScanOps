@@ -154,6 +154,26 @@ def _validate_structured_scan(
     return hosts, excludes
 
 
+def _host_timeouts(body) -> dict:
+    """요청의 두 상한을 단계별 상한으로 편다. 빈 값이면 그 단계는 기본값을 쓴다.
+
+    사용자에게는 프로토콜당 하나씩만 받는다(TCP·UDP). 정상 호스트가 걸리지 않는 상한이
+    프로토콜마다 다르기 때문에 하나로 묶지 않고, 그렇다고 sweep/식별까지 네 개를 물어보면
+    쓰이지 않는 손잡이만 늘어난다. 명시된 값은 그 프로토콜의 두 단계에 함께 적용한다.
+
+    빈 문자열은 '지정 없음'이고 "0" 이 명시적 끄기다. 값 검증은 엔진 spec 이 한다
+    (validate_host_timeout) - 여기서 조용히 정규화하면 잘못된 값이 미적용으로 둔갑한다.
+    """
+    tcp = (getattr(body, "host_timeout", "") or "").strip()
+    udp = (getattr(body, "udp_host_timeout", "") or "").strip()
+    limits = {}
+    if tcp:
+        limits["tcp"] = limits["service"] = tcp
+    if udp:
+        limits["udp"] = limits["service_udp"] = udp
+    return limits
+
+
 def _effective_hosts(hosts: list[str], excludes: list[str]) -> list[str]:
     effective = scope.apply_excludes(hosts, excludes)
     if not effective:
@@ -2627,6 +2647,7 @@ def run_staged(
             excludes, body.options, body.ports,
             body.nse, out_dir, body.batch_size, discovery=body.discovery,
             exclude_ports=body.exclude_ports,
+            host_timeouts=_host_timeouts(body),
         )
         tcp_scope = _port_scope(nmap_runner.auto_tcp_port_spec(body.ports), "T")
         udp_scope = (_port_scope(nmap_runner.auto_udp_port_spec(body.ports), "U")

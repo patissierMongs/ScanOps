@@ -59,6 +59,26 @@ class Pipeline:
                            cmd=" ".join(map(str, r["cmd"])))
         return r
 
+    def _record_coverage(self, artifact, proto, role, hosts, ports, finished) -> None:
+        """이 nmap 실행이 **무엇을 · 어디까지 · 어떤 자격으로** 훑었는지 기록한다.
+
+        지금까지 백엔드는 이 사실을 산출물 glob 과 배치 슬라이스(``live[i*b:(i+1)*b]``)로
+        되짚었다. 되짚기는 규칙이 바뀌는 순간 조용히 틀리고, ``--open`` 때문에 열린 포트가
+        없는 호스트는 XML 에 아예 안 나타나서 '훑었는가'를 파일에서 읽을 수도 없다.
+        그래서 **만든 쪽이 적어 둔다** - 이 저장소가 이미 쓰는 규칙이다
+        (scan_summary 의 범위 꼬리표: "만든 쪽이 적어 준 값이 파싱보다 먼저").
+
+        ``role`` 이 핵심이다. 같은 stage3 XML 이라도 전체 스캔에서는 enrichment 이고
+        포트 재스캔에서는 그 자체가 authority 다. 역할을 안 적으면 읽는 쪽이 파일 이름으로
+        추측하게 되고, 그러면 완결된 TCP sweep 의 권한을 enrichment 타임아웃 하나가 빼앗는다.
+        """
+        entry = {"artifact": artifact, "proto": proto, "role": role,
+                 "hosts": list(hosts), "ports": ports, "finished": bool(finished)}
+        log = list(self.state.get("coverage") or [])
+        log.append(entry)
+        self.state.set("coverage", log)
+        self.state.save()
+
     def _save(self):
         self.state.set("open_map", self.open_map)
         self.state.save()
@@ -74,6 +94,22 @@ class Pipeline:
         if self.spec.exclude_ports.strip():
             args += ["--exclude-ports", self.spec.exclude_ports.strip()]
         return args
+
+    @staticmethod
+    def _timeout_args(value: str) -> list:
+        """``--host-timeout`` — 한 호스트가 실행 전체를 붙잡는 것을 막는다.
+
+        단계마다 **별개 값**을 받는다. TCP 전수 스캔은 65535 포트를 훑는 반면 UDP 는 포트 수가
+        훨씬 적은 대신 ICMP 율제한에 걸려 느려지므로, 정상 호스트가 걸리지 않는 상한이 서로
+        다르다. 한 값으로 묶으면 둘 중 하나는 반드시 틀린다 - 느린 쪽에 맞추면 빠른 쪽의
+        트러블메이커를 못 걸러 내고, 빠른 쪽에 맞추면 정상 호스트를 포기한다.
+
+        nmap 은 상한을 넘긴 호스트만 포기하고 실행 자체는 ``exit="success"`` 로 끝내며,
+        그 호스트를 XML 에 ``<host timedout="true">`` 로 남긴다(포트 표는 쓰지 않는다).
+        그래서 '포기당한 호스트'는 부재를 말할 자격이 없다 - 그 판정은 백엔드가
+        coverage 기록으로 한다(run-state 의 coverage 배열).
+        """
+        return ["--host-timeout", value] if value else []
 
     def _tcp_scan_flag(self) -> str:
         return {"syn": "-sS", "connect": "-sT"}[self.spec.tcp.scan_type]
@@ -139,12 +175,15 @@ class Pipeline:
                 "--reason", "--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP),
                 "--max-retries", str(sp.max_retries),
                 "--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
+        args += self._timeout_args(sp.host_timeout)
         args += self._exclude_args()
         args += list(self.spec.targets)
         base = self.out / "stage0-discovery"
         r = self._nmap("discovery", args, base)
         if r.get("stopped") or r["rc"] != 0:
             return []
+        self._record_coverage("stage0-discovery.xml", "", "discovery",
+                              self.spec.targets, "", True)
         live = nmaprun.hosts_up(Path(str(base) + ".xml"))
         self.counts["live"] = len(live)
         self.sink.emit("hosts_up", stage="discovery", hosts=live, count=len(live))
@@ -174,12 +213,17 @@ class Pipeline:
                 if sp.min_rate > 0:
                     args += ["--min-rate", str(sp.min_rate)]
             args += ["-p", sp.ports]
+            args += self._timeout_args(sp.host_timeout)
             args += self._exclude_args()
             args += batch
             base = self.out / f"stage-{proto}-b{bi}"
             r = self._nmap(proto, args, base)
             secs += r["seconds"]
-            if r.get("stopped") or r["rc"] != 0:
+            ok = not r.get("stopped") and r["rc"] == 0
+            # 되짚기가 아니라 명령줄에 실제로 올린 batch 를 그대로 적는다.
+            self._record_coverage(f"stage-{proto}-b{bi}.xml", proto, "authority",
+                                  batch, sp.ports, ok)
+            if not ok:
                 return False
             found = nmaprun.open_ports(Path(str(base) + ".xml"), proto=proto)
             for ip, ports in found.items():
@@ -222,6 +266,8 @@ class Pipeline:
         if sp.nse and proto == "tcp":
             args += ["--script", ",".join(sp.nse),
                      "--script-timeout", DEFAULT_NSE_SCRIPT_TIMEOUT]
+        limit = (sp.udp_host_timeout or sp.host_timeout) if proto == "udp" else sp.host_timeout
+        args += self._timeout_args(limit)
         args += self._exclude_args()
         args.append(ip)
         suffix = tag or proto
@@ -238,6 +284,12 @@ class Pipeline:
             r = self._nmap("service", ["--nsock-engine", _UDP_RETRY_ENGINE] + args, base,
                            fatal=not isolate)
             ok = not r.get("stopped") and r["rc"] == 0
+        # 역할은 실행 종류가 정한다. 포트 재스캔은 stage3 가 **유일한** 관측이라 authority 이고,
+        # 전체 스캔은 sweep 이 이미 개폐를 확정했으므로 stage3 는 enrichment 다. 이걸 파일
+        # 이름으로 추측하면 완결된 sweep 의 권한을 stage3 타임아웃 하나가 빼앗는다.
+        role = ("authority" if (self.spec.rescan_units or self.spec.targets_ports)
+                else "enrichment")
+        self._record_coverage(base.name + ".xml", proto, role, [ip], pspec, ok)
         rows = nmaprun.services(Path(str(base) + ".xml")) if ok else []
         for row in rows:
             self.sink.emit("service", stage="service", confirm=confirm,

@@ -92,7 +92,7 @@ def ensure_available() -> Path:
 def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options: list[str],
                    ports: str, nse: list[str] | None, out_dir: Path, batch_size: int,
                    discovery: str = "sn", rescan_units: list | None = None,
-                   exclude_ports: str = "") -> dict:
+                   exclude_ports: str = "", host_timeouts: dict | None = None) -> dict:
     """ScanOps 옵션 키를 엔진 단계 설정으로 매핑. 스캔 기법/타이밍/버전강도/UDP/NSE 를 단계로 분배.
 
     one-liner 옵션(노핑·기법)은 엔진이 단계별로 알아서 처리하므로 그대로 옮기지 않는다.
@@ -104,6 +104,11 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
         raise ValueError("TCP Connect 단계 스캔은 UDP 스캔과 함께 실행할 수 없습니다.")
     timing = next((_TIMING[k] for k in ("t0", "t1", "t2", "t3", "fast", "t5") if k in opt), "-T4")
     max_retries = 2
+    # 호스트당 상한 — 단계마다 별개 값이다. 호출자가 안 주면 공용 레지스트리의 기본값을 쓴다.
+    # 여기서 문자열로 정규화해 두면 spec.validate() 가 문법만 확인하면 된다("" = 미적용).
+    limits = dict(scan_options.HOST_TIMEOUT_DEFAULTS)
+    limits.update({k: v for k, v in (host_timeouts or {}).items()
+                   if k in limits and isinstance(v, str)})
     # The engine has protocol-specific stages, so its ``-p`` value does not need Nmap's
     # T:/U: selector used by the legacy combined workflow.
     tcp_spec = nmap_runner.auto_tcp_port_spec(ports)
@@ -117,6 +122,8 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
         "timing": timing,
         "max_retries": max_retries,
         "nse": list(scan_options.NSE_DEFAULT_KEYS if nse is None else nse),
+        "host_timeout": limits["service"],
+        "udp_host_timeout": limits["service_udp"],
     }
     spec: dict = {
         "job_id": f"scan_{scan_id}",
@@ -136,9 +143,11 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
             },
             "tcp": {"enabled": bool(tcp_spec), "ports": tcp_ports, "timing": timing,
                     "scan_type": "connect" if "connect" in opt else "syn",
-                    "min_rate": 0, "max_retries": max_retries},
+                    "min_rate": 0, "max_retries": max_retries,
+                    "host_timeout": limits["tcp"]},
             "udp": {"enabled": "udp" in opt and bool(udp_spec), "ports": udp_ports,
-                    "timing": timing, "max_retries": max_retries},
+                    "timing": timing, "max_retries": max_retries,
+                    "host_timeout": limits["udp"]},
             "service": service,
         },
     }
@@ -407,11 +416,16 @@ def absence_times(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dic
     times: dict[tuple[str, str], object] = {}
     if force_scanned_hosts:
         confirm = bool(((spec.get("stages") or {}).get("service") or {}).get("confirm", False))
+        # 재스캔에서는 stage3 가 곧 authority 다. 그 산출물에서 포기당한 호스트는 포트를
+        # 끝까지 보지 못했으므로 시각도 줄 수 없다 - observed_hosts 만 막으면 절반만 막힌다.
+        gave_up = timed_out_hosts(out, force_scanned_hosts=True)
         for unit in spec.get("rescan_units") or []:
             try:
                 ip = str(unit["ip"])
                 port, proto = int(unit["port"]), str(unit.get("proto") or "tcp").lower()
             except (KeyError, TypeError, ValueError):
+                continue
+            if ip in gave_up:
                 continue
             # 선택 재스캔은 포트마다 별도 산출물을 만든다. 22 를 훑은 XML 은 443 의 부재를
             # 증명하지 못하므로 포트까지 키에 넣는다 - (ip, proto) 로 뭉치면 늦게 끝난
@@ -426,6 +440,8 @@ def absence_times(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dic
         # targets_ports 는 한 XML 이 그 호스트의 여러 포트를 실제로 함께 훑으므로 산출물
         # 범위가 곧 (ip, tcp) 다. 여기서까지 포트로 쪼개면 있지도 않은 구분을 만든다.
         for ip in (spec.get("targets_ports") or {}):
+            if str(ip) in gave_up:
+                continue
             paths = [path for path in _stage3_expected(out, str(ip), "tcp", confirm)
                      if path.exists()]
             if not paths:
@@ -436,32 +452,51 @@ def absence_times(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dic
         return times
 
     live = [h for h in (_read_state(out).get("live") or []) if isinstance(h, str)]
-    if not live:
-        return times
-    # 커버리지를 배치 슬라이스로 되짚기 때문에, 타임아웃 호스트도 그 배치에 들어 있다는
-    # 이유만으로 '훑었다' 가 된다. observed_hosts 만 막으면 절반만 막힌다.
-    gave_up = timed_out_hosts(out)
-    batch = max(1, int(spec.get("batch_size") or 256))
     stages = spec.get("stages") or {}
-    for proto in ("tcp", "udp"):
-        if not (stages.get(proto) or {}).get("enabled", True):
+    batch = max(1, int(spec.get("batch_size") or 256))
+
+    def _recorded():
+        """생산자가 적어 둔 커버리지 — 산출물마다 명령줄에 올린 호스트가 그대로 남아 있다."""
+        for entry in coverage_entries(out):
+            if entry.get("role") != "authority":
+                continue
+            proto = str(entry.get("proto") or "")
+            if proto not in ("tcp", "udp"):
+                continue
+            hosts = [h for h in (entry.get("hosts") or []) if isinstance(h, str)]
+            yield proto, out / str(entry.get("artifact") or ""), hosts
+
+    def _slices():
+        """구형 out_dir 폴백 — 엔진의 배치 규칙(live 를 순서대로 batch_size 씩)을 되짚는다.
+
+        되짚기는 규칙이 바뀌면 조용히 어긋나고 재시도처럼 부분집합을 훑은 실행을 표현하지
+        못한다. 그래서 새 실행은 위의 기록을 쓰고, 이 경로는 기록이 없는 옛 실행 전용이다.
+        """
+        for proto in ("tcp", "udp"):
+            if not (stages.get(proto) or {}).get("enabled", True):
+                continue
+            for index in range(-(-len(live) // batch)):
+                yield (proto, out / f"stage-{proto}-b{index}.xml",
+                       live[index * batch:(index + 1) * batch])
+
+    covers = list(_recorded()) if coverage_entries(out) else (list(_slices()) if live else [])
+    # 포기 판정도 프로토콜별이다. 한 집합으로 뭉치면 UDP 타임아웃이 TCP 의 시각까지 지운다.
+    gave_up = {proto: timed_out_hosts(out, proto) for proto in ("tcp", "udp")}
+    for proto, path, hosts in covers:
+        if not path.exists():
             continue
-        for index in range(-(-len(live) // batch)):
-            path = out / f"stage-{proto}-b{index}.xml"
-            if not path.exists():
+        try:
+            when = observed_at(path.read_bytes())
+        except OSError:
+            continue
+        for host in hosts:
+            if host in gave_up[proto]:
                 continue
-            try:
-                when = observed_at(path.read_bytes())
-            except OSError:
-                continue
-            for host in live[index * batch:(index + 1) * batch]:
-                if host in gave_up:
-                    continue
-                key = (host, proto)
-                current = times.get(key)
-                # 시각이 없는 산출물도 '훑었다' 는 사실은 남긴다(값 None = 시각 미상).
-                if key not in times or (when is not None and (current is None or when > current)):
-                    times[key] = when
+            key = (host, proto)
+            current = times.get(key)
+            # 시각이 없는 산출물도 '훑었다' 는 사실은 남긴다(값 None = 시각 미상).
+            if key not in times or (when is not None and (current is None or when > current)):
+                times[key] = when
     return times
 
 
@@ -485,11 +520,35 @@ def swept_batches(out_dir, spec: dict) -> int:
     return min(counts) if counts else 0
 
 
-def timed_out_hosts(out_dir) -> set[str]:
-    """이 실행에서 ``--host-timeout`` 으로 포기된 호스트.
+def coverage_entries(out_dir) -> list[dict]:
+    """엔진이 nmap 을 돌리며 적어 둔 커버리지 기록(run-state 의 ``coverage``).
 
-    엔진은 산출물이 여러 개라 파일마다 읽어 합친다. 한 배치에서라도 포기됐으면 그 호스트는
-    관측을 마치지 못한 것이다 - 부재를 말할 자격이 없다.
+    각 항목은 nmap 프로세스 **하나**를 뜻한다 — ``{artifact, proto, role, hosts, ports,
+    finished}``. ``hosts`` 는 그 실행의 **명령줄에 실제로 올린** 목록이라, 되짚기(배치
+    슬라이스·glob)와 달리 규칙이 바뀌어도 어긋나지 않는다.
+
+    구형 out_dir(이 기록이 생기기 전에 돈 실행)은 빈 목록이며, 호출자는 되짚기 폴백을 쓴다.
+    """
+    return [e for e in (_read_state(Path(out_dir)).get("coverage") or []) if isinstance(e, dict)]
+
+
+def _authority_entries(out_dir, proto: str | None, force_scanned_hosts: bool) -> list[dict]:
+    """부재를 말할 자격이 있는 산출물만. **역할**이 판단 기준이고 파일 이름이 아니다.
+
+    전체 스캔에서 개폐를 확정하는 것은 sweep 이고 stage3 는 enrichment 다. 포트 재스캔에서는
+    stage3 가 유일한 관측이라 그것이 authority 다. 이 구분을 안 하면 완결된 TCP sweep 의
+    권한을 stage3 타임아웃 하나가 빼앗는다(그리고 그 반대 방향도 똑같이 틀린다).
+    """
+    entries = [e for e in coverage_entries(out_dir) if e.get("role") == "authority"]
+    if not force_scanned_hosts and proto:
+        entries = [e for e in entries if e.get("proto") == proto]
+    return entries
+
+
+def _legacy_timed_out_hosts(out_dir) -> set[str]:
+    """커버리지 기록이 없는 구형 out_dir 용 되짚기.
+
+    역할·프로토콜을 구분하지 못하므로 **보수적으로 합집합**이다. 새 실행은 여기 오지 않는다.
     """
     out = Path(out_dir)
     hosts: set[str] = set()
@@ -500,6 +559,34 @@ def timed_out_hosts(out_dir) -> set[str]:
             except (OSError, ET.ParseError):
                 continue
     return hosts
+
+
+def timed_out_hosts(out_dir, proto: str | None = None,
+                    force_scanned_hosts: bool = False) -> set[str]:
+    """``--host-timeout`` 으로 포기당해 **부재를 말할 자격이 없는** 호스트.
+
+    판정은 산출물 하나 단위다. 같은 호스트를 여러 authority 산출물이 덮으면 **마지막 것이
+    이긴다** — 한 번 포기됐다는 이유로 영구히 자격을 잃으면, 재시도가 성공해도 그 관측을
+    쓰지 못한다. 읽을 수 없는 산출물은 그 실행이 아무것도 관측하지 못한 것으로 본다(fail-closed).
+    """
+    out = Path(out_dir)
+    if not coverage_entries(out):
+        # 기록 자체가 없는 구형 out_dir 일 때만 되짚는다. '해당 역할의 항목이 없다' 를 폴백
+        # 조건으로 쓰면, 기록은 있는데 그 역할이 없는 정상 실행이 조용히 옛 합집합으로
+        # 되돌아간다 - 고치려던 바로 그 오류다.
+        return _legacy_timed_out_hosts(out)
+    verdict: dict[str, bool] = {}
+    entries = _authority_entries(out, proto, force_scanned_hosts)
+    for entry in entries:
+        path = out / str(entry.get("artifact") or "")
+        covered = [h for h in (entry.get("hosts") or []) if isinstance(h, str)]
+        try:
+            gave_up = nmap_parse.timed_out_hosts(path.read_bytes())
+        except (OSError, ET.ParseError):
+            gave_up = set(covered)
+        for host in covered:
+            verdict[host] = host in gave_up
+    return {host for host, gone in verdict.items() if gone}
 
 
 def swept_total(out_dir, spec: dict) -> int:
@@ -519,7 +606,8 @@ def swept_total(out_dir, spec: dict) -> int:
     return -(-len(live) // size)
 
 
-def observed_hosts(out_dir, spec: dict, force_scanned_hosts: bool = False) -> set[str]:
+def observed_hosts(out_dir, spec: dict, force_scanned_hosts: bool = False,
+                   proto: str | None = None) -> set[str]:
     """이 실행이 **실제로 포트를 관측한** 호스트.
 
     산출물이 모두 완결됐다는 것과 '이 호스트의 포트를 봤다'는 것은 다른 사실이다.
@@ -538,11 +626,14 @@ def observed_hosts(out_dir, spec: dict, force_scanned_hosts: bool = False) -> se
     if force_scanned_hosts:
         hosts = {str(u.get("ip")) for u in (spec.get("rescan_units") or []) if u.get("ip")}
         hosts |= {str(ip) for ip in (spec.get("targets_ports") or {})}
-        return hosts
+        # 재스캔에서도 포기당한 호스트는 빼야 한다. 여기서 그냥 돌려주면 조치 검증이라는
+        # 가장 중요한 경로에만 이 방어가 빠진다 - stage3 하나가 timedout 인데도 그 발견이
+        # closed + 정상처리 가 된다.
+        return hosts - timed_out_hosts(out, force_scanned_hosts=True)
     # live 는 discovery 가 살아 있다고 본 목록일 뿐이다. 그중 sweep 이 타임아웃으로 포기한
     # 호스트는 포트를 끝까지 보지 못했으므로 부재를 말할 자격이 없다.
     live = {h for h in (_read_state(out).get("live") or []) if isinstance(h, str)}
-    return live - timed_out_hosts(out)
+    return live - timed_out_hosts(out, proto)
 
 
 def observed_scope(scope_keys: set | None, out_dir, spec: dict,
@@ -557,8 +648,22 @@ def observed_scope(scope_keys: set | None, out_dir, spec: dict,
     """
     if scope_keys is None:
         return None
-    hosts = observed_hosts(out_dir, spec, force_scanned_hosts)
-    return {key for key in scope_keys if str(key).split("|", 1)[0] in hosts}
+    if force_scanned_hosts:
+        hosts = observed_hosts(out_dir, spec, True)
+        return {key for key in scope_keys if str(key).split("|", 1)[0] in hosts}
+    # 전체 스캔에서는 프로토콜마다 authority 산출물이 다르다. 한 집합으로 뭉치면 UDP sweep
+    # 타임아웃 하나가 완결된 TCP sweep 의 권한까지 빼앗는다 - 그러면 사라진 TCP 포트가
+    # 영원히 열린 채로 남는다(닫지 못하는 쪽의 오류).
+    by_proto = {proto: observed_hosts(out_dir, spec, False, proto)
+                for proto in ("tcp", "udp")}
+    kept = set()
+    for key in scope_keys:
+        parts = str(key).split("|")
+        host = parts[0]
+        proto = parts[2] if len(parts) > 2 else "tcp"
+        if host in by_proto.get(proto, by_proto["tcp"]):
+            kept.add(key)
+    return kept
 
 
 def artifact_report(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dict:

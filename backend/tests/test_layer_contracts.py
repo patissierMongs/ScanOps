@@ -611,3 +611,277 @@ def test_the_engine_denies_absence_authority_to_a_timed_out_host(tmp_path):
     absence = engine_runner.absence_times(out, spec)
     assert ("10.0.0.1", "tcp") in absence, "관측을 마친 호스트는 부재를 말할 수 있다"
     assert ("10.0.0.9", "tcp") not in absence, "포기한 호스트에 부재 권한을 주면 안 된다"
+
+
+# ── 호스트당 상한은 단계마다 별개다 ───────────────────────────────────────────
+def _timedout_only_xml(ip: str, proto: str = "tcp") -> bytes:
+    """nmap 이 상한을 넘겨 포기한 호스트 - 포트 표가 통째로 없고 실행은 정상 종료한다."""
+    return (
+        '<?xml version="1.0"?><nmaprun scanner="nmap">'
+        f'<scaninfo type="syn" protocol="{proto}" numservices="1" services="443"/>'
+        f'<host timedout="true"><status state="up" reason="user-set"/>'
+        f'<address addr="{ip}" addrtype="ipv4"/></host>'
+        '<runstats><finished exit="success"/><hosts up="1" down="0" total="1"/></runstats>'
+        "</nmaprun>"
+    ).encode("utf-8")
+
+
+def _clean_xml(ip: str, proto: str = "tcp", port: int = 22) -> bytes:
+    return (
+        '<?xml version="1.0"?><nmaprun scanner="nmap">'
+        f'<scaninfo type="syn" protocol="{proto}" numservices="1" services="{port}"/>'
+        f'<host><status state="up" reason="syn-ack"/><address addr="{ip}" addrtype="ipv4"/>'
+        f'<ports><port protocol="{proto}" portid="{port}">'
+        '<state state="open" reason="syn-ack"/><service name="ssh"/></port></ports></host>'
+        '<runstats><finished exit="success"/><hosts up="1" down="0" total="1"/></runstats>'
+        "</nmaprun>"
+    ).encode("utf-8")
+
+
+def _pipeline(tmp_path, spec_dict):
+    import sys
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine.pipeline import Pipeline
+    from scanops_engine.spec import JobSpec
+
+    class _Sink:
+        def emit(self, *a, **k):
+            pass
+
+    spec = JobSpec.from_dict(spec_dict).validate()
+    return Pipeline(spec, _Sink(), "nmap"), spec
+
+
+def test_every_engine_stage_carries_its_own_host_timeout(tmp_path):
+    """`--host-timeout` 이 한 단계라도 빠지면 그 단계가 트러블메이커에 그대로 붙잡힌다.
+
+    그리고 값은 **단계마다 별개**여야 한다. TCP 전수는 포트 수(65535)가 소요를 지배하고
+    UDP 는 포트 수가 적은 대신 ICMP 율제한이 지배한다 - 한 값으로 묶으면 느린 쪽에 맞춰
+    빠른 쪽의 트러블메이커를 놓치거나, 빠른 쪽에 맞춰 정상 호스트를 포기한다.
+    """
+    pipe, spec = _pipeline(tmp_path, {
+        "job_id": "j", "targets": ["10.0.0.1"], "out_dir": str(tmp_path),
+        "stages": {
+            "discovery": {"host_timeout": "2m"},
+            "tcp": {"enabled": True, "ports": "1-65535", "host_timeout": "20m"},
+            "udp": {"enabled": True, "ports": "53", "host_timeout": "10m"},
+            "service": {"host_timeout": "10m", "udp_host_timeout": "5m"},
+        },
+    })
+    seen = {}
+
+    def fake(stage, args, base, fatal=True):
+        seen[f"{stage}:{pathlib_Path(base).name}"] = list(map(str, args))
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1"))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._discovery()
+    pipe._sweep("tcp", ["10.0.0.1"])
+    pipe._sweep("udp", ["10.0.0.1"])
+    pipe._probe_protocol("10.0.0.1", "tcp", [443], spec.service, confirm=False)
+    pipe._probe_protocol("10.0.0.1", "udp", [53], spec.service, confirm=False)
+
+    def limit(key):
+        argv = seen[key]
+        assert "--host-timeout" in argv, f"{key} 단계에 상한이 없다"
+        return argv[argv.index("--host-timeout") + 1]
+
+    assert limit("discovery:stage0-discovery") == "2m"
+    assert limit("tcp:stage-tcp-b0") == "20m"
+    assert limit("udp:stage-udp-b0") == "10m"
+    assert limit("service:stage3-10_0_0_1-tcp") == "10m"
+    # UDP 식별은 이 프로젝트에서 실제로 죽어 온 자리라 TCP 와 따로 더 짧게 잡는다.
+    assert limit("service:stage3-10_0_0_1-udp") == "5m"
+
+
+def test_the_engine_records_what_each_nmap_process_covered(tmp_path):
+    """커버리지는 되짚는 게 아니라 **생산자가 적는다**.
+
+    여태 백엔드는 '이 배치가 어느 호스트를 맡았나'를 `live[i*b:(i+1)*b]` 로 되짚었다.
+    되짚기는 규칙이 바뀌면 조용히 어긋나고, 재시도처럼 부분집합을 훑은 실행을 아예 표현하지
+    못한다. 엔진이 명령줄에 올린 목록을 그대로 적어 두면 둘 다 사라진다.
+    """
+    import json
+
+    pipe, _ = _pipeline(tmp_path, {
+        "job_id": "j", "targets": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+        "out_dir": str(tmp_path), "batch_size": 2,
+        "stages": {"tcp": {"enabled": True, "ports": "22"}},
+    })
+
+    def fake(stage, args, base, fatal=True):
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1"))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._sweep("tcp", ["10.0.0.1", "10.0.0.2", "10.0.0.3"])
+
+    log = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))["coverage"]
+    sweeps = [e for e in log if e["role"] == "authority"]
+    assert [e["artifact"] for e in sweeps] == ["stage-tcp-b0.xml", "stage-tcp-b1.xml"]
+    assert [e["hosts"] for e in sweeps] == [["10.0.0.1", "10.0.0.2"], ["10.0.0.3"]]
+    assert {e["proto"] for e in sweeps} == {"tcp"}
+
+
+# ── 타임아웃 산출물의 '역할'을 구분하지 않으면 양방향으로 틀린다 ──────────────
+def _write_state(out, payload):
+    import json
+
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "run-state.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_a_timed_out_rescan_artifact_denies_closure(tmp_path):
+    """재스캔에서 stage3 가 timedout 이면 그 발견을 닫으면 안 된다.
+
+    조치 검증(재스캔)은 닫힘이 실제로 일어나는 가장 중요한 경로다. 그런데 observed_hosts 는
+    force_scanned_hosts 분기에서 선택 호스트를 그대로 돌려주며 포기 판정을 아예 건너뛰었다 -
+    이번 방어가 정작 가장 중요한 경로에만 빠져 있었다.
+    """
+    from scanops.scanning import engine_runner
+
+    out = tmp_path / "scan_1"
+    spec = {"rescan_units": [{"ip": "127.0.0.1", "port": 18443, "proto": "tcp"}],
+            "stages": {"service": {"confirm": True}}}
+    _write_state(out, {"coverage": [
+        {"artifact": "stage3-127_0_0_1-tcp18443.xml", "proto": "tcp", "role": "authority",
+         "hosts": ["127.0.0.1"], "ports": "T:18443", "finished": True},
+    ]})
+    (out / "stage3-127_0_0_1-tcp18443.xml").write_bytes(_timedout_only_xml("127.0.0.1"))
+
+    assert engine_runner.observed_hosts(out, spec, True) == set()
+    assert engine_runner.observed_scope(
+        {"127.0.0.1|18443|tcp"}, out, spec, True) == set(), "포기당한 관측은 닫힘 권한이 없다"
+    assert ("127.0.0.1", 18443, "tcp") not in engine_runner.absence_times(out, spec, True)
+
+    # 반대 경계 - 온전히 끝난 재스캔은 그대로 닫을 수 있어야 한다(과잉 보수로 넘어가지 않는다).
+    (out / "stage3-127_0_0_1-tcp18443.xml").write_bytes(_clean_xml("127.0.0.1", port=18443))
+    assert engine_runner.observed_hosts(out, spec, True) == {"127.0.0.1"}
+    assert engine_runner.observed_scope({"127.0.0.1|18443|tcp"}, out, spec, True) == {
+        "127.0.0.1|18443|tcp"}
+
+
+def test_an_enrichment_timeout_does_not_strip_a_completed_sweep(tmp_path):
+    """전체 스캔에서 stage3 는 enrichment 다 - 그 타임아웃이 sweep 의 권한을 뺏으면 안 된다.
+
+    sweep 이 22/open 과 443/부재를 끝까지 관측했는데 식별만 늦어 포기당한 경우, 권한까지
+    빼면 사라진 443 이 영원히 열린 채로 남는다. 이 PR 이 스스로 적어 둔 계약
+    ("Service probing is enrichment, not authority over a successful open-port sweep")과도
+    정면으로 어긋난다.
+    """
+    from scanops.scanning import engine_runner
+
+    out = tmp_path / "scan_2"
+    spec = {"batch_size": 64, "stages": {"tcp": {"enabled": True}, "udp": {"enabled": False}}}
+    _write_state(out, {"live": ["10.0.0.1"], "coverage": [
+        {"artifact": "stage-tcp-b0.xml", "proto": "tcp", "role": "authority",
+         "hosts": ["10.0.0.1"], "ports": "1-65535", "finished": True},
+        {"artifact": "stage3-10_0_0_1-tcp.xml", "proto": "tcp", "role": "enrichment",
+         "hosts": ["10.0.0.1"], "ports": "T:22", "finished": True},
+    ]})
+    (out / "stage-tcp-b0.xml").write_bytes(_clean_xml("10.0.0.1"))
+    (out / "stage3-10_0_0_1-tcp.xml").write_bytes(_timedout_only_xml("10.0.0.1"))
+
+    assert engine_runner.timed_out_hosts(out, "tcp") == set(), "enrichment 는 권한을 뺏지 않는다"
+    assert engine_runner.observed_hosts(out, spec) == {"10.0.0.1"}
+    assert engine_runner.observed_scope({"10.0.0.1|443|tcp"}, out, spec) == {"10.0.0.1|443|tcp"}
+    assert ("10.0.0.1", "tcp") in engine_runner.absence_times(out, spec)
+
+
+def test_a_udp_timeout_does_not_strip_tcp_authority(tmp_path):
+    """프로토콜 축이 없으면 UDP 타임아웃 하나가 완결된 TCP sweep 의 권한까지 지운다."""
+    from scanops.scanning import engine_runner
+
+    out = tmp_path / "scan_3"
+    spec = {"batch_size": 64, "stages": {"tcp": {"enabled": True}, "udp": {"enabled": True}}}
+    _write_state(out, {"live": ["10.0.0.1"], "coverage": [
+        {"artifact": "stage-tcp-b0.xml", "proto": "tcp", "role": "authority",
+         "hosts": ["10.0.0.1"], "ports": "1-65535", "finished": True},
+        {"artifact": "stage-udp-b0.xml", "proto": "udp", "role": "authority",
+         "hosts": ["10.0.0.1"], "ports": "53", "finished": True},
+    ]})
+    (out / "stage-tcp-b0.xml").write_bytes(_clean_xml("10.0.0.1"))
+    (out / "stage-udp-b0.xml").write_bytes(_timedout_only_xml("10.0.0.1", "udp"))
+
+    assert engine_runner.timed_out_hosts(out, "tcp") == set()
+    assert engine_runner.timed_out_hosts(out, "udp") == {"10.0.0.1"}
+    scope = engine_runner.observed_scope({"10.0.0.1|443|tcp", "10.0.0.1|53|udp"}, out, spec)
+    assert scope == {"10.0.0.1|443|tcp"}, "TCP 는 살고 UDP 만 권한을 잃는다"
+    absence = engine_runner.absence_times(out, spec)
+    assert ("10.0.0.1", "tcp") in absence and ("10.0.0.1", "udp") not in absence
+
+
+def test_the_web_request_carries_both_host_timeouts_into_the_spec():
+    """화면의 두 값이 실행 spec 까지 도달하는지 - 중간에서 끊기면 조용한 무시로 되돌아간다."""
+    from pathlib import Path
+
+    from scanops.api.scans import _host_timeouts
+    from scanops.scanning import engine_runner, scan_options
+
+    class _Body:
+        host_timeout = "30m"
+        udp_host_timeout = "0"
+
+    spec = engine_runner.build_job_spec(
+        1, ["10.0.0.1"], [], ["syn", "udp", "version"], "", None, Path("/tmp/x"), 64,
+        host_timeouts=_host_timeouts(_Body()))
+    assert spec["stages"]["tcp"]["host_timeout"] == "30m"
+    assert spec["stages"]["service"]["host_timeout"] == "30m"
+    # "0" 은 명시적 끄기다 - 빈 값(지정 없음)과 다르다.
+    assert spec["stages"]["udp"]["host_timeout"] == "0"
+
+    # 지정이 없으면 단계별 기본값을 쓴다.
+    class _Empty:
+        host_timeout = ""
+        udp_host_timeout = ""
+
+    plain = engine_runner.build_job_spec(
+        1, ["10.0.0.1"], [], ["syn", "udp", "version"], "", None, Path("/tmp/x"), 64,
+        host_timeouts=_host_timeouts(_Empty()))
+    assert plain["stages"]["tcp"]["host_timeout"] == scan_options.HOST_TIMEOUT_DEFAULTS["tcp"]
+    assert plain["stages"]["udp"]["host_timeout"] == scan_options.HOST_TIMEOUT_DEFAULTS["udp"]
+    assert (plain["stages"]["tcp"]["host_timeout"]
+            != plain["stages"]["udp"]["host_timeout"]), "TCP·UDP 상한은 따로 간다"
+
+
+def test_the_scan_paths_share_one_host_timeout_grammar():
+    """상한 값의 문법이 갈리면 같은 값이 한쪽에서만 안전 제어가 된다.
+
+    특히 `None` 은 양쪽 모두 **거절**해야 한다. 조용히 ""(미적용)으로 바꾸면 state/spec 한
+    줄로 상한만 풀려 막으려던 지연이 그대로 돌아온다 - #48 이 정확히 그 사고였다.
+    """
+    import re
+    import sys
+
+    import pytest
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine.spec import validate_host_timeout
+
+    for good, want in (("15m", "15m"), ("30s", "30s"), ("2h", "2h"),
+                       ("900", "900"), ("0", ""), ("", ""), ("  10m  ", "10m")):
+        assert validate_host_timeout(good) == want
+
+    for bad in ("15x", "m15", "-5m", "abc"):
+        with pytest.raises(ValueError):
+            validate_host_timeout(bad)
+    with pytest.raises(ValueError):
+        validate_host_timeout(None)      # 끄기가 아니라 거절
+
+    # 단독 스캐너는 별도 프로세스라 import 할 수 없다 - 문법 원본을 소스에서 읽어 대조한다.
+    text = (pathlib_Path(__file__).resolve().parents[2] / "scanner" / "scanops_scanner.py"
+            ).read_text(encoding="utf-8")
+    standalone = re.search(r"^STATS_RE = re\.compile\(r\"(.+?)\"\)", text, re.M).group(1)
+    engine = re.search(
+        r"^_HOST_TIMEOUT_RE = re\.compile\(r\"(.+?)\"\)",
+        (pathlib_Path(__file__).resolve().parents[2] / "engine" / "scanops_engine" / "spec.py"
+         ).read_text(encoding="utf-8"), re.M).group(1)
+    assert engine == standalone, "엔진과 단독 스캐너의 시간 형식이 달라졌다"
+
+    # 기본값도 nmap 이 받는 형식이어야 한다 - 여기서 어긋나면 모든 단계 스캔이 400 이 된다.
+    from scanops.scanning import scan_options
+
+    for stage, value in scan_options.HOST_TIMEOUT_DEFAULTS.items():
+        assert validate_host_timeout(value) == value, f"{stage} 기본값이 문법에 안 맞는다"

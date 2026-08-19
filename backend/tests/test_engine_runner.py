@@ -7,7 +7,7 @@ import pytest
 
 from scanops.db import SessionLocal
 from scanops.models import Finding, FindingEvent, ScanRun
-from scanops.scanning import engine_runner
+from scanops.scanning import engine_runner, scan_options
 
 
 def test_build_job_spec_maps_options_to_stages():
@@ -57,12 +57,14 @@ def test_build_job_spec_enables_only_protocols_with_explicit_ports(
         "scan_type": "syn",
         "min_rate": 0,
         "max_retries": 2,
+        "host_timeout": scan_options.HOST_TIMEOUT_DEFAULTS["tcp"],
     }
     assert spec["stages"]["udp"] == {
         "enabled": udp,
         "ports": udp_ports,
         "timing": "-T4",
         "max_retries": 2,
+        "host_timeout": scan_options.HOST_TIMEOUT_DEFAULTS["udp"],
     }
 
 

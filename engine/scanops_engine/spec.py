@@ -17,6 +17,9 @@ _EXCLUDE_RANGE_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})-(\d{1,3
 _PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
 _NSE_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 _TIMINGS = {"-T0", "-T1", "-T2", "-T3", "-T4", "-T5"}
+# 호스트당 상한(nmap --host-timeout). 단독 스캐너 validate_host_timeout 과 같은 문법이며
+# 세 경로가 어긋나지 않는지는 백엔드 계약 테스트가 검사한다.
+_HOST_TIMEOUT_RE = re.compile(r"^\d+[smh]?$")
 
 # standalone auto 스캔과 공유하는 기본 발견/동시성 정책.
 DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"
@@ -53,6 +56,7 @@ class DiscoveryStage:
     mode: str = "sn"          # sn=핑 스윕 / pn=발견 생략(타겟 전체 live 취급)
     timing: str = "-T4"
     max_retries: int = 2
+    host_timeout: str = ""    # "" = 미적용
 
 
 @dataclass
@@ -63,6 +67,7 @@ class TcpStage:
     timing: str = "-T4"
     min_rate: int = 0         # 0=강제 하한 없음; 명시된 경우에만 --min-rate 적용
     max_retries: int = 2
+    host_timeout: str = ""    # "" = 미적용
 
 
 @dataclass
@@ -71,6 +76,8 @@ class UdpStage:
     ports: str = DEFAULT_UDP_PORTS
     timing: str = "-T4"
     max_retries: int = 2
+    host_timeout: str = ""    # "" = 미적용. TCP 와 별개 값이다 — 같이 묶으면 UDP 의
+                              # ICMP 율제한 지연 특성에 맞춰 TCP 까지 늘어난다.
 
 
 @dataclass
@@ -82,6 +89,8 @@ class ServiceStage:
     nse: list = field(default_factory=lambda: list(DEFAULT_NSE))
     max_retries: int = 2
     confirm: bool = False      # 2-pass — 1차에 안 잡히면 retries↑ 재확인(재스캔용)
+    host_timeout: str = ""     # "" = 미적용
+    udp_host_timeout: str = "" # UDP probe 전용 상한(비면 host_timeout 을 따른다)
 
 
 _STAGE_CLASSES = {"discovery": DiscoveryStage, "tcp": TcpStage, "udp": UdpStage, "service": ServiceStage}
@@ -109,6 +118,25 @@ def _validate_exclude(value) -> None:
         raise ValueError(f"잘못된 제외 대상 IPv4/CIDR입니다: {value!r}") from exc
     if network.version != 4:
         raise ValueError(f"IPv6 제외 대상은 아직 지원하지 않습니다: {value!r}")
+
+
+def validate_host_timeout(value: object, label: str = "host_timeout") -> str:
+    """호스트당 상한. 빈 값/0 이면 미적용. 그 외는 nmap 시간 형식(15m 등).
+
+    ``None`` 은 '끄기'가 아니라 **거절**이다 — 단독 스캐너 validate_host_timeout 과 같은
+    이유다(#48). 이 값은 한 호스트가 실행 전체를 붙잡는 것을 막는 안전 제어라, 손상됐거나
+    미래 버전이 쓴 spec 의 ``"host_timeout": null`` 을 조용히 ""(미적용)으로 바꾸면 막으려던
+    지연이 그대로 돌아온다. 끄고 싶으면 ""/0 을 명시해야 한다.
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{label} 값이 문자열이 아닙니다: {value!r}. 끄려면 0 또는 빈 값을 명시하세요.")
+    value = value.strip()
+    if value in ("", "0"):
+        return ""
+    if not _HOST_TIMEOUT_RE.fullmatch(value):
+        raise ValueError(f"{label} 값은 30s, 15m 같은 nmap 시간 형식이어야 합니다(끄려면 0): {value!r}")
+    return value
 
 
 def _validate_ports(value: str, label: str) -> None:
@@ -211,6 +239,16 @@ class JobSpec:
                           ("service", self.service.timing)):
             if tm not in _TIMINGS:
                 raise ValueError(f"허용되지 않는 {label} 타이밍: {tm!r}")
+        # 상한은 단계마다 별개 값이다. 여기서 정규화까지 해 두면 pipeline 은 문자열이
+        # 비었는지만 보면 된다.
+        self.discovery.host_timeout = validate_host_timeout(
+            self.discovery.host_timeout, "discovery.host_timeout")
+        self.tcp.host_timeout = validate_host_timeout(self.tcp.host_timeout, "tcp.host_timeout")
+        self.udp.host_timeout = validate_host_timeout(self.udp.host_timeout, "udp.host_timeout")
+        self.service.host_timeout = validate_host_timeout(
+            self.service.host_timeout, "service.host_timeout")
+        self.service.udp_host_timeout = validate_host_timeout(
+            self.service.udp_host_timeout, "service.udp_host_timeout")
         for n in self.service.nse:
             if not _NSE_RE.match(n):
                 raise ValueError(f"허용되지 않는 NSE 스크립트명: {n!r}")
