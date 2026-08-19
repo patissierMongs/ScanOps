@@ -27,6 +27,9 @@ DISCOVERY_PA = "-PA80,443,3389"
 DEFAULT_MIN_HOSTGROUP = 64
 DEFAULT_MAX_PARALLELISM = 100
 DEFAULT_NSE_SCRIPT_TIMEOUT = "10s"
+# 식별 단계 동시 실행 상한. 프로세스가 늘면 스캔 서버의 소켓·CPU 를 그만큼 쓰므로,
+# '느려서 못 쓰는' 문제를 '서버가 죽는' 문제로 바꾸지 않도록 위쪽을 막아 둔다.
+_MAX_SERVICE_WORKERS = 32
 
 # nmapParser 기본 UDP 포트 집합(원본 one-liner 계승)
 DEFAULT_UDP_PORTS = ("7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,"
@@ -91,6 +94,10 @@ class ServiceStage:
     confirm: bool = False      # 2-pass — 1차에 안 잡히면 retries↑ 재확인(재스캔용)
     host_timeout: str = ""     # "" = 미적용
     udp_host_timeout: str = "" # UDP probe 전용 상한(비면 host_timeout 을 따른다)
+    # 식별 단계에서 동시에 돌릴 호스트 수. 이 단계는 프로세스마다 타깃이 1개라 nmap 자신의
+    # 호스트 병렬성(--min-hostgroup)을 못 쓴다 - 직렬로 두면 호스트 수에 소요가 그대로 비례한다.
+    # 재스캔(닫힘 권한이 걸린 경로)은 1 로 강제해 실패 시 즉시 중단하는 의미를 지킨다.
+    workers: int = 8
 
 
 _STAGE_CLASSES = {"discovery": DiscoveryStage, "tcp": TcpStage, "udp": UdpStage, "service": ServiceStage}
@@ -249,6 +256,13 @@ class JobSpec:
             self.service.host_timeout, "service.host_timeout")
         self.service.udp_host_timeout = validate_host_timeout(
             self.service.udp_host_timeout, "service.udp_host_timeout")
+        try:
+            self.service.workers = int(self.service.workers)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"service.workers 는 정수여야 합니다: {self.service.workers!r}") from exc
+        if not 1 <= self.service.workers <= _MAX_SERVICE_WORKERS:
+            raise ValueError(
+                f"service.workers 는 1-{_MAX_SERVICE_WORKERS} 여야 합니다: {self.service.workers}")
         for n in self.service.nse:
             if not _NSE_RE.match(n):
                 raise ValueError(f"허용되지 않는 NSE 스크립트명: {n!r}")

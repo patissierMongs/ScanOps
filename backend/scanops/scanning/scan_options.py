@@ -171,6 +171,11 @@ DEFAULT_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 #
 # 식별 단계는 열린 포트에만 붙으므로 포트 수가 작다. 다만 TCP 는 --version-all + NSE 가 붙고
 # UDP 는 이 프로젝트에서 실제로 죽어 온 지점이라 UDP 를 더 짧게 둔다.
+# 식별 단계에서 동시에 돌릴 호스트 수. 이 단계는 nmap 프로세스마다 타깃이 1개라
+# nmap 자신의 호스트 병렬성(--min-hostgroup)을 쓸 수 없어, 직렬로 두면 소요가 호스트 수에
+# 그대로 비례한다. 호스트당 상한을 켠 뒤로는 느린 호스트의 대기시간까지 그대로 더해진다.
+SERVICE_WORKERS_DEFAULT = 8
+
 HOST_TIMEOUT_DEFAULTS = {
     "tcp": "20m",          # TCP 전수 sweep
     "udp": "10m",          # UDP sweep

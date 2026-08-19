@@ -885,3 +885,76 @@ def test_the_scan_paths_share_one_host_timeout_grammar():
 
     for stage, value in scan_options.HOST_TIMEOUT_DEFAULTS.items():
         assert validate_host_timeout(value) == value, f"{stage} 기본값이 문법에 안 맞는다"
+
+
+def test_the_service_stage_probes_hosts_concurrently(tmp_path):
+    """식별 단계는 프로세스마다 타깃이 1개라 nmap 의 호스트 병렬성을 쓸 수 없다.
+
+    그래서 직렬로 두면 소요가 호스트 수에 그대로 비례한다 - /24 한 대역이면 nmap 프로세스
+    수백 개를 하나씩 세우고 기다린다. 호스트당 상한을 켠 뒤로는 느린 호스트의 대기시간까지
+    그대로 더해진다. 전체 스캔의 stage3 는 enrichment 라 닫힘 권한 경로가 아니므로
+    (권한은 discovery + sweep) 여기를 동시에 돌려도 권한 판정은 그대로다.
+    """
+    import threading
+
+    pipe, spec = _pipeline(tmp_path, {
+        "job_id": "j", "targets": [f"10.0.0.{i}" for i in range(1, 9)],
+        "out_dir": str(tmp_path),
+        "stages": {"service": {"workers": 4}},
+    })
+    pipe.open_map = {f"10.0.0.{i}": {"tcp": [22]} for i in range(1, 9)}
+
+    lock = threading.Lock()
+    live, peak = 0, 0
+
+    def fake(stage, args, base, fatal=True):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        threading.Event().wait(0.05)
+        with lock:
+            live -= 1
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1"))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._service()
+    assert peak > 1, "식별이 여전히 호스트 하나씩 직렬로 돈다"
+    assert peak <= 4, "상한을 넘겨 프로세스를 띄우면 스캔 서버가 죽는다"
+    # 모든 호스트가 실제로 식별됐고 재개 표식도 남아야 한다.
+    assert all(pipe.state.service_done(f"10.0.0.{i}") for i in range(1, 9))
+
+
+def test_a_rescan_still_probes_one_host_at_a_time(tmp_path):
+    """재스캔은 stage3 가 유일한 폐쇄 근거다 - 실패하면 그 자리에서 멈춰야 한다.
+
+    동시에 여러 개를 띄워 두면 '이미 시작한 것들을 어떻게 하나'가 애매해진다.
+    권한이 걸린 경로에서는 애매함을 만들지 않는다.
+    """
+    import threading
+
+    pipe, spec = _pipeline(tmp_path, {
+        "job_id": "j", "targets": ["10.0.0.1"], "out_dir": str(tmp_path),
+        "targets_ports": {"10.0.0.1": [22], "10.0.0.2": [22], "10.0.0.3": [22]},
+        "stages": {"service": {"workers": 8}},
+    })
+    pipe.open_map = {ip: {"tcp": [22]} for ip in ("10.0.0.1", "10.0.0.2", "10.0.0.3")}
+
+    lock = threading.Lock()
+    live, peak = 0, 0
+
+    def fake(stage, args, base, fatal=True):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        threading.Event().wait(0.02)
+        with lock:
+            live -= 1
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1"))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._service()
+    assert peak == 1, "재스캔은 직렬이어야 한다"

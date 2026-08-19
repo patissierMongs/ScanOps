@@ -124,6 +124,7 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
         "nse": list(scan_options.NSE_DEFAULT_KEYS if nse is None else nse),
         "host_timeout": limits["service"],
         "udp_host_timeout": limits["service_udp"],
+        "workers": scan_options.SERVICE_WORKERS_DEFAULT,
     }
     spec: dict = {
         "job_id": f"scan_{scan_id}",

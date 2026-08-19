@@ -5,7 +5,9 @@ run-state 재개 + 중지. 재스캔(targets_ports)이면 발견·찾기를 건�
 """
 from __future__ import annotations
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import nmaprun
@@ -22,6 +24,21 @@ _UDP_RETRY_ENGINE = "select"
 _MAX_SPLIT_UNITS = 32
 
 
+class _LockedSink:
+    """식별 단계를 동시에 돌리면 이벤트가 여러 스레드에서 나온다.
+
+    싱크는 JSONL 한 줄씩을 쓰는데, 잠그지 않으면 줄이 서로 섞여 읽는 쪽이 파싱에 실패한다.
+    직렬로 돌 때는 락이 사실상 비용이 없으므로 항상 감싼다.
+    """
+
+    def __init__(self, inner, lock):
+        self._inner, self._lock = inner, lock
+
+    def emit(self, *args, **kwargs):
+        with self._lock:
+            self._inner.emit(*args, **kwargs)
+
+
 def _batches(items, size):
     size = max(1, size)
     return [items[i:i + size] for i in range(0, len(items), size)]
@@ -30,7 +47,8 @@ def _batches(items, size):
 class Pipeline:
     def __init__(self, spec, sink, nmap):
         self.spec = spec
-        self.sink = sink
+        self._lock = threading.Lock()
+        self.sink = _LockedSink(sink, self._lock)
         self.nmap = nmap
         self.out = Path(spec.out_dir)
         self.out.mkdir(parents=True, exist_ok=True)
@@ -54,7 +72,8 @@ class Pipeline:
             )
         elif r["rc"] != 0:
             if fatal:
-                self.counts["errors"] += 1
+                with self._lock:
+                    self.counts["errors"] += 1
             self.sink.emit("error", stage=stage, rc=r["rc"], fatal=fatal,
                            cmd=" ".join(map(str, r["cmd"])))
         return r
@@ -74,10 +93,14 @@ class Pipeline:
         """
         entry = {"artifact": artifact, "proto": proto, "role": role,
                  "hosts": list(hosts), "ports": ports, "finished": bool(finished)}
-        log = list(self.state.get("coverage") or [])
-        log.append(entry)
-        self.state.set("coverage", log)
-        self.state.save()
+        # 식별 단계는 동시에 돌 수 있고 이건 read-modify-write 라, 잠그지 않으면 기록이
+        # 통째로 사라진다 - 그러면 그 산출물이 커버한 호스트가 '훑지 않음'이 되어
+        # (fail-closed 방향이긴 하지만) 닫아야 할 것을 못 닫는다.
+        with self._lock:
+            log = list(self.state.get("coverage") or [])
+            log.append(entry)
+            self.state.set("coverage", log)
+            self.state.save()
 
     def _save(self):
         self.state.set("open_map", self.open_map)
@@ -392,27 +415,46 @@ class Pipeline:
         targets = {ip: m for ip, m in self.open_map.items() if m.get("tcp") or m.get("udp")}
         self.sink.emit("stage_start", stage="service", hosts=len(targets))
         secs, nsvc = 0.0, 0
-        for ip in sorted(targets, key=nmaprun._ipkey):
+        # targets_ports 재스캔은 stage3 가 유일한 폐쇄 근거다 — 거기서는 실패를 격리하지
+        # 않는다. 전체 스캔에서는 sweep 이 이미 개방 여부의 권위를 쥐고 있으므로 식별
+        # 실패는 enrichment 저하로만 남긴다.
+        isolate = not self.spec.targets_ports
+        # 이 단계는 프로세스마다 타깃이 1개라 nmap 자신의 호스트 병렬성을 쓸 수 없다.
+        # 직렬로 두면 소요가 호스트 수에 그대로 비례한다 - /24 한 대역이면 nmap 프로세스
+        # 수백 개를 하나씩 세우고 기다리는 셈이고, 호스트당 상한을 걸어 둔 만큼 느린
+        # 호스트의 대기시간도 그대로 더해진다.
+        #
+        # 닫힘 권한이 걸린 재스캔은 1 로 강제한다. 거기서는 실패가 곧 '판단할 수 없음'이라
+        # 그 자리에서 멈춰야 하는데, 동시에 여러 개를 띄워 두면 이미 시작한 것들의 처리를
+        # 어떻게 할지가 애매해진다 - 권한 경로에서 애매함을 만들지 않는다.
+        workers = max(1, int(sp.workers)) if isolate else 1
+        pending = [ip for ip in sorted(targets, key=nmaprun._ipkey)
+                   if not self.state.service_done(ip)]
+        for group in _batches(pending, workers):
             if self.state.stopped():
-                self.sink.emit("stage_done", stage="service", seconds=round(secs, 2), counts={"stopped": True})
+                self.sink.emit("stage_done", stage="service", seconds=round(secs, 2),
+                               counts={"stopped": True})
                 return
-            if self.state.service_done(ip):
-                continue
-            # targets_ports 재스캔은 stage3 가 유일한 폐쇄 근거다 — 거기서는 실패를 격리하지
-            # 않는다. 전체 스캔에서는 sweep 이 이미 개방 여부의 권위를 쥐고 있으므로 식별
-            # 실패는 enrichment 저하로만 남긴다.
-            isolate = not self.spec.targets_ports
-            s1, rows, ok = self._probe_host(ip, targets[ip], sp, isolate_failures=isolate)
-            secs += s1
-            nsvc += len(rows)
-            if not ok:
-                # 격리 모드에서는 이 호스트만 건너뛰고 나머지 호스트의 식별을 계속한다.
-                # 예전에는 여기서 stage 를 통째로 중단해, nmap 하나가 죽으면 뒤따르는
-                # 호스트가 전부 식별되지 못한 채 실행이 끝났다.
-                if not isolate or self.state.stopped():
-                    return False
-                continue
-            self.state.mark_service_done(ip)
+            if len(group) == 1:
+                done = [(group[0], *self._probe_host(group[0], targets[group[0]], sp,
+                                                     isolate_failures=isolate))]
+            else:
+                with ThreadPoolExecutor(max_workers=len(group)) as pool:
+                    futures = [(ip, pool.submit(self._probe_host, ip, targets[ip], sp,
+                                                isolate_failures=isolate)) for ip in group]
+                    done = [(ip, *future.result()) for ip, future in futures]
+            # 상태 변경은 여기서만 한다 - 순서를 고정해야 재개·이벤트가 결정적으로 남는다.
+            for ip, s1, rows, ok in done:
+                secs += s1
+                nsvc += len(rows)
+                if not ok:
+                    # 격리 모드에서는 이 호스트만 건너뛰고 나머지 호스트의 식별을 계속한다.
+                    # 예전에는 여기서 stage 를 통째로 중단해, nmap 하나가 죽으면 뒤따르는
+                    # 호스트가 전부 식별되지 못한 채 실행이 끝났다.
+                    if not isolate or self.state.stopped():
+                        return False
+                    continue
+                self.state.mark_service_done(ip)
             self._save()
         self.counts["services"] = nsvc
         self.sink.emit("stage_done", stage="service", seconds=round(secs, 2), counts={"services": nsvc})
