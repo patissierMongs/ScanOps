@@ -10,7 +10,14 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
-_DEFAULT = {"stages_done": [], "open_map": {}, "live": None, "service_done": [], "stop": False}
+_DEFAULT = {"stages_done": [], "open_map": {}, "live": None, "service_done": [],
+            # 배치 단위 재개 — 스캔은 배치마다 sweep → 식별까지 끝내고 다음 배치로 간다.
+            # 단계 전체가 아니라 '어느 배치의 어느 일까지 끝났나'가 재개 단위다.
+            "batches_done": [],
+            # --host-timeout 으로 포기당한 호스트. 나중에 따로 다시 스캔할 대상이라
+            # 실행이 끝나도 남겨야 한다.
+            "gave_up": [],
+            "stop": False}
 _STOP_SENTINEL = "stop-requested"
 
 
@@ -39,6 +46,25 @@ class RunState:
     def mark_done(self, stage):
         if stage not in self.data["stages_done"]:
             self.data["stages_done"].append(stage)
+
+    def batch_done(self, key) -> bool:
+        return key in self.data["batches_done"]
+
+    def mark_batch_done(self, key):
+        if key not in self.data["batches_done"]:
+            self.data["batches_done"].append(key)
+
+    def add_gave_up(self, hosts):
+        """포기당한 호스트를 모아 둔다 - 이후 별도 스캔의 대상 목록이 된다."""
+        known = self.data["gave_up"]
+        for host in hosts:
+            if host not in known:
+                known.append(host)
+
+    def clear_gave_up(self, hosts):
+        """재시도로 끝까지 훑은 호스트는 목록에서 뺀다 - 한 번 걸렸다고 영구 낙인이 아니다."""
+        drop = set(hosts)
+        self.data["gave_up"] = [h for h in self.data["gave_up"] if h not in drop]
 
     def service_done(self, ip) -> bool:
         return ip in self.data["service_done"]

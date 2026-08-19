@@ -874,8 +874,18 @@ def test_custom_timing_is_used_by_discovery_sweeps_and_service(monkeypatch, tmp_
 
     assert counts["errors"] == 0 and len(calls) == 5
     assert all("-T2" in args and "-T4" not in args for args in calls)
-    assert calls[0][calls[0].index("--max-retries") + 1] == "3"
-    assert all(args[args.index("--max-retries") + 1] == "4" for args in calls[-2:])
+
+    # 위치가 아니라 **역할**로 고른다. 스캔은 배치마다 sweep → 식별까지 끝내고 다음 배치로
+    # 가므로 호출 순서가 discovery · tcp sweep · tcp 식별 · udp sweep · udp 식별 이다.
+    def retries(args):
+        return args[args.index("--max-retries") + 1]
+
+    discovery = [args for args in calls if "-sn" in args]
+    identify = [args for args in calls if "-sV" in args]
+    sweeps = [args for args in calls if "-sn" not in args and "-sV" not in args]
+    assert len(discovery) == 1 and len(identify) == 2 and len(sweeps) == 2
+    assert retries(discovery[0]) == "3"
+    assert all(retries(args) == "4" for args in identify), "식별은 service.max_retries 를 쓴다"
 
 
 @pytest.mark.parametrize(("scan_type", "scan_flag"), [

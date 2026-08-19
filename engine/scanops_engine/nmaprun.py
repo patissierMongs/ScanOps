@@ -116,6 +116,18 @@ def _ipv4(h):
     return a.get("addr") if a is not None else None
 
 
+def timed_out(xml_path) -> list[str]:
+    """``--host-timeout`` 으로 nmap 이 포기한 호스트.
+
+    nmap 은 상한을 넘긴 호스트를 건너뛰고 포트 표를 아예 쓰지 않으며, `<host>` 에
+    ``timedout="true"`` 만 남긴 뒤 실행 자체는 ``exit="success"`` 로 끝낸다. 그래서 이
+    표식을 안 읽으면 '살아 있는데 열린 포트가 없다'로 보인다 - 그 호스트의 기존 발견이
+    전부 닫힘 처리되는 자리다.
+    """
+    return sorted({ip for h in _hosts(xml_path)
+                   if h.get("timedout") == "true" and (ip := _ipv4(h))}, key=_ipkey)
+
+
 def hosts_up(xml_path) -> list[str]:
     ups = [ip for h in _hosts(xml_path)
            if (st := h.find("status")) is not None and st.get("state") == "up"

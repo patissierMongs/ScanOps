@@ -529,6 +529,16 @@ def swept_batches(out_dir, spec: dict) -> int:
     return min(counts) if counts else 0
 
 
+def gave_up_hosts(out_dir) -> list[str]:
+    """``--host-timeout`` 으로 포기당해 **아직 제대로 못 훑은** 호스트.
+
+    엔진이 배치를 끝낼 때마다 run-state 에 모아 둔다(재시도로 끝까지 훑으면 목록에서 빠진다).
+    이 실행에서는 부재를 말할 자격이 없는 호스트이자, 나중에 그 호스트들만 골라 다시
+    스캔할 대상 목록이다 - 안 남겨 두면 '왜 이 대역만 결과가 비지?' 를 알아낼 방법이 없다.
+    """
+    return [h for h in (_read_state(Path(out_dir)).get("gave_up") or []) if isinstance(h, str)]
+
+
 def coverage_entries(out_dir) -> list[dict]:
     """엔진이 nmap 을 돌리며 적어 둔 커버리지 기록(run-state 의 ``coverage``).
 
