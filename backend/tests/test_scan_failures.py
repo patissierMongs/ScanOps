@@ -1869,6 +1869,76 @@ def test_selected_rescan_keeps_time_authority_per_port(client, monkeypatch, tmp_
     assert 'portid="443"' in merged and 'portid="22"' not in merged
 
 
+def test_selected_rescan_timeout_only_denies_its_own_port(client, monkeypatch, tmp_path):
+    """22 timeout 뒤 443 성공이 같은 호스트의 22 판정을 덮어쓰면 안 된다."""
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    ip = "10.4.4.5"
+
+    db = SessionLocal()
+    try:
+        previous = ScanRun(name="이전 스캔", status="done")
+        db.add(previous)
+        db.commit()
+        previous_id = previous.id
+        for port, service in ((22, "ssh"), (443, "https")):
+            db.add(Finding(
+                finding_key=f"{ip}|{port}|tcp", host_ip=ip, port=port, proto="tcp",
+                state="open", service=service, first_scan_id=previous_id, last_scan_id=previous_id,
+            ))
+        db.commit()
+    finally:
+        db.close()
+
+    scan_id = _scan_with_spec(tmp_path, {
+        "targets": [ip], "exclude": [], "out_dir": str(tmp_path / "ignored"),
+        "rescan_units": [
+            {"ip": ip, "port": 22, "proto": "tcp"},
+            {"ip": ip, "port": 443, "proto": "tcp"},
+        ],
+        "stages": {"service": {"enabled": True, "confirm": False}},
+        "scanops": {"scope_keys": [f"{ip}|22|tcp", f"{ip}|443|tcp"]},
+    })
+    out_dir = scans_api._settings.scans_dir / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text(
+        json.dumps({"event": "job_done", "status": "done", "counts": {"live": 1}}) + "\n",
+        encoding="utf-8",
+    )
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "stages_done": ["job"], "live": [ip], "open_map": {}, "stop": False,
+        "coverage": [
+            {"artifact": "stage3-10_4_4_5-tcp22.xml", "proto": "tcp", "role": "authority",
+             "hosts": [ip], "ports": "T:22", "finished": True},
+            {"artifact": "stage3-10_4_4_5-tcp443.xml", "proto": "tcp", "role": "authority",
+             "hosts": [ip], "ports": "T:443", "finished": True},
+        ],
+    }), encoding="utf-8")
+    (out_dir / "stage3-10_4_4_5-tcp22.xml").write_text(
+        '<?xml version="1.0"?><nmaprun scanner="nmap">'
+        '<host timedout="true"><status state="up"/><address addr="10.4.4.5" addrtype="ipv4"/>'
+        '</host><runstats><finished time="1893455999" exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
+    (out_dir / "stage3-10_4_4_5-tcp443.xml").write_text(
+        '<?xml version="1.0"?><nmaprun scanner="nmap">'
+        '<scaninfo type="syn" protocol="tcp" numservices="1" services="443"/>'
+        '<runstats><finished time="1893456000" exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
+    monkeypatch.setattr(scans_api.scope, "check_scope", lambda hosts: None)
+
+    scans_api._finalize_completed_engine_worker(scan_id)
+
+    db = SessionLocal()
+    try:
+        rows = {row.port: row for row in db.query(Finding).filter(Finding.host_ip == ip).all()}
+        assert rows[22].state == "open" and rows[22].last_scan_id == previous_id
+        assert rows[443].state == "closed" and rows[443].last_scan_id == scan_id
+        events = db.query(FindingEvent).all()
+        assert not [e for e in events if e.finding_id == rows[22].id and e.type == "CLOSED"]
+        assert [e for e in events if e.finding_id == rows[443].id and e.type == "CLOSED"]
+    finally:
+        db.close()
+
+
 def test_the_merged_evidence_records_only_what_the_run_actually_closed(client, monkeypatch, tmp_path):
     """병합 XML 이 DB 와 반대로 증언하면 안 된다.
 

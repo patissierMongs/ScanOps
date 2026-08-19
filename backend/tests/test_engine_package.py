@@ -1464,7 +1464,7 @@ def test_allinone_verify_site_rejects_mismatched_abi(tmp_path):
     site = tmp_path / "site"
     for pkg in ("fastapi", "uvicorn", "sqlalchemy", "pydantic", "pydantic_core",
                 "pydantic_settings", "starlette", "openpyxl", "multipart",
-                "click", "colorama", "greenlet"):
+                "click", "colorama"):
         (site / pkg).mkdir(parents=True)
     (site / "pydantic_core" / "_pydantic_core.cp312-win_amd64.pyd").write_bytes(b"x")
 
@@ -1480,6 +1480,20 @@ def test_allinone_verify_site_reports_missing_dependency(tmp_path):
 
     with pytest.raises(SystemExit, match="빠진 패키지"):
         module.verify_site(site)
+
+
+def test_allinone_verify_site_accepts_deliberately_trimmed_greenlet(tmp_path):
+    """동기 SQLite 서버는 greenlet을 싣지 않는다; 검증기가 제거 정책과 충돌하면 안 된다."""
+    module = _load_allinone()
+    module.configure("3.13")
+    site = tmp_path / "site"
+    for pkg in ("fastapi", "uvicorn", "sqlalchemy", "pydantic", "pydantic_core",
+                "pydantic_settings", "starlette", "openpyxl", "multipart",
+                "click", "colorama"):
+        (site / pkg).mkdir(parents=True)
+
+    module.verify_site(site)
+    assert "greenlet" in module.SITE_DROP_PACKAGES
 
 
 # ── 산출물 완결성 → 닫힘 권한 (실제 Pipeline 으로 검증) ────────────────────────

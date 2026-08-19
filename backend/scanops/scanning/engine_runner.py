@@ -417,22 +417,33 @@ def absence_times(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dic
     times: dict[tuple[str, str], object] = {}
     if force_scanned_hosts:
         confirm = bool(((spec.get("stages") or {}).get("service") or {}).get("confirm", False))
-        # 재스캔에서는 stage3 가 곧 authority 다. 그 산출물에서 포기당한 호스트는 포트를
-        # 끝까지 보지 못했으므로 시각도 줄 수 없다 - observed_hosts 만 막으면 절반만 막힌다.
-        gave_up = timed_out_hosts(out, force_scanned_hosts=True)
+
+        def completed_for(ip: str, paths: list[Path]) -> list[Path]:
+            """이 authority 단위가 실제로 끝까지 관측한 산출물만 돌려준다.
+
+            선택 재스캔은 같은 host/proto라도 포트마다 별도 XML을 만든다. 따라서 timeout을
+            host 하나의 verdict로 합치면 뒤 포트가 앞 포트의 판정을 덮어쓴다. base/confirm을
+            포함한 바로 그 단위의 산출물만 판정해야 한다.
+            """
+            if not paths or any(not path.exists() or not _xml_run_finished(path) for path in paths):
+                return []
+            try:
+                if any(ip in nmap_parse.timed_out_hosts(path.read_bytes()) for path in paths):
+                    return []
+            except (OSError, ET.ParseError):
+                return []
+            return paths
+
         for unit in spec.get("rescan_units") or []:
             try:
                 ip = str(unit["ip"])
                 port, proto = int(unit["port"]), str(unit.get("proto") or "tcp").lower()
             except (KeyError, TypeError, ValueError):
                 continue
-            if ip in gave_up:
-                continue
             # 선택 재스캔은 포트마다 별도 산출물을 만든다. 22 를 훑은 XML 은 443 의 부재를
             # 증명하지 못하므로 포트까지 키에 넣는다 - (ip, proto) 로 뭉치면 늦게 끝난
             # 포트의 시각을 다른 포트가 빌려 쓴다.
-            paths = [path for path in _stage3_expected(out, ip, f"{proto}{port}", confirm)
-                     if path.exists()]
+            paths = completed_for(ip, _stage3_expected(out, ip, f"{proto}{port}", confirm))
             if not paths:
                 continue
             stamps = [s for s in (observed_at(path.read_bytes()) for path in paths)
@@ -441,10 +452,7 @@ def absence_times(out_dir, spec: dict, force_scanned_hosts: bool = False) -> dic
         # targets_ports 는 한 XML 이 그 호스트의 여러 포트를 실제로 함께 훑으므로 산출물
         # 범위가 곧 (ip, tcp) 다. 여기서까지 포트로 쪼개면 있지도 않은 구분을 만든다.
         for ip in (spec.get("targets_ports") or {}):
-            if str(ip) in gave_up:
-                continue
-            paths = [path for path in _stage3_expected(out, str(ip), "tcp", confirm)
-                     if path.exists()]
+            paths = completed_for(str(ip), _stage3_expected(out, str(ip), "tcp", confirm))
             if not paths:
                 continue
             stamps = [s for s in (observed_at(path.read_bytes()) for path in paths)
@@ -625,12 +633,9 @@ def observed_hosts(out_dir, spec: dict, force_scanned_hosts: bool = False,
     """
     out = Path(out_dir)
     if force_scanned_hosts:
-        hosts = {str(u.get("ip")) for u in (spec.get("rescan_units") or []) if u.get("ip")}
-        hosts |= {str(ip) for ip in (spec.get("targets_ports") or {})}
-        # 재스캔에서도 포기당한 호스트는 빼야 한다. 여기서 그냥 돌려주면 조치 검증이라는
-        # 가장 중요한 경로에만 이 방어가 빠진다 - stage3 하나가 timedout 인데도 그 발견이
-        # closed + 정상처리 가 된다.
-        return hosts - timed_out_hosts(out, force_scanned_hosts=True)
+        # 재스캔 authority는 포트 단위일 수 있다. 한 포트가 timeout이어도 같은 호스트의 다른
+        # 포트는 정상 완료할 수 있으므로, 실제 권한 단위가 하나라도 남은 호스트만 돌려준다.
+        return {str(key[0]) for key in absence_times(out, spec, True)}
     # live 는 discovery 가 살아 있다고 본 목록일 뿐이다. 그중 sweep 이 타임아웃으로 포기한
     # 호스트는 포트를 끝까지 보지 못했으므로 부재를 말할 자격이 없다.
     live = {h for h in (_read_state(out).get("live") or []) if isinstance(h, str)}
@@ -650,8 +655,20 @@ def observed_scope(scope_keys: set | None, out_dir, spec: dict,
     if scope_keys is None:
         return None
     if force_scanned_hosts:
-        hosts = observed_hosts(out_dir, spec, True)
-        return {key for key in scope_keys if str(key).split("|", 1)[0] in hosts}
+        authority = absence_times(out_dir, spec, True)
+        kept = set()
+        for key in scope_keys:
+            parts = str(key).split("|")
+            if len(parts) < 3:
+                continue
+            host, proto = parts[0], parts[2]
+            try:
+                exact = (host, int(parts[1]), proto)
+            except ValueError:
+                continue
+            if exact in authority or (host, proto) in authority:
+                kept.add(key)
+        return kept
     # 전체 스캔에서는 프로토콜마다 authority 산출물이 다르다. 한 집합으로 뭉치면 UDP sweep
     # 타임아웃 하나가 완결된 TCP sweep 의 권한까지 빼앗는다 - 그러면 사라진 TCP 포트가
     # 영원히 열린 채로 남는다(닫지 못하는 쪽의 오류).

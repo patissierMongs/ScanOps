@@ -331,7 +331,7 @@ def verify_site(site: Path) -> None:
     missing = [
         name for name in ("fastapi", "uvicorn", "sqlalchemy", "pydantic",
                           "pydantic_core", "pydantic_settings", "starlette",
-                          "openpyxl", "multipart", "click", "colorama", "greenlet")
+                          "openpyxl", "multipart", "click", "colorama")
         if not (site / name).exists() and not list(site.glob(f"{name}*"))
     ]
     if missing:

@@ -763,6 +763,41 @@ def test_a_timed_out_rescan_artifact_denies_closure(tmp_path):
         "127.0.0.1|18443|tcp"}
 
 
+def test_rescan_timeout_authority_is_kept_per_port(tmp_path):
+    """한 호스트의 재스캔 포트들은 서로의 timeout 판정을 덮어쓰지 않는다."""
+    from scanops.scanning import engine_runner
+
+    ip = "127.0.0.1"
+    out = tmp_path / "scan_multi_port"
+    spec = {
+        "rescan_units": [
+            {"ip": ip, "port": 22, "proto": "tcp"},
+            {"ip": ip, "port": 443, "proto": "tcp"},
+        ],
+        "stages": {"service": {"confirm": False}},
+    }
+    _write_state(out, {"coverage": [
+        {"artifact": "stage3-127_0_0_1-tcp22.xml", "proto": "tcp", "role": "authority",
+         "hosts": [ip], "ports": "T:22", "finished": True},
+        {"artifact": "stage3-127_0_0_1-tcp443.xml", "proto": "tcp", "role": "authority",
+         "hosts": [ip], "ports": "T:443", "finished": True},
+    ]})
+    (out / "stage3-127_0_0_1-tcp22.xml").write_bytes(_timedout_only_xml(ip))
+    (out / "stage3-127_0_0_1-tcp443.xml").write_text(
+        '<?xml version="1.0"?><nmaprun scanner="nmap">'
+        '<scaninfo type="syn" protocol="tcp" numservices="1" services="443"/>'
+        '<runstats><finished time="1893456000" exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>',
+        encoding="utf-8",
+    )
+
+    scope = {f"{ip}|22|tcp", f"{ip}|443|tcp"}
+    assert engine_runner.observed_scope(scope, out, spec, True) == {f"{ip}|443|tcp"}
+    absence = engine_runner.absence_times(out, spec, True)
+    assert (ip, 22, "tcp") not in absence
+    assert (ip, 443, "tcp") in absence
+
+
 def test_an_enrichment_timeout_does_not_strip_a_completed_sweep(tmp_path):
     """전체 스캔에서 stage3 는 enrichment 다 - 그 타임아웃이 sweep 의 권한을 뺏으면 안 된다.
 

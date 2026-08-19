@@ -9,10 +9,9 @@ jobs:
   backend:
     name: backend (pytest)
     runs-on: ubuntu-latest
-    # 이 잡은 nmap 을 설치하므로 실제 프로세스를 띄우는 테스트가 있다. 상한이 없으면 한 번
-    # 멈춘 실행이 기본값인 6시간을 통째로 잡아먹고, 무엇보다 '실패'가 아니라 '진행 중'으로
-    # 보여서 원인을 찾을 로그조차 받을 수 없다. 로컬 전체 실행은 3분이 안 걸린다.
-    timeout-minutes: 15
+    # 의존성 설치까지 15분으로 자르면 Ubuntu mirror 지연이 테스트 실패처럼 보인다. 잡에는
+    # 설치 여유를 주고, 실제 고아 프로세스 위험은 아래 pytest 단계 자체의 상한으로 막는다.
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -32,6 +31,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
       - name: Run tests
+        # 실제 프로세스를 띄우는 테스트가 멈춰도 Actions 기본값인 6시간을 잡아먹지 않는다.
+        timeout-minutes: 15
         working-directory: backend
         run: python -m pytest -q
 
