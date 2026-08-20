@@ -1122,3 +1122,120 @@ def test_a_resumed_scan_skips_batches_it_already_finished(tmp_path):
     resumed._nmap = fake
     resumed._scan_batches(["10.0.0.1", "10.0.0.2"])
     assert calls == [], f"이미 끝낸 배치를 다시 돌았다: {calls}"
+
+
+def test_an_upgraded_scan_resumes_from_its_legacy_stage_checkpoints(tmp_path):
+    """재개 단위가 '단계 전체'에서 '배치 × 일'로 바뀌었다.
+
+    새 표식만 보면, 구버전으로 시작해 중단된 스캔이 업그레이드 후 **이미 끝낸 TCP 를 처음부터
+    다시 돌린다.** 같은 경로에 다시 쓰므로 보존돼 있던 authority 산출물을 덮어쓰고, 그 재실행이
+    또 중단되면 원래 있던 증거까지 잃는다.
+    """
+    import json
+
+    live = ["10.0.0.1"]
+    # base 형식 state - stages_done 만 있고 batches_done 은 없다.
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "stages_done": ["discovery", "tcp"],
+        "open_map": {"10.0.0.1": {"tcp": [22]}},
+        "live": live, "service_done": [], "stop": False,
+    }), encoding="utf-8")
+    done_xml = tmp_path / "stage-tcp-b0.xml"
+    done_xml.write_bytes(_clean_xml("10.0.0.1"))
+    before = done_xml.read_bytes()
+
+    pipe, spec = _pipeline(tmp_path, {
+        "job_id": "j", "targets": live, "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": True, "ports": "1-65535"},
+                   "udp": {"enabled": True, "ports": "53"},
+                   "service": {"nse": []}},
+    })
+    calls = []
+
+    def fake(stage, args, base, fatal=True):
+        calls.append(pathlib_Path(base).name)
+        proto = "udp" if "-sU" in args else "tcp"
+        pathlib_Path(str(base) + ".xml").write_bytes(
+            _clean_xml("10.0.0.1", proto, 53 if proto == "udp" else 22))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._scan_batches(live)
+
+    assert "stage-tcp-b0" not in calls, f"끝낸 TCP sweep 을 다시 돌았다: {calls}"
+    assert done_xml.read_bytes() == before, "보존돼 있던 authority 산출물을 덮어썼다"
+    # 아직 끝나지 않은 일은 그대로 돈다.
+    assert "stage-udp-b0" in calls and "stage3-10_0_0_1-tcp" in calls
+
+
+def test_a_half_finished_legacy_artifact_is_not_adopted_as_done(tmp_path):
+    """파일이 있다는 것과 그 실행이 끝맺혔다는 것은 다른 사실이다.
+
+    중간에 죽은 산출물을 완료로 읽으면 이어가기가 그 배치를 건너뛰고, 훑지 않은 포트가
+    부재로 넘어간다. 이관은 `finished exit="success"` 인 것만 받는다.
+    """
+    import json
+
+    live = ["10.0.0.1"]
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "stages_done": ["discovery", "tcp"], "open_map": {}, "live": live,
+        "service_done": [], "stop": False,
+    }), encoding="utf-8")
+    # 잘린 XML - runstats 가 없다.
+    (tmp_path / "stage-tcp-b0.xml").write_bytes(
+        b'<?xml version="1.0"?><nmaprun><host>')
+
+    pipe, spec = _pipeline(tmp_path, {
+        "job_id": "j", "targets": live, "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": True, "ports": "22"}, "service": {"enabled": False}},
+    })
+    calls = []
+
+    def fake(stage, args, base, fatal=True):
+        calls.append(pathlib_Path(base).name)
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1"))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._scan_batches(live)
+    assert "stage-tcp-b0" in calls, "끝맺히지 않은 산출물을 완료로 받아들였다"
+
+
+def _gave_up_after(tmp_path, timed_out_proto):
+    """한 배치에서 한쪽 프로토콜만 포기당했을 때의 state 와 백엔드 판정."""
+    from scanops.scanning import engine_runner
+
+    pipe, spec = _pipeline(tmp_path, {
+        "job_id": "j", "targets": ["10.0.0.1"], "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": True, "ports": "22"},
+                   "udp": {"enabled": True, "ports": "53"},
+                   "service": {"enabled": False}},
+    })
+
+    def fake(stage, args, base, fatal=True):
+        proto = "udp" if "-sU" in args else "tcp"
+        payload = (_timedout_only_xml("10.0.0.1", proto) if proto == timed_out_proto
+                   else _clean_xml("10.0.0.1", proto, 53 if proto == "udp" else 22))
+        pathlib_Path(str(base) + ".xml").write_bytes(payload)
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._scan_batches(["10.0.0.1"])
+    return (engine_runner.gave_up_hosts(tmp_path),
+            engine_runner.timed_out_hosts(tmp_path, timed_out_proto))
+
+
+def test_one_protocol_succeeding_does_not_erase_another_protocols_timeout(tmp_path):
+    """포기 판정은 프로토콜별 사실이다 - 한 목록으로 뭉치면 순서에 따라 사라진다.
+
+    같은 배치에서 TCP 가 포기당하고 UDP 가 정상이면, 뒤에 도는 UDP 의 성공이 앞의 TCP 포기를
+    지워 그 호스트가 재시도 대상에서 조용히 빠진다. 순서를 뒤집으면 반대가 남는다 - 어느
+    쪽이든 틀린다. 화면이 보는 재시도 목록은 실제 판정과 일치해야 한다.
+    """
+    listed, denied = _gave_up_after(tmp_path / "tcp-out", "tcp")
+    assert denied == {"10.0.0.1"}
+    assert listed == ["10.0.0.1"], "TCP 를 끝까지 못 본 호스트가 재시도 목록에서 사라졌다"
+
+    listed, denied = _gave_up_after(tmp_path / "udp-out", "udp")
+    assert denied == {"10.0.0.1"}
+    assert listed == ["10.0.0.1"], "반대 순서에서도 같아야 한다"

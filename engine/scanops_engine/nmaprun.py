@@ -116,6 +116,20 @@ def _ipv4(h):
     return a.get("addr") if a is not None else None
 
 
+def run_finished(xml_path) -> bool:
+    """그 산출물이 **끝맺힌** 실행인가 — `<runstats><finished exit="success">`.
+
+    파일이 있다는 것과 그 실행이 끝났다는 것은 다른 사실이다. 중간에 죽은 산출물을
+    '완료'로 읽으면 이어가기가 그 배치를 건너뛰고, 훑지 않은 포트가 부재로 넘어간다.
+    """
+    try:
+        root = ET.parse(str(xml_path)).getroot()
+    except (ET.ParseError, FileNotFoundError, OSError):
+        return False
+    finished = root.findall("./runstats/finished")
+    return len(finished) == 1 and finished[0].get("exit") == "success"
+
+
 def timed_out(xml_path) -> list[str]:
     """``--host-timeout`` 으로 nmap 이 포기한 호스트.
 
