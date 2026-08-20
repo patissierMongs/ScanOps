@@ -224,6 +224,7 @@ class Pipeline:
         sp = self.spec.service
         sweeps = [p for p in ("tcp", "udp")
                   if (self.spec.tcp if p == "tcp" else self.spec.udp).enabled]
+        self._adopt_legacy_checkpoints(live, sweeps)
         # sweep 을 끈 채 이어가는 실행(이미 open_map 이 있는 경우)도 식별은 돌아야 한다.
         # sweep 목록만 보면 그 실행이 통째로 아무 일도 하지 않는다.
         protos = [p for p in ("tcp", "udp")
@@ -290,6 +291,29 @@ class Pipeline:
         self._save()
         return True
 
+    def _adopt_legacy_checkpoints(self, live, sweeps) -> None:
+        """구형 state 의 ``stages_done`` 을 배치 checkpoint 로 이관한다.
+
+        재개 단위가 '단계 전체'에서 '배치 × 일'로 바뀌었다. batches_done 만 보면, 구버전으로
+        시작해 중단된 스캔이 업그레이드 후 **이미 끝낸 TCP 를 처음부터 다시 돌린다** - 그리고
+        같은 경로에 다시 쓰므로 보존돼 있던 authority 산출물을 덮어쓴다. 그 재실행이 또
+        중단되면 원래 있던 증거까지 잃는다.
+
+        ``stages_done`` 을 그대로 믿지는 않는다. 파일이 있다는 것과 그 실행이 끝맺혔다는 것은
+        다른 사실이라, 실제 산출물이 ``finished exit="success"`` 인 배치만 완료로 넘긴다 -
+        나머지는 다시 돈다(fail-closed).
+        """
+        if self.state.get("batches_done"):
+            return                      # 이미 새 형식이다
+        for proto in sweeps:
+            if not self.state.done(proto):
+                continue
+            for bi, _batch in enumerate(_batches(live, self.spec.batch_size)):
+                if nmaprun.run_finished(self.out / f"stage-{proto}-b{bi}.xml"):
+                    self.state.mark_batch_done(f"{proto}:{bi}")
+        if self.state.get("batches_done"):
+            self.state.save()
+
     def _sweep_batch(self, proto, bi, batch):
         """배치 하나의 포트 스윕. 반환: (초, {ip: [열린 포트]}) — 실패/중지면 두 번째가 None."""
         sp = self.spec.tcp if proto == "tcp" else self.spec.udp
@@ -320,8 +344,9 @@ class Pipeline:
         # 나중에 그 호스트들만 다시 스캔할 대상 목록이 된다.
         gave_up = nmaprun.timed_out(xml)
         with self._lock:
-            self.state.add_gave_up(gave_up)
-            self.state.clear_gave_up([h for h in batch if h not in set(gave_up)])
+            # 이 sweep 은 **이 프로토콜**만 관측했다. 다른 프로토콜의 포기 판정을 지울
+            # 자격이 없다 - 지우면 순서에 따라 재시도 대상이 사라진다.
+            self.state.record_gave_up(proto, batch, gave_up)
         if gave_up:
             self.sink.emit("hosts_gave_up", stage=proto, hosts=gave_up, count=len(gave_up))
         found = nmaprun.open_ports(xml, proto=proto)
@@ -341,7 +366,8 @@ class Pipeline:
         targets = {}
         for ip in batch:
             ports = (self.open_map.get(ip) or {}).get(proto) or []
-            if ports:
+            # 구버전에서 이미 식별을 끝낸 호스트(service_done)는 다시 훑지 않는다.
+            if ports and not self.state.service_done(ip):
                 targets[ip] = {proto: ports}
         if not targets:
             return 0.0, [], set(), set()
