@@ -99,14 +99,11 @@ SCAN_OPTIONS = [
 # ── NSE 스크립트 화이트리스트 ──
 # 선택한 스크립트들은 서버가 `--script a,b,c` 한 줄로 조립한다. 임의 스크립트 주입은 막고
 # 이 목록의 이름만 허용. nmap_default=True 가 '정체 식별형' 기본 선택(용도 파악에 직접 기여).
-# proto: nmap portrule 이 걸리는 프로토콜(tcp/udp/both) — TCP identify 엔 tcp+both 만 보낸다.
+# proto: nmap portrule 이 걸리는 프로토콜(tcp/udp/both) — staged 웹 엔진은 각 식별 단계에
+# 맞는 목록만 보내고, 단독/legacy 자동 스캔은 기존처럼 UDP NSE 를 사용하지 않는다.
 #
-# UDP 전용(proto='udp')은 전부 기본 제외다. 자동 스캔의 UDP 식별 단계는 NSE 를 아예 붙이지 않고
-# (nmap_runner.build_auto_command), 발견에 반영되는 NSE 는 nmap_parse 의 _REMARK_PATTERNS·
-# _tls_evidence·fingerprint 세 경로뿐인데 그 전부가 TCP 스크립트다. UDP 스크립트는 출력이
-# nse_json 에 저장만 되고 읽는 코드가 없는 반면, 출발지 포트를 bind 하는 것들은 스캔 호스트의
-# 서비스와 충돌해(ike-version↔IKEEXT 의 UDP 500) NSE 정리 실패로 그 실행의 신뢰도를 통째로
-# 떨어뜨린다. 필요하면 직접 선택할 수 있게 목록에는 남겨 둔다.
+# UDP 전용(proto='udp')은 전부 기본 제외다. 출발지 포트를 bind 하는 스크립트는 스캔 호스트의
+# 서비스와 충돌할 수 있어(ike-version↔IKEEXT 의 UDP 500) 사용자가 명시적으로 선택해야 한다.
 # 취약점/노이즈/부작용 스크립트(ssl-enum-ciphers·ntp-monlist·ms-sql-info 등)는 기본 제외(펼쳐서 선택 가능).
 NSE_SCRIPTS = [
     {"key": "http-headers", "group": "HTTP", "nmap_default": True, "proto": "tcp", "desc": "HTTP 응답 헤더 수집"},
@@ -125,14 +122,14 @@ NSE_SCRIPTS = [
     {"key": "ms-sql-info", "group": "DB", "nmap_default": False, "proto": "both", "desc": "MS-SQL 인스턴스 정보 ⚠ DB 장애/부작용 위험 — 기본 제외"},
     {"key": "ldap-rootdse", "group": "DB", "nmap_default": False, "proto": "tcp", "desc": "LDAP RootDSE(디렉터리 정보)"},
     {"key": "rdp-ntlm-info", "group": "RDP", "nmap_default": True, "proto": "tcp", "desc": "RDP NTLM 컴퓨터/도메인(NTLM_Computer)"},
-    {"key": "snmp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "SNMP 시스템 정보(UDP 전용 — 자동 스캔 UDP 단계는 NSE 미사용)"},
-    {"key": "snmp-sysdescr", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "SNMP sysDescr(UDP 전용 — 자동 스캔 UDP 단계는 NSE 미사용)"},
+    {"key": "snmp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "SNMP 시스템 정보(UDP 전용)"},
+    {"key": "snmp-sysdescr", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "SNMP sysDescr(UDP 전용)"},
     # 출발지 포트 500 을 직접 bind 하는 스크립트라, Windows 스캔 호스트에서는 IKEEXT 서비스가
     # UDP 500 을 이미 잡고 있어 bind 가 WSAEACCES(10013) 로 실패한다. NSOCK 오류가 호스트마다
     # 쏟아지고 NSE 가 정리되지 못한 채 끝나므로 기본에서 뺀다(필요하면 직접 선택).
     {"key": "ike-version", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "IKE(VPN) 버전 ⚠ Windows 스캔 호스트에서는 UDP 500 충돌 — 기본 제외"},
     {"key": "sip-methods", "group": "SNMP/IKE/SIP/NTP", "nmap_default": True, "proto": "both", "desc": "SIP 지원 메서드"},
-    {"key": "ntp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "NTP 서버 정보(UDP 전용 — 자동 스캔 UDP 단계는 NSE 미사용)"},
+    {"key": "ntp-info", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "NTP 서버 정보(UDP 전용)"},
     {"key": "ntp-monlist", "group": "SNMP/IKE/SIP/NTP", "nmap_default": False, "proto": "udp", "desc": "NTP monlist(증폭 취약 점검용)"},
     {"key": "rpcinfo", "group": "RPC", "nmap_default": True, "proto": "both", "desc": "RPC 서비스 목록"},
     {"key": "fingerprint-strings", "group": "기타", "nmap_default": True, "proto": "tcp", "desc": "미식별 서비스 원시 응답(-sV 가 식별 못 한 포트 조사)"},
@@ -171,16 +168,16 @@ DEFAULT_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 #
 # 식별 단계는 열린 포트에만 붙으므로 포트 수가 작다. 다만 TCP 는 --version-all + NSE 가 붙고
 # UDP 는 이 프로젝트에서 실제로 죽어 온 지점이라 UDP 를 더 짧게 둔다.
-# 식별 단계에서 동시에 돌릴 호스트 수. 이 단계는 nmap 프로세스마다 타깃이 1개라
-# nmap 자신의 호스트 병렬성(--min-hostgroup)을 쓸 수 없어, 직렬로 두면 소요가 호스트 수에
-# 그대로 비례한다. 호스트당 상한을 켠 뒤로는 느린 호스트의 대기시간까지 그대로 더해진다.
-SERVICE_WORKERS_DEFAULT = 8
+# UDP의 정확 host×port 묶음과 공통 실행 실패 뒤 호스트별 격리를 동시에 돌릴 상한.
+# 정상 TCP 서비스 식별은 배치의 포트 합집합을 한 프로세스로 돌려 Nmap 호스트 병렬성을 쓴다.
+# 호스트당 상한을 켠 뒤로는 느린 격리 호스트의 대기시간까지 그대로 더해질 수 있다.
+SERVICE_WORKERS_DEFAULT = 16
 
 HOST_TIMEOUT_DEFAULTS = {
     "tcp": "20m",          # TCP 전수 sweep
     "udp": "10m",          # UDP sweep
     "service": "10m",      # TCP 서비스 식별
-    "service_udp": "5m",   # UDP 서비스 식별
+    "service_udp": "10m",  # UDP 서비스 식별
 }
 
 _BY_KEY = {o["key"]: o for o in SCAN_OPTIONS}

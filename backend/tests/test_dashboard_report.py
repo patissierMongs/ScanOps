@@ -27,6 +27,47 @@ def test_dashboard_metrics(client):
     assert d["overdue"] == 0
 
 
+def test_dashboard_separates_evidence_allowed_and_unresolved(client):
+    from scanops.db import SessionLocal
+    from scanops.models import Finding
+
+    h = _auth(client)
+    db = SessionLocal()
+    try:
+        rows = [
+            Finding(finding_key="10.0.0.1|80|tcp", host_ip="10.0.0.1", port=80,
+                    proto="tcp", state="open", reason="syn-ack", risk_level="high",
+                    dept="운영팀", status="미조치"),
+            Finding(finding_key="10.0.0.2|161|udp", host_ip="10.0.0.2", port=161,
+                    proto="udp", state="open|filtered", reason="no-response",
+                    risk_level="medium", dept="운영팀", status="처리중"),
+            Finding(finding_key="10.0.0.3|443|tcp", host_ip="10.0.0.3", port=443,
+                    proto="tcp", state="open", reason="syn-ack", risk_level="info",
+                    dept="운영팀", status="미조치", allowed=1),
+            Finding(finding_key="10.0.0.4|22|tcp", host_ip="10.0.0.4", port=22,
+                    proto="tcp", state="open", reason="syn-ack", risk_level="high",
+                    dept="보안팀", status="정상처리"),
+            Finding(finding_key="10.0.0.5|25|tcp", host_ip="10.0.0.5", port=25,
+                    proto="tcp", state="closed", reason="reset", risk_level="high",
+                    dept="운영팀", status="미조치"),
+        ]
+        db.add_all(rows)
+        db.commit()
+    finally:
+        db.close()
+
+    payload = client.get("/api/dashboard", headers=h).json()
+
+    assert payload["open_total"] == 4
+    assert payload["confirmed_open_total"] == 3
+    assert payload["confirmation_required_total"] == 1
+    assert payload["allowed_open_total"] == 1
+    assert payload["unresolved_total"] == 2
+    assert payload["by_dept"] == [{"dept": "운영팀", "count": 2}]
+    assert payload["unresolved_by_risk"]["high"] == 1
+    assert payload["unresolved_by_risk"]["medium"] == 1
+
+
 def test_overdue_counts_after_deadline(client):
     h = _auth(client)
     _import(client, h)

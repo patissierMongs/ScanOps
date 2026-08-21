@@ -97,7 +97,7 @@ const DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,33
 const DISCOVERY_PA = "-PA80,443,3389";
 
 export default function ScanOptions({
-  targets = [], excludes = [], portsAuto = "", staged = false, discovery = "sn", fixedTargetPorts = false, onState,
+  targets = [], excludes = [], excludePorts = "", portsAuto = "", staged = false, discovery = "sn", fixedTargetPorts = false, onState,
 }) {
   const [workflow, setWorkflow] = useState("auto");
   const [registry, setRegistry] = useState([]);
@@ -176,10 +176,12 @@ export default function ScanOptions({
     [nseReg, nseSel]
   );
   // Nmap 7.99는 반복 --exclude를 누적하지 않으므로 항상 단일 comma-list로 표시한다.
-  const excludeArgs = useMemo(
-    () => excludes.length ? ["--exclude", excludes.join(",")] : [],
-    [excludes]
-  );
+  const excludeArgs = useMemo(() => {
+    const args = excludes.length ? ["--exclude", excludes.join(",")] : [];
+    const excludedPortSpec = excludePorts.trim();
+    if (excludedPortSpec) args.push("--exclude-ports", excludedPortSpec);
+    return args;
+  }, [excludes, excludePorts]);
 
   // 단계 분리(staged) 또는 자동 스캔이면 한 번에 안 돌고 단계별로 나눠 순차 실행된다.
   const stepped = staged || workflow === "auto";
@@ -229,7 +231,7 @@ export default function ScanOptions({
           desc: "호스트별 열린 TCP에만 서비스·제품·버전·NSE 단서를 확인합니다.",
           cmd: commandText(["nmap", "--stats-every", "5s", scanFlag, "-Pn", "-sV", versionFlag, "--open",
             "--reason", timing, "--max-retries", "2", "-p", "T:<TCP 탐색에서 열린 포트>",
-            stagedScripts && "--script", stagedScripts, stagedScripts && "--script-timeout", stagedScripts && "10s", ...excludeArgs,
+            stagedScripts && "--script", stagedScripts, stagedScripts && "--script-timeout", stagedScripts && "2m", ...excludeArgs,
             "-oA", "scan_<id>.tcp_service_<host>", "<호스트 1대>"]),
         });
       }
@@ -247,7 +249,7 @@ export default function ScanOptions({
           cmd: commandText(["nmap", "--stats-every", "5s", "-sU", "-Pn", "-n", "-sV",
             versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing, "--max-retries", "2",
             "-p", "U:<UDP 탐색에서 열린 포트>", stagedScripts && "--script", stagedScripts,
-            stagedScripts && "--script-timeout", stagedScripts && "10s", ...excludeArgs,
+            stagedScripts && "--script-timeout", stagedScripts && "3m", ...excludeArgs,
             "-oA", "scan_<id>.udp_service_<host>", "<호스트 1대>"]),
         });
       }
@@ -267,7 +269,7 @@ export default function ScanOptions({
         title: "TCP 식별",
         desc: "앞 단계에서 살아있던 호스트의 열린 TCP에만 서비스·제품·버전·NSE 단서를 확인합니다.",
         cmd: commandText(["nmap", "--stats-every", "10s", "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
-          "-T4", "--max-retries", "2", tcpScripts && "--script", tcpScripts, "--script-timeout", "10s",
+          "-T4", "--max-retries", "2", tcpScripts && "--script", tcpScripts, "--script-timeout", "2m",
           "-p", "T:<1단계에서 발견된 TCP 포트>", ...excludeArgs,
           "-oA", "scan_<id>.tcp_identify", ...targets]),
       });
@@ -277,7 +279,7 @@ export default function ScanOptions({
         title: "UDP 식별",
         desc: "주요/지정 UDP에서 DNS·SNMP·NTP 같은 용도 단서를 확인합니다(강도 7 -sV — UDP는 version-all 미적용).",
         cmd: commandText(["nmap", "--stats-every", "10s", "-sU", "-Pn", "-n", "-sV", "--open",
-          "--reason", "-T4", "--max-retries", "2", udpScripts && "--script", udpScripts, "--script-timeout", "10s",
+          "--reason", "-T4", "--max-retries", "2", udpScripts && "--script", udpScripts, "--script-timeout", "3m",
           "-p", udp, ...excludeArgs, "-oA", "scan_<id>.udp_identify", ...targets]),
       });
     }

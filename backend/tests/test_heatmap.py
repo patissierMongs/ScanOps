@@ -8,7 +8,7 @@ from pathlib import Path
 import openpyxl
 from scanops.api import scans as scans_api
 from scanops.db import SessionLocal
-from scanops.models import Finding, ScanRun
+from scanops.models import EndpointObservation, Finding, ScanRun
 from scanops.scanning.nmap_parse import scan_start
 from tests.conftest import make_user, token_for
 
@@ -235,3 +235,87 @@ def test_heatmap_endpoint_survives_hostname_targets(client):
 
     assert response.status_code == 200, response.text
     assert any(row["host_ip"] == "web01.local" for row in response.json()["rows"])
+
+
+def test_heatmap_prefers_endpoint_observation_without_xml(client):
+    headers = _auth(client)
+    db = SessionLocal()
+    try:
+        scan = ScanRun(name="원장 기반", status="done")
+        db.add(scan)
+        db.flush()
+        finding = Finding(
+            finding_key="10.20.0.1|161|udp", host_ip="10.20.0.1", port=161, proto="udp",
+            state="open|filtered", reason="no-response", service="snmp", risk_level="medium",
+            status="미조치", last_scan_id=scan.id, first_scan_id=scan.id,
+        )
+        observation = EndpointObservation(
+            scan_id=scan.id, finding_key=finding.finding_key, host_ip=finding.host_ip,
+            port=finding.port, proto=finding.proto, state=finding.state,
+            reason=finding.reason, evidence_kind="inferred", service="snmp",
+        )
+        db.add_all([finding, observation])
+        db.commit()
+        scan_id = scan.id
+    finally:
+        db.close()
+
+    response = client.get("/api/heatmap", headers=headers)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    row = next(item for item in payload["rows"] if item["key"] == "10.20.0.1|161|udp")
+    assert row["endpoint_state"] == "open|filtered"
+    assert row["state_evidence"] == "무응답 추정"
+    assert row["needs_confirmation"] is True
+    assert payload["summary"]["confirmation_required_count"] == 1
+    assert not any(warning["scan_id"] == scan_id for warning in payload["quality_warnings"])
+
+
+def test_heatmap_reports_done_scan_with_no_ledger_or_xml(client):
+    headers = _auth(client)
+    db = SessionLocal()
+    try:
+        # Session DB는 테스트마다 초기화되지만 scans_dir 산출물은 공유된다.
+        # 자동 증가 ID가 이전 테스트의 scan_<id>.xml과 우연히 겹치지 않게 고정한다.
+        scan = ScanRun(id=987654321, name="산출물 없음", status="done")
+        db.add(scan)
+        db.commit()
+        scan_id = scan.id
+    finally:
+        db.close()
+
+    payload = client.get("/api/heatmap", headers=headers).json()
+    warning = next(item for item in payload["quality_warnings"] if item["scan_id"] == scan_id)
+    assert warning["type"] == "artifact_missing"
+
+
+def test_heatmap_carries_forward_last_authoritative_identity(client):
+    headers = _auth(client)
+    db = SessionLocal()
+    try:
+        identified = ScanRun(name="식별 관측", status="done")
+        sweep_only = ScanRun(name="포트만 재관측", status="done")
+        db.add_all([identified, sweep_only])
+        db.flush()
+        key = "10.30.0.1|8080|tcp"
+        db.add_all([
+            EndpointObservation(
+                scan_id=identified.id, finding_key=key, host_ip="10.30.0.1", port=8080,
+                proto="tcp", state="open", reason="syn-ack", evidence_kind="confirmed",
+                identity_observed=1, service="http", product="Apache httpd", version="2.4",
+            ),
+            EndpointObservation(
+                scan_id=sweep_only.id, finding_key=key, host_ip="10.30.0.1", port=8080,
+                proto="tcp", state="open", reason="syn-ack", evidence_kind="confirmed",
+                identity_observed=0, service="unknown", product="", version="",
+            ),
+        ])
+        db.commit()
+    finally:
+        db.close()
+
+    row = next(item for item in client.get("/api/heatmap", headers=headers).json()["rows"]
+               if item["key"] == "10.30.0.1|8080|tcp")
+    assert row["service"] == "http"
+    assert row["product"] == "Apache httpd"
+    assert row["version"] == "2.4"

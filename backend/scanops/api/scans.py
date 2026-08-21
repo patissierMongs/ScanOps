@@ -23,11 +23,14 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import SessionLocal, get_db
-from ..models import ACTIVE_FINDING_STATES, Finding, FindingEvent, ScanRun, User
+from ..models import (
+    ACTIVE_FINDING_STATES, Finding, FindingEvent, ScanExecution, ScanHostObservation,
+    ScanQualityIssue, ScanRun, User,
+)
 from ..schemas import IngestSummary, KnownResultsIn, RawCommandIn, ScanOut, ScanRunIn
 from ..uploads import read_limited
 from ..scanning import (
-    chunker, engine_runner, nmap_runner, scan_options, scan_summary, scope, taxonomy,
+    chunker, engine_runner, nmap_runner, observability, scan_options, scan_summary, scope, taxonomy,
     xml_verdict,
 )
 from ..scanning.presets import PRESETS
@@ -1315,6 +1318,93 @@ def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
     return counts
 
 
+def _artifact_issue_inputs(report: dict, problems: list[str]) -> list[dict]:
+    issues: list[dict] = []
+
+    def stage_for(name: str) -> str:
+        lowered = name.lower()
+        proto = "udp" if "udp" in lowered else "tcp" if "tcp" in lowered else ""
+        return f"{proto}_service" if "stage3" in lowered and proto else proto or "service"
+
+    for bucket, kind in (
+        ("authority_missing", "artifact_missing"),
+        ("authority_broken", "artifact_broken"),
+        ("enrichment_missing", "artifact_missing"),
+        ("enrichment_broken", "artifact_broken"),
+    ):
+        for artifact in report.get(bucket) or []:
+            name = str(artifact)
+            issues.append({
+                "issue_key": f"{kind}|{bucket}|{name}", "kind": kind,
+                "stage": stage_for(name), "host_ip": "",
+                "detail": f"{bucket}: {name}",
+            })
+    for index, problem in enumerate(problems):
+        issues.append({
+            "issue_key": f"nse_degraded|{index}|{hashlib.sha256(problem.encode('utf-8')).hexdigest()[:16]}",
+            "kind": "nse_degraded", "stage": "service", "host_ip": "",
+            "detail": problem,
+        })
+    return issues
+
+
+def _resolve_retry_observations(db: Session, retry_scan_id: int, saved_spec: dict) -> int:
+    scanops = saved_spec.get("scanops") if isinstance(saved_spec, dict) else None
+    source_id = scanops.get("retry_of") if isinstance(scanops, dict) else None
+    if not isinstance(source_id, int) or source_id <= 0:
+        return 0
+    source_issues = db.query(ScanQualityIssue).filter(
+        ScanQualityIssue.scan_id == source_id,
+        ScanQualityIssue.retry_scan_id == retry_scan_id,
+        ScanQualityIssue.resolved_by_scan_id.is_(None),
+    ).all()
+    if not source_issues:
+        return 0
+    host_rows = {
+        row.host_ip: row for row in db.query(ScanHostObservation).filter_by(
+            scan_id=retry_scan_id
+        ).all()
+    }
+    child_issues = {
+        (issue.kind, engine_runner.canonical_stage(issue.stage), issue.host_ip)
+        for issue in db.query(ScanQualityIssue).filter_by(scan_id=retry_scan_id).all()
+        if issue.resolved_by_scan_id is None
+    }
+    stage_field = {
+        "discovery": "discovery_status", "tcp": "tcp_sweep_status",
+        "tcp_service": "tcp_service_status", "udp": "udp_sweep_status",
+        "udp_service": "udp_service_status",
+    }
+    resolved = []
+    for issue in source_issues:
+        canonical = engine_runner.canonical_stage(issue.stage)
+        field = stage_field.get(canonical)
+        host = host_rows.get(issue.host_ip)
+        if not field or host is None or getattr(host, field) != "done":
+            continue
+        if (issue.kind, canonical, issue.host_ip) in child_issues:
+            continue
+        resolved.append(issue.issue_key)
+    return observability.resolve_quality_issues(
+        db, source_id, retry_scan_id, resolved,
+    )
+
+
+def _materialize_engine_terminal(
+    db: Session, scan: ScanRun, out_dir: Path, saved_spec: dict,
+    report: dict, problems: list[str],
+) -> dict:
+    projection = engine_runner.terminal_observability(out_dir, saved_spec)
+    issues = list(projection["issues"])
+    issues.extend(_artifact_issue_inputs(report, problems))
+    counts = observability.materialize_terminal_observability(
+        db, scan.id, executions=projection["executions"], issues=issues,
+        hosts=projection["hosts"],
+    )
+    _resolve_retry_observations(db, scan.id, saved_spec)
+    return {**projection, "materialized": counts}
+
+
 def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
     """단계분리 엔진 실행 — spec.json 으로 엔진 spawn → 대기 → 단계요약 영속 + 결과 인입.
 
@@ -1438,6 +1528,9 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
                 closing,                               # 빈 집합 = 닫힘 후보 없음
                 force_scanned_hosts,
                 saved_spec,
+            )
+            _materialize_engine_terminal(
+                db, scan, out_dir, saved_spec, report, problems,
             )
             scan.status = "partial" if unfinished else "done"
             scan.finished_at = datetime.now(timezone.utc)
@@ -2140,12 +2233,173 @@ def _import_stage_bundle(db: Session, user: User, display: str,
             "files": sorted(files), "reviews": reviews}
 
 
+def _scan_history_summary(scan: ScanRun) -> dict:
+    """현재 명령과 저장된 실행 사양을 합쳐 오래된 단계 스캔의 제외값까지 복원한다."""
+    command = scan.command or ""
+    saved = _read_engine_spec(_settings.scans_dir / f"scan_{scan.id}")
+    if saved is None:
+        saved = chunker.read_state(_basename(scan.id)) or {}
+    excluded_ports = str(saved.get("exclude_ports") or "").strip()
+    excluded_hosts = [str(host) for host in (saved.get("exclude") or []) if str(host).strip()]
+    if excluded_ports and "--exclude-ports" not in command:
+        command += f"  ·  --exclude-ports {excluded_ports}"
+    has_excluded_hosts = bool(re.search(r"(?:^|\s)--exclude(?:\s|=)", command))
+    if excluded_hosts and not has_excluded_hosts:
+        command += f"  ·  --exclude {','.join(excluded_hosts)}"
+    return scan_summary.summarize_command(command, scan.targets)
+
+
+def _durable_retry_detail(db: Session, scan_id: int) -> dict | None:
+    rows = db.query(ScanQualityIssue).filter(
+        ScanQualityIssue.scan_id == scan_id,
+        ScanQualityIssue.resolved_by_scan_id.is_(None),
+    ).order_by(ScanQualityIssue.id).all()
+    if not rows:
+        return None
+    retryable = [
+        row for row in rows
+        if row.host_ip and row.kind in {
+            "host_timeout", "retransmission_cap", "service_degraded",
+        }
+    ]
+    by_stage: dict[str, list[str]] = {}
+    reasons: dict[str, list[str]] = {}
+    for row in retryable:
+        stage = engine_runner.canonical_stage(row.stage)
+        by_stage.setdefault(stage, []).append(row.host_ip)
+        reasons.setdefault(row.host_ip, []).append(row.kind)
+    for stage, hosts in by_stage.items():
+        by_stage[stage] = list(dict.fromkeys(hosts))
+    targets = sorted(set(reasons), key=engine_runner._retry_ip_key)
+    return {
+        "required": bool(targets), "count": len(targets), "targets": targets,
+        "by_stage": by_stage, "reasons": reasons,
+        "issues": [row.issue_key for row in retryable],
+    }
+
+
+def _retry_history(rows: list[ScanRun], db: Session) -> dict[int, dict]:
+    """Return retry state from durable exact issues, with sidecars only for legacy scans."""
+    raw = {}
+    children: dict[int, ScanRun] = {}
+    for scan in rows:
+        out_dir = _settings.scans_dir / f"scan_{scan.id}"
+        raw[scan.id] = engine_runner.gave_up_detail(out_dir)
+        saved = _read_engine_spec(out_dir)
+        scanops = saved.get("scanops") if isinstance(saved, dict) else None
+        source = scanops.get("retry_of") if isinstance(scanops, dict) else None
+        if isinstance(source, int) and source > 0 and source not in children:
+            children[source] = scan
+
+    scan_ids = [scan.id for scan in rows]
+    issue_rows = db.query(ScanQualityIssue).filter(
+        ScanQualityIssue.scan_id.in_(scan_ids)
+    ).all() if scan_ids else []
+    issues_by_scan: dict[int, list[ScanQualityIssue]] = {}
+    for issue in issue_rows:
+        issues_by_scan.setdefault(issue.scan_id, []).append(issue)
+
+    result = {}
+    for scan in rows:
+        durable = issues_by_scan.get(scan.id, [])
+        if durable:
+            unresolved = [issue for issue in durable if issue.resolved_by_scan_id is None]
+            retry_ids = [
+                issue.retry_scan_id for issue in durable if issue.retry_scan_id is not None
+            ]
+            retry_scan_id = max(retry_ids) if retry_ids else None
+            retry_scan = next((row for row in rows if row.id == retry_scan_id), None)
+            if retry_scan is None and retry_scan_id is not None:
+                retry_scan = db.get(ScanRun, retry_scan_id)
+            if unresolved:
+                retry_status = (
+                    "running" if retry_scan and retry_scan.status in {"running", "canceling"}
+                    else "required"
+                )
+            else:
+                retry_status = "resolved" if any(
+                    issue.resolved_by_scan_id is not None for issue in durable
+                ) else "none"
+            hosts = {issue.host_ip for issue in unresolved if issue.host_ip}
+            stages = list(dict.fromkeys(issue.stage for issue in unresolved if issue.stage))
+            severe = any(
+                issue.kind in {"command_error", "artifact_missing", "artifact_broken"}
+                for issue in unresolved
+            )
+            result[scan.id] = {
+                "retry_required": bool(unresolved) and retry_status != "running",
+                "retry_count": len(hosts) or len(unresolved),
+                "retry_stages": stages,
+                "retry_status": retry_status,
+                "retry_scan_id": retry_scan_id,
+                "quality_status": "error" if severe else "warning" if unresolved else "ok",
+                "unresolved_issue_count": len(unresolved),
+                "unresolved_host_count": len(hosts),
+            }
+            continue
+        detail = raw[scan.id]
+        update = {
+            "retry_required": detail["required"], "retry_count": detail["count"],
+            "retry_stages": list(detail["by_stage"]),
+            "retry_status": "required" if detail["required"] else "none",
+            "retry_scan_id": None,
+        }
+        child = children.get(scan.id)
+        if child is not None and detail["required"]:
+            update["retry_scan_id"] = child.id
+            child_detail = raw.get(child.id) or {}
+            if child.status in {"running", "canceling"}:
+                update["retry_status"] = "running"
+                update["retry_required"] = False
+            elif child.status == "done" and not child_detail.get("required"):
+                # New scans use exact issue rows above. This branch is strictly the legacy
+                # sidecar contract, retained for scans created before durable quality rows.
+                update.update({"retry_status": "resolved", "retry_required": False,
+                               "retry_count": 0, "retry_stages": []})
+            elif child_detail.get("required"):
+                update.update({
+                    "retry_status": "required", "retry_required": True,
+                    "retry_count": child_detail.get("count", detail["count"]),
+                    "retry_stages": list((child_detail.get("by_stage") or {}).keys()),
+                })
+            else:
+                update["retry_status"] = "failed"
+        update.update({
+            "quality_status": "warning" if detail["required"] else "ok",
+            "unresolved_issue_count": detail["count"],
+            "unresolved_host_count": detail["count"],
+        })
+        result[scan.id] = update
+    return result
+
+
+def _scan_out(scan: ScanRun, db: Session, retry: dict | None = None) -> ScanOut:
+    creator = db.get(User, scan.created_by) if scan.created_by is not None else None
+    if retry is None:
+        retry = _retry_history(
+            db.query(ScanRun).order_by(ScanRun.id.desc()).all(), db,
+        ).get(scan.id, {})
+    return ScanOut.model_validate(scan).model_copy(update={
+        "summary": _scan_history_summary(scan),
+        "created_by_name": (creator.display_name or creator.username) if creator else "",
+        **retry,
+    })
+
+
 @router.get("", response_model=list[ScanOut])
 def list_scans(_: User = Depends(current_user), db: Session = Depends(get_db)):
     rows = db.query(ScanRun).order_by(ScanRun.id.desc()).all()
+    retry = _retry_history(rows, db)
+    user_ids = {row.created_by for row in rows if row.created_by is not None}
+    user_names = {
+        user.id: user.display_name or user.username
+        for user in db.query(User).filter(User.id.in_(user_ids)).all()
+    } if user_ids else {}
     return [
         ScanOut.model_validate(row).model_copy(update={
-            "summary": scan_summary.summarize_command(row.command, row.targets),
+            "summary": _scan_history_summary(row),
+            "created_by_name": user_names.get(row.created_by, ""),
+            **retry[row.id],
         })
         for row in rows
     ]
@@ -2266,7 +2520,7 @@ def get_scan(scan_id: int, _: User = Depends(current_user), db: Session = Depend
     scan = db.get(ScanRun, scan_id)
     if scan is None:
         raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
-    return scan
+    return _scan_out(scan, db)
 
 
 @router.post("/known-results")
@@ -2536,6 +2790,10 @@ def run_scan(
                 f"자동 스캔 · {' → '.join(stages)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
                 f"  ·  {scan_summary.scope_note(tcp_spec, udp_spec)}"
             )
+            if exclude_ports:
+                scan.command += f"  ·  --exclude-ports {exclude_ports}"
+            if excludes:
+                scan.command += f"  ·  --exclude {','.join(excludes)}"
         else:
             parts, skip = [], False
             for t in argv0:
@@ -2549,7 +2807,7 @@ def run_scan(
                     continue
                 parts.append(t)
             scan.command = f"{' '.join(parts)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
-        if excludes:
+        if excludes and body.workflow != "auto":
             scan.command += f"  ·  제외 {', '.join(excludes)}"
         # 배치 구성은 실행이 끝나면 sidecar 와 함께 사라진다. 이력이 나중에도 '어떻게
         # 돌았는지'를 말할 수 있게 스캔 행에 남긴다.
@@ -2663,8 +2921,11 @@ def run_staged(
         }
         (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
         scan.command = f"{engine_runner.describe(spec)}  ·  {len(hosts)}호스트"
+        exclude_ports = scan_options.validate_ports(body.exclude_ports or "")
+        if exclude_ports:
+            scan.command += f"  ·  --exclude-ports {exclude_ports}"
         if excludes:
-            scan.command += f"  ·  제외 {', '.join(excludes)}"
+            scan.command += f"  ·  --exclude {','.join(excludes)}"
         # 엔진도 같은 대역을 배치로 나눠 sweep 한다(stage-tcp-b0.xml …). 청킹 스캔과 같은
         # 자리에 같은 뜻으로 남겨야 이력에서 둘을 나란히 읽을 수 있다.
         scan.batch_size = int(spec.get("batch_size") or 0)
@@ -2862,6 +3123,133 @@ def resume_scan(
     return scan
 
 
+@router.post("/{scan_id}/retry-timeouts", response_model=ScanOut)
+def retry_timed_out_hosts(
+    scan_id: int,
+    user: User = Depends(require_role("auditor")),
+    db: Session = Depends(get_db),
+):
+    """Start a new staged scan containing only hosts retained in the retry queue."""
+    source = db.get(ScanRun, scan_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
+    if source.status in {"running", "canceling"}:
+        raise HTTPException(status_code=400, detail="원본 스캔이 끝난 뒤 재스캔할 수 있습니다.")
+    source_dir = _settings.scans_dir / f"scan_{source.id}"
+    if not engine_runner.is_engine_scan(source_dir):
+        raise HTTPException(status_code=400, detail="단계 엔진 스캔만 확인 필요 대상을 재스캔할 수 있습니다.")
+
+    rows = db.query(ScanRun).order_by(ScanRun.id.desc()).all()
+    history = _retry_history(rows, db).get(source.id) or {}
+    if history.get("retry_status") == "running":
+        raise HTTPException(status_code=400, detail="확인 필요 대상 재스캔이 이미 진행 중입니다.")
+    if history.get("retry_status") == "resolved":
+        raise HTTPException(status_code=400, detail="확인 필요 대상 재스캔이 이미 완료되었습니다.")
+    retry = _durable_retry_detail(db, source.id)
+    if retry is None:
+        retry_evidence_dir = source_dir
+        child_id = history.get("retry_scan_id")
+        if history.get("retry_required") and isinstance(child_id, int):
+            child_dir = _settings.scans_dir / f"scan_{child_id}"
+            if engine_runner.gave_up_detail(child_dir)["required"]:
+                retry_evidence_dir = child_dir
+        retry = engine_runner.gave_up_detail(retry_evidence_dir)
+    if not retry["required"]:
+        raise HTTPException(status_code=400, detail="재스캔이 필요한 확인 대상이 없습니다.")
+
+    try:
+        saved = _load_engine_spec(source_dir / "spec.json")
+        targets = list(retry["targets"])
+        nmap_runner.validate_targets(targets)
+        scope.check_scope(targets)
+        engine_runner.ensure_available()
+    except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not nmap_runner.find_nmap(_settings.nmap_path):
+        raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
+
+    scan = ScanRun(
+        name=f"확인 필요 재스캔 #{source.id} · {len(targets)}대",
+        targets=" ".join(targets), status="running", created_by=user.id,
+    )
+    db.add(scan)
+    db.flush()
+    retry_stage_set = {
+        engine_runner.canonical_stage(stage)
+        for stage in retry["by_stage"] if isinstance(stage, str)
+    }
+    selected_issue_keys = [
+        issue.issue_key
+        for issue in db.query(ScanQualityIssue).filter(
+            ScanQualityIssue.scan_id == source.id,
+            ScanQualityIssue.resolved_by_scan_id.is_(None),
+        ).all()
+        if issue.host_ip in set(targets)
+        and engine_runner.canonical_stage(issue.stage) in retry_stage_set
+    ]
+    observability.set_quality_retry(
+        db, source.id, scan.id, issue_keys=selected_issue_keys,
+    )
+    db.commit()
+    db.refresh(scan)
+    out_dir = _settings.scans_dir / f"scan_{scan.id}"
+    launch_paths = [out_dir / "spec.json", out_dir / "run-state.json", out_dir / "stop-requested"]
+    try:
+        spec = json.loads(json.dumps(saved))
+        spec.update({
+            "job_id": f"scan_{scan.id}", "targets": targets, "exclude": [],
+            "out_dir": str(out_dir), "targets_ports": None, "rescan_units": None,
+        })
+        stages = spec.setdefault("stages", {})
+        stages.setdefault("discovery", {}).update({"enabled": True, "mode": "pn"})
+        retry_stages = set(retry["by_stage"])
+        if retry_stages and "discovery" not in retry_stages:
+            for proto in ("tcp", "udp"):
+                needed = proto in retry_stages or f"service:{proto}" in retry_stages
+                needed = needed or f"{proto}_service" in retry_stages
+                stage_spec = stages.get(proto)
+                if isinstance(stage_spec, dict):
+                    stage_spec["enabled"] = bool(stage_spec.get("enabled")) and needed
+        for stage_name in ("tcp", "udp", "service"):
+            stage_spec = stages.get(stage_name)
+            if isinstance(stage_spec, dict):
+                stage_spec["max_retries"] = 4
+        scanops = spec.setdefault("scanops", {})
+        original_keys = scanops.get("scope_keys") or []
+        target_set = set(targets)
+        enabled_protocols = {
+            proto for proto in ("tcp", "udp")
+            if isinstance(stages.get(proto), dict) and stages[proto].get("enabled")
+        }
+        scanops["scope_keys"] = [
+            key for key in original_keys
+            if (isinstance(key, str) and key.split("|", 1)[0] in target_set
+                and key.rsplit("|", 1)[-1] in enabled_protocols)
+        ]
+        scanops.update({
+            "retry_of": source.id, "retry_stages": list(retry["by_stage"]),
+            "retry_targets": targets,
+        })
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        scan.command = (
+            f"{engine_runner.describe(spec)}  ·  {len(targets)}호스트"
+            f"  ·  확인 필요 재스캔 #{source.id} · --max-retries 4"
+        )
+        scan.batch_size = int(spec.get("batch_size") or 0)
+        scan.batch_total = -(-len(targets) // scan.batch_size) if scan.batch_size else 0
+        db.commit()
+        db.refresh(scan)
+        threading.Thread(target=_engine_worker, args=(scan.id,), daemon=True).start()
+    except Exception:
+        _fail_launch_setup(db, scan.id, user, scan.targets, launch_paths, artifact_dirs=[out_dir])
+    record(
+        db, user, "SCAN_RETRY_TIMEOUTS", target=scan.targets,
+        detail=f"#{source.id} → #{scan.id} · {len(targets)}대 · {','.join(retry['by_stage'])}",
+    )
+    return _scan_out(scan, db)
+
+
 @router.get("/{scan_id}/progress")
 def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = Depends(get_db)):
     """실시간 진행률 — 배치 진행(완료/전체) + 현재 배치 nmap percent/ETC/경과 → 전체 percent."""
@@ -2931,7 +3319,9 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
         ),
         # 호스트당 상한을 넘겨 포기당한 호스트. 이 실행에서는 부재를 말할 자격이 없고
         # 나중에 따로 다시 스캔할 대상이라, 진행 상황과 함께 꺼내 볼 수 있어야 한다.
-        "gave_up": engine_runner.gave_up_hosts(_settings.scans_dir / _basename(scan.id)),
+        "gave_up": engine_runner.gave_up_detail(
+            _settings.scans_dir / _basename(scan.id)
+        )["targets"],
     })
     return prog
 
@@ -2944,23 +3334,80 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
         raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
     out_dir = _settings.scans_dir / f"scan_{scan_id}"
     derived = engine_runner.parse_events(out_dir)
-    stages = derived["stages"] or (scan.stages_json or [])
+    durable_executions = db.query(ScanExecution).filter_by(scan_id=scan_id).order_by(
+        ScanExecution.id
+    ).all()
+    durable_issues = db.query(ScanQualityIssue).filter_by(scan_id=scan_id).order_by(
+        ScanQualityIssue.id
+    ).all()
+    durable_hosts = db.query(ScanHostObservation).filter_by(scan_id=scan_id).order_by(
+        ScanHostObservation.host_ip
+    ).all()
+    terminal = scan.status not in {"running", "canceling"}
+    use_db = terminal and bool(durable_executions or durable_issues or durable_hosts)
+    stages = (scan.stages_json or []) if use_db else derived["stages"] or (scan.stages_json or [])
     overall = dict(derived["overall"])
+    retry = engine_runner.gave_up_detail(out_dir)
+    if use_db:
+        executions = [{
+            "id": row.execution_key, "stage": row.stage, "group": row.group_kind,
+            "role": row.role, "reason": row.reason, "artifact": row.artifact,
+            "argv": row.argv_json or [], "status": row.status,
+            "started_at": row.started_at, "finished_at": row.finished_at,
+            "seconds": row.seconds, "rc": row.return_code,
+        } for row in durable_executions]
+        issues = [{
+            "issue_key": row.issue_key, "type": row.kind, "stage": row.stage,
+            "host": row.host_ip, "status": "resolved" if row.resolved_by_scan_id is not None
+            else "retrying" if row.retry_scan_id is not None else "unresolved",
+            "message": row.detail, "retry_scan_id": row.retry_scan_id,
+            "resolved_by_scan_id": row.resolved_by_scan_id,
+        } for row in durable_issues]
+        hosts = [{
+            "host_ip": row.host_ip, "discovery_status": row.discovery_status,
+            "tcp_sweep_status": row.tcp_sweep_status,
+            "tcp_service_status": row.tcp_service_status,
+            "udp_sweep_status": row.udp_sweep_status,
+            "udp_service_status": row.udp_service_status,
+        } for row in durable_hosts]
+        unresolved = [issue for issue in issues if issue["status"] != "resolved"]
+        retry = {
+            "required": bool(unresolved), "count": len({
+                issue["host"] for issue in unresolved if issue["host"]
+            }) or len(unresolved),
+            "targets": sorted({issue["host"] for issue in unresolved if issue["host"]}),
+            "by_stage": {}, "reasons": {}, "issues": unresolved,
+        }
+        for issue in unresolved:
+            retry["by_stage"].setdefault(issue["stage"], []).append(issue["host"])
+    else:
+        executions = derived.get("executions") or []
+        issues = derived.get("quality_issues") or []
+        hosts = []
     # The database lifecycle is authoritative. An empty/truncated event stream must not make a
     # terminal scan look like it is still running after a restart or worker failure.
     overall["status"] = scan.status
     return {
         "scan_id": scan_id,
         "status": scan.status,
-        "kind": "staged" if engine_runner.is_engine_scan(out_dir) else "legacy_or_import",
+        "kind": "staged" if use_db or engine_runner.is_engine_scan(out_dir) else "legacy_or_import",
+        "source": "db" if use_db else "live_events" if not terminal else "legacy_events",
         "timeline_available": bool(stages),
         "stages": stages,
         "overall": overall,
+        "current": derived.get("current") or {},
+        "executions": executions,
+        "issues": issues,
+        "recoveries": derived.get("recoveries") or [],
+        "hosts": hosts,
         "failure_code": scan.failure_code,
         "failure_message": scan.failure_message,
         "host_count": scan.host_count,
         "port_count": scan.port_count,
         "finished_at": scan.finished_at,
+        # 완료 후에도 다시 스캔할 타겟을 복사할 수 있도록 상세 응답에 남긴다.
+        "gave_up": retry["targets"],
+        "retry": retry,
     }
 
 

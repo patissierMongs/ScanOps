@@ -131,6 +131,16 @@ class ScanOut(BaseModel):
     stages_json: list | None = None
     failure_code: str = ""
     failure_message: str = ""
+    created_by: int | None = None
+    created_by_name: str = ""
+    quality_status: str = "ok"
+    unresolved_issue_count: int = 0
+    unresolved_host_count: int = 0
+    retry_required: bool = False
+    retry_count: int = 0
+    retry_stages: list[str] = []
+    retry_status: str = "none"
+    retry_scan_id: int | None = None
     # 이력 표가 명령줄 대신 보여주는 요약(어디를·어떤 포트를·TCP/UDP). 서버가 실행된 argv 에서
     # 뽑으므로 표와 상세가 같은 근거를 본다. 원문 명령은 command 로 상세에서만 펼친다.
     summary: dict | None = None
@@ -167,6 +177,7 @@ class FindingOut(BaseModel):
     proto: str
     state: str
     reason: str = ""              # nmap --reason 원문(syn-ack/no-response…)
+    current_reason: str = ""
     state_evidence: str = ""      # 그 근거의 해석 — 응답 확인 / 무응답 추정 / 미관측
     needs_confirmation: bool = False
     service: str
@@ -201,6 +212,8 @@ class FindingOut(BaseModel):
     manual_note: str
     first_seen: datetime
     last_seen: datetime
+    first_scan_id: int | None = None
+    last_scan_id: int | None = None
 
 
 class FindingPatch(BaseModel):
@@ -217,7 +230,9 @@ class EventOut(BaseModel):
     type: str
     detail: str
     actor_user_id: int | None
+    actor_name: str = ""
     scan_id: int | None
+    scan_name: str = ""
     created_at: datetime
 
 
@@ -233,7 +248,9 @@ class EventFeedItem(BaseModel):
     server: str
     service: str
     actor_user_id: int | None
+    actor_name: str = ""
     scan_id: int | None
+    scan_name: str = ""
     created_at: datetime
 
 
@@ -320,7 +337,11 @@ class NotifyOut(BaseModel):
     id: int
     dept: str
     body: str
+    finding_ids: list[int] = []
+    finding_count: int = 0
     channel: str
+    sent_by: int | None = None
+    sent_by_name: str = ""
     sent_at: datetime
 
 

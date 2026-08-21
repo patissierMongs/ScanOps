@@ -12,6 +12,7 @@ import { splitScanTokens } from "../src/lib/scanTargets.js";
 import { toastAnnouncement, toastDuration } from "../src/lib/toast.js";
 import { matchesFilter, parseNeedle } from "../src/lib/filterText.js";
 import { formatImportSummary } from "../src/lib/scanImports.js";
+import { formatScanPortScope } from "../src/lib/scanScope.js";
 import { matchFocus } from "../src/lib/ruleFocus.js";
 import { PAGE_SIZES } from "../src/lib/pageSize.js";
 
@@ -175,8 +176,19 @@ test("scan details expose persisted timeline and safe failure fields", () => {
   assert.match(scans, /withPersistedStages/);
   assert.match(scans, /\/scans\/\$\{scan\.id\}\/stages/);
   assert.match(scans, /timeline_available/);
+  assert.match(scans, /<RetryQueue retry=\{detail\.retry\}/);
+  assert.match(scans, /<StageRecoveries recoveries=\{recoveries\}/);
+  assert.match(scans, /<StageIssueDetails issues=\{issues\}/);
+  assert.match(scans, /<ExecutionGroups executions=\{executions\}/);
   assert.match(scans, /failure_message/);
   assert.match(scans, /failure_code/);
+});
+
+test("a running Nmap execution is never labeled complete", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /execution\.status === "running" \? "실행 중"/);
+  assert.match(scans, /`경과 \$\{fmtElapsed\(liveSeconds\)\}`/);
+  assert.match(scans, /window\.setInterval\(\(\) => setNow\(Date\.now\(\)\), 1000\)/);
 });
 
 test("heatmap and notification mirrors use display identity with service context", () => {
@@ -186,6 +198,54 @@ test("heatmap and notification mirrors use display identity with service context
   assert.match(heatmap, /primaryServiceIdentity\(finding\)/);
   assert.match(notifications, /const identity = primaryServiceIdentity\(f\)/);
   assert.match(notifications, /\(서비스: \$\{f\.service\}\)/);
+  assert.match(notifications, /RISK_LABEL\[f\.risk_level\]/);
+  assert.match(notifications, /f\.needs_confirmation \? " · 재확인 필요"/);
+});
+
+test("dashboard separates active evidence from actionable unresolved findings", () => {
+  const dashboard = source("../src/views/Dashboard.jsx");
+  assert.match(dashboard, /confirmed_open_total/);
+  assert.match(dashboard, /confirmation_required_total/);
+  assert.match(dashboard, /allowed_open_total/);
+  assert.match(dashboard, /unresolved_total/);
+  assert.match(dashboard, /부서별 미해결/);
+  assert.match(dashboard, /unresolved_by_risk/);
+});
+
+test("notification history exposes immutable body targets and actor", () => {
+  const notifications = source("../src/views/Notifications.jsx");
+  assert.match(notifications, /h\.sent_by_name/);
+  assert.match(notifications, /h\.finding_count/);
+  assert.match(notifications, /h\.finding_ids\.join/);
+  assert.match(notifications, /h\.body \|\| "\(저장된 본문 없음\)"/);
+});
+
+test("scan detail separates recoveries from unresolved quality issues", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /function StageRecoveries/);
+  assert.match(scans, /복구 시도/);
+  assert.match(scans, /service_degraded/);
+  assert.match(scans, /resolved_by_scan_id/);
+  assert.match(scans, /created_by_name/);
+  assert.match(scans, /프로브 결과 \{serviceResults\}개 endpoint/);
+});
+
+test("heatmap shows present evidence and reports missing legacy artifacts", () => {
+  const heatmap = source("../src/views/Heatmap.jsx");
+  assert.match(heatmap, /quality_warnings/);
+  assert.match(heatmap, /confirmed_open_count/);
+  assert.match(heatmap, /confirmation_required_count/);
+  assert.match(heatmap, /row\.endpoint_state/);
+  assert.match(heatmap, /row\.state_evidence/);
+});
+
+test("admin audit history has a dedicated view and remains admin-only", () => {
+  const app = source("../src/App.jsx");
+  const audit = source("../src/views/Audit.jsx");
+  assert.match(app, /\{ k: "audit", label: "감사 이력", ico: "≣", admin: true \}/);
+  assert.match(audit, /api\(`\/audit\?\$\{qs\.toString\(\)\}`\)/);
+  assert.match(audit, /row\.actor_name/);
+  assert.match(audit, /row\.ok \? "성공" : "실패"/);
 });
 
 test("Server changes have a localized history label and filter", () => {
@@ -238,7 +298,7 @@ test("scan exclusions share one deduplicated token contract across estimate and 
   assert.equal((scans.match(/exclude: excludeList/g) || []).length, 4);
   assert.match(scans, /\/scans\/run-command[\s\S]*?exclude: excludeList/);
   assert.match(scans, /const previewExcludes = est\?\.exclude \?\? excludeList/);
-  assert.match(scans, /targets=\{targetList\} excludes=\{previewExcludes\} staged=\{staged\}/);
+  assert.match(scans, /targets=\{targetList\} excludes=\{previewExcludes\} excludePorts=\{excludePorts\} staged=\{staged\}/);
   assert.match(scans, /setTargets\(""\); setExclude\(""\); setName\(""\)/);
   assert.match(scans, /htmlFor="scan-exclude"/);
   assert.match(scans, /aria-describedby="scan-exclude-help"/);
@@ -366,8 +426,22 @@ test("staged preview mirrors discovery, protocol sweeps, and per-host service pr
   assert.match(staged, /"U:<UDP 탐색에서 열린 포트>"/);
   assert.match(staged, /versionFlag === "--version-light" && versionFlag/);
   assert.match(staged, /"<호스트 1대>"/);
-  assert.match(source("../src/views/Scans.jsx"), /targets=\{targetList\} excludes=\{previewExcludes\} staged=\{staged\}/);
+  assert.match(source("../src/views/Scans.jsx"), /targets=\{targetList\} excludes=\{previewExcludes\} excludePorts=\{excludePorts\} staged=\{staged\}/);
+  assert.match(source("../src/views/Scans.jsx"), /excludePorts=\{excludePorts\}/);
+  assert.match(scanOptions, /excludePorts\s*=\s*""/);
+  assert.match(scanOptions, /"--exclude-ports",\s*excludedPortSpec/);
   assert.match(scanOptions, /단계별 명령 템플릿/);
+});
+
+test("finding and event views expose the scan and actor provenance already stored by the server", () => {
+  const findings = source("../src/views/Findings.jsx");
+  const history = source("../src/views/History.jsx");
+  assert.match(findings, /finding\.first_scan_id/);
+  assert.match(findings, /finding\.last_scan_id/);
+  assert.match(findings, /ev\.actor_name/);
+  assert.match(findings, /ev\.scan_id/);
+  assert.match(history, /ev\.actor_name/);
+  assert.match(history, /ev\.scan_name/);
 });
 
 test("scan screen shows target and run first, with everything else folded away", () => {
@@ -696,7 +770,8 @@ test("an imported run is drawn exactly like one that ran in the web UI", () => {
   assert.equal(shouldLoadStages({ status: "done", command: "단계스캔(엔진) · TCP 443" }), true);
   const scans = source("../src/views/Scans.jsx");
   // 엔진 단계와 가져오기 단계를 같은 라벨 표에서 그린다.
-  assert.match(scans, /tcp_discovery: "TCP 발견", tcp_identify: "TCP 식별", udp_identify: "UDP 식별"/);
+  assert.match(scans, /tcp_discovery: "TCP 포트 발견", tcp_identify: "TCP 서비스 프로브"/);
+  assert.match(scans, /udp_identify: "UDP 서비스 프로브"/);
   assert.match(scans, /withPersistedStages\(prev, list\)/);
 });
 
@@ -710,6 +785,47 @@ test("a running scan says which batch and stage it is on", () => {
   // 배치 번호는 사람이 세는 방식(1부터)이되 총 개수를 넘지 않는다(마지막 배치에서 N+1/N 방지).
   assert.match(scans, /배치 \$\{Math\.min\(p\.batches_done \+ 1, total\)\}\/\$\{total\}/);
   assert.match(scans, /\(\$\{p\.batch_size\}대씩\)/);
+  assert.match(scans, /tcp_service: "TCP 서비스 프로브"/);
+  assert.match(scans, /udp_service: "UDP 서비스 프로브"/);
+  assert.match(scans, /현재 대상 · \{currentHosts\(current\)\}/);
+  assert.match(scans, /current\.completed_hosts \|\| 0\}\/\{current\.total_hosts\}대 완료/);
+});
+
+test("scan history distinguishes retry queues and procedural completion", () => {
+  const scans = source("../src/views/Scans.jsx");
+  const css = source("../src/styles.css");
+  assert.match(scans, /재스캔 필요 · \{scan\.retry_count\}대/);
+  assert.match(scans, /\/scans\/\$\{scan\.id\}\/retry-timeouts/);
+  assert.match(scans, /포트 재전송 한도 도달/);
+  assert.match(scans, /retransmission_cap_hosts/);
+  assert.match(scans, /aria-label="전체 절차 완료율"/);
+  assert.match(scans, /function procedurePercent\(stages\)/);
+  assert.match(scans, /\["done", "warning"\]\.includes\(stage\.status\)/);
+  assert.match(css, /\.stage-running/);
+  assert.match(css, /\.stage-warning/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+});
+
+test("scan history puts excluded ports in the main scope label", () => {
+  assert.equal(formatScanPortScope({
+    protocols: ["TCP"], ports: "전체 (일부 제외)", excluded_ports: "2222",
+  }), "TCP 전체: 2222 제외");
+  assert.equal(formatScanPortScope({
+    protocols: ["TCP", "UDP"], ports: "TCP 전체 · UDP 53,161 (일부 제외)",
+    excluded_ports: "2222,U:161",
+  }), "TCP 전체 · UDP 53,161: 2222,U:161 제외");
+  assert.equal(formatScanPortScope({ protocols: ["TCP"], ports: "전체" }), "TCP 전체");
+});
+
+test("scan history table wraps cell contents without losing its column layout", () => {
+  const scans = source("../src/views/Scans.jsx");
+  const css = source("../src/styles.css");
+  assert.match(scans, /className="tbl scan-history-table"/);
+  assert.match(scans, /<colgroup>/);
+  assert.match(scans, /className="scan-history-actions"/);
+  assert.match(css, /\.scan-history-table\s*\{[^}]*table-layout:\s*fixed/);
+  assert.match(css, /\.scan-history-table td\s*\{[^}]*white-space:\s*normal/);
+  assert.match(css, /\.scan-history-actions\s*\{[^}]*flex-wrap:\s*wrap/);
 });
 
 test("a finished batched scan still says how it was split", () => {

@@ -379,28 +379,34 @@ def test_a_staged_web_scan_runs_the_same_scripts_as_the_manual_path():
 
     from scanops.scanning import engine_runner, scan_options
 
+    selected = ["http-title", "snmp-info", "dns-nsid"]
     built = engine_runner.build_job_spec(
-        1, ["10.0.0.1"], [], ["syn", "version"], "", None, Path("/tmp/x"), 64)
+        1, ["10.0.0.1"], [], ["syn", "udp", "version"], "", selected,
+        Path("/tmp/x"), 64)
     spec = JobSpec.from_dict(built)
-    assert set(spec.service.nse) == set(scan_options.NSE_DEFAULT_KEYS)
+    assert spec.service.nse == ["http-title", "dns-nsid"]
+    assert spec.service.udp_nse == ["snmp-info", "dns-nsid"]
 
     class _Sink:
         def emit(self, *a, **k):
             pass
 
-    # 서비스 단계가 TCP 에 싣는 --script 를 확인한다(UDP 는 의도적으로 NSE 미사용).
+    # 웹에서 고른 스크립트가 프로토콜별로 걸러져 실제 TCP/UDP 식별 인자까지 가야 한다.
     recorded = {}
 
     def fake_nmap(stage, args, base, fatal=True):
-        recorded.setdefault(stage, args)
+        recorded["udp" if "-sU" in args else "tcp"] = args
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
 
     pipe = Pipeline(spec, _Sink(), "nmap")
     pipe._nmap = fake_nmap
     pipe._probe_protocol("10.0.0.1", "tcp", [443], spec.service, confirm=False)
-    argv = " ".join(map(str, recorded["service"]))
-    for script in ("telnet-encryption", "vnc-info", "smb-protocols", "ssl-cert", "ftp-anon"):
-        assert script in argv, f"{script} 가 실제 인자에 없다"
+    pipe._probe_protocol("10.0.0.1", "udp", [161], spec.service, confirm=False)
+    tcp_scripts = recorded["tcp"][recorded["tcp"].index("--script") + 1]
+    udp_scripts = recorded["udp"][recorded["udp"].index("--script") + 1]
+    assert tcp_scripts == "http-title,dns-nsid"
+    assert udp_scripts == "snmp-info,dns-nsid"
+    assert "snmp-info" not in tcp_scripts and "http-title" not in udp_scripts
 
 
 # ── 제외는 전선뿐 아니라 닫힘 권한에서도 빠져야 한다 ─────────────────────────
@@ -1030,7 +1036,121 @@ def test_a_batch_is_finished_before_the_next_one_starts(tmp_path):
     b1 = [i for i, n in enumerate(order) if "b1" in n or "10_0_0_2" in n]
     assert b0 and b1 and max(b0) < min(b1), f"배치가 섞여 있다: {order}"
     # 그리고 배치 안에서는 sweep 이 식별보다 먼저다 - 식별은 sweep 이 찾은 포트를 쓴다.
-    assert order.index("stage-tcp-b0") < order.index("stage3-10_0_0_1-tcp")
+    assert order.index("stage-tcp-b0") < order.index("stage3-tcp-b0-g0")
+
+
+def test_engine_reports_five_stages_and_the_hosts_active_inside_each_batch(tmp_path):
+    """이력은 '서비스 중'이 아니라 TCP/UDP 단계와 실제 병렬 호스트를 말해야 한다."""
+    import sys
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine.pipeline import Pipeline
+    from scanops_engine.spec import JobSpec
+
+    class Sink:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event, **fields):
+            self.events.append({"event": event, **fields})
+
+    sink = Sink()
+    spec = JobSpec.from_dict({
+        "job_id": "progress", "targets": ["10.0.0.1", "10.0.0.2"],
+        "out_dir": str(tmp_path), "batch_size": 1,
+        "stages": {"tcp": {"enabled": True, "ports": "22"},
+                   "udp": {"enabled": True, "ports": "53"},
+                   "service": {"nse": [], "udp_nse": []}},
+    }).validate()
+    pipe = Pipeline(spec, sink, "nmap")
+
+    def fake(stage, args, base, fatal=True):
+        host = str(args[-1])
+        proto = "udp" if "-sU" in args else "tcp"
+        port = 53 if proto == "udp" else 22
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml(host, proto, port))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._scan_batches(["10.0.0.1", "10.0.0.2"])
+
+    assert pipe._stage_plan() == [
+        "discovery", "tcp", "tcp_service", "udp", "udp_service",
+    ]
+    activity = [event for event in sink.events if event["event"] == "stage_activity"]
+    assert {event["stage"] for event in activity} == {
+        "tcp", "tcp_service", "udp", "udp_service",
+    }
+    assert any(event["stage"] == "tcp" and event["current_hosts"] == ["10.0.0.1"]
+               and event["batch"] == 1 and event["batch_total"] == 2
+               for event in activity)
+    assert any(event["stage"] == "udp_service"
+               and event["current_hosts"] == ["10.0.0.2"]
+               and event["completed_hosts"] == 0
+               for event in activity)
+
+
+def test_tcp_service_probe_uses_one_batch_union_on_firewall_free_lan(tmp_path):
+    """TCP는 배치 등장 포트 합집합을 한 번 실행해 Nmap 호스트 병렬성을 사용한다."""
+    import sys
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine.pipeline import Pipeline
+    from scanops_engine.spec import JobSpec
+    from scanops.scanning import engine_runner
+
+    class Sink:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event, **fields):
+            self.events.append({"event": event, **fields})
+
+    hosts = [f"10.0.0.{i}" for i in range(1, 5)]
+    spec_dict = {
+        "job_id": "union", "targets": hosts, "out_dir": str(tmp_path), "batch_size": 16,
+        "stages": {"tcp": {"enabled": False}, "udp": {"enabled": False},
+                   "service": {"enabled": True, "confirm": False, "nse": []}},
+    }
+    sink = Sink()
+    pipe = Pipeline(JobSpec.from_dict(spec_dict).validate(), sink, "nmap")
+    pipe.open_map = {
+        hosts[0]: {"tcp": [22, 80, 443]},
+        hosts[1]: {"tcp": [22, 80, 443, 4444]},
+        hosts[2]: {"tcp": [22, 80, 443, 3333]},
+        hosts[3]: {"tcp": [22, 80, 443, 8888]},
+    }
+    seen = []
+
+    def fake(stage, args, base, fatal=True):
+        seen.append((stage, list(args), pathlib_Path(base).name))
+        selected = [host for host in hosts if host in args]
+        xml_hosts = "".join(
+            f'<host><status state="up"/><address addr="{host}" addrtype="ipv4"/>'
+            '<ports><port protocol="tcp" portid="22"><state state="open"/>'
+            '<service name="ssh"/></port></ports></host>' for host in selected
+        )
+        pathlib_Path(str(base) + ".xml").write_text(
+            '<?xml version="1.0"?><nmaprun>' + xml_hosts
+            + '<runstats><finished exit="success"/></runstats></nmaprun>', encoding="utf-8",
+        )
+        return {"rc": 0, "seconds": 0.1, "cmd": args, "stopped": False}
+
+    pipe._nmap = fake
+    pipe._scan_batches(hosts)
+
+    assert len(seen) == 1
+    commands = {
+        (tuple(host for host in hosts if host in args), args[args.index("-p") + 1])
+        for stage, args, _base in seen if stage == "service"
+    }
+    assert commands == {(tuple(hosts), "T:22,80,443,3333,4444,8888")}
+    assert {base for _stage, _args, base in seen} == {"stage3-tcp-b0-g0"}
+    activity = [event for event in sink.events
+                if event["event"] == "stage_activity" and event["stage"] == "tcp_service"]
+    assert activity[0]["current_hosts"] == hosts
+    assert activity[-1]["completed_hosts"] == 4
+    assert engine_runner.artifact_report(tmp_path, spec_dict)["enrichment_missing"] == []
 
 
 def test_identify_only_covers_the_ports_that_batch_actually_found(tmp_path):
@@ -1055,7 +1175,7 @@ def test_identify_only_covers_the_ports_that_batch_actually_found(tmp_path):
 
     sweep = seen["stage-tcp-b0"]
     assert sweep[sweep.index("-p") + 1] == "1-65535", "sweep 은 전수 그대로"
-    probe = seen["stage3-10_0_0_1-tcp"]
+    probe = seen["stage3-tcp-b0-g0"]
     assert probe[probe.index("-p") + 1] == "T:22", "식별은 그 배치가 찾은 포트만"
 
 
@@ -1094,6 +1214,92 @@ def test_hosts_nmap_gave_up_on_are_collected_for_a_later_scan(tmp_path):
     pipe._nmap = clean
     pipe._sweep_batch("tcp", 1, ["10.0.0.1"])
     assert engine_runner.gave_up_hosts(tmp_path) == [], "끝까지 훑었으면 목록에서 빠진다"
+
+
+def test_retransmission_cap_hosts_are_collected_by_stage_for_a_later_scan(tmp_path, monkeypatch):
+    """cap-hit은 host timeout과 별개지만 같은 재스캔 대기열에 원인별로 남아야 한다."""
+    from scanops.scanning import engine_runner
+
+    pipe, _ = _pipeline(tmp_path, {
+        "job_id": "j", "targets": ["10.0.0.1", "10.0.0.2"], "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": True, "ports": "22"},
+                   "service": {"enabled": False}},
+    })
+    from scanops_engine import nmaprun
+
+    def cap_hit(nmap, args, base, **kwargs):
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1", "tcp", 22))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False,
+                "retransmission_cap_hosts": ["10.0.0.2"]}
+
+    monkeypatch.setattr(nmaprun, "run", cap_hit)
+    pipe._sweep_batch("tcp", 0, ["10.0.0.1", "10.0.0.2"])
+
+    retry = engine_runner.gave_up_detail(tmp_path)
+    assert retry["targets"] == ["10.0.0.2"]
+    assert retry["by_stage"] == {"tcp": ["10.0.0.2"]}
+    assert retry["reasons_by_stage"] == {
+        "tcp": {"10.0.0.2": ["retransmission_cap"]},
+    }
+
+
+def test_a_clean_udp_sweep_does_not_erase_a_tcp_timeout(tmp_path):
+    """한 프로토콜 성공은 다른 프로토콜의 timeout 증거를 지우면 안 된다."""
+    from scanops.scanning import engine_runner
+
+    pipe, _ = _pipeline(tmp_path, {
+        "job_id": "j", "targets": ["10.0.0.1"], "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": True, "ports": "22"},
+                   "udp": {"enabled": True, "ports": "53"},
+                   "service": {"enabled": False}},
+    })
+
+    def mixed(stage, args, base, fatal=True):
+        xml = (_timedout_only_xml("10.0.0.1") if stage == "tcp"
+               else _clean_xml("10.0.0.1", "udp", 53))
+        pathlib_Path(str(base) + ".xml").write_bytes(xml)
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = mixed
+    pipe._sweep_batch("tcp", 0, ["10.0.0.1"])
+    pipe._sweep_batch("udp", 0, ["10.0.0.1"])
+
+    assert engine_runner.gave_up_hosts(tmp_path) == ["10.0.0.1"]
+
+
+def test_discovery_and_service_timeouts_are_also_collected(tmp_path):
+    """timeout 재스캔 목록은 sweep뿐 아니라 호스트 발견·서비스/NSE 상한도 포함한다."""
+    from scanops.scanning import engine_runner
+
+    discovery_dir = tmp_path / "discovery"
+    pipe, _ = _pipeline(discovery_dir, {
+        "job_id": "d", "targets": ["10.0.0.1"], "out_dir": str(discovery_dir),
+        "stages": {"discovery": {"enabled": True, "mode": "sn", "host_timeout": "1m"},
+                   "tcp": {"enabled": False}, "service": {"enabled": False}},
+    })
+
+    def timed_out(stage, args, base, fatal=True):
+        pathlib_Path(str(base) + ".xml").write_bytes(_timedout_only_xml("10.0.0.1"))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = timed_out
+    pipe._discovery()
+    assert engine_runner.gave_up_hosts(discovery_dir) == ["10.0.0.1"]
+
+    service_dir = tmp_path / "service"
+    service, spec = _pipeline(service_dir, {
+        "job_id": "s", "targets": ["10.0.0.2"], "out_dir": str(service_dir),
+        "stages": {"service": {"nse": [], "udp_nse": ["dns-nsid"],
+                                "udp_host_timeout": "1m"}},
+    })
+    def service_timed_out(stage, args, base, fatal=True):
+        pathlib_Path(str(base) + ".xml").write_bytes(_timedout_only_xml("10.0.0.2"))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    service._nmap = service_timed_out
+    service._probe_protocol("10.0.0.2", "udp", [53], spec.service, confirm=False,
+                            isolate=True)
+    assert engine_runner.gave_up_hosts(service_dir) == ["10.0.0.2"]
 
 
 def test_a_resumed_scan_skips_batches_it_already_finished(tmp_path):

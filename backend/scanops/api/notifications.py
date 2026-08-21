@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..identity import display_identity
-from ..models import ACTIVE_FINDING_STATES, RISK_LABELS_KO, Finding, Notification, User
+from ..models import (
+    ACTIVE_FINDING_STATES, RISK_LABELS_KO, RISK_LEVELS,
+    Finding, Notification, User,
+)
+from ..observation import exposure_text, needs_confirmation
 from ..schemas import NotifyOut, NotifyPreview, NotifySend
 from .deps import current_user, require_role
 
@@ -17,13 +21,17 @@ router = APIRouter()
 
 
 def _open_findings_for_dept(db: Session, dept: str) -> list[Finding]:
-    return (
+    rows = (
         db.query(Finding)
         .filter(Finding.dept == dept, Finding.state.in_(ACTIVE_FINDING_STATES),
-                Finding.status != "정상처리")
-        .order_by(Finding.risk_level.desc(), Finding.host_ip, Finding.port)
+                Finding.status != "정상처리", Finding.allowed == 0)
+        .order_by(Finding.host_ip, Finding.port)
         .all()
     )
+    risk_rank = {level: index for index, level in enumerate(RISK_LEVELS)}
+    return sorted(rows, key=lambda row: (
+        risk_rank.get(row.risk_level, len(risk_rank)), row.host_ip, row.port, row.proto,
+    ))
 
 
 def _build_body(dept: str, rows: list[Finding]) -> str:
@@ -46,9 +54,27 @@ def _build_body(dept: str, rows: list[Finding]) -> str:
         )
         if r.service and identity != r.service:
             identity += f" (서비스: {r.service})"
+        confirmation = " · 재확인 필요" if needs_confirmation(r.state, r.reason) else ""
+        exposure = exposure_text(r.exposure_json)
+        exposure_note = f" · {exposure}" if exposure else ""
         lines.append(f"- {r.host_ip}:{r.port}/{r.proto} {identity}{who} "
-                     f"[{risk}] {r.status}{dl}")
+                     f"[{risk}] {r.status}{confirmation}{exposure_note}{dl}")
     return "\n".join(lines)
+
+
+def _notification_payload(note: Notification, actors: dict[int, str]) -> dict:
+    finding_ids = [int(fid) for fid in (note.finding_ids_json or []) if isinstance(fid, int)]
+    return {
+        "id": note.id,
+        "dept": note.dept,
+        "body": note.body,
+        "channel": note.channel,
+        "sent_at": note.sent_at,
+        "finding_ids": finding_ids,
+        "finding_count": len(finding_ids),
+        "sent_by": note.sent_by,
+        "sent_by_name": actors.get(note.sent_by, ""),
+    }
 
 
 @router.get("/preview", response_model=NotifyPreview)
@@ -68,16 +94,34 @@ def send(
     d = (payload.dept if payload and payload.dept else dept).strip()
     if not d:
         raise HTTPException(status_code=400, detail="부서가 필요합니다.")
-    rows = _open_findings_for_dept(db, d)
+    eligible = _open_findings_for_dept(db, d)
+    by_id = {row.id: row for row in eligible}
+    requested = list(dict.fromkeys(payload.finding_ids)) if payload and payload.finding_ids else []
+    if requested:
+        invalid = [fid for fid in requested if fid not in by_id]
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"통보 대상이 아니거나 부서가 다른 발견 ID: {', '.join(map(str, invalid))}",
+            )
+        rows = [by_id[fid] for fid in requested]
+    else:
+        rows = eligible
     body = payload.body if (payload and payload.body) else _build_body(d, rows)
-    fids = payload.finding_ids if (payload and payload.finding_ids) else [r.id for r in rows]
+    fids = [row.id for row in rows]
     note = Notification(dept=d, finding_ids_json=fids, body=body, channel="file", sent_by=user.id)
     db.add(note)
     db.commit()
     db.refresh(note)
-    return note
+    return _notification_payload(note, {user.id: user.display_name or user.username})
 
 
 @router.get("", response_model=list[NotifyOut])
 def history(_: User = Depends(current_user), db: Session = Depends(get_db)):
-    return db.query(Notification).order_by(Notification.id.desc()).all()
+    notes = db.query(Notification).order_by(Notification.id.desc()).all()
+    actor_ids = {note.sent_by for note in notes if note.sent_by is not None}
+    actors = {
+        user.id: (user.display_name or user.username)
+        for user in db.query(User).filter(User.id.in_(actor_ids)).all()
+    } if actor_ids else {}
+    return [_notification_payload(note, actors) for note in notes]

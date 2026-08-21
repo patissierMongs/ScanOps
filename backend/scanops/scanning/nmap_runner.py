@@ -41,14 +41,14 @@ AUTO_TCP_DISCOVERY_FLAGS = [
 # 호스트명 확보(용도 식별 근거). --version-all(intensity 9)로 rarity 높은 서비스(redis 등)까지 식별.
 AUTO_TCP_IDENTIFY_FLAGS = [
     "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
-    "-T4", "--max-retries", "2", "--script-timeout", "10s",
+    "-T4", "--max-retries", "2", "--script-timeout", "2m",
 ]
 # UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 적응형 백오프를 막아 open|filtered 오판).
 # --version-all 미적용: 강도 9 는 수다스러운/증폭형 UDP 서비스(SNMP·SSDP·DNS 등)에서 거대·비정상
 # 응답으로 nmap 을 fatal 종료시킬 위험이 크고 UDP 식별 이득은 미미 → 기본 -sV(강도 7)로 안전하게.
 AUTO_UDP_IDENTIFY_FLAGS = [
     "-sU", "-Pn", "-n", "-sV", "--open", "--reason",
-    "-T4", "--max-retries", "2", "--script-timeout", "10s",
+    "-T4", "--max-retries", "2", "--script-timeout", "3m",
 ]
 
 

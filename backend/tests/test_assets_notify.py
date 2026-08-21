@@ -97,6 +97,69 @@ def test_dept_notification(client):
     assert len(client.get("/api/notifications", headers=h).json()) == 1
 
 
+def test_notification_history_keeps_exact_snapshot_targets_and_actor(client):
+    h = _auth(client)
+    db = SessionLocal()
+    try:
+        confirmed = Finding(
+            finding_key="10.1.0.1|443|tcp", host_ip="10.1.0.1", port=443, proto="tcp",
+            state="open", reason="syn-ack", service="https", risk_level="high",
+            status="미조치", dept="운영팀",
+        )
+        inferred = Finding(
+            finding_key="10.1.0.2|161|udp", host_ip="10.1.0.2", port=161, proto="udp",
+            state="open|filtered", reason="no-response", service="snmp", risk_level="medium",
+            status="처리중", dept="운영팀",
+        )
+        allowed = Finding(
+            finding_key="10.1.0.3|22|tcp", host_ip="10.1.0.3", port=22, proto="tcp",
+            state="open", reason="syn-ack", service="ssh", risk_level="info",
+            status="미조치", dept="운영팀", allowed=1,
+        )
+        db.add_all([confirmed, inferred, allowed])
+        db.commit()
+        confirmed_id, inferred_id, allowed_id = confirmed.id, inferred.id, allowed.id
+    finally:
+        db.close()
+
+    preview = client.get(
+        "/api/notifications/preview", headers=h, params={"dept": "운영팀"},
+    ).json()
+    assert preview["finding_count"] == 2
+    assert "[상]" in preview["body"]
+    assert "재확인 필요" in preview["body"]
+
+    body = "운영팀 불변 통보 snapshot"
+    created = client.post("/api/notifications", headers=h, json={
+        "dept": "운영팀", "body": body,
+        "finding_ids": [inferred_id, confirmed_id],
+    })
+    assert created.status_code == 201, created.text
+    payload = created.json()
+    assert payload["body"] == body
+    assert payload["finding_ids"] == [inferred_id, confirmed_id]
+    assert payload["finding_count"] == 2
+    assert payload["sent_by_name"] == "op"
+
+    db = SessionLocal()
+    try:
+        db.get(Finding, confirmed_id).dept = "변경팀"
+        db.get(Finding, inferred_id).status = "정상처리"
+        db.commit()
+    finally:
+        db.close()
+
+    history = client.get("/api/notifications", headers=h).json()
+    assert history[0]["body"] == body
+    assert history[0]["finding_ids"] == [inferred_id, confirmed_id]
+    assert history[0]["sent_by_name"] == "op"
+
+    rejected = client.post("/api/notifications", headers=h, json={
+        "dept": "운영팀", "body": "invalid", "finding_ids": [allowed_id],
+    })
+    assert rejected.status_code == 400
+
+
 def test_omitted_asset_fields_preserve_asset_and_finding_attribution(client):
     h = _auth(client)
     created = client.post("/api/assets", headers=h, json={

@@ -49,6 +49,30 @@ class _Sink:
         self.events.append({"event": event, **data})
 
 
+def test_run_state_retries_a_transient_windows_replace_lock(monkeypatch, tmp_path):
+    from scanops_engine import state as state_module
+
+    path = tmp_path / "run-state.json"
+    state = RunState(path)
+    state.set("live", ["127.0.0.1"])
+    real_replace = state_module.os.replace
+    calls = 0
+
+    def flaky_replace(source, target):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise PermissionError(5, "transient sharing violation")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(state_module.os, "replace", flaky_replace)
+    state.save()
+
+    assert calls == 3
+    assert json.loads(path.read_text(encoding="utf-8"))["live"] == ["127.0.0.1"]
+    assert list(tmp_path.glob(".run-state.json.*.tmp")) == []
+
+
 def test_engine_stop_sentinel_survives_stale_progress_save_until_resume(tmp_path):
     state_path = tmp_path / "run-state.json"
     initial = RunState(state_path)
@@ -151,6 +175,31 @@ def test_nmap_normal_progress_still_streams(monkeypatch, tmp_path):
     assert "About 42.50% done" in (tmp_path / "progress.stdout.log").read_text(
         encoding="utf-8",
     )
+
+
+def test_nmap_collects_hosts_that_hit_the_retransmission_cap(monkeypatch, tmp_path):
+    class WarningProcess:
+        pid = 23457
+        stdout = io.StringIO(
+            "Warning: 10.0.0.8 giving up on port because retransmission cap hit (2).\n"
+            "Warning: 10.0.0.7 giving up on port because retransmission cap hit (2).\n"
+            "Warning: 10.0.0.8 giving up on port because retransmission cap hit (2).\n"
+        )
+
+        @staticmethod
+        def poll():
+            return 0
+
+        @staticmethod
+        def wait(timeout=None):
+            return 0
+
+    monkeypatch.setattr(nmaprun, "popen_owned", lambda *args, **kwargs: WarningProcess())
+    monkeypatch.setattr(nmaprun, "close_kill_job", lambda proc: False)
+
+    result = nmaprun.run("nmap", [], tmp_path / "cap-hit")
+
+    assert result["retransmission_cap_hosts"] == ["10.0.0.7", "10.0.0.8"]
 
 
 @pytest.mark.parametrize("stopped_rc", [0, -15])
@@ -1009,7 +1058,7 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
         "stages": {
             "tcp": {"enabled": False},
             "udp": {"enabled": False},
-            "service": {"nse": ["banner"]},
+            "service": {"nse": ["banner"], "udp_nse": ["dns-nsid"]},
         },
     })
     calls = []
@@ -1039,7 +1088,7 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
     assert counts["errors"] == 0 and counts["services"] == 3
     assert [call["proto"] for call in calls] == ["tcp", "udp"]
     tcp, udp = calls
-    assert tcp["base"].name == "stage3-127_0_0_1-tcp"
+    assert tcp["base"].name == "stage3-tcp-b0-g0"
     # 정상 경로는 프로토콜당 한 프로세스다. 포트별로 쪼개는 것은 그 묶음이 죽었을 때뿐이다.
     assert udp["base"].name == "stage3-127_0_0_1-udp"
     assert tcp["args"][tcp["args"].index("-p") + 1] == "T:54842,54844"
@@ -1050,13 +1099,13 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
     assert tcp["args"] == [
         "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
         "--max-retries", "2", "-p", "T:54842,54844", "--script", "banner",
-        "--script-timeout", "10s", "--exclude", excluded, ip,
+        "--script-timeout", "2m", "--exclude", excluded, ip,
     ]
-    # UDP probe 에는 NSE 를 붙이지 않는다: 발견에 반영되는 스크립트가 전부 TCP 인데, 출발지 포트를
-    # bind 하는 UDP 스크립트는 스캔 호스트의 서비스와 충돌해 NSE 정리 실패로 실행을 못 믿게 만든다.
+    # UDP도 웹에서 선택한 UDP/both 스크립트만 열린 UDP 포트 식별에 붙인다.
     assert udp["args"] == [
         "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
-        "--max-retries", "2", "-p", "U:63848", "--exclude", excluded, ip,
+        "--max-retries", "2", "-p", "U:63848", "--script", "dns-nsid",
+        "--script-timeout", "3m", "--exclude", excluded, ip,
     ]
     state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
     assert ip in state["service_done"] and "job" in state["stages_done"]
@@ -1278,6 +1327,37 @@ def test_allinone_copy_and_embedded_python_path_include_engine(tmp_path):
     assert "..\\..\\backend" in pth and "..\\..\\engine" in pth
 
 
+def test_allinone_start_creates_and_prints_initial_admin_credentials(tmp_path):
+    module = _load_allinone()
+    app = tmp_path / "app"
+    app.mkdir()
+    module.write_launcher(app)
+
+    start = (app / "START.bat").read_text(encoding="ascii")
+    assert "run_bootstrap" in start and "INITIAL_ADMIN.txt" in start
+    assert "read_text(encoding='utf-8')" in start
+    assert "Username: admin" in start and "Password: '+pw" in start
+    assert start.index("run_bootstrap") < start.index("-m uvicorn")
+    assert "chcp 65001" in start
+    assert "<this-server-ip>" not in start
+
+
+def test_runtime_browser_failed_stage_fixture_matches_current_scan_schema(client):
+    """The browser fixture uses raw SQL, so new non-null scan columns must be supplied."""
+    from scanops.config import get_settings
+
+    seeded = runtime_e2e._seed_failed_stage_scan(get_settings().data_dir)
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, seeded["id"])
+        assert scan is not None
+        assert scan.batch_total == 0 and scan.batch_size == 0
+        assert scan.source_fingerprint == ""
+    finally:
+        db.close()
+
+
 def test_offline_wheelhouse_resolves_only_for_documented_windows_pythons(tmp_path):
     """wheelhouse 는 문서화된 런타임(all-in-one 의 3.12/3.13)에서만 오프라인 해석돼야 한다.
 
@@ -1311,6 +1391,7 @@ def test_offline_wheelhouse_resolves_only_for_documented_windows_pythons(tmp_pat
         assert f'"{version}"' in installer
     # all-in-one 은 두 런타임을 모두 담을 수 있으므로 그 사실도 문서에 있어야 한다.
     assert "--python 3.12" in readme
+    assert "--arch x86" in readme
 
 
 def test_non_ascii_windows_powershell_installer_has_utf8_bom():
@@ -1422,6 +1503,7 @@ def test_allinone_default_keeps_the_established_output_contract():
     옮겼다 — smoke/CI 가 ScanOps_allinone.zip 을 이름으로 집어가기 때문."""
     module = _load_allinone()
     assert module.PYTHON == "3.13" and module.ABI == "cp313"
+    assert module.ARCH == "x64" and module.PLATFORM == "win_amd64"
     assert module.OUT.name == "ScanOps_allinone.zip"
     assert module.STAGE.name == "_allinone_stage"
 
@@ -1448,6 +1530,22 @@ def test_allinone_configure_binds_runtime_abi_and_output_per_version():
         module.configure("3.11")
 
 
+def test_allinone_configure_binds_x86_runtime_without_changing_x64_defaults():
+    module = _load_allinone()
+
+    module.configure("3.13", arch="x86")
+    assert module.ARCH == "x86" and module.PLATFORM == "win32"
+    assert "embed-win32" in module.EMBED_URL
+    assert module.OUT.name == "ScanOps_allinone_x86.zip"
+    assert module.STAGE.name == "_allinone_stage_x86"
+
+    with pytest.raises(SystemExit, match="x86"):
+        module.configure("3.12", arch="x86")
+
+    module.configure("3.13")
+    assert module.ARCH == "x64" and module.OUT.name == "ScanOps_allinone.zip"
+
+
 def test_allinone_wheelhouse_covers_every_supported_python():
     """각 지원 버전의 win_amd64 바이너리 휠이 wheelhouse 에 있어야 완전 오프라인 빌드가 된다."""
     module = _load_allinone()
@@ -1457,6 +1555,10 @@ def test_allinone_wheelhouse_covers_every_supported_python():
         for dist in ("SQLAlchemy", "greenlet", "pydantic_core"):
             assert any(w.startswith(dist) and f"{abi}-{abi}-win_amd64" in w for w in wheels), (
                 f"{dist} 의 {abi} win_amd64 휠이 wheelhouse 에 없습니다")
+
+    for dist in ("SQLAlchemy", "pydantic_core"):
+        assert any(w.startswith(dist) and "cp313-cp313-win32" in w for w in wheels), (
+            f"{dist} 의 cp313 win32 휠이 wheelhouse 에 없습니다")
 
 
 def test_allinone_ships_windows_conditional_dependencies():
@@ -1479,6 +1581,20 @@ def test_allinone_verify_site_rejects_mismatched_abi(tmp_path):
     (site / "pydantic_core" / "_pydantic_core.cp312-win_amd64.pyd").write_bytes(b"x")
 
     with pytest.raises(SystemExit, match="cp313"):
+        module.verify_site(site)
+
+
+def test_allinone_verify_site_rejects_mismatched_architecture(tmp_path):
+    module = _load_allinone()
+    module.configure("3.13", arch="x86")
+    site = tmp_path / "site"
+    for pkg in ("fastapi", "uvicorn", "sqlalchemy", "pydantic", "pydantic_core",
+                "pydantic_settings", "starlette", "openpyxl", "multipart",
+                "click", "colorama"):
+        (site / pkg).mkdir(parents=True)
+    (site / "pydantic_core" / "_pydantic_core.cp313-win_amd64.pyd").write_bytes(b"x")
+
+    with pytest.raises(SystemExit, match="win32"):
         module.verify_site(site)
 
 
@@ -1652,7 +1768,7 @@ def test_a_missing_service_probe_artifact_is_recorded_as_degraded(tmp_path, monk
     spec = _run_pipeline(tmp_path, monkeypatch, omit={"stage3-"})
     report = engine_runner.artifact_report(tmp_path, spec, force_scanned_hosts=False)
     assert not (report["authority_missing"] + report["authority_broken"]), report
-    assert report["enrichment_missing"] == ["stage3-127_0_0_1-tcp.xml"], report
+    assert report["enrichment_missing"] == ["stage3-tcp-b0-g0.xml"], report
 
 
 def test_one_dead_udp_probe_no_longer_abandons_the_rest_of_the_identify_stage(
@@ -1682,20 +1798,24 @@ def test_one_dead_udp_probe_no_longer_abandons_the_rest_of_the_identify_stage(
     seen = []
 
     def fake_run(nmap, args, out_base, **_kwargs):
-        target = args[-1]
+        targets = tuple(ip for ip in (dead, alive) if ip in args)
         pspec = args[args.index("-p") + 1].split(":")[1]
         ports = [int(x) for x in pspec.split(",")]
-        seen.append((target, tuple(ports), "--nsock-engine" in args))
+        seen.append((targets, tuple(ports), "--nsock-engine" in args))
         # 500 을 물고 있는 실행만 죽는다 — 묶음도, 쪼갠 뒤의 500 도.
-        if target == dead and 500 in ports:
+        if dead in targets and 500 in ports:
             return {"rc": 7, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
         rows = "".join(
             f'<port protocol="udp" portid="{p}"><state state="open" reason="udp-response"/>'
             '<service name="test" method="probed"/></port>' for p in ports)
+        xml_hosts = "".join(
+            '<host><status state="up"/>'
+            f'<address addr="{target}" addrtype="ipv4"/><ports>{rows}</ports></host>'
+            for target in targets
+        )
         Path(str(out_base) + ".xml").write_text(
-            '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
-            f'<address addr="{target}" addrtype="ipv4"/><ports>{rows}</ports>'
-            '</host><runstats><finished exit="success"/></runstats></nmaprun>',
+            '<?xml version="1.0"?><nmaprun>' + xml_hosts
+            + '<runstats><finished exit="success"/></runstats></nmaprun>',
             encoding="utf-8",
         )
         return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
@@ -1704,11 +1824,11 @@ def test_one_dead_udp_probe_no_longer_abandons_the_rest_of_the_identify_stage(
     sink = _Sink()
     counts = Pipeline(spec, sink, "nmap").run()
 
-    # 정상 호스트는 묶음 한 번으로 끝난다 — 포트마다 프로세스를 만들지 않는다.
-    assert [call for call in seen if call[0] == alive] == [(alive, (123,), False)]
+    # 공유 호스트 집합이 없으므로 정상 호스트는 자기 포트 묶음 한 번으로 끝난다.
+    assert [call for call in seen if call[0] == (alive,)] == [((alive,), (123,), False)]
     # 죽은 호스트는 묶음 → select 재시도 → 그때서야 포트별 분할.
-    assert (dead, (161, 500), False) in seen and (dead, (161, 500), True) in seen
-    assert (dead, (161,), False) in seen, "묶음이 죽은 뒤에야 포트별로 쪼갠다"
+    assert ((dead,), (161, 500), False) in seen and ((dead,), (161, 500), True) in seen
+    assert ((dead,), (161,), False) in seen, "묶음이 죽은 뒤에야 포트별로 쪼갠다"
     assert (tmp_path / f"stage3-{dead.replace('.', '_')}-udp161.xml").exists()
     # 뒤따르는 호스트가 살아남는다 — stage 가 중단되지 않았다는 뜻.
     assert (tmp_path / f"stage3-{alive.replace('.', '_')}-udp.xml").exists()

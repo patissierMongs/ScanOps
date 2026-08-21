@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { api, uploadMany } from "../api.js";
 import { formatImportSummary, prepareImportGroups, runImportGroups } from "../lib/scanImports.js";
 import { splitScanTokens } from "../lib/scanTargets.js";
+import { formatScanPortScope } from "../lib/scanScope.js";
 import { useToast } from "../ui/Toast.jsx";
 import ScanOptions from "../ui/ScanOptions.jsx";
 import { scanKind, scanNotice, scanStatus, shouldLoadStages } from "../lib/scanStatus.js";
@@ -43,6 +44,38 @@ function fmtDur(sec) {
   return mm ? `${h}시간 ${mm}분` : `${h}시간`;
 }
 
+function fmtElapsed(sec) {
+  if (sec == null || !Number.isFinite(sec)) return "계산 중";
+  sec = Math.max(0, Math.floor(sec));
+  const s = sec % 60;
+  const totalMinutes = Math.floor(sec / 60);
+  if (!totalMinutes) return `${s}초`;
+  const m = totalMinutes % 60;
+  const h = Math.floor(totalMinutes / 60);
+  if (!h) return `${m}분 ${s}초`;
+  return `${h}시간 ${m}분 ${s}초`;
+}
+
+function scanDuration(scan, liveProgress) {
+  if (liveProgress?.elapsed_seconds != null) return liveProgress.elapsed_seconds;
+  if (!scan?.started_at || !scan?.finished_at) return null;
+  const seconds = (new Date(scan.finished_at).getTime() - new Date(scan.started_at).getTime()) / 1000;
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+
+function formatArgv(argv) {
+  return (argv || []).map((arg) => (/\s|"/.test(arg) ? `"${arg.replaceAll('"', '\\"')}"` : arg)).join(" ");
+}
+
+function procedurePercent(stages) {
+  if (!stages?.length) return null;
+  const total = stages.reduce((sum, stage) => {
+    if (["done", "warning"].includes(stage.status)) return sum + 100;
+    return sum + Math.max(0, Math.min(100, Number(stage.percent) || 0));
+  }, 0);
+  return Math.round((total / stages.length) * 10) / 10;
+}
+
 function withPersistedStages(previous, scans) {
   const next = { ...previous };
   scans.forEach((scan) => {
@@ -50,7 +83,7 @@ function withPersistedStages(previous, scans) {
     next[scan.id] = {
       ...(next[scan.id] || {}),
       stages: scan.stages_json,
-      overall: { status: scan.status, percent: isActive(scan.status) ? null : 100 },
+      overall: { status: scan.status, percent: procedurePercent(scan.stages_json) },
     };
   });
   return next;
@@ -74,6 +107,7 @@ export default function Scans({ user }) {
   const [showAdvanced, setShowAdvanced] = useState(false);   // 세부 설정 — 기본은 접힘
   const [est, setEst] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [retryingId, setRetryingId] = useState(null);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const fileButtonRef = useRef(null);
@@ -311,6 +345,17 @@ export default function Scans({ user }) {
       .catch((e) => toast(e.message, { type: "err" }));
   }
 
+  function retryTimeouts(scan) {
+    setRetryingId(scan.id);
+    api(`/scans/${scan.id}/retry-timeouts`, { method: "POST" })
+      .then((next) => {
+        toast(`#${scan.id} 확인 필요 ${scan.retry_count}대 재스캔 시작 · 새 스캔 #${next.id}`);
+        load();
+      })
+      .catch((e) => toast(e.message, { type: "err" }))
+      .finally(() => setRetryingId(null));
+  }
+
   return (
     <div className="content">
       {canRun && (
@@ -423,7 +468,7 @@ export default function Scans({ user }) {
 
             {/* 옵션 빌더는 raw 모드에서도 마운트 유지(숨김만) — opt.command 가 최신이라 '채우기'가 정확하게 동작 */}
             <div style={{ display: rawMode ? "none" : "block" }}>
-              <ScanOptions targets={targetList} excludes={previewExcludes} staged={staged}
+              <ScanOptions targets={targetList} excludes={previewExcludes} excludePorts={excludePorts} staged={staged}
                            discovery={discovery} onState={setOpt} />
 
               <section className="scan-step" style={{ marginTop: 14 }}>
@@ -475,11 +520,21 @@ export default function Scans({ user }) {
 
       <div className="panel">
         <h3>스캔 이력</h3>
-        <div style={{ overflowX: "auto" }}>
-          <table className="tbl">
+        <div className="scan-history-scroll">
+          <table className="tbl scan-history-table">
+            <colgroup>
+              <col className="scan-history-col-id" />
+              <col className="scan-history-col-name" />
+              <col className="scan-history-col-scope" />
+              <col className="scan-history-col-status" />
+              <col className="scan-history-col-progress" />
+              <col className="scan-history-col-count" />
+              <col className="scan-history-col-count" />
+              <col className="scan-history-col-actions" />
+            </colgroup>
             <thead><tr>
               <th>ID</th><th>이름</th><th>스캔 범위</th><th>상태</th>
-              <th style={{ minWidth: 220 }}>진행</th><th>호스트</th><th>포트</th><th>작업</th>
+              <th>진행</th><th>호스트</th><th>포트</th><th>작업</th>
             </tr></thead>
             <tbody>
               {scans.length === 0 ? (
@@ -492,10 +547,14 @@ export default function Scans({ user }) {
                   <React.Fragment key={s.id}>
                   <tr>
                     <td className="mono">{s.id}</td>
-                    <td>{s.name}<div><span className="tag">{kind.label}</span></div></td>
-                    <td style={{ maxWidth: 260, whiteSpace: "normal" }}><ScanScope summary={s.summary} /></td>
-                    <td style={{ whiteSpace: "normal", minWidth: 150 }}>
+                    <td className="scan-history-name">{s.name}<div><span className="tag">{kind.label}</span></div>
+                      <div className="muted scan-created-by">실행자 · {s.created_by_name || (s.created_by ? `사용자 #${s.created_by}` : "—")}</div>
+                    </td>
+                    <td><ScanScope summary={s.summary} /></td>
+                    <td>
                       <span className={`pill ${st.cls}`}>{st.label}</span>
+                      <RetryBadge scan={s} />
+                      <QualityBadge scan={s} />
                       {s.failure_message && <div className="scan-failure">{s.failure_message}</div>}
                     </td>
                     <td>
@@ -509,17 +568,27 @@ export default function Scans({ user }) {
                         ? <StagedRunMeta p={p} /> : null}
                       {/* 배치 구성은 끝난 뒤에도 '이 스캔이 어떻게 돌았는지'를 말해 준다. */}
                       <BatchNote scan={s} progress={isActive(s.status) ? p : null} />
+                      <div className="scan-total-time mono">
+                        총 {fmtDur(scanDuration(s, isActive(s.status) ? p : null))}
+                      </div>
                       {!stages[s.id]?.stages?.length && !isActive(s.status) && !s.batch_total
                         ? <span className="muted">—</span> : null}
                     </td>
                     <td className="mono">{s.host_count}</td>
                     <td className="mono">{s.port_count}</td>
-                    <td>
+                    <td className="scan-history-actions-cell">
+                      <div className="scan-history-actions">
                       {canRun && isActive(s.status) && (
                         <button className="sm" onClick={() => stopScan(s.id)} disabled={s.status === "canceling"}>중지</button>
                       )}
                       {canRun && canResume(s.status) && (
                         <button className="sm" onClick={() => resumeScan(s.id)}>이어하기</button>
+                      )}
+                      {canRun && s.retry_required && !isActive(s.status) && (
+                        <button className="sm retry" onClick={() => retryTimeouts(s)}
+                                disabled={retryingId === s.id}>
+                          {retryingId === s.id ? "재스캔 준비 중" : `${s.retry_count}대 재스캔`}
+                        </button>
                       )}
                       <button className="sm" aria-expanded={expanded.has(s.id)}
                               aria-controls={`scan-detail-${s.id}`} onClick={() => toggleDetails(s)}>
@@ -528,6 +597,7 @@ export default function Scans({ user }) {
                       {canDelete && !isActive(s.status) && (
                         <button className="sm danger" onClick={() => deleteScan(s)}>삭제</button>
                       )}
+                      </div>
                     </td>
                   </tr>
                   {expanded.has(s.id) && (
@@ -546,6 +616,30 @@ export default function Scans({ user }) {
   );
 }
 
+function RetryBadge({ scan }) {
+  const status = scan.retry_status;
+  if (status === "required") {
+    return <span className="pill retry-required">재스캔 필요 · {scan.retry_count}대</span>;
+  }
+  if (status === "running") {
+    return <span className="pill retry-running">재스캔 진행 중 · #{scan.retry_scan_id}</span>;
+  }
+  if (status === "resolved") {
+    return <span className="pill retry-resolved">재스캔 완료 · #{scan.retry_scan_id}</span>;
+  }
+  if (status === "failed") {
+    return <span className="pill retry-required">재스캔 실패 · 다시 확인</span>;
+  }
+  return null;
+}
+
+function QualityBadge({ scan }) {
+  const count = scan.unresolved_issue_count || 0;
+  if (!count || scan.retry_status === "required") return null;
+  const label = scan.quality_status === "error" ? "품질 오류" : "확인 필요";
+  return <span className="pill retry-required">{label} · {count}건</span>;
+}
+
 // 이력 표의 '스캔 범위' — 명령줄 대신 어디를·어떤 포트를·무슨 프로토콜로 봤는지만.
 // 원문 명령은 [상세]에 그대로 남는다(필요한 사람은 거기서 본다).
 function ScanScope({ summary }) {
@@ -554,24 +648,19 @@ function ScanScope({ summary }) {
   // 'TCP · 기본 1000개' 로 그려서, 전 포트 TCP+UDP 단계 스캔이 상위 1000개 TCP 스캔으로
   // 보였다 - 스캔하지 않은 범위를 봤다고 말하고 실제 범위는 감추는 이중 오류였다.
   const unknown = !(summary.protocols || []).length;
-  const partial = summary.excluded_ports || summary.excluded_hosts;
+  const excludedPorts = Boolean(summary.excluded_ports);
   return (
     <div className="scan-scope">
       <div className="scan-scope-target">{summary.targets}</div>
       <div className="scan-scope-line">
-        {(summary.protocols || []).map((p) => (
-          <span key={p} className={`tag proto-${p.toLowerCase()}`}>{p}</span>
-        ))}
-        <span className={`scan-scope-ports${partial ? " is-partial" : ""}${unknown ? " is-unknown" : ""}`}
+        <span className={`scan-scope-ports${excludedPorts ? " is-partial" : ""}${unknown ? " is-unknown" : ""}`}
               title={unknown ? "이 실행의 명령 표기에 스캔 범위가 남아 있지 않습니다 (이 기능 이전에 실행된 스캔)" : undefined}>
-          {summary.ports}
+          {formatScanPortScope(summary)}
         </span>
       </div>
-      {partial && (
+      {summary.excluded_hosts && (
         <div className="scan-scope-excluded">
-          {summary.excluded_ports && <>포트 제외 <code>{summary.excluded_ports}</code></>}
-          {summary.excluded_ports && summary.excluded_hosts && " · "}
-          {summary.excluded_hosts && <>대상 제외 <code>{summary.excluded_hosts}</code></>}
+          대상 제외 <code>{summary.excluded_hosts}</code>
         </div>
       )}
     </div>
@@ -656,50 +745,80 @@ function Progress({ p }) {
 // 엔진 단계(discovery/tcp/udp/service)와 자동 스캔·가져오기 단계(tcp_discovery/…)를 한 표에서
 // 함께 그린다. 가져온 결과라고 해서 이름을 다르게 부를 이유가 없다.
 const STAGE_LABEL = {
-  discovery: "발견", tcp: "TCP", udp: "UDP", service: "서비스",
-  tcp_discovery: "TCP 발견", tcp_identify: "TCP 식별", udp_identify: "UDP 식별",
+  discovery: "호스트 발견",
+  tcp: "TCP 포트 발견", tcp_service: "TCP 서비스 프로브",
+  udp: "UDP 포트 발견", udp_service: "UDP 서비스 프로브",
+  service: "서비스 프로브",
+  tcp_discovery: "TCP 포트 발견", tcp_identify: "TCP 서비스 프로브",
+  udp_identify: "UDP 서비스 프로브",
 };
-const STAGE_CLS = { pending: "info", running: "info", done: "low", stopped: "medium", error: "high" };
+const STAGE_CLS = {
+  pending: "stage-pending", running: "stage-running", done: "stage-done",
+  warning: "stage-warning", stopped: "stage-stopped", error: "stage-warning",
+};
 
 function stageLabel(stage) {
   const key = stage.stage || stage.name;
   return STAGE_LABEL[key] || key || "단계";
 }
 
+function currentHosts(current) {
+  const hosts = current?.hosts || [];
+  if (!hosts.length) return "";
+  const shown = hosts.slice(0, 3);
+  const total = Math.max(current.current_host_count || hosts.length, hosts.length);
+  const rest = total - shown.length;
+  return `${shown.join(", ")}${rest > 0 ? ` 외 ${rest}대` : ""}`;
+}
+
 function StageTimeline({ s }) {
   const list = s?.stages || [];
   if (!list.length) return <span className="muted">…</span>;
   const overall = s.overall?.percent;
+  const current = s.current || {};
   const known = overall != null;
   return (
-    <div style={{ minWidth: 220 }}>
-      <div role="progressbar" aria-label="단계 스캔 진행률" aria-valuemin="0" aria-valuemax="100"
-           aria-valuenow={known ? Math.round(overall) : undefined}
-           style={{ height: 6, borderRadius: 4, background: "var(--line)", overflow: "hidden" }}>
-        <div style={{
-          width: known ? `${Math.min(overall, 100)}%` : "12%",
-          height: "100%", background: "var(--accent)", transition: "width .4s", opacity: known ? 1 : 0.45,
-        }} />
+    <div className="stage-timeline">
+      <div role="progressbar" aria-label="전체 절차 완료율" aria-valuemin="0" aria-valuemax="100"
+           aria-valuenow={known ? Math.round(overall) : undefined} className="scan-procedure-progress">
+        <div className="scan-procedure-progress-fill"
+             style={{ width: known ? `${Math.min(overall, 100)}%` : "12%", opacity: known ? 1 : 0.45 }} />
+        <span>{known ? `절차 ${Math.round(overall)}%` : "절차 준비 중"}</span>
       </div>
-      <div className="row" style={{ gap: 4, marginTop: 4, flexWrap: "wrap" }}>
+      <div className="stage-status-list">
         {list.map((st, index) => {
-          const c = st.counts || {};
-          const extra = st.status === "running" && st.percent != null ? ` ${Math.round(st.percent)}%`
-            : c.live != null ? ` ${c.live}대`
-            : c.open_ports != null ? ` ${c.open_ports}p`
-            : c.services != null ? ` ${c.services}svc` : "";
+          const extra = st.status === "running" ? ` ${Math.round(st.percent || 0)}%`
+            : st.status === "done" ? " 완료"
+            : st.status === "warning" ? " 확인 필요"
+            : st.status === "stopped" ? " 중지"
+            : st.status === "error" ? " 오류" : " 대기";
+          const issueText = (st.issues || []).map((issue) => issue.message).join(" ");
+          const serviceResults = st.counts?.result_endpoints ?? st.counts?.services;
           return (
             <span key={`${st.stage || st.name || "stage"}-${index}`}
-                  className={`pill ${STAGE_CLS[st.status] || "info"}`}
-                  title={st.error || ""} style={{ fontSize: 10.5 }}>
-              {stageLabel(st)}{extra}{st.status === "error" ? " ⚠" : ""}
+                  className={`stage-status ${STAGE_CLS[st.status] || "stage-pending"}`}
+                  title={issueText || st.error || ""}>
+              <span>{stageLabel(st)}{extra}</span>
+              {serviceResults != null && <small>프로브 결과 {serviceResults}개 endpoint</small>}
+              {st.seconds != null && <small>{fmtDur(st.seconds)}</small>}
             </span>
           );
         })}
       </div>
-      {list.filter((stage) => stage.error).map((stage, index) => (
-        <div key={`${stage.stage || stage.name || "stage"}-error-${index}`} className="scan-failure">
-          {stageLabel(stage)}: {stage.error}
+      {current.stage && (
+        <div style={{ fontSize: 11, marginTop: 5, lineHeight: 1.55, whiteSpace: "normal" }}>
+          <span className="pill info" style={{ fontSize: 10.5 }}>진행 중</span>{" "}
+          <b>{STAGE_LABEL[current.stage] || current.stage}</b>
+          {current.batch_total ? <span className="mono muted"> · 배치 {current.batch}/{current.batch_total}</span> : null}
+          {currentHosts(current) ? <div className="mono">현재 대상 · {currentHosts(current)}</div> : null}
+          {current.total_hosts != null ? (
+            <div className="muted">이 배치의 서비스 프로브 · {current.completed_hosts || 0}/{current.total_hosts}대 완료</div>
+          ) : null}
+        </div>
+      )}
+      {list.filter((stage) => stage.error || stage.issues?.length).map((stage, index) => (
+        <div key={`${stage.stage || stage.name || "stage"}-error-${index}`} className="stage-problem-hint">
+          {stageLabel(stage)} · 상세에서 원인 확인
         </div>
       ))}
     </div>
@@ -708,15 +827,25 @@ function StageTimeline({ s }) {
 
 function ScanDetails({ scan, detail }) {
   const kind = detail?.kind === "staged" ? "단계 엔진" : scanKind(scan).label;
+  const executions = detail?.executions || [];
+  const legacyIssues = (detail?.stages || []).flatMap((stage) =>
+    (stage.issues || []).map((issue) => ({ ...issue, stage: issue.stage || stage.stage || stage.name })));
+  const issues = detail?.issues?.length ? detail.issues : legacyIssues;
+  const recoveries = detail?.recoveries || (detail?.stages || []).flatMap((stage) => stage.recoveries || []);
+  const totalSeconds = detail?.overall?.seconds ?? scanDuration(scan, null);
   const notice = scanNotice({
     failure_message: detail?.failure_message || scan.failure_message,
     failure_code: detail?.failure_code || scan.failure_code,
   });
   return (
     <div className="scan-detail">
-      <div className="row">
-        <b>실행 유형</b><span>{kind}</span>
-        <b>상태</b><span>{scanStatus(detail?.status || scan.status).label}</span>
+      <div className="scan-detail-overview">
+        <div><small>실행 유형</small><b>{kind}</b></div>
+        <div><small>상태</small><b>{scanStatus(detail?.status || scan.status).label}</b></div>
+        <div><small>실행자</small><b>{scan.created_by_name || (scan.created_by ? `사용자 #${scan.created_by}` : "—")}</b></div>
+        <div><small>총 소요시간</small><b className="mono">{fmtDur(totalSeconds)}</b></div>
+        <div><small>문제 기록</small><b className="mono">{issues.length}건</b></div>
+        <div><small>Nmap 실행</small><b className="mono">{executions.length}회</b></div>
       </div>
       {detail?.stages?.length
         ? <StageTimeline s={detail} />
@@ -727,12 +856,163 @@ function ScanDetails({ scan, detail }) {
           {notice.code && <code>{notice.code}</code>}
         </div>
       )}
+      {!!detail?.gave_up?.length && (
+        <RetryQueue retry={detail.retry} />
+      )}
+      <StageRecoveries recoveries={recoveries} />
+      <StageIssueDetails issues={issues} />
       {scan.command && (
         <div className="scan-detail-command">
-          <b>실행한 명령</b>
+          <b>실행 계획</b>
           <code className="mono">{scan.command}</code>
         </div>
       )}
+      <ExecutionGroups executions={executions} />
     </div>
+  );
+}
+
+function RetryQueue({ retry }) {
+  const byStage = retry?.by_stage || {};
+  const reasons = retry?.reasons_by_stage || {};
+  const reasonLabel = (reason) => reason === "host_timeout" ? "호스트 시간 초과"
+    : reason === "retransmission_cap" ? "포트 재전송 한도 도달" : reason;
+  return (
+    <div className="scan-failure-detail retry-queue">
+      <div className="retry-queue-head">
+        <b>재스캔 대기열</b>
+        <span className="pill retry-required">{retry?.count || 0}대</span>
+      </div>
+      <p>완료된 결과와 섞지 않고 보존했습니다. 이력의 <b>재스캔</b> 버튼은 이 대상만 새 스캔으로 실행합니다.</p>
+      {Object.entries(byStage).map(([stage, hosts]) => (
+        <details key={stage}>
+          <summary>{STAGE_LABEL[stage.replace("service:", "") + (stage.startsWith("service:") ? "_service" : "")] || STAGE_LABEL[stage] || stage} · {hosts.length}대</summary>
+          {hosts.map((host) => (
+            <div className="retry-host" key={host}>
+              <code className="mono">{host}</code>
+              <span>{(reasons?.[stage]?.[host] || []).map(reasonLabel).join(" · ")}</span>
+            </div>
+          ))}
+        </details>
+      ))}
+    </div>
+  );
+}
+
+function issueLabel(type) {
+  if (type === "host_timeout") return "호스트 시간 초과";
+  if (type === "retransmission_cap") return "포트 재전송 한도 도달";
+  if (type === "service_degraded") return "서비스 프로브 결과 저하";
+  return "Nmap 실행 오류";
+}
+
+function StageRecoveries({ recoveries }) {
+  if (!recoveries.length) return null;
+  return (
+    <section className="scan-detail-section">
+      <h4>복구 시도</h4>
+      <p className="muted">실패 범위를 줄이기 위해 대체 엔진 재시도 또는 개별 격리를 수행한 기록입니다. 미해결 문제와는 구분됩니다.</p>
+      {recoveries.map((recovery, index) => (
+        <div className="stage-recovery" key={`${recovery.type || "recovery"}-${recovery.host || recovery.ip || index}-${index}`}>
+          <b>{recovery.type === "service_split" ? "개별·격리 실행" : "대체 엔진 재시도"}</b>
+          <span>{STAGE_LABEL[recovery.stage] || recovery.stage || "서비스 프로브"}</span>
+          <code className="mono">
+            {[recovery.host || recovery.ip, recovery.proto, recovery.port_spec || recovery.ports].filter(Boolean).join(" · ")}
+          </code>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function StageIssueDetails({ issues }) {
+  if (!issues.length) return null;
+  return (
+    <section className="scan-detail-section">
+      <h4>단계별 문제</h4>
+      {issues.map((issue, index) => {
+        const resolved = issue.status === "resolved";
+        const hosts = issue.hosts?.length ? issue.hosts : issue.host ? [issue.host] : [];
+        return (
+          <div className={`stage-issue-card${resolved ? " issue-resolved" : ""}`} key={issue.issue_key || `${issue.type}-${index}`}>
+            <div>
+              <b>{STAGE_LABEL[issue.stage] || issue.stage || "스캔"}</b>
+              <span>{resolved ? `재스캔으로 해결${issue.resolved_by_scan_id ? ` · #${issue.resolved_by_scan_id}` : ""}` : "일부 결과 확인 필요"}</span>
+            </div>
+            <div className="stage-issue">
+              <b>{issueLabel(issue.type)}</b>
+              <span>{issue.message}</span>
+              {!!hosts.length && <code className="mono">{hosts.join(", ")}</code>}
+              {(issue.proto || issue.port_spec) && (
+                <code className="mono">{[issue.proto, issue.port_spec].filter(Boolean).join(" · ")}</code>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function ExecutionGroups({ executions }) {
+  const hasRunning = executions.some((execution) => execution.status === "running");
+  const snapshotAt = useRef(Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const receivedAt = Date.now();
+    snapshotAt.current = receivedAt;
+    setNow(receivedAt);
+  }, [executions]);
+  useEffect(() => {
+    if (!hasRunning) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasRunning]);
+  if (!executions.length) return (
+    <div className="scan-detail-section muted">이 기능 적용 이전 실행이라 개별 Nmap 명령 기록이 없습니다.</div>
+  );
+  const groups = [
+    ["common", "공통·배치 실행", "같은 포트나 배치 범위를 공유해 Nmap 자체 병렬 처리를 사용한 명령입니다."],
+    ["individual", "개별·격리 실행", "실패 범위를 격리하거나 특정 호스트·포트만 다시 확인한 명령입니다."],
+  ];
+  return (
+    <section className="scan-detail-section command-evidence">
+      <h4>실제 실행 명령</h4>
+      {groups.map(([key, title, description]) => {
+        const items = executions.filter((execution) => execution.group === key);
+        if (!items.length) return null;
+        return (
+          <details key={key} className="command-group" open={key === "common"}>
+            <summary><b>{title}</b><span>{items.length}회</span></summary>
+            <p>{description}</p>
+            <div className="command-list">
+              {items.map((execution, index) => {
+                const liveSeconds = execution.status === "running" && Number.isFinite(execution.seconds)
+                  ? execution.seconds + Math.max(0, now - snapshotAt.current) / 1000
+                  : null;
+                return <div className={`command-record command-${execution.status}`} key={execution.id || index}>
+                  <div className="command-record-head">
+                    <b>{STAGE_LABEL[execution.stage] || execution.stage}</b>
+                    <span className="mono">{execution.status === "running"
+                      ? `경과 ${fmtElapsed(liveSeconds)}` : fmtDur(execution.seconds)}</span>
+                    <span>{execution.status === "running" ? "실행 중"
+                      : execution.status === "timeout" ? `시간 초과 ${execution.timeout_count}대`
+                      : execution.retransmission_cap_count ? `재전송 한도 ${execution.retransmission_cap_count}대`
+                      : execution.status === "error" ? `오류 · rc ${execution.rc}`
+                      : execution.status === "stopped" ? "중지됨" : "완료"}</span>
+                  </div>
+                  <p>{execution.reason}</p>
+                  <code className="mono">{formatArgv(execution.argv)}</code>
+                  {!!execution.timed_out?.length && <small className="mono">시간 초과: {execution.timed_out.join(", ")}</small>}
+                  {!!execution.retransmission_cap_hosts?.length && (
+                    <small className="mono">재전송 한도 도달: {execution.retransmission_cap_hosts.join(", ")}</small>
+                  )}
+                </div>;
+              })}
+            </div>
+          </details>
+        );
+      })}
+    </section>
   );
 }

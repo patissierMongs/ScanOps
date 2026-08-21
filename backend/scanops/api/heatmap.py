@@ -1,4 +1,4 @@
-"""스캔 시간축 히트맵 — 저장된 nmap XML 로 phase/현재포트/4시트 보고서를 계산."""
+"""스캔 시간축 히트맵 — 새 관측 원장 우선, 과거 실행은 저장 XML로 계산."""
 from __future__ import annotations
 
 import glob
@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import get_db
 from ..identity import display_identity
-from ..models import Finding, RISK_LABELS_KO, ScanRun, User
+from ..models import EndpointObservation, Finding, RISK_LABELS_KO, ScanRun, User
+from ..observation import current_reason, is_confirmed_open, needs_confirmation, state_evidence
 from ..scanning.nmap_parse import extract_server, scan_start
 from ..spreadsheet import safe_cell
 from .deps import current_user
@@ -135,7 +136,38 @@ def _parse_xml_rows(path: Path) -> list[dict]:
     return rows
 
 
-def _snapshots(db: Session) -> list[dict]:
+def _observation_rows(db: Session, scan_id: int) -> list[dict]:
+    """새 스캔의 terminal observation projection을 기존 snapshot row 형태로 변환한다."""
+    observations = (
+        db.query(EndpointObservation)
+        .filter(EndpointObservation.scan_id == scan_id)
+        .order_by(EndpointObservation.host_ip, EndpointObservation.proto, EndpointObservation.port)
+        .all()
+    )
+    return [
+        {
+            "key": observation.finding_key,
+            "host_ip": observation.host_ip,
+            "hostname": observation.hostname,
+            "proto": observation.proto,
+            "port": observation.port,
+            "state": observation.state,
+            "reason": observation.reason,
+            "evidence_kind": observation.evidence_kind,
+            "identity_observed": bool(observation.identity_observed),
+            "service": observation.service,
+            "product": observation.product,
+            "version": observation.version,
+            "server": observation.server,
+            "identification": observation.identification,
+            "banner": "",
+            "_observed_at": observation.observed_at,
+        }
+        for observation in observations
+    ]
+
+
+def _snapshots(db: Session) -> tuple[list[dict], list[dict]]:
     scans = (
         db.query(ScanRun)
         .filter(ScanRun.status == "done")
@@ -143,9 +175,32 @@ def _snapshots(db: Session) -> list[dict]:
         .all()
     )
     out: list[dict] = []
+    warnings: list[dict] = []
     for scan in scans:
+        observed_rows = _observation_rows(db, scan.id)
+        if observed_rows:
+            rows_by_key = {row["key"]: row for row in observed_rows}
+            scope_keys = set(rows_by_key)
+            out.append({
+                "scan": scan,
+                "label": _display_label(scan),
+                "scan_ids": [scan.id],
+                "rows_by_key": rows_by_key,
+                "scope_keys": scope_keys,
+                "scope_ip_proto": {(row["host_ip"], row["proto"]) for row in observed_rows},
+                "open_keys": {key for key, row in rows_by_key.items()
+                              if row["state"].startswith("open")},
+                "started_at": min((row["_observed_at"] for row in observed_rows),
+                                  default=scan.started_at),
+                "source": "observation",
+            })
+            continue
         paths = _scan_xml_paths(scan)
         if not paths:
+            warnings.append({
+                "scan_id": scan.id, "type": "artifact_missing",
+                "message": "관측 원장과 읽을 수 있는 XML 산출물이 없어 이 스캔을 히트맵에서 제외했습니다.",
+            })
             continue
         rows_by_key: dict[str, dict] = {}
         scope_keys: set[str] = set()
@@ -159,9 +214,17 @@ def _snapshots(db: Session) -> list[dict]:
                     rows_by_key[row["key"]] = row
                     scope_keys.add(row["key"])
                     scope_ip_proto.add((row["host_ip"], row["proto"]))
-            except Exception:
+            except (OSError, ET.ParseError, ValueError) as exc:
+                warnings.append({
+                    "scan_id": scan.id, "type": "artifact_unreadable", "artifact": path.name,
+                    "message": f"XML 산출물을 읽지 못했습니다: {type(exc).__name__}",
+                })
                 continue
         if not scope_keys:
+            warnings.append({
+                "scan_id": scan.id, "type": "artifact_empty",
+                "message": "읽은 XML에 히트맵으로 표시할 endpoint 관측이 없습니다.",
+            })
             continue
         out.append({
             "scan": scan,
@@ -172,8 +235,9 @@ def _snapshots(db: Session) -> list[dict]:
             "scope_ip_proto": scope_ip_proto,
             "open_keys": {k for k, r in rows_by_key.items() if r["state"].startswith("open")},
             "started_at": (scan_dates[0] if scan_dates else scan.started_at),
+            "source": "legacy_xml",
         })
-    return out
+    return out, warnings
 
 
 def _group_phases(snapshots: list[dict]) -> list[dict]:
@@ -257,6 +321,16 @@ def _last_open_row(phases: list[dict], key: str) -> dict:
     return row
 
 
+def _last_identity_row(phases: list[dict], key: str) -> dict:
+    """가장 최근의 실제 identity probe 결과. sweep의 포트표 추측으로 덮지 않는다."""
+    row: dict = {}
+    for phase in phases:
+        candidate = phase["rows_by_key"].get(key)
+        if candidate and candidate.get("identity_observed", True):
+            row = candidate
+    return row
+
+
 def _last_scan_label(phases: list[dict], key: str, last_idx: int | None) -> str:
     if last_idx is None:
         return ""
@@ -281,7 +355,7 @@ def _key_sort(key: str):
 
 
 def build_heatmap(db: Session) -> dict:
-    snapshots = _snapshots(db)
+    snapshots, quality_warnings = _snapshots(db)
     phases = _group_phases(snapshots)
     finding_by_key = {f.finding_key: f for f in db.query(Finding).all()}
     ever_open = set()
@@ -298,14 +372,16 @@ def build_heatmap(db: Session) -> dict:
         finding = finding_by_key.get(key)
         latest = _latest_row(phases, key)
         last_open = _last_open_row(phases, key)
+        last_identity = _last_identity_row(phases, key)
         token_list = states.get(key, [])
         current = _current_state(token_list)
         detail = last_open or latest
+        identity_detail = last_identity or {}
         risk = finding.risk_level if finding else ""
-        service = (detail.get("service") or (finding.service if finding else "")) if detail else (finding.service if finding else "")
-        product = (detail.get("product") or (finding.product if finding else "")) if detail else (finding.product if finding else "")
-        version = (detail.get("version") or (finding.version if finding else "")) if detail else (finding.version if finding else "")
-        server = (detail.get("server") or (finding.server if finding else "")) if detail else (finding.server if finding else "")
+        service = identity_detail.get("service") or (finding.service if finding else "")
+        product = identity_detail.get("product") or (finding.product if finding else "")
+        version = identity_detail.get("version") or (finding.version if finding else "")
+        server = identity_detail.get("server") or (finding.server if finding else "")
         rows.append({
             "key": key,
             "finding_id": finding.id if finding else None,
@@ -325,6 +401,14 @@ def build_heatmap(db: Session) -> dict:
             "risk_label": RISK_LABELS_KO.get(risk, risk),
             "status": finding.status if finding else "",
             "dept": finding.dept if finding else "",
+            "endpoint_state": finding.state if finding else latest.get("state", ""),
+            "state_evidence": finding.state_evidence if finding else state_evidence(
+                latest.get("state"), latest.get("reason")),
+            "current_reason": current_reason(finding.state, finding.reason) if finding else current_reason(
+                latest.get("state"), latest.get("reason")),
+            "needs_confirmation": finding.needs_confirmation if finding else needs_confirmation(
+                latest.get("state"), latest.get("reason")),
+            "allowed": finding.allowed if finding else 0,
             "current_state": current,
             "observed_count": sum(1 for t in token_list if t != STATE_OUT_OF_SCOPE),
             "last_scan_label": _last_scan_label(phases, key, last_idx.get(key)),
@@ -352,11 +436,21 @@ def build_heatmap(db: Session) -> dict:
         ],
         "rows": rows,
         "current_ports": current_open,
+        "quality_warnings": quality_warnings,
         "summary": {
             "scan_count": len(snapshots),
             "phase_count": len(phases),
             "row_count": len(rows),
             "current_open_count": len(current_open),
+            "confirmed_open_count": sum(
+                1 for row in current_open
+                if (finding := finding_by_key.get(row["key"]))
+                and is_confirmed_open(finding.state, finding.reason)
+            ),
+            "confirmation_required_count": sum(
+                1 for row in current_open if row["needs_confirmation"]
+            ),
+            "allowed_open_count": sum(1 for row in current_open if row["allowed"]),
             "new_open_count": sum(1 for r in rows if r["current_state"] == STATE_NEW_OPEN),
             "new_closed_count": sum(1 for r in rows if r["current_state"] == STATE_NEW_CLOSED),
         },

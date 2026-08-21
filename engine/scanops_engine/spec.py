@@ -26,7 +26,8 @@ DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,338
 DISCOVERY_PA = "-PA80,443,3389"
 DEFAULT_MIN_HOSTGROUP = 64
 DEFAULT_MAX_PARALLELISM = 100
-DEFAULT_NSE_SCRIPT_TIMEOUT = "10s"
+DEFAULT_TCP_NSE_SCRIPT_TIMEOUT = "2m"
+DEFAULT_UDP_NSE_SCRIPT_TIMEOUT = "3m"
 # 식별 단계 동시 실행 상한. 프로세스가 늘면 스캔 서버의 소켓·CPU 를 그만큼 쓰므로,
 # '느려서 못 쓰는' 문제를 '서버가 죽는' 문제로 바꾸지 않도록 위쪽을 막아 둔다.
 _MAX_SERVICE_WORKERS = 32
@@ -45,8 +46,8 @@ DEFAULT_UDP_PORTS = ("7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,5
 # 검사한다(tests/test_layer_contracts.py). 엔진은 백엔드를 import 하지 않는 독립 패키지라
 # 파생시킬 수 없어서, 사본을 두되 드리프트를 테스트로 막는 방식이다.
 #
-# UDP 식별 단계는 NSE 를 붙이지 않으므로(_probe_protocol 이 tcp 일 때만 --script 를 싣는다)
-# 이 목록은 TCP 식별에만 쓰인다.
+# 웹 경로는 선택한 목록을 proto 에 따라 nse/udp_nse 로 나눠서 전달한다. 이 목록은 구형 spec 이
+# nse 만 보낼 때의 TCP 폴백이며, UDP 는 명시적인 udp_nse 가 있을 때만 스크립트를 실행한다.
 DEFAULT_NSE = ["banner", "dns-nsid", "fingerprint-strings", "ftp-anon", "ftp-syst",
                "http-headers", "http-server-header", "http-title", "rdp-ntlm-info",
                "rpcinfo", "sip-methods", "smb-os-discovery", "smb-protocols",
@@ -90,14 +91,17 @@ class ServiceStage:
     version_all: bool = True
     version_light: bool = False
     nse: list = field(default_factory=lambda: list(DEFAULT_NSE))
+    # 열린 UDP 포트 식별에만 붙일 UDP/both 스크립트. 구형 spec 은 이 필드가 없으므로 빈 목록이
+    # 안전한 하위호환이고, 웹 build_job_spec 은 사용자가 고른 목록을 proto 별로 나눠 채운다.
+    udp_nse: list = field(default_factory=list)
     max_retries: int = 2
     confirm: bool = False      # 2-pass — 1차에 안 잡히면 retries↑ 재확인(재스캔용)
     host_timeout: str = ""     # "" = 미적용
     udp_host_timeout: str = "" # UDP probe 전용 상한(비면 host_timeout 을 따른다)
-    # 식별 단계에서 동시에 돌릴 호스트 수. 이 단계는 프로세스마다 타깃이 1개라 nmap 자신의
-    # 호스트 병렬성(--min-hostgroup)을 못 쓴다 - 직렬로 두면 호스트 수에 소요가 그대로 비례한다.
+    # UDP의 정확 host×port 묶음과 공통 실행 실패 후 호스트별 격리를 동시에 돌릴 상한.
+    # 정상 TCP 전체 스캔은 배치 합집합 한 프로세스에서 Nmap 자체 호스트 병렬화를 사용한다.
     # 재스캔(닫힘 권한이 걸린 경로)은 1 로 강제해 실패 시 즉시 중단하는 의미를 지킨다.
-    workers: int = 8
+    workers: int = 16
 
 
 _STAGE_CLASSES = {"discovery": DiscoveryStage, "tcp": TcpStage, "udp": UdpStage, "service": ServiceStage}
@@ -263,9 +267,13 @@ class JobSpec:
         if not 1 <= self.service.workers <= _MAX_SERVICE_WORKERS:
             raise ValueError(
                 f"service.workers 는 1-{_MAX_SERVICE_WORKERS} 여야 합니다: {self.service.workers}")
-        for n in self.service.nse:
-            if not _NSE_RE.match(n):
-                raise ValueError(f"허용되지 않는 NSE 스크립트명: {n!r}")
+        for label, scripts in (("service.nse", self.service.nse),
+                               ("service.udp_nse", self.service.udp_nse)):
+            if not isinstance(scripts, list):
+                raise ValueError(f"{label} 는 스크립트명 배열이어야 합니다: {scripts!r}")
+            for n in scripts:
+                if not isinstance(n, str) or not _NSE_RE.fullmatch(n):
+                    raise ValueError(f"허용되지 않는 NSE 스크립트명: {n!r}")
         if self.sudo not in ("auto", "always", "never"):
             raise ValueError(f"sudo 는 auto/always/never: {self.sudo!r}")
         if self.discovery.mode not in ("sn", "pn"):

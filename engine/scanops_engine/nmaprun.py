@@ -17,6 +17,11 @@ from pathlib import Path
 from .process_control import close_kill_job, popen_owned, terminate_owned
 
 _PCT_RE = re.compile(r"About\s+([\d.]+)%\s+done")
+_RETRANSMISSION_CAP_RE = re.compile(
+    r"\b((?:\d{1,3}\.){3}\d{1,3})\s+giving up on port because "
+    r"retransmission cap hit\b",
+    re.IGNORECASE,
+)
 
 
 def find_nmap(explicit: str = "") -> str | None:
@@ -37,15 +42,25 @@ def _need_sudo(mode: str) -> bool:
     return os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0
 
 
-def _stream_output(stream, log, progress) -> None:
+def _stream_output(stream, log, progress, retransmission_cap_hosts) -> None:
     for line in stream:
         log.write(line)
         log.flush()
+        if m := _RETRANSMISSION_CAP_RE.search(line):
+            retransmission_cap_hosts.add(m.group(1))
         if progress and (m := _PCT_RE.search(line)):
             try:
                 progress(float(m.group(1)))
             except Exception:
                 pass
+
+
+def build_command(nmap, args, out_base, sudo_mode="auto", stats="5s") -> list[str]:
+    """Return the exact argv used by :func:`run` for history/UI evidence."""
+    return (['sudo'] if _need_sudo(sudo_mode) else []) + [
+        str(nmap), "--stats-every", str(stats), *[str(arg) for arg in args],
+        "-oA", str(Path(out_base)),
+    ]
 
 
 def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
@@ -56,14 +71,15 @@ def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
     프로세스 트리만 종료한다. 반환: {"rc", "seconds", "cmd", "stopped"}.
     """
     out_base = Path(out_base)
-    cmd = (["sudo"] if _need_sudo(sudo_mode) else []) + \
-        [nmap, "--stats-every", stats, *args, "-oA", str(out_base)]
+    cmd = build_command(nmap, args, out_base, sudo_mode=sudo_mode, stats=stats)
     t0 = time.time()
     with open(str(out_base) + ".stdout.log", "w", encoding="utf-8") as log:
         proc = popen_owned(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            text=True, bufsize=1)
+        retransmission_cap_hosts = set()
         reader = threading.Thread(
-            target=_stream_output, args=(proc.stdout, log, progress), daemon=True,
+            target=_stream_output,
+            args=(proc.stdout, log, progress, retransmission_cap_hosts), daemon=True,
         )
         reader.start()
         stopped = False
@@ -92,6 +108,7 @@ def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
         "seconds": round(time.time() - t0, 2),
         "cmd": cmd,
         "stopped": stopped,
+        "retransmission_cap_hosts": sorted(retransmission_cap_hosts, key=_ipkey),
     }
 
 

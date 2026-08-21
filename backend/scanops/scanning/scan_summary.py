@@ -9,6 +9,10 @@ argv 를 근거로 삼아야 이력이 실행과 어긋나지 않는다.
 """
 from __future__ import annotations
 
+import ipaddress
+
+from . import chunker, scope
+
 FULL_TCP = "1-65535"
 # 값을 뒤 토큰으로 받는 옵션 — 그 값을 타겟으로 오인하지 않기 위해 건너뛴다.
 _VALUE_OPTIONS = frozenset({
@@ -156,12 +160,29 @@ def _looks_like_nmap_argv(tokens: list[str]) -> bool:
 def _describe_targets(targets: str, excluded_hosts: str) -> str:
     tokens = [t for t in (targets or "").replace(",", " ").split() if t]
     if not tokens:
-        head = "—"
-    elif len(tokens) == 1:
-        head = tokens[0]
-    else:
-        head = f"{tokens[0]} 외 {len(tokens) - 1}건"
-    return f"{head} (일부 제외)" if excluded_hosts else head
+        return "—"
+    try:
+        hosts = chunker.expand_targets(tokens)
+        excluded = [t for t in excluded_hosts.replace(",", " ").split() if t]
+        hosts = scope.apply_excludes(hosts, excluded)
+    except ValueError:
+        # 오래된 직접 명령에는 Nmap 전용 복합 범위가 남아 있을 수 있다. 실제 호스트 수를
+        # 확정할 수 없는 이력은 그럴듯한 숫자를 만들지 않고 기존 축약 표기로 되돌린다.
+        head = tokens[0] if len(tokens) == 1 else f"{tokens[0]} 외 {len(tokens) - 1}건"
+        return f"{head} (일부 제외)" if excluded_hosts else head
+
+    def order(host: str) -> tuple:
+        try:
+            address = ipaddress.ip_address(host)
+            return (0, address.version, int(address))
+        except ValueError:
+            return (1, 0, host.casefold())
+
+    ordered = sorted(hosts, key=order)
+    if not ordered:
+        return "대상 0대"
+    bounds = ordered[0] if len(ordered) == 1 else f"{ordered[0]} – {ordered[-1]}"
+    return f"{bounds} · 대상 {len(ordered)}대"
 
 
 def summarize_command(command, targets: str = "") -> dict:

@@ -1,17 +1,19 @@
 """All-in-one (Python 포함) 에어갭 번들 생성 — 타깃에 아무 설치 없이 압축만 풀고 START.bat.
 
 구성: Windows 임베디드 Python + 의존성 사전설치(runtime/site) + 앱 + 프론트 dist.
-타깃 요건: Windows x64. (Python 불필요. 스캔 실행만 별도 nmap 필요, XML 가져오기는 불필요.)
+타깃 요건: Windows x64 또는 x86. (Python 불필요. 스캔 실행만 별도 nmap 필요,
+XML 가져오기는 불필요.)
 
 ASCII 전용 스크립트.
 Usage:
     python packaging/build_allinone.py                     # 3.13 (기본, ../ScanOps_allinone.zip)
     python packaging/build_allinone.py --python 3.12       # ../ScanOps_allinone_py312.zip
+    python packaging/build_allinone.py --arch x86          # ../ScanOps_allinone_x86.zip
     python packaging/build_allinone.py --split-mb 10       # 10 MB 조각 + JOIN.bat (반출 한도용)
     python packaging/build_allinone.py --out /path/to/custom.zip
 
-wheelhouse 는 지원 버전별 win_amd64 휠을 모두 담고 있어야 한다(pure 휠은 공용, 바이너리
-휠은 cp312/cp313 각각). 인자 없이 실행할 때의 산출물 이름/스테이지 경로는 기존 계약 그대로다
+wheelhouse 는 지원 타깃의 win_amd64/win32 휠을 담고 있어야 한다(pure 휠은 공용).
+인자 없이 실행할 때의 산출물 이름/스테이지 경로는 기존 계약 그대로다
 (scripts/package_runtime_smoke.py 가 그 이름을 기대한다).
 """
 from __future__ import annotations
@@ -35,11 +37,20 @@ WHEELHOUSE = PKG / "wheelhouse"
 # 지원하는 임베디드 런타임: 마이너 버전 -> 배포 패치 버전.
 PY_RELEASES = {"3.12": "3.12.8", "3.13": "3.13.9"}
 DEFAULT_PYTHON = "3.13"
+ARCHITECTURES = {
+    "x64": {"platform": "win_amd64", "embed": "amd64", "label": "Windows x64"},
+    "x86": {"platform": "win32", "embed": "win32", "label": "Windows x86"},
+}
+# x86은 실제 임베디드 런타임으로 검증한 3.13 조합만 지원한다.
+SUPPORTED_PYTHONS = {"x64": set(PY_RELEASES), "x86": {"3.13"}}
 
 # 아래 4개는 --python 에 따라 configure() 가 다시 묶는다. 모듈 전역으로 두는 이유는
 # 테스트가 monkeypatch 로 ROOT/OUT 을 갈아끼우기 때문이다.
 PYTHON = DEFAULT_PYTHON
 PYVER = PY_RELEASES[DEFAULT_PYTHON]
+ARCH = "x64"
+PLATFORM = ARCHITECTURES[ARCH]["platform"]
+EMBED_ARCH = ARCHITECTURES[ARCH]["embed"]
 # 기본값에서 파생시킨다 — 손으로 적으면 DEFAULT_PYTHON 을 옮길 때 ABI 만 남아 어긋난다.
 ABI = "cp" + DEFAULT_PYTHON.replace(".", "")
 EMBED_URL = f"https://www.python.org/ftp/python/{PYVER}/python-{PYVER}-embed-amd64.zip"
@@ -53,21 +64,44 @@ PREFIX = "ScanOps"
 # 의존성이라, 여기서 명시적으로 채워 넣어야 완전 오프라인 타깃에서 죽지 않는다.
 WINDOWS_EXTRA_PACKAGES = ["colorama"]
 
+# win32 greenlet wheel은 없지만 ScanOps는 동기 SQLite만 사용하고 slim_site()도 greenlet을
+# 제거한다. x86 cross-install에서는 의존성 마커를 빌드 호스트 기준으로 잘못 평가하는 pip를
+# 우회해, 현재 wheelhouse에서 검증한 실제 런타임 의존성만 명시 설치한다.
+X86_TRANSITIVE_PACKAGES = [
+    "starlette", "typing-extensions", "annotated-types", "pydantic-core",
+    "click", "h11", "python-dotenv", "et-xmlfile", "anyio", "idna",
+]
+
 # 확장 모듈 파일명의 ABI 태그(_pydantic_core.cp312-win_amd64.pyd -> cp312).
 _ABI_TAG_RE = re.compile(r"\.(cp\d+)-")
+_PLATFORM_TAG_RE = re.compile(r"-(win32|win_amd64)\.pyd$")
 
 
-def configure(python: str = DEFAULT_PYTHON, out: Path | None = None) -> None:
-    """선택한 마이너 버전에 맞춰 런타임/ABI/산출물 경로를 묶는다."""
-    global PYTHON, PYVER, ABI, EMBED_URL, STAGE, OUT
+def configure(
+    python: str = DEFAULT_PYTHON,
+    out: Path | None = None,
+    arch: str = "x64",
+) -> None:
+    """선택한 마이너 버전과 아키텍처에 맞춰 런타임/산출물 경로를 묶는다."""
+    global PYTHON, PYVER, ABI, ARCH, PLATFORM, EMBED_ARCH, EMBED_URL, STAGE, OUT
     if python not in PY_RELEASES:
         raise SystemExit(f"지원하지 않는 Python 버전: {python} (가능: {', '.join(PY_RELEASES)})")
+    if arch not in ARCHITECTURES:
+        raise SystemExit(f"지원하지 않는 아키텍처: {arch}")
+    if python not in SUPPORTED_PYTHONS[arch]:
+        allowed = ", ".join(sorted(SUPPORTED_PYTHONS[arch]))
+        raise SystemExit(f"{arch}에서 지원하지 않는 Python 버전: {python} (가능: {allowed})")
     PYTHON = python
     PYVER = PY_RELEASES[python]
     ABI = "cp" + python.replace(".", "")
-    EMBED_URL = f"https://www.python.org/ftp/python/{PYVER}/python-{PYVER}-embed-amd64.zip"
-    # 기본(3.12)은 기존 이름을 그대로 써서 smoke/CI 계약을 깨지 않는다.
-    suffix = "" if python == DEFAULT_PYTHON else f"_py{python.replace('.', '')}"
+    ARCH = arch
+    PLATFORM = ARCHITECTURES[arch]["platform"]
+    EMBED_ARCH = ARCHITECTURES[arch]["embed"]
+    EMBED_URL = f"https://www.python.org/ftp/python/{PYVER}/python-{PYVER}-embed-{EMBED_ARCH}.zip"
+    # 기본(x64/3.13)은 기존 이름을 그대로 써서 smoke/CI 계약을 깨지 않는다.
+    version_suffix = "" if python == DEFAULT_PYTHON else f"_py{python.replace('.', '')}"
+    arch_suffix = "" if arch == "x64" else f"_{arch}"
+    suffix = version_suffix + arch_suffix
     STAGE = ROOT.parent / f"_allinone_stage{suffix}"
     OUT = Path(out) if out else ROOT.parent / f"ScanOps_allinone{suffix}.zip"
 
@@ -245,7 +279,7 @@ def slim_site(site: Path) -> None:
 
 def download_embed() -> Path:
     CACHE.mkdir(exist_ok=True)
-    dst = CACHE / f"python-{PYVER}-embed-amd64.zip"
+    dst = CACHE / f"python-{PYVER}-embed-{EMBED_ARCH}.zip"
     if dst.exists() and dst.stat().st_size > 1_000_000:
         log(f"embed cached: {dst.name}")
         return dst
@@ -301,18 +335,27 @@ def copy_app(app: Path) -> None:
 def install_site(app: Path) -> None:
     site = app / "runtime" / "site"
     site.mkdir(parents=True)
-    log(f"pip install --target runtime/site (offline, win_amd64 {ABI} wheels)")
-    # 타깃 고정 설치: 빌드 호스트 OS/파이썬과 무관하게 Windows 휠로 설치(리눅스에서 크로스빌드 가능).
+    log(f"pip install --target runtime/site (offline, {PLATFORM} {ABI} wheels)")
+    # 타깃 고정 설치: 빌드 호스트 OS/파이썬과 무관하게 선택한 Windows 휠로 설치한다.
     # --only-binary=:all: 가 있어야 --platform/--abi/--python-version 가 허용된다(소스빌드 금지).
     cross = [
-        "--platform", "win_amd64", "--python-version", PYTHON,
+        "--platform", PLATFORM, "--python-version", PYTHON,
         "--abi", ABI, "--implementation", "cp", "--only-binary=:all:",
     ]
-    subprocess.check_call([
+    install = [
         sys.executable, "-m", "pip", "install", "--no-index",
         "--find-links", str(WHEELHOUSE), "--target", str(site),
-        *cross, "-r", str(ROOT / "backend" / "requirements.txt"),
-    ])
+        *cross,
+    ]
+    if ARCH == "x86":
+        subprocess.check_call([
+            *install, "--no-deps", "-r", str(ROOT / "backend" / "requirements.txt"),
+            *X86_TRANSITIVE_PACKAGES,
+        ])
+    else:
+        subprocess.check_call([
+            *install, "-r", str(ROOT / "backend" / "requirements.txt"),
+        ])
     # Windows 전용 의존성 보강(위 WINDOWS_EXTRA_PACKAGES 주석 참고). --no-deps 로 붙여
     # requirements 해석 결과를 흔들지 않는다.
     subprocess.check_call([
@@ -344,7 +387,13 @@ def verify_site(site: Path) -> None:
     })
     if wrong:
         raise SystemExit(f"{ABI} 가 아닌 확장 모듈이 섞였습니다: {wrong[:5]}")
-    log(f"verified runtime/site: {len(list(site.glob('*')))} entries, all {ABI}")
+    wrong_platform = sorted({
+        p.name for p in site.rglob("*.pyd")
+        if (tag := _PLATFORM_TAG_RE.search(p.name)) and tag.group(1) != PLATFORM
+    })
+    if wrong_platform:
+        raise SystemExit(f"{PLATFORM} 이 아닌 확장 모듈이 섞였습니다: {wrong_platform[:5]}")
+    log(f"verified runtime/site: {len(list(site.glob('*')))} entries, all {ABI}/{PLATFORM}")
 
 
 def place_python(app: Path, embed_zip: Path) -> None:
@@ -369,10 +418,24 @@ def write_launcher(app: Path) -> None:
     (app / "START.bat").write_text(
         "@echo off\r\n"
         "title ScanOps\r\n"
+        "chcp 65001 >nul\r\n"
         "cd /d \"%~dp0backend\"\r\n"
-        "echo Starting ScanOps -- open http://<this-server-ip>:8770/ in a browser.\r\n"
+        "\"%~dp0runtime\\python\\python.exe\" -E -s -c \"from scanops.db import init_db; init_db(); "
+        "from scanops.seed.bootstrap import run_bootstrap; run_bootstrap(); "
+        "from scanops.config import get_settings; p=get_settings().data_dir/'INITIAL_ADMIN.txt'; "
+        "lines=p.read_text(encoding='utf-8').splitlines() if p.exists() else []; "
+        "pw=lines[2].split(':',1)[1].strip() if len(lines)>2 else ''; "
+        "print('\\n=== INITIAL ADMIN ===\\nUsername: admin\\nPassword: '+pw+'\\nFile: '+str(p)+'\\n') if pw else None\"\r\n"
+        "if errorlevel 1 goto :bootstrap_failed\r\n"
+        "echo Starting ScanOps -- open http://127.0.0.1:8770/ in this computer's browser.\r\n"
         "\"%~dp0runtime\\python\\python.exe\" -E -s -m uvicorn scanops.main:app --host 0.0.0.0 --port 8770\r\n"
-        "pause\r\n",
+        "set \"SCANOPS_EXIT=%ERRORLEVEL%\"\r\n"
+        "pause\r\n"
+        "exit /b %SCANOPS_EXIT%\r\n"
+        ":bootstrap_failed\r\n"
+        "echo [ERROR] Initial administrator setup failed.\r\n"
+        "pause\r\n"
+        "exit /b 1\r\n",
         encoding="ascii",
     )
     # standalone 스캐너를 번들 임베디드 파이썬으로 실행(nmap 은 호스트에 별도 설치 필요).
@@ -414,6 +477,7 @@ def write_launcher(app: Path) -> None:
 
 
 def zip_bundle(app: Path) -> int:
+    OUT.parent.mkdir(parents=True, exist_ok=True)
     if OUT.exists():
         OUT.unlink()
     count = 0
@@ -496,7 +560,10 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Build the all-in-one air-gapped bundle.")
     ap.add_argument("--python", default=DEFAULT_PYTHON, choices=sorted(PY_RELEASES),
                     help="Embedded CPython minor version to bundle.")
-    ap.add_argument("--out", default=None, help="Output zip path (default: ../ScanOps_allinone[_pyXYZ].zip)")
+    ap.add_argument("--arch", default="x64", choices=sorted(ARCHITECTURES),
+                    help="Windows target architecture (x64 or x86).")
+    ap.add_argument("--out", default=None,
+                    help="Output zip path (default: ../ScanOps_allinone[_pyXYZ][_x86].zip)")
     ap.add_argument("--no-slim", action="store_true",
                     help="Keep the untrimmed runtime (debugging the bundle itself).")
     ap.add_argument("--max-mb", type=float, default=None,
@@ -505,9 +572,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="Split the archive into .001/.002 parts of at most MB each "
                          "(Bandizip/7-Zip open the .001; JOIN.bat rejoins without them).")
     args = ap.parse_args(argv)
-    configure(args.python, Path(args.out) if args.out else None)
+    configure(args.python, Path(args.out) if args.out else None, args.arch)
 
-    log(f"target: Windows x64 / embedded CPython {PYVER} ({ABI})")
+    log(f"target: {ARCHITECTURES[ARCH]['label']} / embedded CPython {PYVER} ({ABI})")
     embed_zip = download_embed()
     if STAGE.exists():
         shutil.rmtree(STAGE)

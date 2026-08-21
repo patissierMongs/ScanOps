@@ -119,10 +119,12 @@ def test_event_feed(client):
     assert feed["total"] >= 1
     item = feed["items"][0]
     assert {"host_ip", "port", "service", "type", "detail"} <= set(item)
+    assert item["actor_name"] == "op"
 
     only_new = client.get("/api/events", headers=h, params={"type": "NEW_OPEN"}).json()
     assert only_new["total"] >= 1
     assert all(i["type"] == "NEW_OPEN" for i in only_new["items"])
+    assert all(i["scan_id"] is not None and i["scan_name"] for i in only_new["items"])
 
 
 # ---- 선택 컬럼 내보내기 ----

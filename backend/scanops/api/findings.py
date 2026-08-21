@@ -17,7 +17,7 @@ from ..db import get_db
 from ..identity import display_identity
 from ..observation import current_reason, exposure_text
 from ..models import (
-    ACTIVE_FINDING_STATES, FINDING_STATUSES, RISK_LABELS_KO,
+    ACTIVE_FINDING_STATES, FINDING_STATUSES, RISK_LABELS_KO, RISK_LEVELS,
     Finding, FindingEvent, ScanRun, User,
 )
 from ..schemas import (
@@ -224,6 +224,14 @@ def _parse_filters(raw: str) -> dict[str, str]:
 
 
 def _sort_key(key: str):
+    if key == "risk_level":
+        # 일반적인 정렬 의미를 지킨다: asc=정보→금지, desc=금지→정보.
+        order = {level: len(RISK_LEVELS) - index for index, level in enumerate(RISK_LEVELS)}
+
+        def risk(finding: Finding):
+            return (0, order.get(finding.risk_level, -1), finding.risk_level.casefold())
+        return risk
+
     if key in _NUMERIC_COLS:
         def numeric(finding: Finding):
             raw = _cell(finding, key)
@@ -341,6 +349,11 @@ def list_findings(
     out = []
     for finding in rows:
         item = FindingOut.model_validate(finding).model_dump(mode="json")
+        # 스키마가 계산 필드를 지원하는 버전에서는 이 값이 response_model 을 통과한다. 구형
+        # 스키마에서도 내부 dict 계약을 한 곳에 두어 표·상세·내보내기의 reason 해석이 갈리지 않는다.
+        item["current_reason"] = current_reason(finding.state, finding.reason)
+        item["first_scan_id"] = finding.first_scan_id
+        item["last_scan_id"] = finding.last_scan_id
         if not include_fingerprint:
             item["fingerprint"] = ""
         out.append(item)
@@ -550,14 +563,38 @@ def get_finding(fid: int, _: User = Depends(current_user), db: Session = Depends
     row = db.get(Finding, fid)
     if row is None:
         raise HTTPException(status_code=404, detail="발견을 찾을 수 없습니다.")
-    return row
+    item = FindingOut.model_validate(row).model_dump(mode="json")
+    item["current_reason"] = current_reason(row.state, row.reason)
+    item["first_scan_id"] = row.first_scan_id
+    item["last_scan_id"] = row.last_scan_id
+    return item
 
 
 @router.get("/{fid}/events", response_model=list[EventOut])
 def finding_events(fid: int, _: User = Depends(current_user), db: Session = Depends(get_db)):
     if db.get(Finding, fid) is None:
         raise HTTPException(status_code=404, detail="발견을 찾을 수 없습니다.")
-    return db.query(FindingEvent).filter_by(finding_id=fid).order_by(FindingEvent.created_at).all()
+    events = db.query(FindingEvent).filter_by(finding_id=fid).order_by(FindingEvent.created_at).all()
+    actor_ids = {event.actor_user_id for event in events if event.actor_user_id is not None}
+    scan_ids = {event.scan_id for event in events if event.scan_id is not None}
+    actors = {
+        user.id: (user.display_name or user.username)
+        for user in db.query(User).filter(User.id.in_(actor_ids)).all()
+    } if actor_ids else {}
+    scans = {
+        scan.id: (scan.name or f"스캔 #{scan.id}")
+        for scan in db.query(ScanRun).filter(ScanRun.id.in_(scan_ids)).all()
+    } if scan_ids else {}
+    return [
+        {
+            "id": event.id, "type": event.type, "detail": event.detail,
+            "actor_user_id": event.actor_user_id,
+            "actor_name": actors.get(event.actor_user_id, ""),
+            "scan_id": event.scan_id, "scan_name": scans.get(event.scan_id, ""),
+            "created_at": event.created_at,
+        }
+        for event in events
+    ]
 
 
 @router.get("/{fid}/evidence")

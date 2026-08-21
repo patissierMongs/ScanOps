@@ -141,6 +141,36 @@ def test_the_event_feed_host_filter_uses_the_same_exclude_rule(client):
 
 
 # ── 6. 최초 로그인 비밀번호 강제 변경 ──────────────────────────────────────────
+def test_bootstrap_repairs_a_blank_initial_admin_password_file():
+    """계정만 커밋되고 안내 파일이 비면 에어갭 설치가 영구 잠기므로 재발급한다."""
+    from scanops.seed.bootstrap import run_bootstrap
+    from scanops.security import hash_password, verify_password
+
+    cred = scans_api._settings.data_dir / "INITIAL_ADMIN.txt"
+    cred.write_text("ScanOps 최초 관리자 계정\n  아이디: admin\n  비밀번호: \n", encoding="utf-8")
+    db = SessionLocal()
+    try:
+        db.add(User(username="admin", password_hash=hash_password("unrecoverable12"),
+                    role="admin", display_name="관리자", must_change_password=1))
+        db.commit()
+    finally:
+        db.close()
+
+    run_bootstrap()
+    line = next(line for line in cred.read_text(encoding="utf-8").splitlines()
+                if line.strip().startswith("비밀번호:"))
+    password = line.split(":", 1)[1].strip()
+    assert password and len(password) >= 8
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.username == "admin").one()
+        assert verify_password(password, admin.password_hash)
+        assert admin.auth_version == 1
+    finally:
+        db.close()
+    assert not list(cred.parent.glob(f".{cred.name}.*.tmp"))
+
+
 def test_a_borrowed_password_is_flagged_and_its_file_disappears_when_changed(client, tmp_path):
     """INITIAL_ADMIN.txt 의 비밀번호는 평문으로 파일에 남는다.
 

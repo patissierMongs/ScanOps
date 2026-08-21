@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     JSON,
     DateTime,
+    Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -97,6 +99,129 @@ class ScanRun(Base):
     # 스캔 이력이 불어나고 닫힘 판정이 재실행되는 것을 막는다. 직접 실행한 스캔은 빈 값.
     source_fingerprint: Mapped[str] = mapped_column(String(64), default="", index=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class ScanExecution(Base):
+    """종료된 staged 실행의 명령 단위 조회 인덱스.
+
+    실행 중 재개·중지의 원천은 계속 events.ndjson/run-state.json 이고, 이 행은 실행이
+    끝난 뒤에도 실제 명령과 결과를 조회할 수 있게 materialize 한 사본이다.
+    """
+
+    __tablename__ = "scan_executions"
+    __table_args__ = (
+        UniqueConstraint("scan_id", "execution_key", name="uq_scan_execution_key"),
+        Index("ix_scan_executions_scan_stage", "scan_id", "stage"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_id: Mapped[int] = mapped_column(
+        ForeignKey("scan_runs.id", ondelete="CASCADE")
+    )
+    execution_key: Mapped[str] = mapped_column(String(256))
+    stage: Mapped[str] = mapped_column(String(32), default="")
+    group_kind: Mapped[str] = mapped_column(String(16), default="common")
+    role: Mapped[str] = mapped_column(String(16), default="")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    artifact: Mapped[str] = mapped_column(String(256), default="")
+    argv_json: Mapped[list | None] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class ScanQualityIssue(Base):
+    """실행 품질 문제 한 건. 정상 호스트에는 행을 만들지 않는다."""
+
+    __tablename__ = "scan_quality_issues"
+    __table_args__ = (
+        UniqueConstraint("scan_id", "issue_key", name="uq_scan_quality_issue_key"),
+        Index("ix_scan_quality_issues_scan_kind_stage", "scan_id", "kind", "stage"),
+        Index("ix_scan_quality_issues_host_kind", "host_ip", "kind"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_id: Mapped[int] = mapped_column(
+        ForeignKey("scan_runs.id", ondelete="CASCADE")
+    )
+    execution_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scan_executions.id", ondelete="SET NULL"), nullable=True
+    )
+    issue_key: Mapped[str] = mapped_column(String(384))
+    kind: Mapped[str] = mapped_column(String(32))
+    stage: Mapped[str] = mapped_column(String(32), default="")
+    host_ip: Mapped[str] = mapped_column(String(64), default="")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    retry_scan_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    resolved_by_scan_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    @property
+    def resolved(self) -> bool:
+        return self.resolved_by_scan_id is not None
+
+
+class ScanHostObservation(Base):
+    """한 scan에서 대상 host가 각 단계 어디까지 실제로 도달했는지의 compact projection."""
+
+    __tablename__ = "scan_host_observations"
+    __table_args__ = (
+        UniqueConstraint("scan_id", "host_ip", name="uq_scan_host_observation"),
+        Index("ix_scan_host_observations_host_scan", "host_ip", "scan_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_id: Mapped[int] = mapped_column(
+        ForeignKey("scan_runs.id", ondelete="CASCADE")
+    )
+    host_ip: Mapped[str] = mapped_column(String(64))
+    discovery_status: Mapped[str] = mapped_column(String(16), default="unknown")
+    tcp_sweep_status: Mapped[str] = mapped_column(String(16), default="unknown")
+    tcp_service_status: Mapped[str] = mapped_column(String(16), default="unknown")
+    udp_sweep_status: Mapped[str] = mapped_column(String(16), default="unknown")
+    udp_service_status: Mapped[str] = mapped_column(String(16), default="unknown")
+
+
+class EndpointObservation(Base):
+    """scan별 endpoint 상태 snapshot.
+
+    열린 endpoint와 기존 finding 후보의 권위 있는 부재만 저장한다. 포트 범위 전체의 closed
+    cartesian product를 저장하는 테이블이 아니다.
+    """
+
+    __tablename__ = "endpoint_observations"
+    __table_args__ = (
+        UniqueConstraint("scan_id", "finding_key", name="uq_endpoint_observation"),
+        Index("ix_endpoint_observations_key_time", "finding_key", "observed_at"),
+        Index("ix_endpoint_observations_scan_host_proto", "scan_id", "host_ip", "proto"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_id: Mapped[int] = mapped_column(
+        ForeignKey("scan_runs.id", ondelete="CASCADE")
+    )
+    finding_key: Mapped[str] = mapped_column(String(96))
+    host_ip: Mapped[str] = mapped_column(String(64))
+    port: Mapped[int] = mapped_column(Integer)
+    proto: Mapped[str] = mapped_column(String(8))
+    state: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(String(32), default="")
+    evidence_kind: Mapped[str] = mapped_column(String(16))
+    identity_observed: Mapped[int] = mapped_column(Integer, default=1)
+    applied_to_current: Mapped[int] = mapped_column(Integer, default=1)
+    hostname: Mapped[str] = mapped_column(String(128), default="")
+    service: Mapped[str] = mapped_column(String(64), default="")
+    product: Mapped[str] = mapped_column(String(128), default="")
+    version: Mapped[str] = mapped_column(String(128), default="")
+    server: Mapped[str] = mapped_column(String(256), default="")
+    identification: Mapped[str] = mapped_column(String(16), default="미확인")
+    observed_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
 class Finding(Base):

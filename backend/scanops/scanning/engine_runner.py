@@ -20,6 +20,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -115,13 +116,15 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
     udp_spec = nmap_runner.auto_udp_port_spec(ports)
     tcp_ports = tcp_spec.removeprefix("T:")
     udp_ports = udp_spec.removeprefix("U:")
+    selected_nse = list(scan_options.NSE_DEFAULT_KEYS if nse is None else nse)
     service = {
         "enabled": True,
         "version_all": not options or ("version_all" in opt and "version_light" not in opt),
         "version_light": "version_light" in opt,
         "timing": timing,
         "max_retries": max_retries,
-        "nse": list(scan_options.NSE_DEFAULT_KEYS if nse is None else nse),
+        "nse": scan_options.filter_nse_proto(selected_nse, "tcp"),
+        "udp_nse": scan_options.filter_nse_proto(selected_nse, "udp"),
         "host_timeout": limits["service"],
         "udp_host_timeout": limits["service_udp"],
         "workers": scan_options.SERVICE_WORKERS_DEFAULT,
@@ -352,8 +355,30 @@ def _enrichment_units(out_dir, spec: dict) -> list[tuple[list[Path], list[Path]]
     if not svc.get("enabled", True):
         return []
     confirm = bool(svc.get("confirm", False))
-    open_map = _read_state(out).get("open_map") or {}
+    state = _read_state(out)
+    open_map = state.get("open_map") or {}
     units: list[tuple[list[Path], list[Path]]] = []
+    covered: set[tuple[str, str, int]] = set()
+    # 새 엔진은 공통 포트가 많은 배치를 한 Nmap으로 식별한다. 생산자가 coverage에 정확한
+    # 산출물·호스트를 적으므로, 성공한 배치 산출물 하나를 호스트별 파일 N개로 지어내지 않는다.
+    for entry in state.get("coverage") or []:
+        if not isinstance(entry, dict) or entry.get("role") != "enrichment":
+            continue
+        artifact, proto = entry.get("artifact"), entry.get("proto")
+        if (not entry.get("finished") or not isinstance(artifact, str)
+                or proto not in {"tcp", "udp"}
+                or not artifact.startswith(f"stage3-{proto}-b")):
+            continue
+        units.append(([out / artifact], []))
+        hosts = entry.get("hosts")
+        port_text = entry.get("ports")
+        try:
+            ports = {int(port) for port in str(port_text).split(":")[-1].split(",")}
+        except ValueError:
+            ports = set()
+        if isinstance(hosts, list):
+            covered.update((host, proto, port) for host in hosts if isinstance(host, str)
+                           for port in ports)
     for ip, protos in sorted((open_map or {}).items()):
         if not isinstance(protos, dict):
             continue
@@ -361,8 +386,10 @@ def _enrichment_units(out_dir, spec: dict) -> list[tuple[list[Path], list[Path]]
             raw = protos.get(proto)
             if not raw:
                 continue
+            ports = sorted({int(p) for p in raw if (ip, proto, int(p)) not in covered})
+            if not ports:
+                continue
             grouped = _stage3_expected(out, ip, proto, confirm)
-            ports = sorted({int(p) for p in raw})
             split: list[Path] = []
             if proto == "udp" and 1 < len(ports) <= _MAX_SPLIT_UNITS:
                 for port in ports:
@@ -537,6 +564,45 @@ def gave_up_hosts(out_dir) -> list[str]:
     스캔할 대상 목록이다 - 안 남겨 두면 '왜 이 대역만 결과가 비지?' 를 알아낼 방법이 없다.
     """
     return [h for h in (_read_state(Path(out_dir)).get("gave_up") or []) if isinstance(h, str)]
+
+
+def _retry_ip_key(value: str):
+    try:
+        return (0, int(ipaddress.ip_address(value)))
+    except ValueError:
+        return (1, value)
+
+
+def gave_up_detail(out_dir) -> dict:
+    """Persistent retry queue from timeout and retransmission-cap evidence."""
+    state = _read_state(Path(out_dir))
+    by_stage = {}
+    reasons_by_stage = {}
+
+    def merge(raw, reason):
+        if not isinstance(raw, dict):
+            return
+        for stage, hosts in raw.items():
+            if not isinstance(stage, str) or not isinstance(hosts, list):
+                continue
+            clean = sorted({host for host in hosts if isinstance(host, str)}, key=_retry_ip_key)
+            if not clean:
+                continue
+            by_stage[stage] = sorted(set(by_stage.get(stage, [])) | set(clean), key=_retry_ip_key)
+            stage_reasons = reasons_by_stage.setdefault(stage, {})
+            for host in clean:
+                host_reasons = stage_reasons.setdefault(host, [])
+                if reason not in host_reasons:
+                    host_reasons.append(reason)
+
+    merge(state.get("gave_up_by_stage") or {}, "host_timeout")
+    merge(state.get("retransmission_cap_by_stage") or {}, "retransmission_cap")
+    targets = sorted({host for hosts in by_stage.values() for host in hosts}, key=_retry_ip_key)
+    if not targets:
+        targets = sorted(set(gave_up_hosts(out_dir)), key=_retry_ip_key)
+    return {"required": bool(targets), "count": len(targets),
+            "targets": targets, "by_stage": by_stage,
+            "reasons_by_stage": reasons_by_stage}
 
 
 def coverage_entries(out_dir) -> list[dict]:
@@ -798,20 +864,47 @@ def is_done(out_dir) -> bool:
 
 # ── 이벤트 → 단계 요약 ──
 
+
+def canonical_stage(stage: str, proto: str = "") -> str:
+    """One stage vocabulary for events, durable issues, retries, and the UI."""
+    if stage in {"service:tcp", "tcp_service"} or stage == "service" and proto == "tcp":
+        return "tcp_service"
+    if stage in {"service:udp", "udp_service"} or stage == "service" and proto == "udp":
+        return "udp_service"
+    return stage if stage in {"discovery", "tcp", "udp"} else stage or ""
+
 def parse_events(out_dir) -> dict:
     """events.ndjson 을 단계 요약으로 접는다(라이브 진행·이력 공용). 파일 없으면 빈 결과."""
     path = Path(out_dir) / "events.ndjson"
     stages: dict[str, dict] = {}
     order: list[str] = []
+    executions: dict[str, dict] = {}
+    execution_order: list[str] = []
+    recoveries: list[dict] = []
+    quality_issues: list[dict] = []
+    current: dict = {}
     overall = {"status": "running", "percent": None, "seconds": None, "counts": {}}
     if not path.exists():
-        return {"stages": [], "overall": overall}
+        return {"stages": [], "overall": overall, "current": current, "executions": [],
+                "recoveries": [], "quality_issues": []}
 
     def slot(name):
         if name and name not in stages:
-            stages[name] = {"stage": name, "status": "pending", "percent": 0, "counts": {}}
+            stages[name] = {
+                "stage": name, "status": "pending", "percent": 0,
+                "counts": {}, "issues": [],
+            }
             order.append(name)
         return stages.get(name, {})
+
+    def mapped_stage(name, event):
+        proto = event.get("proto")
+        mapped = canonical_stage(name, proto if proto in {"tcp", "udp"} else "")
+        if mapped != "service":
+            return mapped
+        if current.get("stage") in {"tcp_service", "udp_service"}:
+            return current["stage"]
+        return name
 
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
@@ -824,35 +917,254 @@ def parse_events(out_dir) -> dict:
         if not isinstance(e, str):
             continue
         if (
-            e in {"stage_start", "stage_progress", "stage_done", "error"}
+            e in {"stage_start", "stage_progress", "stage_activity", "stage_done", "error",
+                  "hosts_gave_up", "retransmission_cap_hit", "command_start", "command_done"}
             and (not isinstance(st, str) or not st)
         ):
             continue
-        if e == "stage_start":
-            slot(st).update({"status": "running", "percent": 0})
-        elif e == "stage_progress":
+        if e == "stage_plan":
+            plan = ev.get("stages")
+            if isinstance(plan, list):
+                for name in plan:
+                    if isinstance(name, str) and name:
+                        slot(name)
+        elif e == "stage_start":
+            s = slot(st)
+            if s.get("status") not in {"done", "stopped", "error"}:
+                s["status"] = "running"
+                s["percent"] = s.get("percent") or 0
+        elif e == "stage_activity":
+            s = slot(st)
             progress = ev.get("percent")
             if isinstance(progress, (int, float)) and not isinstance(progress, bool) and math.isfinite(progress):
-                slot(st)["percent"] = max(0, min(100, progress))
+                s["percent"] = max(0, min(100, progress))
+            s["status"] = "running"
+            focus = {"stage": st}
+            hosts = ev.get("current_hosts")
+            if isinstance(hosts, list):
+                focus["hosts"] = [h for h in hosts[:8] if isinstance(h, str)]
+            for key in ("batch", "batch_total", "current_host_count",
+                        "completed_hosts", "total_hosts"):
+                value = ev.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    focus[key] = value
+            if ev.get("progress_mode") == "batch":
+                focus["progress_mode"] = "batch"
+            current = focus
+        elif e == "stage_progress":
+            progress = ev.get("percent")
+            mapped = st
+            if st == "service" and current.get("stage") in {"tcp_service", "udp_service"}:
+                mapped = current["stage"]
+            if isinstance(progress, (int, float)) and not isinstance(progress, bool) and math.isfinite(progress):
+                # 포트 스윕 Nmap 퍼센트는 현재 배치 안의 값이다. 배치 위치를 더해 단계 전체
+                # 퍼센트로 바꾼다. 호스트별 서비스 프로브는 여러 Nmap이 동시에 떠 있으므로
+                # 개별 프로세스 퍼센트로 전체를 덮지 않고 stage_activity의 완료 호스트 수를 쓴다.
+                batch_progress = (
+                    current.get("stage") == mapped and current.get("batch_total")
+                    and (mapped == st or current.get("progress_mode") == "batch")
+                )
+                if batch_progress:
+                    progress = ((current.get("batch", 1) - 1) + progress / 100) \
+                               / current["batch_total"] * 100
+                if st != "service" or mapped == st or current.get("progress_mode") == "batch":
+                    slot(mapped)["percent"] = max(0, min(100, progress))
             else:
-                slot(st)
-            stages[st]["status"] = "running"
+                slot(mapped)
+            if stages[mapped].get("status") not in {"warning", "error"}:
+                stages[mapped]["status"] = "running"
+            if not current:
+                current = {"stage": mapped}
         elif e == "hosts_up":
             slot("discovery")["counts"]["live"] = ev.get("count")
+        elif e == "hosts_gave_up":
+            mapped = mapped_stage(st, ev)
+            s = slot(mapped)
+            hosts = ev.get("hosts")
+            hosts = [host for host in hosts if isinstance(host, str)] \
+                if isinstance(hosts, list) else []
+            count = ev.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                count = len(hosts)
+            s["issues"].append({
+                "type": "host_timeout", "count": count, "hosts": hosts,
+                "message": f"호스트 {count}대가 제한 시간 안에 이 단계를 끝내지 못했습니다.",
+            })
+            s["status"] = "warning"
+            s["timeout_count"] = s.get("timeout_count", 0) + count
+        elif e == "retransmission_cap_hit":
+            mapped = mapped_stage(st, ev)
+            s = slot(mapped)
+            hosts = ev.get("hosts")
+            hosts = [host for host in hosts if isinstance(host, str)] \
+                if isinstance(hosts, list) else []
+            count = ev.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                count = len(hosts)
+            retries = ev.get("max_retries")
+            retries = retries if isinstance(retries, int) and not isinstance(retries, bool) else "?"
+            s["issues"].append({
+                "type": "retransmission_cap", "count": count, "hosts": hosts,
+                "message": f"호스트 {count}대에서 포트 재전송 한도({retries}회)에 도달했습니다.",
+            })
+            s["status"] = "warning"
+        elif e in {"service_retry", "service_split"}:
+            mapped = mapped_stage(st, ev)
+            hosts = ev.get("hosts")
+            hosts = [host for host in hosts if isinstance(host, str)] \
+                if isinstance(hosts, list) else []
+            if not hosts and isinstance(ev.get("ip"), str):
+                hosts = [ev["ip"]]
+            ports = ev.get("ports")
+            ports = [port for port in ports if isinstance(port, int) and not isinstance(port, bool)] \
+                if isinstance(ports, list) else []
+            recovery = {
+                "type": "retry" if e == "service_retry" else "split",
+                "stage": mapped, "proto": ev.get("proto") if ev.get("proto") in {"tcp", "udp"} else "",
+                "hosts": hosts, "ports": ports,
+                "port_spec": ev.get("port_spec") if isinstance(ev.get("port_spec"), str) else "",
+                "reason": ev.get("reason") if isinstance(ev.get("reason"), str) else "",
+                "outcome": ev.get("outcome") if ev.get("outcome") in {"recovered", "degraded", "failed", "stopped"}
+                else "",
+                "recovered": ev.get("recovered") is True,
+            }
+            for key in ("engine", "units", "recovered_units", "failed_units", "seconds", "rc"):
+                value = ev.get(key)
+                if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                    recovery[key] = value
+            for key in ("recovery_of_execution_id", "execution_id"):
+                value = ev.get(key)
+                if isinstance(value, str) and value:
+                    recovery[key] = value
+            recoveries.append(recovery)
+        elif e == "service_degraded":
+            mapped = mapped_stage(st, ev)
+            s = slot(mapped)
+            hosts = ev.get("hosts")
+            hosts = [host for host in hosts if isinstance(host, str)] \
+                if isinstance(hosts, list) else []
+            if not hosts and isinstance(ev.get("ip"), str):
+                hosts = [ev["ip"]]
+            ports = ev.get("failed_ports") or ev.get("ports")
+            ports = [port for port in ports if isinstance(port, int) and not isinstance(port, bool)] \
+                if isinstance(ports, list) else []
+            proto = ev.get("proto") if ev.get("proto") in {"tcp", "udp"} else ""
+            message = ev.get("message") if isinstance(ev.get("message"), str) \
+                else "서비스 프로브가 일부 또는 전부 완료되지 않았습니다."
+            issue = {
+                "type": "service_degraded", "count": len(hosts) or 1,
+                "hosts": hosts, "proto": proto, "ports": ports,
+                "port_spec": ev.get("port_spec") if isinstance(ev.get("port_spec"), str) else "",
+                "message": message,
+            }
+            s["issues"].append(issue)
+            s["status"] = "warning"
+            for host in hosts or [""]:
+                quality_issues.append({
+                    "kind": "service_degraded", "stage": mapped, "host_ip": host,
+                    "proto": proto, "port_spec": issue["port_spec"], "message": message,
+                })
         elif e == "stage_done":
             s = slot(st)
             cnts = ev.get("counts", {})
             if not isinstance(cnts, dict):
                 cnts = {}
-            s.update({"status": "stopped" if cnts.get("stopped") else "done",
-                      "percent": 100, "seconds": ev.get("seconds"), "counts": cnts})
+            if cnts.get("stopped"):
+                status = "stopped"
+            elif s.get("status") == "error":
+                status = "error"
+            elif s.get("issues"):
+                status = "warning"
+            else:
+                status = "done"
+            # warning 은 호스트 일부를 재시도 큐에 보존한 채 해당 단계 자체는 끝난 것이다.
+            # 반대로 error/stopped 를 100%로 칠하면 "전체 절차 완료율"이 실패 직후 100%가
+            # 되어 버린다. 마지막으로 실제 관측한 진행률을 그대로 둔다.
+            percent = 100 if status in {"done", "warning"} else (s.get("percent") or 0)
+            s.update({"status": status, "percent": percent,
+                      "seconds": ev.get("seconds"), "counts": cnts})
+            if current.get("stage") == st:
+                current = {}
         elif e == "error":
+            st = mapped_stage(st, ev)
             s = slot(st)
-            label = {"discovery": "호스트 발견", "tcp": "TCP 탐색", "udp": "UDP 탐색",
-                     "service": "서비스 식별"}.get(st, "스캔")
+            label = {"discovery": "호스트 발견", "tcp": "TCP 포트 발견",
+                     "tcp_service": "TCP 서비스 프로브", "udp": "UDP 포트 발견",
+                     "udp_service": "UDP 서비스 프로브", "service": "서비스 식별"}.get(st, "스캔")
             # 원시 이벤트의 cmd/path/rc는 서버 로그에만 남기고 API에는 안정적 메시지만 노출한다.
             s["error"] = f"{label} 단계 실행에 실패했습니다."
-            s["status"] = "error"
+            fatal = ev.get("fatal") is not False
+            s["issues"].append({
+                "type": "command_error", "count": 1, "message": s["error"],
+                "fatal": fatal,
+                "execution_key": ev.get("execution_id")
+                if isinstance(ev.get("execution_id"), str) else "",
+            })
+            s["status"] = "error" if fatal else "warning"
+            if fatal:
+                quality_issues.append({
+                    "kind": "command_error", "stage": st, "host_ip": "",
+                    "proto": ev.get("proto") if ev.get("proto") in {"tcp", "udp"} else "",
+                    "port_spec": "", "message": s["error"],
+                    "execution_key": ev.get("execution_id")
+                    if isinstance(ev.get("execution_id"), str) else "",
+                })
+        elif e == "command_start":
+            execution_id = ev.get("execution_id")
+            argv = ev.get("argv")
+            if not isinstance(execution_id, str) or not isinstance(argv, list):
+                continue
+            argv = [arg for arg in argv if isinstance(arg, str)]
+            execution = {
+                "id": execution_id, "stage": st,
+                "group": ev.get("group") if ev.get("group") in {"common", "individual"}
+                else "common",
+                "reason": ev.get("reason") if isinstance(ev.get("reason"), str) else "",
+                "artifact": ev.get("artifact") if isinstance(ev.get("artifact"), str) else "",
+                "argv": argv, "status": "running", "started_at": ev.get("ts"),
+                "seconds": None, "timeout_count": 0, "timed_out": [],
+                "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
+            }
+            if ev.get("role") in {"authority", "enrichment"}:
+                execution["role"] = ev["role"]
+            executions[execution_id] = execution
+            execution_order.append(execution_id)
+        elif e == "command_done":
+            execution_id = ev.get("execution_id")
+            execution = executions.get(execution_id)
+            if execution is None:
+                continue
+            outcome = ev.get("outcome")
+            execution.update({
+                "status": outcome if outcome in {"done", "timeout", "error", "stopped"}
+                else "done",
+                "seconds": ev.get("seconds") if isinstance(ev.get("seconds"), (int, float))
+                and not isinstance(ev.get("seconds"), bool) else None,
+                "rc": ev.get("rc") if isinstance(ev.get("rc"), int) else None,
+                "timeout_count": ev.get("timeout_count")
+                if isinstance(ev.get("timeout_count"), int) else 0,
+                "timed_out": [host for host in (ev.get("timed_out") or [])
+                              if isinstance(host, str)],
+                "retransmission_cap_count": ev.get("retransmission_cap_count")
+                if isinstance(ev.get("retransmission_cap_count"), int) else 0,
+                "retransmission_cap_hosts": [
+                    host for host in (ev.get("retransmission_cap_hosts") or [])
+                    if isinstance(host, str)
+                ],
+                "finished_at": ev.get("ts"),
+            })
+            for kind, hosts in (
+                ("host_timeout", execution["timed_out"]),
+                ("retransmission_cap", execution["retransmission_cap_hosts"]),
+            ):
+                for host in hosts:
+                    quality_issues.append({
+                        "kind": kind, "stage": execution["stage"], "host_ip": host,
+                        "proto": "udp" if execution["stage"].startswith("udp") else "tcp"
+                        if execution["stage"].startswith("tcp") else "",
+                        "port_spec": "", "message": "",
+                        "execution_key": execution_id,
+                    })
         elif e == "job_start":
             overall["status"] = "running"
         elif e == "job_done":
@@ -873,14 +1185,145 @@ def parse_events(out_dir) -> dict:
             overall.update({"status": status, "seconds": seconds, "counts": counts})
 
     stage_list = [stages[s] for s in order]
-    done = sum(1 for s in stage_list if s["status"] in ("done", "stopped"))
-    if overall["status"] != "running":
+    if overall["status"] == "done":
         overall["percent"] = 100
     elif stage_list:
-        cur = next((s for s in stage_list if s["status"] == "running"), None)
-        frac = (cur["percent"] or 0) / 100.0 if cur else 0
-        overall["percent"] = round(min(done + frac, len(stage_list)) / len(stage_list) * 100, 1)
-    return {"stages": stage_list, "overall": overall}
+        # 시간 경과나 프로세스 상태가 아니라, 계획된 단계 중 실제로 끝난 비율이다.
+        total = sum(100 if s["status"] in ("done", "warning") else (s.get("percent") or 0)
+                    for s in stage_list)
+        overall["percent"] = round(min(total / len(stage_list), 100), 1)
+    now = time.time()
+    for execution in executions.values():
+        if execution["status"] != "running":
+            continue
+        started_at = execution.get("started_at")
+        if (
+            isinstance(started_at, (int, float))
+            and not isinstance(started_at, bool)
+            and math.isfinite(started_at)
+        ):
+            execution["seconds"] = round(max(now - started_at, 0), 1)
+    recovered_execution_keys = {
+        recovery.get("recovery_of_execution_id") for recovery in recoveries
+        if recovery.get("recovered") is True
+    }
+    quality_issues = [
+        issue for issue in quality_issues
+        if not (
+            issue.get("kind") == "command_error"
+            and issue.get("execution_key") in recovered_execution_keys
+        )
+    ]
+    if recovered_execution_keys:
+        for stage in stage_list:
+            stage["issues"] = [
+                issue for issue in stage.get("issues", [])
+                if not (
+                    issue.get("type") == "command_error"
+                    and issue.get("execution_key") in recovered_execution_keys
+                )
+            ]
+            if stage.get("status") == "warning" and not stage["issues"]:
+                stage["status"] = "done" if stage.get("percent") == 100 else "running"
+    return {
+        "stages": stage_list, "overall": overall, "current": current,
+        "executions": [executions[key] for key in execution_order if key in executions],
+        "recoveries": recoveries, "quality_issues": quality_issues,
+    }
+
+
+_HOST_STAGE_FIELD = {
+    "discovery": "discovery_status",
+    "tcp": "tcp_sweep_status",
+    "tcp_service": "tcp_service_status",
+    "udp": "udp_sweep_status",
+    "udp_service": "udp_service_status",
+}
+
+
+def terminal_observability(out_dir, spec: dict | None = None) -> dict:
+    """Build deterministic terminal DB inputs from the authoritative sidecars.
+
+    This does not write the database. Running scans continue to read the sidecars directly;
+    the API calls this only while committing a terminal scan.  Keeping the conversion here
+    makes reconciliation and the normal worker use the exact same projection.
+    """
+    out = Path(out_dir)
+    parsed = parse_events(out)
+    state = _read_state(out)
+    saved = spec if isinstance(spec, dict) else {}
+    plan = {
+        stage.get("stage") for stage in parsed.get("stages", [])
+        if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+    }
+    host_rows: dict[str, dict] = {}
+
+    def host_row(host) -> dict | None:
+        if not isinstance(host, str) or not host:
+            return None
+        row = host_rows.setdefault(host, {"host_ip": host})
+        for stage, field in _HOST_STAGE_FIELD.items():
+            row.setdefault(field, "unknown" if stage in plan else "not_planned")
+        return row
+
+    for host in saved.get("targets", []) if isinstance(saved.get("targets"), list) else []:
+        host_row(host)
+    live = {host for host in (state.get("live") or []) if isinstance(host, str)}
+    for host in live:
+        row = host_row(host)
+        if row is not None:
+            row["discovery_status"] = "done"
+    discovery = next(
+        (stage for stage in parsed.get("stages", []) if stage.get("stage") == "discovery"),
+        None,
+    )
+    if discovery and discovery.get("status") in {"done", "warning"}:
+        for host, row in host_rows.items():
+            if host not in live and row["discovery_status"] == "unknown":
+                row["discovery_status"] = "not_responding"
+
+    coverage = state.get("coverage") or []
+    if isinstance(coverage, list):
+        for entry in coverage:
+            if not isinstance(entry, dict):
+                continue
+            proto = entry.get("proto")
+            if proto not in {"tcp", "udp"}:
+                continue
+            artifact = entry.get("artifact") if isinstance(entry.get("artifact"), str) else ""
+            field = f"{proto}_service_status" if artifact.startswith("stage3-") \
+                else f"{proto}_sweep_status"
+            status = "done" if entry.get("finished") is True else "error"
+            for host in entry.get("hosts", []) if isinstance(entry.get("hosts"), list) else []:
+                row = host_row(host)
+                if row is not None:
+                    row[field] = status
+
+    issue_inputs = []
+    for raw in parsed.get("quality_issues", []):
+        if not isinstance(raw, dict) or not isinstance(raw.get("kind"), str):
+            continue
+        issue = dict(raw)
+        issue["detail"] = raw.get("message") if isinstance(raw.get("message"), str) else ""
+        issue_inputs.append(issue)
+        row = host_row(issue.get("host_ip"))
+        field = _HOST_STAGE_FIELD.get(issue.get("stage"))
+        if row is not None and field:
+            row[field] = {
+                "host_timeout": "timeout",
+                "retransmission_cap": "warning",
+                "service_degraded": "degraded",
+                "command_error": "error",
+            }.get(issue["kind"], "warning")
+
+    return {
+        "executions": parsed.get("executions") or [],
+        "issues": issue_inputs,
+        "hosts": list(host_rows.values()),
+        "recoveries": parsed.get("recoveries") or [],
+        "stages": parsed.get("stages") or [],
+        "overall": parsed.get("overall") or {},
+    }
 
 
 # ── 결과 인입 ──

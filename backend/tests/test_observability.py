@@ -1,0 +1,258 @@
+"""Compact terminal observability projections and lifecycle contracts."""
+from datetime import datetime, timezone
+
+import pytest
+
+from scanops.db import SessionLocal, init_db
+from scanops.models import (
+    EndpointObservation,
+    Finding,
+    FindingEvent,
+    ScanExecution,
+    ScanHostObservation,
+    ScanQualityIssue,
+    ScanRun,
+)
+from scanops.scanning.ingest import ingest
+from scanops.scanning.nmap_parse import parse_xml
+from scanops.scanning.observability import (
+    materialize_terminal_observability,
+    resolve_quality_issues,
+    set_quality_retry,
+)
+
+XML = "tests/fixtures/sample_scan.xml"
+
+
+def _scan(db, name="scan") -> ScanRun:
+    row = ScanRun(name=name, status="done")
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _one_finding() -> dict:
+    return dict(parse_xml(XML)[0])
+
+
+def test_terminal_materializer_is_idempotent_and_keeps_zero_port_hosts():
+    init_db()
+    db = SessionLocal()
+    try:
+        scan = _scan(db)
+        first = materialize_terminal_observability(
+            db,
+            scan.id,
+            executions=[{
+                "id": "stage-tcp-b0.xml:1",
+                "stage": "tcp",
+                "group": "common",
+                "artifact": "stage-tcp-b0.xml",
+                "argv": ["nmap", "-p", "1-65535", "10.0.0.1"],
+                "status": "running",
+                "started_at": 1_700_000_000.0,
+            }],
+            issues=[{
+                "issue_key": "timeout|tcp|10.0.0.1",
+                "kind": "host_timeout",
+                "stage": "tcp",
+                "host_ip": "10.0.0.1",
+                "execution_key": "stage-tcp-b0.xml:1",
+                "detail": "host timeout",
+            }],
+            hosts=[{
+                "host_ip": "10.0.0.1",
+                "discovery_status": "up",
+                "tcp_sweep_status": "timeout",
+                "tcp_service_status": "not_applicable",
+                "udp_sweep_status": "disabled",
+                "udp_service_status": "disabled",
+            }],
+        )
+        db.commit()
+        assert first == {"executions": 1, "quality_issues": 1, "host_observations": 1}
+        assert db.query(EndpointObservation).count() == 0  # 열린 포트가 없어도 host는 남는다.
+
+        second = materialize_terminal_observability(
+            db,
+            scan.id,
+            executions=[{
+                "id": "stage-tcp-b0.xml:1",
+                "stage": "tcp",
+                "group": "common",
+                "artifact": "stage-tcp-b0.xml",
+                "argv": ["nmap", "-p", "1-65535", "10.0.0.1"],
+                "status": "done",
+                "started_at": 1_700_000_000.0,
+                "finished_at": 1_700_000_003.0,
+                "seconds": 3.0,
+                "rc": 0,
+            }],
+            issues=[{
+                "issue_key": "timeout|tcp|10.0.0.1",
+                "kind": "host_timeout",
+                "stage": "tcp",
+                "host_ip": "10.0.0.1",
+                "execution_key": "stage-tcp-b0.xml:1",
+                "detail": "host timeout",
+            }],
+            hosts=[{"host_ip": "10.0.0.1", "tcp_sweep_status": "complete"}],
+        )
+        db.commit()
+
+        assert second == first
+        assert db.query(ScanExecution).count() == 1
+        assert db.query(ScanQualityIssue).count() == 1
+        assert db.query(ScanHostObservation).count() == 1
+        execution = db.query(ScanExecution).one()
+        assert execution.status == "done" and execution.return_code == 0
+        assert execution.started_at == datetime.fromtimestamp(1_700_000_000, timezone.utc).replace(tzinfo=None)
+        issue = db.query(ScanQualityIssue).one()
+        assert issue.execution_id == execution.id
+        assert db.query(ScanHostObservation).one().tcp_sweep_status == "complete"
+    finally:
+        db.close()
+
+
+def test_ingest_records_positive_stale_and_authoritative_absence_without_duplicates():
+    init_db()
+    db = SessionLocal()
+    try:
+        finding = _one_finding()
+        key = f"{finding['host_ip']}|{finding['port']}|{finding['proto']}"
+        current_when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        stale_when = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        close_when = datetime(2027, 1, 1, tzinfo=timezone.utc)
+
+        current = _scan(db, "current")
+        ingest(db, current.id, [finding], {finding["host_ip"]}, scan_date=current_when)
+        current_observation = db.query(EndpointObservation).filter_by(scan_id=current.id).one()
+        assert current_observation.state == "open"
+        assert current_observation.evidence_kind == "positive"
+        assert current_observation.applied_to_current == 1
+
+        # 같은 scan id를 idempotent 재-finalize하더라도 더 오래된 artifact가 snapshot을
+        # 역행시키면 안 된다.
+        same_scan_stale = {**finding, "service": "older-same-scan", "observed_at": stale_when}
+        ingest(
+            db, current.id, [same_scan_stale], {finding["host_ip"]}, scan_date=stale_when,
+        )
+        db.refresh(current_observation)
+        assert current_observation.service == finding["service"]
+        assert current_observation.applied_to_current == 1
+
+        stale_finding = {**finding, "service": "stale-service", "observed_at": stale_when}
+        stale = _scan(db, "stale")
+        ingest(db, stale.id, [stale_finding], {finding["host_ip"]}, scan_date=stale_when)
+        stale_observation = db.query(EndpointObservation).filter_by(scan_id=stale.id).one()
+        assert stale_observation.service == "stale-service"
+        assert stale_observation.applied_to_current == 0
+        assert db.query(Finding).filter_by(finding_key=key).one().service == finding["service"]
+
+        closed = _scan(db, "closed")
+        ingest(
+            db,
+            closed.id,
+            [],
+            {finding["host_ip"]},
+            scope_keys={key},
+            scan_date=close_when,
+        )
+        absence = db.query(EndpointObservation).filter_by(scan_id=closed.id).one()
+        assert absence.state == "closed" and absence.evidence_kind == "absence"
+        assert absence.applied_to_current == 1
+
+        # 같은 scan finalization을 다시 실행해도 행이 늘거나 과거 적용 사실이 사라지지 않는다.
+        ingest(
+            db,
+            closed.id,
+            [],
+            {finding["host_ip"]},
+            scope_keys={key},
+            scan_date=close_when,
+        )
+        assert db.query(EndpointObservation).filter_by(scan_id=closed.id).count() == 1
+        assert db.query(EndpointObservation).filter_by(scan_id=closed.id).one().applied_to_current == 1
+    finally:
+        db.close()
+
+
+def test_ingest_does_not_expand_never_seen_scope_keys_into_closed_rows():
+    init_db()
+    db = SessionLocal()
+    try:
+        finding = _one_finding()
+        host = finding["host_ip"]
+        opened = _scan(db, "opened")
+        ingest(db, opened.id, [finding], {host})
+
+        closed = _scan(db, "wide-scope")
+        known = f"{host}|{finding['port']}|{finding['proto']}"
+        never_seen = {f"{host}|{port}|tcp" for port in range(1000, 1100)}
+        ingest(db, closed.id, [], {host}, scope_keys={known, *never_seen})
+
+        rows = db.query(EndpointObservation).filter_by(scan_id=closed.id).all()
+        assert [row.finding_key for row in rows] == [known]
+    finally:
+        db.close()
+
+
+def test_quality_resolution_is_exact_and_child_delete_reopens_source_issue():
+    init_db()
+    db = SessionLocal()
+    try:
+        source = _scan(db, "source")
+        child = _scan(db, "retry")
+        materialize_terminal_observability(
+            db,
+            source.id,
+            issues=[
+                {"issue_key": "tcp-a", "kind": "host_timeout", "stage": "tcp",
+                 "host_ip": "10.0.0.1"},
+                {"issue_key": "udp-b", "kind": "host_timeout", "stage": "udp",
+                 "host_ip": "10.0.0.2"},
+            ],
+        )
+        assert set_quality_retry(db, source.id, child.id) == 2
+        assert resolve_quality_issues(db, source.id, child.id, ["tcp-a"]) == 1
+        db.commit()
+
+        issues = {row.issue_key: row for row in db.query(ScanQualityIssue).all()}
+        assert issues["tcp-a"].resolved is True
+        assert issues["udp-b"].resolved is False
+        assert issues["udp-b"].retry_scan_id == child.id
+
+        db.delete(child)
+        db.commit()
+        db.expire_all()
+        issues = {row.issue_key: row for row in db.query(ScanQualityIssue).all()}
+        assert issues["tcp-a"].resolved is False and issues["tcp-a"].retry_scan_id is None
+        assert issues["udp-b"].resolved is False and issues["udp-b"].retry_scan_id is None
+
+        db.delete(source)
+        db.commit()
+        assert db.query(ScanQualityIssue).count() == 0
+    finally:
+        db.close()
+
+
+def test_endpoint_observation_failure_rolls_back_finding_and_event(monkeypatch):
+    init_db()
+    db = SessionLocal()
+    try:
+        scan = _scan(db)
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError("observation write failed")
+
+        monkeypatch.setattr("scanops.scanning.ingest.record_endpoint_observations", fail)
+        with pytest.raises(RuntimeError, match="observation write failed"):
+            ingest(db, scan.id, [_one_finding()], {"127.0.0.1"})
+        db.rollback()
+
+        assert db.query(Finding).count() == 0
+        assert db.query(FindingEvent).count() == 0
+        assert db.query(EndpointObservation).count() == 0
+    finally:
+        db.close()

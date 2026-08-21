@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 import { downloadText } from "../lib/download.js";
 import { useToast } from "../ui/Toast.jsx";
-import { asDate, dday, today } from "../lib/format.js";
+import { asDate, dday, RISK_LABEL, today } from "../lib/format.js";
 import { primaryServiceIdentity } from "../lib/columns.js";
 
 const STATUSES = ["미조치", "처리중", "정상처리"];
@@ -30,7 +30,11 @@ export function renderNotification(tpl, dept, findings) {
     const who = f.owner ? ` (${f.owner})` : "";
     const identity = primaryServiceIdentity(f);
     const service = f.service && f.service !== identity ? ` (서비스: ${f.service})` : "";
-    return `- ${f.host_ip}:${f.port}/${f.proto} ${identity}${service}${who} ${f.status}${dl}`;
+    const risk = RISK_LABEL[f.risk_level] || f.risk_level || "정보";
+    const confirmation = f.needs_confirmation ? " · 재확인 필요" : "";
+    const exposure = (f.exposure_json || []).map((item) => item.detail || item.kind).filter(Boolean).join(" · ");
+    const exposureText = exposure ? ` · ${exposure}` : "";
+    return `- ${f.host_ip}:${f.port}/${f.proto} ${identity}${service}${who} [${risk}] ${f.status}${confirmation}${exposureText}${dl}`;
   }).join("\n");
   return tpl
     .replaceAll("{dept}", dept || "")
@@ -168,21 +172,33 @@ export default function Notifications({ user }) {
         <div className="row" style={{ marginTop: 12 }}>
           <button onClick={copyBody} disabled={!dept}>복사</button>
           <button onClick={saveBody} disabled={!dept}>.txt 저장(BOM)</button>
-          {canSend && <button className="primary" onClick={record} disabled={!dept}>통보 기록</button>}
+          {canSend && <button className="primary" onClick={record} disabled={!dept || !filtered.length}>통보 기록</button>}
         </div>
       </div>
 
       <div className="panel">
         <h3>통보 이력</h3>
         <table className="tbl">
-          <thead><tr><th>부서</th><th>채널</th><th>시각</th></tr></thead>
+          <thead><tr><th>부서</th><th>기록자</th><th>대상</th><th>채널</th><th>시각</th><th>기록 내용</th></tr></thead>
           <tbody>
             {history.length === 0 ? (
-              <tr><td className="empty" colSpan={3}>이력 없음</td></tr>
+              <tr><td className="empty" colSpan={6}>이력 없음</td></tr>
             ) : history.map((h) => (
               <tr key={h.id}>
-                <td>{h.dept}</td><td>{h.channel}</td>
+                <td>{h.dept}</td>
+                <td>{h.sent_by_name || (h.sent_by ? `사용자 #${h.sent_by}` : "—")}</td>
+                <td className="mono">{h.finding_count ?? h.finding_ids?.length ?? 0}건</td>
+                <td>{h.channel}</td>
                 <td className="mono">{String(h.sent_at).slice(0, 16).replace("T", " ")}</td>
+                <td>
+                  <details className="notification-history-detail">
+                    <summary>본문 보기</summary>
+                    <div className="pre">{h.body || "(저장된 본문 없음)"}</div>
+                    {!!h.finding_ids?.length && (
+                      <div className="muted mono">발견 ID · {h.finding_ids.join(", ")}</div>
+                    )}
+                  </details>
+                </td>
               </tr>
             ))}
           </tbody>

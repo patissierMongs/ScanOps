@@ -854,9 +854,10 @@ def _seed_failed_stage_scan(data_dir: Path) -> dict:
             """
             INSERT INTO scan_runs (
                 name, targets, command, status, started_at, finished_at,
-                raw_xml_path, log_path, host_count, port_count, stages_json,
-                failure_code, failure_message, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                raw_xml_path, log_path, host_count, port_count,
+                batch_total, batch_size, stages_json,
+                failure_code, failure_message, source_fingerprint, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "runtime-browser-failed-stage",
@@ -869,9 +870,12 @@ def _seed_failed_stage_scan(data_dir: Path) -> dict:
                 "",
                 1,
                 0,
+                0,
+                0,
                 json.dumps(stages, ensure_ascii=False),
                 "engine_failed",
                 "단계 스캔 중 오류가 발생했습니다.",
+                "",
                 None,
             ),
         )

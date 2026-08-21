@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 
 from scanops.db import SessionLocal
-from scanops.models import Finding
+from scanops.models import Finding, ScanRun
 
 from .conftest import make_user, token_for
 
@@ -262,3 +262,48 @@ def test_findings_without_a_deadline_are_never_overdue(client):
     auth = _auth(client)
     _add(host_ip="10.4.0.1", port=22, status="미조치")
     assert client.get("/api/findings?overdue_only=true&today=2026-08-11", headers=auth).json() == []
+
+
+def test_finding_exposes_current_reason_and_scan_provenance(client):
+    auth = _auth(client)
+    db = SessionLocal()
+    try:
+        first = ScanRun(name="최초", status="done")
+        latest = ScanRun(name="최근", status="done")
+        db.add_all([first, latest])
+        db.flush()
+        finding = Finding(
+            finding_key="10.50.0.1|22|tcp", host_ip="10.50.0.1", port=22, proto="tcp",
+            state="closed", reason="syn-ack", first_scan_id=first.id, last_scan_id=latest.id,
+        )
+        db.add(finding)
+        db.commit()
+        finding_id, first_id, latest_id = finding.id, first.id, latest.id
+    finally:
+        db.close()
+
+    payload = client.get(f"/api/findings/{finding_id}", headers=auth).json()
+    assert payload["reason"] == "syn-ack"       # 원본 provenance는 보존
+    assert payload["current_reason"] == ""      # 현재 closed의 근거처럼 재사용하지 않음
+    assert payload["first_scan_id"] == first_id
+    assert payload["last_scan_id"] == latest_id
+
+
+def test_risk_sort_uses_operational_ordinal(client):
+    auth = _auth(client)
+    for index, level in enumerate(("medium", "info", "banned", "low", "high"), start=1):
+        _add(host_ip=f"10.60.0.{index}", port=8000 + index, risk_level=level)
+
+    descending = client.get(
+        "/api/findings?sort=risk_level&dir=desc", headers=auth,
+    ).json()
+    ascending = client.get(
+        "/api/findings?sort=risk_level&dir=asc", headers=auth,
+    ).json()
+
+    assert [row["risk_level"] for row in descending] == [
+        "banned", "high", "medium", "low", "info",
+    ]
+    assert [row["risk_level"] for row in ascending] == [
+        "info", "low", "medium", "high", "banned",
+    ]

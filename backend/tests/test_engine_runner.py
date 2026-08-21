@@ -83,6 +83,7 @@ def test_build_job_spec_defaults_and_rescan():
     assert st["service"]["version_all"] is True
     assert st["service"]["timing"] == "-T4"
     assert st["service"]["max_retries"] == 2
+    assert st["service"]["workers"] == 16
     assert len(spec["rescan_units"]) == 2 and spec["rescan_units"][0]["port"] == 6379
 
 
@@ -187,6 +188,43 @@ def test_parse_events_folds_stages(tmp_path):
     assert res["overall"]["status"] == "running"
 
 
+def test_parse_events_exposes_five_stage_progress_and_current_hosts(tmp_path):
+    lines = [
+        {"event": "job_start"},
+        {"event": "stage_plan", "stages": [
+            "discovery", "tcp", "tcp_service", "udp", "udp_service",
+        ]},
+        {"event": "stage_done", "stage": "discovery", "seconds": 1,
+         "counts": {"live": 4}},
+        {"event": "stage_start", "stage": "tcp"},
+        {"event": "stage_activity", "stage": "tcp", "percent": 25,
+         "batch": 2, "batch_total": 4,
+         "current_hosts": ["10.0.0.3", "10.0.0.4"], "current_host_count": 2},
+        {"event": "stage_progress", "stage": "tcp", "percent": 50},
+        {"event": "stage_start", "stage": "tcp_service"},
+        {"event": "stage_activity", "stage": "tcp_service", "percent": 37.5,
+         "batch": 2, "batch_total": 4, "current_hosts": ["10.0.0.3"],
+         "current_host_count": 1, "completed_hosts": 1, "total_hosts": 2},
+        # 병렬 호스트별 Nmap 퍼센트는 단계 전체 퍼센트를 덮어쓰면 안 된다.
+        {"event": "stage_progress", "stage": "service", "percent": 99},
+    ]
+    (tmp_path / "events.ndjson").write_text(
+        "\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+
+    result = engine_runner.parse_events(tmp_path)
+    stages = {stage["stage"]: stage for stage in result["stages"]}
+
+    assert list(stages) == ["discovery", "tcp", "tcp_service", "udp", "udp_service"]
+    assert stages["tcp"]["percent"] == 37.5
+    assert stages["tcp_service"]["percent"] == 37.5
+    assert stages["udp"]["status"] == "pending"
+    assert result["current"] == {
+        "stage": "tcp_service", "hosts": ["10.0.0.3"],
+        "batch": 2, "batch_total": 4, "current_host_count": 1,
+        "completed_hosts": 1, "total_hosts": 2,
+    }
+
+
 def test_parse_events_error_and_stopped(tmp_path):
     lines = [
         {"event": "stage_start", "stage": "udp"},
@@ -200,7 +238,212 @@ def test_parse_events_error_and_stopped(tmp_path):
     udp = res["stages"][0]
     assert udp["status"] == "stopped"          # stage_done 의 stopped 가 error 보다 나중
     assert res["overall"]["status"] == "stopped"
-    assert res["overall"]["percent"] == 100
+    assert res["overall"]["percent"] == 0
+
+
+def test_parse_events_exposes_timeout_reason_and_exact_grouped_commands(tmp_path):
+    lines = [
+        {"event": "stage_plan", "stages": ["tcp", "tcp_service", "udp"]},
+        {"event": "stage_done", "stage": "tcp", "seconds": 2.0,
+         "counts": {"open_ports": 2}},
+        {"event": "stage_start", "stage": "tcp_service"},
+        {"event": "command_start", "stage": "tcp_service", "execution_id": "x1",
+         "group": "common", "reason": "TCP union", "artifact": "stage3-tcp-b0-g0",
+         "argv": ["nmap.exe", "-sV", "-p", "T:22,443", "10.0.0.1", "10.0.0.2"],
+         "ts": 10.0},
+        {"event": "command_done", "stage": "tcp_service", "execution_id": "x1",
+         "outcome": "timeout", "seconds": 20.5, "rc": 0,
+         "timeout_count": 1, "timed_out": ["10.0.0.2"], "ts": 30.5},
+        {"event": "hosts_gave_up", "stage": "service", "proto": "tcp", "count": 1,
+         "hosts": ["10.0.0.2"]},
+        {"event": "stage_done", "stage": "tcp_service", "seconds": 21.0,
+         "counts": {"services": 1}},
+        {"event": "job_done", "status": "stopped", "seconds": 23.0, "counts": {}},
+    ]
+    (tmp_path / "events.ndjson").write_text(
+        "\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+
+    result = engine_runner.parse_events(tmp_path)
+    stages = {stage["stage"]: stage for stage in result["stages"]}
+    assert stages["tcp_service"]["status"] == "warning"
+    assert stages["tcp_service"]["percent"] == 100
+    assert stages["tcp_service"]["issues"][0] == {
+        "type": "host_timeout", "count": 1, "hosts": ["10.0.0.2"],
+        "message": "호스트 1대가 제한 시간 안에 이 단계를 끝내지 못했습니다.",
+    }
+    assert result["overall"]["percent"] == pytest.approx(66.7)
+    assert result["executions"] == [{
+        "id": "x1", "stage": "tcp_service", "group": "common",
+        "reason": "TCP union", "artifact": "stage3-tcp-b0-g0",
+        "argv": ["nmap.exe", "-sV", "-p", "T:22,443", "10.0.0.1", "10.0.0.2"],
+        "status": "timeout", "started_at": 10.0, "seconds": 20.5,
+        "timeout_count": 1, "timed_out": ["10.0.0.2"], "rc": 0,
+        "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
+        "finished_at": 30.5,
+    }]
+
+
+def test_parse_events_exposes_retransmission_cap_as_a_stage_warning(tmp_path):
+    lines = [
+        {"event": "stage_plan", "stages": ["tcp"]},
+        {"event": "stage_start", "stage": "tcp"},
+        {"event": "retransmission_cap_hit", "stage": "tcp", "count": 1,
+         "hosts": ["10.0.0.9"], "max_retries": 2},
+        {"event": "stage_done", "stage": "tcp", "seconds": 3.0,
+         "counts": {"open_ports": 0}},
+        {"event": "job_done", "status": "done", "seconds": 3.0, "counts": {}},
+    ]
+    (tmp_path / "events.ndjson").write_text(
+        "\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+
+    stage = engine_runner.parse_events(tmp_path)["stages"][0]
+
+    assert stage["status"] == "warning"
+    assert stage["issues"] == [{
+        "type": "retransmission_cap", "count": 1, "hosts": ["10.0.0.9"],
+        "message": "호스트 1대에서 포트 재전송 한도(2회)에 도달했습니다.",
+    }]
+
+
+def test_parse_events_keeps_recovery_separate_from_durable_degradation(tmp_path):
+    lines = [
+        {"event": "stage_plan", "stages": ["udp_service"]},
+        {"event": "stage_start", "stage": "udp_service"},
+        {"event": "error", "stage": "service", "proto": "udp",
+         "execution_id": "failed", "rc": 1, "fatal": False},
+        {"event": "service_retry", "stage": "service", "proto": "udp",
+         "hosts": ["10.0.0.7"], "ports": [53, 161], "port_spec": "U:53,161",
+         "engine": "select", "reason": "udp_nsock_engine_fallback",
+         "outcome": "recovered", "recovered": True, "seconds": 1.2, "rc": 0,
+         "recovery_of_execution_id": "failed", "execution_id": "retry"},
+        {"event": "service_split", "stage": "service", "proto": "udp",
+         "ip": "10.0.0.8", "hosts": ["10.0.0.8"], "ports": [53, 161],
+         "port_spec": "U:53,161", "units": 2, "recovered_units": 1,
+         "failed_units": 1, "reason": "grouped_service_probe_failed",
+         "outcome": "degraded", "recovered": False},
+        {"event": "service_degraded", "stage": "service", "proto": "udp",
+         "ip": "10.0.0.8", "hosts": ["10.0.0.8"], "ports": [53, 161],
+         "failed_ports": [161], "port_spec": "U:53,161",
+         "message": "서비스 프로브가 일부 또는 전부 완료되지 않았습니다."},
+        {"event": "stage_done", "stage": "udp_service", "seconds": 4.0,
+         "counts": {"services": 1}},
+        {"event": "job_done", "status": "done", "seconds": 4.0, "counts": {}},
+    ]
+    (tmp_path / "events.ndjson").write_text(
+        "\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+
+    result = engine_runner.parse_events(tmp_path)
+
+    assert [recovery["type"] for recovery in result["recoveries"]] == ["retry", "split"]
+    assert result["recoveries"][0]["outcome"] == "recovered"
+    assert result["recoveries"][0]["recovery_of_execution_id"] == "failed"
+    assert result["recoveries"][1]["failed_units"] == 1
+    assert result["stages"][0]["status"] == "warning"
+    assert result["stages"][0]["issues"] == [{
+        "type": "service_degraded", "count": 1, "hosts": ["10.0.0.8"],
+        "proto": "udp", "ports": [161], "port_spec": "U:53,161",
+        "message": "서비스 프로브가 일부 또는 전부 완료되지 않았습니다.",
+    }]
+    assert result["quality_issues"] == [{
+        "kind": "service_degraded", "stage": "udp_service", "host_ip": "10.0.0.8",
+        "proto": "udp", "port_spec": "U:53,161",
+        "message": "서비스 프로브가 일부 또는 전부 완료되지 않았습니다.",
+    }]
+
+
+def test_fully_recovered_service_retry_does_not_leave_a_warning_issue(tmp_path):
+    events = [
+        {"event": "stage_plan", "stages": ["udp_service"]},
+        {"event": "stage_start", "stage": "udp_service"},
+        {"event": "error", "stage": "service", "proto": "udp",
+         "execution_id": "failed", "rc": 1, "fatal": False},
+        {"event": "service_retry", "stage": "service", "proto": "udp",
+         "hosts": ["10.0.0.7"], "ports": [53], "port_spec": "U:53",
+         "reason": "udp_nsock_engine_fallback", "outcome": "recovered",
+         "recovered": True, "recovery_of_execution_id": "failed",
+         "execution_id": "retry"},
+        {"event": "stage_done", "stage": "udp_service", "seconds": 2,
+         "counts": {"services": 1}},
+        {"event": "job_done", "status": "done", "seconds": 2, "counts": {}},
+    ]
+    (tmp_path / "events.ndjson").write_text(
+        "\n".join(json.dumps(event) for event in events), encoding="utf-8")
+
+    result = engine_runner.parse_events(tmp_path)
+
+    assert result["stages"][0]["status"] == "done"
+    assert result["stages"][0]["issues"] == []
+    assert result["quality_issues"] == []
+    assert result["recoveries"][0]["outcome"] == "recovered"
+
+
+def test_terminal_observability_projects_five_host_stages_and_exact_issues(tmp_path):
+    events = [
+        {"event": "stage_plan", "stages": [
+            "discovery", "tcp", "tcp_service", "udp", "udp_service",
+        ]},
+        {"event": "stage_start", "stage": "discovery"},
+        {"event": "hosts_up", "stage": "discovery", "hosts": ["10.0.0.1"], "count": 1},
+        {"event": "stage_done", "stage": "discovery", "seconds": 1, "counts": {"live": 1}},
+        {"event": "command_start", "stage": "tcp", "execution_id": "tcp-1",
+         "group": "common", "role": "authority", "reason": "sweep",
+         "artifact": "stage-tcp-b0", "argv": ["nmap", "10.0.0.1"], "ts": 10},
+        {"event": "command_done", "stage": "tcp", "execution_id": "tcp-1",
+         "outcome": "timeout", "seconds": 2, "rc": 0,
+         "timed_out": ["10.0.0.2"], "timeout_count": 1,
+         "retransmission_cap_hosts": [], "retransmission_cap_count": 0, "ts": 12},
+        {"event": "service_degraded", "stage": "service", "proto": "udp",
+         "hosts": ["10.0.0.1"], "ports": [161], "failed_ports": [161],
+         "port_spec": "U:161", "message": "UDP 상세 실패"},
+        {"event": "job_done", "status": "done", "seconds": 3, "counts": {}},
+    ]
+    (tmp_path / "events.ndjson").write_text(
+        "\n".join(json.dumps(event) for event in events), encoding="utf-8")
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "live": ["10.0.0.1"],
+        "coverage": [
+            {"artifact": "stage-tcp-b0.xml", "proto": "tcp", "role": "authority",
+             "hosts": ["10.0.0.1", "10.0.0.2"], "ports": "T:1-65535", "finished": True},
+            {"artifact": "stage3-10_0_0_1-udp.xml", "proto": "udp", "role": "enrichment",
+             "hosts": ["10.0.0.1"], "ports": "U:161", "finished": False},
+        ],
+    }), encoding="utf-8")
+
+    result = engine_runner.terminal_observability(
+        tmp_path, {"targets": ["10.0.0.1", "10.0.0.2"]},
+    )
+
+    assert result["executions"][0]["role"] == "authority"
+    issues = {(issue["kind"], issue["host_ip"], issue["stage"]) for issue in result["issues"]}
+    assert issues == {
+        ("host_timeout", "10.0.0.2", "tcp"),
+        ("service_degraded", "10.0.0.1", "udp_service"),
+    }
+    hosts = {row["host_ip"]: row for row in result["hosts"]}
+    assert hosts["10.0.0.1"] == {
+        "host_ip": "10.0.0.1", "discovery_status": "done",
+        "tcp_sweep_status": "done", "tcp_service_status": "unknown",
+        "udp_sweep_status": "unknown", "udp_service_status": "degraded",
+    }
+    assert hosts["10.0.0.2"]["discovery_status"] == "not_responding"
+    assert hosts["10.0.0.2"]["tcp_sweep_status"] == "timeout"
+
+
+def test_parse_events_reports_elapsed_seconds_for_a_running_command(tmp_path, monkeypatch):
+    lines = [
+        {"event": "stage_start", "stage": "tcp_service"},
+        {"event": "command_start", "stage": "tcp_service", "execution_id": "active",
+         "group": "common", "reason": "TCP union", "artifact": "stage3-tcp-b0-g0",
+         "argv": ["nmap.exe", "-sV", "10.0.0.1"], "ts": 100.0},
+    ]
+    (tmp_path / "events.ndjson").write_text(
+        "\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+    monkeypatch.setattr(engine_runner.time, "time", lambda: 112.4)
+
+    execution = engine_runner.parse_events(tmp_path)["executions"][0]
+
+    assert execution["status"] == "running"
+    assert execution["seconds"] == pytest.approx(12.4)
 
 
 def test_parse_events_missing_file(tmp_path):

@@ -9,18 +9,19 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..identity import display_identity
-from ..models import RISK_LABELS_KO, Finding, User
-from ..observation import exposure_text
+from ..models import RISK_LABELS_KO, RISK_LEVELS, Finding, User
+from ..observation import current_reason, exposure_text
 from ..spreadsheet import safe_cell
 from .deps import current_user
 
 router = APIRouter()
 
 _HEADERS = [
-    "발견키", "IP", "호스트명", "포트", "프로토콜", "상태", "표시 식별", "Server",
+    "발견키", "IP", "호스트명", "포트", "프로토콜", "상태", "상태 근거", "근거 원문",
+    "표시 식별", "Server",
     "서비스", "제품", "버전",
     "식별", "분류", "용도", "위험등급", "운영상태", "부서", "마감", "등록 날짜", "스캔 날짜",
-    "비고", "컴플라이언스근거", "노출관측",
+    "비고", "컴플라이언스근거", "노출관측", "최초 스캔 ID", "최근 스캔 ID",
 ]
 
 
@@ -33,6 +34,7 @@ def _row(f: Finding) -> list:
     exposure = exposure_text(f.exposure_json)
     return [
         f.finding_key, f.host_ip, f.hostname, f.port, f.proto, f.state,
+        f.state_evidence, current_reason(f.state, f.reason),
         display_identity(server=f.server, product=f.product, version=f.version, service=f.service,
                          identification=f.identification),
         f.server, f.service, f.product, f.version, f.identification, f.category, f.usage,
@@ -40,7 +42,7 @@ def _row(f: Finding) -> list:
         f.status, f.dept,
         f.deadline.strftime("%Y-%m-%d") if f.deadline else "",
         f.first_seen.strftime("%Y-%m-%d"), f.last_seen.strftime("%Y-%m-%d"),
-        f.remarks, comp, exposure,
+        f.remarks, comp, exposure, f.first_scan_id or "", f.last_scan_id or "",
     ]
 
 
@@ -52,7 +54,12 @@ def audit_report(_: User = Depends(current_user), db: Session = Depends(get_db))
     ws = wb.active
     ws.title = "감사리포트"
     ws.append(_HEADERS)
-    for f in db.query(Finding).order_by(Finding.risk_level.desc(), Finding.host_ip, Finding.port).all():
+    risk_rank = {level: index for index, level in enumerate(RISK_LEVELS)}
+    rows = sorted(db.query(Finding).all(), key=lambda finding: (
+        risk_rank.get(finding.risk_level, len(risk_rank)), finding.host_ip,
+        finding.port, finding.proto,
+    ))
+    for f in rows:
         ws.append([safe_cell(v) for v in _row(f)])
     buf = io.BytesIO()
     wb.save(buf)

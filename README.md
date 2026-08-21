@@ -26,16 +26,18 @@ cd frontend && npm install && npm run dev
 
 ## 에어갭(오프라인) 배포
 일반 오프라인 ZIP은 `install.ps1` 이 요구하는 **Python 3.13 / 3.12 (x64)** 와 **nmap**이 필요합니다
-(3.13 을 먼저 찾습니다). Python을 설치할 수 없는 Windows x64 서버는 Python 런타임이 포함된
-all-in-one ZIP을 사용하세요 — 기본 런타임은 **3.13** 입니다.
+(3.13 을 먼저 찾습니다). Python을 설치할 수 없는 Windows x64/x86 서버는 Python 런타임이
+포함된 all-in-one ZIP을 사용하세요 — 기본 런타임은 **3.13** 입니다.
 
 ```powershell
 python packaging\build_allinone.py                  # 3.13 → ..\ScanOps_allinone.zip
 python packaging\build_allinone.py --python 3.12    # 3.12 → ..\ScanOps_allinone_py312.zip
+python packaging\build_allinone.py --arch x86       # 3.13 x86 → ..\ScanOps_allinone_x86.zip
 ```
-두 번들 모두 압축만 풀고 `START.bat` 을 실행하면 됩니다(대상에 Python 설치 불필요). 앱 의존성
-버전은 두 번들이 동일하며, 런타임과 바이너리 휠(cp312/cp313)만 다릅니다. 스캔 실행에만 nmap이
-따로 필요하고, XML 가져오기는 nmap 없이도 동작합니다.
+세 번들 모두 압축만 풀고 `START.bat` 을 실행하면 됩니다(대상에 Python 설치 불필요). 앱 의존성
+버전은 동일하며 런타임과 바이너리 휠의 Python ABI/Windows 아키텍처만 다릅니다. x86은 검증된
+CPython 3.13 조합만 지원합니다. 스캔 실행에만 nmap이 따로 필요하고, XML 가져오기는 nmap 없이도
+동작합니다.
 
 빌드는 실행에 쓰이지 않는 것만 덜어냅니다(대화형/개발용 표준 라이브러리, 이 앱이 쓰지 않는
 SQLAlchemy 방언, 의존성이 함께 배포한 자기 테스트 코드). **기능을 없애는 절단은 하지 않습니다** —

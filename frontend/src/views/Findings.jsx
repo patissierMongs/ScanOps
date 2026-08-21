@@ -620,6 +620,7 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
         <div className="row" style={{ marginBottom: 8 }}>
           <span className={"pill " + (finding.risk_level || "info")}>{RISK_LABEL[finding.risk_level]}</span>
           {finding.reopened ? <span className="tag" style={{ color: "var(--high)" }}>재발</span> : null}
+          {finding.allowed ? <span className="tag allowed">허용</span> : null}
           <span className="tag">{finding.category || "미분류"}</span>
           <span className="tag">{finding.identification}</span>
           {/* 열려 있다고 확인한 게 아니라 무응답으로 추정한 건이면 그 사실을 먼저 보여 준다. */}
@@ -634,6 +635,12 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
         <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
           관측 근거: {stateWithEvidence(finding)}
           {currentReason(finding) ? <span className="mono"> · {currentReason(finding)}</span> : null}
+        </div>
+
+        <div className="finding-provenance" aria-label="스캔 출처">
+          <span>최초 발견 <b className="mono">{finding.first_scan_id ? `#${finding.first_scan_id}` : "—"}</b></span>
+          <span>최근 관측 <b className="mono">{finding.last_scan_id ? `#${finding.last_scan_id}` : "—"}</b></span>
+          <span>관측 기간 <b className="mono">{String(finding.first_seen || "").slice(0, 10) || "—"} → {String(finding.last_seen || "").slice(0, 10) || "—"}</b></span>
         </div>
 
         {/* 용도 근거 — '왜 열렸나/무엇인가' 추정 근거(역DNS·서비스·NSE 추출 등). 관리자 통보의 핵심. */}
@@ -716,6 +723,10 @@ function Drawer({ data, canEdit, onClose, onSaved, toast }) {
             <div className="ev" key={ev.id}>
               <div className="t">{ev.type}</div>
               <div className="d">{ev.detail}</div>
+              <div className="event-provenance">
+                <span>{ev.actor_name || (ev.actor_user_id ? `사용자 #${ev.actor_user_id}` : "스캔 자동 처리")}</span>
+                {ev.scan_id && <span className="mono">스캔 #{ev.scan_id}{ev.scan_name ? ` · ${ev.scan_name}` : ""}</span>}
+              </div>
               <div className="when">{String(ev.created_at).slice(0, 19).replace("T", " ")}</div>
             </div>
           ))}

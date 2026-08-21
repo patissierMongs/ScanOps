@@ -16,7 +16,7 @@ const STATE_CLASS = {
 };
 
 export default function Heatmap() {
-  const [data, setData] = useState({ summary: {}, phases: [], rows: [], current_ports: [] });
+  const [data, setData] = useState({ summary: {}, phases: [], rows: [], current_ports: [], quality_warnings: [] });
   const [tab, setTab] = useState("heatmap");
   const [query, setQuery] = useState("");
   const [state, setState] = useState("");
@@ -64,11 +64,25 @@ export default function Heatmap() {
   return (
     <div className="content">
       <div className="stats">
-        <div className="stat"><div className="n">{summary.scan_count || 0}</div><div className="l">스캔 XML</div></div>
+        <div className="stat"><div className="n">{summary.scan_count || 0}</div><div className="l">관측 스캔</div></div>
         <div className="stat"><div className="n">{summary.phase_count || 0}</div><div className="l">시간축 phase</div></div>
-        <div className="stat"><div className="n">{summary.current_open_count || 0}</div><div className="l">현재 열린 포트</div></div>
-        <div className="stat"><div className="n">{summary.row_count || 0}</div><div className="l">히트맵 행</div></div>
+        <div className="stat"><div className="n">{summary.current_open_count || 0}</div><div className="l">현재 열림 계열</div></div>
+        <div className="stat"><div className="n">{summary.confirmed_open_count || 0}</div><div className="l">응답 확인</div></div>
+        <div className="stat"><div className="n">{summary.confirmation_required_count || 0}</div><div className="l">재확인 필요</div></div>
+        <div className="stat"><div className="n">{summary.allowed_open_count || 0}</div><div className="l">허용된 활성</div></div>
       </div>
+
+      {!!data.quality_warnings?.length && (
+        <div className="panel heatmap-quality-warning">
+          <h3>히트맵 데이터 품질 경고 · {data.quality_warnings.length}건</h3>
+          {data.quality_warnings.map((warning, index) => (
+            <div key={`${warning.scan_id}-${warning.type}-${index}`}>
+              <b className="mono">스캔 #{warning.scan_id}</b> · {warning.message}
+              {warning.artifact ? <span className="mono muted"> · {warning.artifact}</span> : null}
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="panel">
         <div className="row">
@@ -143,7 +157,10 @@ function HeatmapTable({ phases, rows }) {
                   <ServiceIdentity finding={row} />
                 </td>
                 <td>{row.risk_level ? <span className={"pill " + riskClass(row.risk_level)}>{RISK_LABEL[row.risk_level] || row.risk_label}</span> : <span className="muted">—</span>}</td>
-                <td><span className={"heat-token " + stateClass(row.current_state)}>{row.current_state || "—"}</span></td>
+                <td>
+                  <span className={"heat-token " + stateClass(row.current_state)}>{row.current_state || "—"}</span>
+                  {row.needs_confirmation ? <span className="tag heat-confirmation">재확인 필요</span> : null}
+                </td>
                 <td className="muted heat-last">{row.last_scan_label || "—"}</td>
                 {row.cells.map((cell) => (
                   <td key={cell.phase} className={"heat-cell " + stateClass(cell.state)} title={cell.state}>
@@ -177,12 +194,12 @@ function CurrentTable({ rows }) {
         <table className="tbl">
           <thead>
             <tr>
-              <th>IP</th><th>포트</th><th>주 식별 / 서비스</th><th>위험</th><th>현재</th><th>운영상태</th><th>부서</th><th>마지막</th>
+              <th>IP</th><th>포트</th><th>주 식별 / 서비스</th><th>위험</th><th>관측 상태</th><th>관측 근거</th><th>운영상태</th><th>부서</th><th>마지막</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
-              <tr><td className="empty" colSpan={8}>현재 열린 포트 없음</td></tr>
+              <tr><td className="empty" colSpan={9}>현재 열린 포트 없음</td></tr>
             ) : rows.map((row) => (
               <tr key={row.key}>
                 <td className="mono">{row.host_ip}</td>
@@ -191,7 +208,15 @@ function CurrentTable({ rows }) {
                   <ServiceIdentity finding={row} />
                 </td>
                 <td>{row.risk_level ? <span className={"pill " + riskClass(row.risk_level)}>{RISK_LABEL[row.risk_level] || row.risk_label}</span> : <span className="muted">—</span>}</td>
-                <td><span className={"heat-token " + stateClass(row.current_state)}>{row.current_state || "—"}</span></td>
+                <td>
+                  <span className="mono">{row.endpoint_state || "—"}</span>
+                  {row.allowed ? <span className="tag allowed" style={{ marginLeft: 4 }}>허용</span> : null}
+                </td>
+                <td>
+                  <span>{row.state_evidence || "—"}</span>
+                  {row.needs_confirmation ? <span className="tag heat-confirmation">재확인 필요</span> : null}
+                  {row.current_reason ? <div className="mono muted">{row.current_reason}</div> : null}
+                </td>
                 <td>{row.status || <span className="muted">—</span>}</td>
                 <td>{row.dept || <span className="muted">—</span>}</td>
                 <td className="muted heat-last">{row.last_scan_label || "—"}</td>

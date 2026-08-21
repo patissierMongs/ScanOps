@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -17,6 +20,11 @@ _DEFAULT = {"stages_done": [], "open_map": {}, "live": None, "service_done": [],
             # --host-timeout 으로 포기당한 호스트. 나중에 따로 다시 스캔할 대상이라
             # 실행이 끝나도 남겨야 한다.
             "gave_up": [],
+            # 프로토콜별 증거를 보존해야 TCP timeout 을 정상 UDP 결과가 지우지 않는다.
+            "gave_up_by_stage": {},
+            # 포트 재전송 상한에 걸린 호스트. host timeout과 원인은 다르지만 결과를 완전히
+            # 신뢰할 수 없으므로 같은 후속 재스캔 흐름에서 별도 이유로 관리한다.
+            "retransmission_cap_by_stage": {},
             "stop": False}
 _STOP_SENTINEL = "stop-requested"
 
@@ -54,17 +62,36 @@ class RunState:
         if key not in self.data["batches_done"]:
             self.data["batches_done"].append(key)
 
-    def add_gave_up(self, hosts):
-        """포기당한 호스트를 모아 둔다 - 이후 별도 스캔의 대상 목록이 된다."""
-        known = self.data["gave_up"]
+    def update_gave_up(self, stage, timed_out, completed):
+        """단계별 timeout 을 갱신하고, 어느 단계든 남은 호스트의 합집합을 공개한다.
+
+        같은 단계 재시도가 성공하면 그 단계 목록에서는 빠진다. 다른 단계의 timeout 증거는
+        그대로 남으므로 TCP 에서 포기한 호스트를 정상 UDP 결과가 지울 수 없다.
+        """
+        by_stage = self.data.setdefault("gave_up_by_stage", {})
+        known = list(by_stage.get(stage) or [])
+        drop = set(completed)
+        known = [host for host in known if host not in drop]
+        for host in timed_out:
+            if host not in known:
+                known.append(host)
+        by_stage[stage] = known
+
+        merged = []
+        for hosts in by_stage.values():
+            for host in hosts:
+                if host not in merged:
+                    merged.append(host)
+        self.data["gave_up"] = merged
+
+    def add_retransmission_cap(self, stage, hosts):
+        """한 번이라도 cap-hit이 난 호스트를 해당 실행이 끝날 때까지 보존한다."""
+        by_stage = self.data.setdefault("retransmission_cap_by_stage", {})
+        known = list(by_stage.get(stage) or [])
         for host in hosts:
             if host not in known:
                 known.append(host)
-
-    def clear_gave_up(self, hosts):
-        """재시도로 끝까지 훑은 호스트는 목록에서 뺀다 - 한 번 걸렸다고 영구 낙인이 아니다."""
-        drop = set(hosts)
-        self.data["gave_up"] = [h for h in self.data["gave_up"] if h not in drop]
+        by_stage[stage] = known
 
     def service_done(self, ip) -> bool:
         return ip in self.data["service_done"]
@@ -88,6 +115,24 @@ class RunState:
         # sentinel은 진행 state JSON과 분리되어 stale save가 중지 요청을 덮을 수 없다.
         if self.stopped():
             self.data["stop"] = True
-        temp = self.path.with_name(f"{self.path.name}.tmp")
+        # Windows에서는 진행 API가 state를 읽는 아주 짧은 순간에도 os.replace가
+        # WinError 5를 낼 수 있다. 식별 병렬 실행끼리 같은 ``.tmp`` 이름을 공유하는 것도
+        # 피하고, 대상 파일의 일시적인 공유 잠금은 짧게 재시도한다.
+        temp = self.path.with_name(
+            f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
         temp.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
-        temp.replace(self.path)
+        try:
+            for attempt in range(12):
+                try:
+                    os.replace(temp, self.path)
+                    return
+                except PermissionError:
+                    if attempt == 11:
+                        raise
+                    time.sleep(min(0.01 * (attempt + 1), 0.1))
+        finally:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass

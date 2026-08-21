@@ -431,6 +431,7 @@ def test_excludes_are_deduplicated_and_persisted_compact_for_estimate_legacy_and
         "exclude": ["127.0.0.1", "127.0.0.3/32", "127.0.0.1"],
         "workflow": "manual",
         "ports": "T:443",
+        "exclude_ports": "2222",
         "options": ["syn"],
         "batch_size": 256,
     }
@@ -452,6 +453,12 @@ def test_excludes_are_deduplicated_and_persisted_compact_for_estimate_legacy_and
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     assert spec["targets"] == ["127.0.0.0", "127.0.0.2"]
     assert spec["exclude"] == ["127.0.0.1", "127.0.0.3"]
+    assert spec["exclude_ports"] == "2222"
+
+    history = client.get("/api/scans", headers=h).json()
+    staged_history = next(row for row in history if row["id"] == staged.json()["id"])
+    assert staged_history["summary"]["excluded_ports"] == "2222"
+    assert staged_history["summary"]["targets"] == "127.0.0.0 – 127.0.0.2 · 대상 2대"
 
 
 def test_staged_pn_spec_uses_expanded_effective_hosts_for_engine_batching(
@@ -2258,7 +2265,7 @@ def test_scan_summary_says_전체_instead_of_a_port_count(client):
     full = summarize_command(
         "nmap -sS -p T:1-65535 --stats-every 10s 10.0.0.0/24", "10.0.0.0/24")
     assert full["ports"] == "전체" and full["protocols"] == ["TCP"]
-    assert full["targets"] == "10.0.0.0/24"
+    assert full["targets"] == "10.0.0.0 – 10.0.0.255 · 대상 256대"
 
     # 전체에서 일부만 뺀 경우는 개수가 아니라 그 사실이 중요하다.
     partial = summarize_command(
@@ -2266,7 +2273,7 @@ def test_scan_summary_says_전체_instead_of_a_port_count(client):
         "10.0.0.0/24")
     assert partial["ports"] == "전체 (일부 제외)"
     assert partial["excluded_ports"] == "9100,515"
-    assert partial["targets"] == "10.0.0.0/24 (일부 제외)"
+    assert partial["targets"] == "10.0.0.0 – 10.0.0.255 · 대상 255대"
 
     # 두 프로토콜을 다른 범위로 스캔했으면 둘 다 적는다. TCP 범위만 보이면 그 옆의 UDP
     # 뱃지와 붙어 'UDP 도 22,80 을 봤다'로 읽힌다 - 실제로는 53 하나뿐이다.
@@ -2282,7 +2289,11 @@ def test_scan_summary_says_전체_instead_of_a_port_count(client):
 
     many = summarize_command("nmap -sS -p 1-65535 10.0.0.1 10.0.0.2 10.0.0.3",
                              "10.0.0.1 10.0.0.2 10.0.0.3")
-    assert many["targets"] == "10.0.0.1 외 2건"
+    assert many["targets"] == "10.0.0.1 – 10.0.0.3 · 대상 3대"
+
+    unordered = summarize_command(
+        "nmap -sS -p 22 10.0.0.9 10.0.0.2 10.0.0.15", "10.0.0.9 10.0.0.2 10.0.0.15")
+    assert unordered["targets"] == "10.0.0.2 – 10.0.0.15 · 대상 3대"
 
 
 def test_scan_list_carries_the_summary(client):
@@ -2299,6 +2310,331 @@ def test_scan_list_carries_the_summary(client):
     assert rows[0]["summary"]["ports"] == "전체 (일부 제외)"
     assert rows[0]["summary"]["protocols"] == ["TCP"]
     assert rows[0]["command"]          # 원문은 상세에서 볼 수 있게 남아 있다
+
+
+def test_timed_out_hosts_are_retained_and_retried_as_a_narrow_staged_scan(
+    client, monkeypatch, tmp_path,
+):
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.scans_dir.mkdir(parents=True)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    db = SessionLocal()
+    source = ScanRun(
+        name="원본", targets="10.0.0.1 10.0.0.2 10.0.0.3", status="done",
+        command="단계스캔(엔진) · TCP 전체 · UDP 53 · --exclude-ports 2222",
+    )
+    db.add(source)
+    db.commit()
+    source_id = source.id
+    db.close()
+
+    source_dir = scans_api._settings.scans_dir / f"scan_{source_id}"
+    source_dir.mkdir()
+    spec = {
+        "job_id": f"scan_{source_id}",
+        "targets": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+        "exclude": ["10.0.0.99"], "exclude_ports": "2222", "batch_size": 2,
+        "out_dir": str(source_dir),
+        "stages": {
+            "discovery": {"enabled": True, "mode": "sn"},
+            "tcp": {"enabled": True, "ports": "1-65535"},
+            "udp": {"enabled": True, "ports": "53"},
+            "service": {"enabled": True, "version_all": False},
+        },
+        "scanops": {"scope_keys": [
+            "10.0.0.1|22|tcp", "10.0.0.2|443|tcp", "10.0.0.3|53|udp",
+        ]},
+    }
+    (source_dir / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    (source_dir / "run-state.json").write_text(json.dumps({
+        "gave_up": ["10.0.0.3", "10.0.0.2"],
+        "gave_up_by_stage": {
+            "tcp": ["10.0.0.2"], "service:udp": ["10.0.0.3"],
+        },
+        "retransmission_cap_by_stage": {"udp": ["10.0.0.1"]},
+    }), encoding="utf-8")
+
+    before = client.get("/api/scans", headers=h).json()[0]
+    assert before["retry_status"] == "required"
+    assert before["retry_count"] == 3
+    assert before["retry_stages"] == ["tcp", "service:udp", "udp"]
+
+    response = client.post(f"/api/scans/{source_id}/retry-timeouts", headers=h)
+    assert response.status_code == 200, response.text
+    child_id = response.json()["id"]
+    child_spec = json.loads((
+        scans_api._settings.scans_dir / f"scan_{child_id}" / "spec.json"
+    ).read_text(encoding="utf-8"))
+    assert child_spec["targets"] == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    assert child_spec["exclude"] == []
+    assert child_spec["exclude_ports"] == "2222"
+    assert child_spec["stages"]["discovery"] == {"enabled": True, "mode": "pn"}
+    assert all(
+        child_spec["stages"][stage]["max_retries"] == 4
+        for stage in ("tcp", "udp", "service")
+    )
+    assert child_spec["scanops"]["scope_keys"] == [
+        "10.0.0.1|22|tcp", "10.0.0.2|443|tcp", "10.0.0.3|53|udp",
+    ]
+    assert child_spec["scanops"]["retry_of"] == source_id
+    assert child_spec["scanops"]["retry_targets"] == [
+        "10.0.0.1", "10.0.0.2", "10.0.0.3",
+    ]
+
+    history = client.get("/api/scans", headers=h).json()
+    original = next(scan for scan in history if scan["id"] == source_id)
+    assert original["retry_status"] == "running"
+    assert original["retry_required"] is False
+    assert original["retry_scan_id"] == child_id
+    duplicate = client.post(f"/api/scans/{source_id}/retry-timeouts", headers=h)
+    assert duplicate.status_code == 400 and "이미 진행 중" in duplicate.json()["detail"]
+
+    db = SessionLocal()
+    child = db.get(ScanRun, child_id)
+    child.status = "done"
+    db.commit()
+    db.close()
+    resolved = client.get("/api/scans", headers=h).json()
+    original = next(scan for scan in resolved if scan["id"] == source_id)
+    assert original["retry_status"] == "resolved"
+    again = client.post(f"/api/scans/{source_id}/retry-timeouts", headers=h)
+    assert again.status_code == 400 and "이미 완료" in again.json()["detail"]
+
+
+def test_durable_retry_resolves_only_exact_successful_host_and_stage_and_delete_reopens(
+    client, tmp_path, monkeypatch,
+):
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanQualityIssue, ScanRun
+    from scanops.scanning import observability
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    db = SessionLocal()
+    try:
+        source = ScanRun(name="source", status="done")
+        child = ScanRun(name="child", status="running")
+        db.add_all([source, child])
+        db.flush()
+        observability.materialize_terminal_observability(db, source.id, issues=[
+            {"issue_key": "tcp-a", "kind": "host_timeout", "stage": "tcp",
+             "host_ip": "10.0.0.1", "detail": "tcp timeout"},
+            {"issue_key": "tcp-b", "kind": "host_timeout", "stage": "tcp",
+             "host_ip": "10.0.0.2", "detail": "tcp timeout"},
+            {"issue_key": "udp-a", "kind": "host_timeout", "stage": "udp",
+             "host_ip": "10.0.0.1", "detail": "udp timeout"},
+        ])
+        observability.set_quality_retry(
+            db, source.id, child.id, issue_keys=["tcp-a", "tcp-b", "udp-a"],
+        )
+        source_id, child_id = source.id, child.id
+        db.commit()
+    finally:
+        db.close()
+
+    child_dir = scans_api._settings.scans_dir / f"scan_{child_id}"
+    child_dir.mkdir(parents=True)
+    spec = {
+        "targets": ["10.0.0.1", "10.0.0.2"],
+        "scanops": {"retry_of": source_id},
+    }
+    (child_dir / "events.ndjson").write_text("\n".join(json.dumps(event) for event in [
+        {"event": "stage_plan", "stages": ["tcp"]},
+        {"event": "command_start", "stage": "tcp", "execution_id": "retry-tcp",
+         "group": "common", "role": "authority", "reason": "retry",
+         "artifact": "stage-tcp-b0", "argv": ["nmap", "10.0.0.1", "10.0.0.2"],
+         "ts": 10},
+        {"event": "command_done", "stage": "tcp", "execution_id": "retry-tcp",
+         "outcome": "timeout", "seconds": 2, "rc": 0,
+         "timed_out": ["10.0.0.2"], "timeout_count": 1,
+         "retransmission_cap_hosts": [], "retransmission_cap_count": 0, "ts": 12},
+        {"event": "job_done", "status": "done", "seconds": 2, "counts": {}},
+    ]), encoding="utf-8")
+    (child_dir / "run-state.json").write_text(json.dumps({
+        "live": ["10.0.0.1", "10.0.0.2"],
+        "coverage": [{
+            "artifact": "stage-tcp-b0.xml", "proto": "tcp", "role": "authority",
+            "hosts": ["10.0.0.1", "10.0.0.2"], "ports": "T:1-65535", "finished": True,
+        }],
+    }), encoding="utf-8")
+
+    db = SessionLocal()
+    try:
+        child = db.get(ScanRun, child_id)
+        scans_api._materialize_engine_terminal(
+            db, child, child_dir, spec,
+            {name: [] for name in (
+                "authority_missing", "authority_broken",
+                "enrichment_missing", "enrichment_broken",
+            )}, [],
+        )
+        child.status = "done"
+        db.commit()
+        by_key = {
+            issue.issue_key: issue for issue in db.query(ScanQualityIssue).filter_by(
+                scan_id=source_id
+            )
+        }
+        assert by_key["tcp-a"].resolved_by_scan_id == child_id
+        assert by_key["tcp-b"].resolved_by_scan_id is None
+        assert by_key["udp-a"].resolved_by_scan_id is None
+    finally:
+        db.close()
+
+    listed = next(row for row in client.get("/api/scans", headers=h).json()
+                  if row["id"] == source_id)
+    detailed = client.get(f"/api/scans/{source_id}", headers=h).json()
+    assert listed["retry_status"] == detailed["retry_status"] == "required"
+    assert listed["retry_count"] == detailed["retry_count"] == 2
+    import shutil
+    shutil.rmtree(child_dir)
+    stages = client.get(f"/api/scans/{child_id}/stages", headers=h).json()
+    assert stages["source"] == "db"
+    assert stages["executions"][0]["id"] == "retry-tcp"
+    assert stages["hosts"][0]["tcp_sweep_status"] in {"done", "timeout"}
+
+    make_user("delete-admin", "delete-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'delete-admin', 'delete-pass-1234')}"}
+    assert client.delete(f"/api/scans/{child_id}", headers=admin).status_code == 200
+    db = SessionLocal()
+    try:
+        by_key = {
+            issue.issue_key: issue for issue in db.query(ScanQualityIssue).filter_by(
+                scan_id=source_id
+            )
+        }
+        assert all(issue.retry_scan_id is None for issue in by_key.values())
+        assert all(issue.resolved_by_scan_id is None for issue in by_key.values())
+    finally:
+        db.close()
+    reopened = next(row for row in client.get("/api/scans", headers=h).json()
+                    if row["id"] == source_id)
+    assert reopened["retry_status"] == "required"
+    assert reopened["retry_count"] == 2
+    assert reopened["unresolved_issue_count"] == 3
+
+
+def test_scan_list_and_detail_expose_the_same_creator_and_quality_summary(client):
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun, User
+    from scanops.scanning import observability
+
+    make_user("scan-owner", "owner-pass-1234", role="auditor")
+    h = {"Authorization": f"Bearer {token_for(client, 'scan-owner', 'owner-pass-1234')}"}
+    db = SessionLocal()
+    try:
+        owner = db.query(User).filter_by(username="scan-owner").one()
+        scan = ScanRun(name="owned", status="done", created_by=owner.id)
+        db.add(scan)
+        db.flush()
+        observability.materialize_terminal_observability(db, scan.id, issues=[{
+            "issue_key": "cap-a", "kind": "retransmission_cap", "stage": "tcp",
+            "host_ip": "10.0.0.9", "detail": "max retries 2",
+        }])
+        scan_id = scan.id
+        db.commit()
+    finally:
+        db.close()
+
+    listed = next(row for row in client.get("/api/scans", headers=h).json()
+                  if row["id"] == scan_id)
+    detail = client.get(f"/api/scans/{scan_id}", headers=h).json()
+
+    for key in (
+        "created_by", "created_by_name", "quality_status", "unresolved_issue_count",
+        "unresolved_host_count", "retry_status", "retry_count", "retry_stages",
+    ):
+        assert detail[key] == listed[key]
+    assert listed["created_by_name"] == "scan-owner"
+    assert listed["quality_status"] == "warning"
+    assert listed["unresolved_issue_count"] == listed["unresolved_host_count"] == 1
+
+
+def test_retry_endpoint_uses_durable_issues_when_run_state_is_missing(
+    client, monkeypatch, tmp_path,
+):
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanQualityIssue, ScanRun
+    from scanops.scanning import observability
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    db = SessionLocal()
+    try:
+        source = ScanRun(name="durable source", status="done", targets="10.0.0.2")
+        db.add(source)
+        db.flush()
+        observability.materialize_terminal_observability(db, source.id, issues=[{
+            "issue_key": "tcp-timeout", "kind": "host_timeout", "stage": "tcp",
+            "host_ip": "10.0.0.2", "detail": "timeout",
+        }])
+        source_id = source.id
+        db.commit()
+    finally:
+        db.close()
+    source_dir = scans_api._settings.scans_dir / f"scan_{source_id}"
+    source_dir.mkdir()
+    (source_dir / "spec.json").write_text(json.dumps({
+        "job_id": f"scan_{source_id}", "targets": ["10.0.0.2"], "exclude": [],
+        "exclude_ports": "", "batch_size": 1, "out_dir": str(source_dir),
+        "stages": {
+            "discovery": {"enabled": True, "mode": "sn"},
+            "tcp": {"enabled": True, "ports": "1-65535", "max_retries": 2},
+            "udp": {"enabled": False, "ports": "", "max_retries": 2},
+            "service": {"enabled": True, "max_retries": 2, "version_all": False},
+        },
+        "scanops": {"scope_keys": ["10.0.0.2|443|tcp"]},
+    }), encoding="utf-8")
+    assert not (source_dir / "run-state.json").exists()
+
+    response = client.post(f"/api/scans/{source_id}/retry-timeouts", headers=h)
+
+    assert response.status_code == 200, response.text
+    child_id = response.json()["id"]
+    child_spec = json.loads((
+        scans_api._settings.scans_dir / f"scan_{child_id}" / "spec.json"
+    ).read_text(encoding="utf-8"))
+    assert child_spec["targets"] == ["10.0.0.2"]
+    assert child_spec["scanops"]["retry_stages"] == ["tcp"]
+    db = SessionLocal()
+    try:
+        issue = db.query(ScanQualityIssue).filter_by(
+            scan_id=source_id, issue_key="tcp-timeout",
+        ).one()
+        assert issue.retry_scan_id == child_id
+        assert issue.resolved_by_scan_id is None
+    finally:
+        db.close()
 
 
 def test_deleting_a_scan_removes_only_the_findings_it_alone_proves(client):
