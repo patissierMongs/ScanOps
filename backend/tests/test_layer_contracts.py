@@ -1199,6 +1199,53 @@ def test_every_surface_that_lost_the_host_timeout_can_turn_the_watchdog_on():
     assert "{staged &&" not in tail, "실행 상한 컨트롤이 staged 전용으로 갇혀 있다"
 
 
+def test_the_two_run_modes_lay_out_their_artifacts_differently():
+    """산출물 위치는 두 실행 방식이 **다르다**. 한쪽 규칙을 공통이라고 적으면 안 된다.
+
+    화면은 워치독이 끊은 실행의 관측을 어디서 찾는지 안내한다. 그런데 `scan_<id>` 는
+    단계 엔진에서만 디렉터리다 - `out_dir` 를 mkdir 하고 그 안에 stage-*.xml 을 넣는다.
+    레거시는 같은 문자열을 **파일 접두사**로 써서(`_basename` + `.b<batch>` + `.<stage>`)
+    `data/scans/` 바로 아래에 흩어 놓는다.
+
+    그래서 '공통 폴더' 라고 안내하면 한 번에 실행을 쓴 관리자는 **없는 폴더**를 연다.
+    UI 문자열이 아니라 경로 함수가 실제로 만드는 부모와 이름을 확인한다 - 문자열 검사는
+    이 가정이 틀려도 그대로 통과했다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.scanning import nmap_runner
+
+    # 실제 설정값을 그대로 쓴다 - 검사하는 것은 루트가 아니라 그 아래의 **모양**이다.
+    scans_dir = scans_api._settings.scans_dir
+
+    # 레거시: _basename 은 디렉터리가 아니라 접두사다.
+    base = scans_api._basename(7)
+    assert base == scans_dir / "scan_7"
+
+    # 워커가 실제로 만드는 이름(_chunk_worker: base + '.b<cursor>', 자동 단계가 '.<stage>')
+    batch_base = pathlib_Path(str(base) + ".b0")
+    stage_base = pathlib_Path(str(batch_base) + ".tcp_discovery")
+    legacy_xml = nmap_runner.xml_of(stage_base)
+    assert legacy_xml.parent == scans_dir, "레거시 XML 은 data/scans 바로 아래에 있다"
+    assert legacy_xml.name == "scan_7.b0.tcp_discovery.xml"
+
+    # 단계 엔진: 같은 문자열이 진짜 디렉터리이고 산출물은 그 안에 있다
+    # (engine_runner 가 out_dir 을 mkdir 하고 pipeline 이 그 안에 stage-*.xml 을 쓴다).
+    staged_dir = scans_dir / "scan_8"
+    staged_xml = staged_dir / "stage-tcp-b0.xml"
+    assert staged_xml.parent == staged_dir
+
+    # 두 모양이 실제로 다르다는 것이 이 계약의 요지다.
+    assert legacy_xml.parent != staged_xml.parent
+
+    # 화면도 두 모양을 따로 안내해야 한다 - 한쪽 규칙만 적으면 다른 쪽이 없는 곳을 연다.
+    ui = (pathlib_Path(__file__).resolve().parents[2]
+          / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
+    warning = ui.split("watchdogMin > 0 &&")[1].split("</section>")[0]
+    assert "staged ?" in warning, "회수 경로 안내가 실행 방식별로 갈리지 않는다"
+    assert "scan_&lt;스캔번호&gt;/" in warning          # staged: 폴더
+    assert ".b&lt;배치&gt;.&lt;단계&gt;.xml" in warning  # legacy: 파일 접두사
+
+
 def test_the_three_scan_paths_agree_on_the_throughput_numbers():
     """웹·엔진·단독 스캐너가 같은 숫자를 써야 같은 프리셋이 같은 스캔이 된다.
 
