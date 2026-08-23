@@ -98,6 +98,9 @@ export default function Scans({ user }) {
   const [name, setName] = useState("");
   const [opt, setOpt] = useState({ workflow: "auto", options: [], ports: "", nse: [], command: "" });
   const [batchSize, setBatchSize] = useState(256);
+  // nmap 프로세스당 상한(분). 0 = 끔이 기본이다 — 정상적인 전 포트 스캔이 몇 시간 걸리는
+  // 망이 실제로 있어서, 섣부른 값은 '느린 망'을 '실패'로 바꾼다.
+  const [watchdogMin, setWatchdogMin] = useState(0);
   const [staged, setStaged] = useState(true);      // 단계 분리 엔진 스캔(발견→포트→서비스) — 기본 ON
   const [discovery, setDiscovery] = useState("sn");
   const [stages, setStages] = useState({});        // { [scanId]: { stages, overall } } — 단계 타임라인
@@ -308,7 +311,7 @@ export default function Scans({ user }) {
     setBusy(true);
     const endpoint = staged ? "/scans/run-staged" : "/scans/run";
     const body = staged
-      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize, discovery }
+      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize, discovery, watchdog_seconds: Math.max(0, Math.round(watchdogMin * 60)) }
       : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize };
     api(endpoint, { method: "POST", json: body })
       .then((s) => { toast(`${staged ? "단계 " : ""}스캔 시작됨 · #${s.id} (백그라운드 — 진행은 아래 표)`); setTargets(""); setExclude(""); setName(""); load(); })
@@ -480,6 +483,22 @@ export default function Scans({ user }) {
                        onChange={(e) => setBatchSize(Number(e.target.value))} style={{ width: "100%" }} />
                 <div className="muted scan-hint">넓은 대역을 이만큼씩 쪼개 스캔합니다.</div>
               </section>
+
+              {staged && (
+                <section className="scan-step">
+                  <div className="row" style={{ justifyContent: "space-between" }}>
+                    <span className="cb-label">실행 상한 — nmap 프로세스 하나당</span>
+                    <span className="mono">{watchdogMin ? `${watchdogMin}분` : "없음"}</span>
+                  </div>
+                  <input type="range" min={0} max={240} step={10} value={watchdogMin}
+                         onChange={(e) => setWatchdogMin(Number(e.target.value))} style={{ width: "100%" }} />
+                  <div className="muted scan-hint">
+                    기본은 <b>없음</b>입니다. 전 포트 스캔이 정상적으로 몇 시간 걸리는 망도 있어서,
+                    섣부른 값은 느린 망을 실패로 바꿉니다. 켜면 그때까지 끝난 호스트의 관측은
+                    남기고 그 실행만 중단합니다(닫힘 판정 권한은 얻지 못합니다).
+                  </div>
+                </section>
+              )}
 
               {staged && (
                 <section className="scan-step">

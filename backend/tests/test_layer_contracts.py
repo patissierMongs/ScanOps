@@ -686,20 +686,26 @@ def _stage_argvs(tmp_path):
     return seen
 
 
-def test_no_engine_stage_carries_a_host_or_script_timeout(tmp_path):
-    """상한은 전 구간에서 뺐다 - 시간은 거의 못 줄이면서 관측을 통째로 버렸다.
+def test_no_engine_stage_carries_a_host_timeout_but_scripts_stay_bounded(tmp_path):
+    """뺀 것은 **호스트 상한뿐**이다. 스크립트 상한은 성질이 달라 그대로 둔다.
 
-    nmap 은 `--host-timeout` 에 걸린 호스트의 포트 표를 아예 쓰지 않고 실행은
-    `exit="success"` 로 끝낸다. 그래서 상한 하나가 그 호스트의 기존 발견을 전부 닫고
-    '정상처리'까지 만든다 - 되돌리기 가장 어려운 미탐이다. 되살아나면 그 사고도 같이
-    되살아나므로, 한 단계라도 새는지 계약으로 막는다.
+    `--host-timeout` 은 걸린 호스트의 포트 표를 아예 쓰지 않고 실행은 `exit="success"` 로
+    끝낸다. 그래서 상한 하나가 그 호스트의 기존 발견을 전부 닫고 '정상처리'까지 만든다 -
+    되돌리기 가장 어려운 미탐이다.
 
-    끊는 수단이 필요하면 프로세스 워치독(JobSpec.watchdog_seconds)을 쓴다 - 그쪽은 그때까지
-    쓰인 XML 을 남기고 실행을 비정상 종료로 표시하므로 닫힘 권한을 얻지 못한다.
+    `--script-timeout` 은 그렇지 않다. nmap 문서: "Any script instance which exceeds that
+    time will be terminated and no output will be shown." 초과한 스크립트 인스턴스만 죽고
+    포트 표는 남는다(실측 A/B 로도 rc=0 · 완결 XML · port=open 확인). 즉 관측 손실 없이
+    느린 NSE 꼬리만 자르므로 유지하는 것이 맞다 - 처음에 이 둘을 같이 묶어 뺀 것이
+    잘못이었다.
     """
     for key, argv in _stage_argvs(tmp_path).items():
         assert "--host-timeout" not in argv, f"{key} 단계에 호스트 상한이 되살아났다"
-        assert "--script-timeout" not in argv, f"{key} 단계에 스크립트 상한이 되살아났다"
+    # NSE 를 싣는 식별 단계는 스크립트 상한을 함께 실어야 한다.
+    for key in ("service:stage3-10_0_0_1-tcp", "service:stage3-10_0_0_1-udp"):
+        argv = _stage_argvs(tmp_path)[key]
+        if "--script" in argv:
+            assert "--script-timeout" in argv, f"{key} 단계에 스크립트 상한이 없다"
 
 
 def test_the_load_caps_are_carried_only_where_nmap_honours_them(tmp_path):
@@ -980,6 +986,56 @@ def test_the_watchdog_kills_the_process_without_forging_a_success(tmp_path):
     assert quick["timed_out_by_watchdog"] is False and quick["rc"] == 0
 
 
+def test_the_watchdog_leaves_parseable_xml_with_the_hosts_it_finished(tmp_path):
+    """'그때까지 쓴 관측은 남는다'가 실제로 참이어야 한다.
+
+    `-oA` 가 증분 기록이라는 것만으로는 부족하다. 중간에 끊긴 XML 은 `</nmaprun>` 이 없어
+    표준 파서가 통째로 거절하고, 그러면 **이미 끝난 호스트의 관측까지 함께 사라진다**
+    (실측: 킬 직후 547바이트, "no element found"). SIGTERM·SIGINT 로 바꿔도 nmap 은
+    닫아 주지 않는다.
+
+    그래서 워치독이 끊은 뒤 마지막 완결 `</host>` 까지만 남기고 루트를 닫는다. `runstats` 는
+    만들지 않으므로 산출물 완결성 검사는 그대로 실패한다 - 관측은 살리되 닫힘 권한은 주지
+    않는 것이 이 복구의 존재 이유다.
+    """
+    import shutil
+    import sys
+
+    import pytest
+
+    if not shutil.which("nmap"):
+        pytest.skip("실제 nmap 이 있어야 중간 종료를 재현할 수 있다")
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import nmaprun
+
+    base = tmp_path / "wd"
+    result = nmaprun.run(
+        "nmap",
+        ["-sT", "-Pn", "-n", "-p", "1-400", "--max-rate", "300",
+         "--max-hostgroup", "1", "127.0.0.1-40"],
+        base, sudo_mode="never", stats="5s", watchdog_seconds=6, poll_interval=0.1,
+    )
+    assert result["timed_out_by_watchdog"] is True and result["rc"] != 0
+
+    xml = pathlib_Path(str(base) + ".xml")
+    if not result["xml_repaired"]:
+        # 끝난 호스트가 하나도 없으면 살릴 것이 없다 - 그때는 손대지 않는 것이 정직하다.
+        pytest.skip("워치독이 첫 호스트 완료 전에 끊었다")
+
+    # 표준 파서로 읽혀야 하고, 끝난 호스트의 관측이 실제로 남아 있어야 한다.
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(xml).getroot()
+    assert len(root.findall("host")) >= 1
+    assert len(nmaprun.hosts_up(xml)) >= 1, "복구된 XML 에서 관측을 못 읽는다"
+    # 그러나 완결 표식은 없어야 한다 - 있으면 미관측 닫힘 권한을 얻는다.
+    assert root.find("runstats") is None
+    from scanops.scanning.engine_runner import _xml_run_finished
+
+    assert _xml_run_finished(xml) is False, "복구본이 닫힘 권한을 얻으면 안 된다"
+
+
 def test_a_crashed_nmap_call_still_closes_its_execution_record(tmp_path):
     """연 것은 반드시 닫는다.
 
@@ -1069,6 +1125,50 @@ def test_a_terminal_scan_never_reports_a_still_running_command(tmp_path, monkeyp
     assert 'if scan.status not in ("running", "canceling"):' in body
 
 
+def test_every_surface_that_lost_the_host_timeout_can_turn_the_watchdog_on():
+    """상한을 없앤 경로마다 대체 제어를 **실제로 켤 수 있어야** 한다.
+
+    기본이 0(끔)인 것과, 제어 자체가 그 표면에 없는 것은 다른 문제다. 후자면 사용자는
+    보호만 잃고 대체는 얻지 못한다 - 그게 순수한 후퇴다.
+
+    표면 셋을 모두 본다: 단독 스캐너 CLI · 웹 staged · 웹 legacy/auto.
+    """
+    from pathlib import Path as _Path
+
+    from scanops.schemas import ScanRunIn
+
+    root = pathlib_Path(__file__).resolve().parents[2]
+
+    # 1) 단독 스캐너: CLI 옵션이 있고, plan 을 거쳐 실행 루프까지 닿아야 한다.
+    standalone = (root / "scanner" / "scanops_scanner.py").read_text(encoding="utf-8")
+    assert '"--watchdog"' in standalone, "단독 스캐너에 워치독 옵션이 없다"
+    assert '"watchdog_seconds": validate_watchdog(' in standalone
+    assert "watchdog_seconds=watchdog" in standalone, "plan 값이 실행 루프까지 안 간다"
+
+    # 2) 웹 API 계약: 요청 본문이 값을 받고 기본은 끔이다.
+    assert ScanRunIn.model_fields["watchdog_seconds"].default == 0
+    body = ScanRunIn(targets=["10.0.0.1"], watchdog_seconds=900)
+    assert body.watchdog_seconds == 900
+
+    # 3) staged: 요청 값이 엔진 spec 까지 실린다.
+    from scanops.scanning import engine_runner
+
+    spec = engine_runner.build_job_spec(
+        1, ["10.0.0.1"], [], ["syn"], "", None, _Path("/tmp/x"), 64, watchdog_seconds=900)
+    assert spec["watchdog_seconds"] == 900
+
+    # 4) legacy/auto: 요청 값이 sidecar state 에 저장되고, 워커가 그걸 읽어 넘긴다.
+    scans_src = (root / "backend" / "scanops" / "api" / "scans.py").read_text(encoding="utf-8")
+    assert '"watchdog_seconds": int(body.watchdog_seconds or 0)' in scans_src
+    assert 'watchdog = int(state.get("watchdog_seconds") or 0)' in scans_src
+    assert '_wait_scan_process(scan_id, proc, int(st.get("watchdog_seconds")' in scans_src, \
+        "청킹 배치가 상한을 안 받는다"
+
+    # 5) 웹 UI 가 실제로 그 필드를 보낸다(계약이 있어도 화면이 안 보내면 못 켠다).
+    ui = (root / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
+    assert "watchdog_seconds:" in ui, "staged 요청 본문이 워치독을 안 보낸다"
+
+
 def test_the_three_scan_paths_agree_on_the_throughput_numbers():
     """웹·엔진·단독 스캐너가 같은 숫자를 써야 같은 프리셋이 같은 스캔이 된다.
 
@@ -1099,8 +1199,12 @@ def test_the_three_scan_paths_agree_on_the_throughput_numbers():
     assert by_key["min_hostgroup"] == ["--min-hostgroup", "64"]
     assert by_key["max_parallel"] == ["--max-parallelism", "100"]
     assert by_key["max_retries"] == ["--max-retries", nmap_runner.MAX_RETRIES]
-    # 상한 문법은 어느 층에도 남아 있으면 안 된다.
-    assert "--host-timeout" not in standalone and "--script-timeout" not in standalone
+    # 호스트 상한만 어느 층에도 남아 있으면 안 된다. 스크립트 상한은 유지 대상이다.
+    #
+    # argv 로 나가는 **문자열 리터럴**만 본다. 소스 전체를 훑으면 "--host-timeout 과 달리"
+    # 처럼 왜 스크립트 상한만 남겼는지 적어 둔 주석까지 걸려, 이유를 기록할 수 없게 된다.
+    assert '"--host-timeout"' not in standalone
+    assert '"--script-timeout"' in standalone, "스크립트 상한은 관측을 버리지 않으므로 유지한다"
     assert not hasattr(engine_spec, "validate_host_timeout")
     assert not hasattr(scan_options, "HOST_TIMEOUT_DEFAULTS")
 

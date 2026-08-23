@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import nmaprun
 from .spec import (DEFAULT_MAX_PARALLELISM, DEFAULT_MIN_HOSTGROUP,
+                   DEFAULT_TCP_NSE_SCRIPT_TIMEOUT, DEFAULT_UDP_NSE_SCRIPT_TIMEOUT,
                                       DISCOVERY_PA, DISCOVERY_PS)
 from .state import RunState
 
@@ -639,10 +640,14 @@ class Pipeline:
         args += self._throughput_args(
             syn=proto == "tcp" and self.spec.tcp.scan_type == "syn")
         # 웹에서 선택한 스크립트는 build_job_spec 이 TCP 와 UDP/both 로 나눠 준다. UDP 도 sweep 이
-        # 실제로 연 포트만 대상으로 실행한다.
+        # 실제로 연 포트만 대상으로 실행하며, 스크립트 상한으로 느린 NSE 꼬리를 제한한다.
+        # 이 상한은 초과한 스크립트 인스턴스만 죽이고 포트 표는 남긴다(--host-timeout 과 다름).
         scripts = sp.nse if proto == "tcp" else sp.udp_nse
         if scripts:
-            args += ["--script", ",".join(scripts)]
+            script_timeout = (DEFAULT_TCP_NSE_SCRIPT_TIMEOUT if proto == "tcp"
+                              else DEFAULT_UDP_NSE_SCRIPT_TIMEOUT)
+            args += ["--script", ",".join(scripts),
+                     "--script-timeout", script_timeout]
         args += self._exclude_args()
         return args
 

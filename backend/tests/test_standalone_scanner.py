@@ -1112,11 +1112,12 @@ def test_empty_scan_reports_done_with_warning(tmp_path):
     assert str(out / "e.127.0.0.1.tcp_discovery.xml") in manifest["import_xml_files"]
 
 
-def test_no_auto_command_carries_a_host_or_script_timeout(tmp_path):
-    """상한은 전 구간에서 뺐다 - 실측 소요는 거의 안 줄면서 관측을 통째로 버렸다.
+def test_no_auto_command_carries_a_host_timeout_but_scripts_stay_bounded(tmp_path):
+    """뺀 것은 **호스트 상한뿐**이다.
 
-    nmap 은 상한에 걸린 호스트의 포트 표를 쓰지 않고 실행은 exit="success" 로 끝낸다.
-    그 조합이 '살아 있는데 열린 포트가 없다'로 읽혀 그 호스트의 기존 발견을 전부 닫는다.
+    nmap 은 호스트 상한에 걸린 호스트의 포트 표를 쓰지 않고 실행은 exit="success" 로
+    끝낸다 - 그 조합이 '살아 있는데 열린 포트가 없다'로 읽혀 기존 발견을 전부 닫는다.
+    스크립트 상한은 초과한 스크립트 인스턴스만 죽이고 포트 표는 남기므로 유지한다.
     """
     import pytest
 
@@ -1131,8 +1132,9 @@ def test_no_auto_command_carries_a_host_or_script_timeout(tmp_path):
         scanner.build_command(plan, 0),
     ):
         assert "--host-timeout" not in cmd
-        assert "--script-timeout" not in cmd
     assert plan["host_timeout"] == "", "manifest 계약을 위해 자리만 남기고 값은 늘 비어 있다"
+    identify = scanner.build_command(plan, 0, "tcp_identify", [22])
+    assert "--script-timeout" in identify, "스크립트 상한은 관측을 버리지 않으므로 유지한다"
 
     # 켜는 손잡이 자체가 없어졌다 - 남겨 두면 '실측 효과 없는데 관측만 버리는' 설정으로
     # 다시 돌아갈 길이 열린다.
@@ -2308,7 +2310,7 @@ def test_interrupted_stage_is_recorded_before_the_stop_propagates(tmp_path, monk
     base = scanner.output_base(plan, 0, "tcp_discovery")
     state_path = tmp_path / "scan.state.json"
 
-    def fake_run(cmd, problems=None):
+    def fake_run(cmd, problems=None, **_watchdog):
         Path(str(base) + ".xml").write_text("<nmaprun/>", encoding="utf-8")
         raise KeyboardInterrupt()
 
@@ -3108,7 +3110,7 @@ def test_failed_udp_identify_is_retried_once_with_the_select_nsock_engine(monkey
     base = scanner.output_base(plan, 0, "udp_identify")
     calls = []
 
-    def fake_process(cmd, problems):
+    def fake_process(cmd, problems, **_watchdog):
         calls.append(list(cmd))
         if "--nsock-engine" not in cmd:
             return 1                       # 기본 엔진에서 죽는다 — XML 도 남기지 않는다
@@ -3144,7 +3146,7 @@ def test_a_healthy_udp_identify_is_never_retried(monkeypatch, tmp_path):
     base = scanner.output_base(plan, 0, "udp_identify")
     calls = []
 
-    def fake_process(cmd, problems):
+    def fake_process(cmd, problems, **_watchdog):
         calls.append(list(cmd))
         Path(str(base) + ".xml").write_text(
             '<?xml version="1.0"?><nmaprun><runstats>'

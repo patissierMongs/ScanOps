@@ -1105,14 +1105,14 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
         "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
         "--max-retries", "2", "-p", "T:54842,54844",
         "--min-hostgroup", "64", "--max-parallelism", "100", "--defeat-rst-ratelimit",
-        "--script", "banner", "--exclude", excluded, ip,
+        "--script", "banner", "--script-timeout", "2m", "--exclude", excluded, ip,
     ]
     # UDP도 웹에서 선택한 UDP/both 스크립트만 열린 UDP 포트 식별에 붙인다.
     assert udp["args"] == [
         "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
         "--max-retries", "4", "-p", "U:63848",
         "--min-hostgroup", "64", "--max-parallelism", "100",
-        "--script", "dns-nsid", "--exclude", excluded, ip,
+        "--script", "dns-nsid", "--script-timeout", "3m", "--exclude", excluded, ip,
     ]
     state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
     assert ip in state["service_done"] and "job" in state["stages_done"]

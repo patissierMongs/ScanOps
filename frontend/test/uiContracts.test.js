@@ -420,19 +420,34 @@ test("staged preview mirrors discovery, protocol sweeps, and per-host service pr
   assert.match(staged, /"--reason", timing, "--max-retries", MAX_RETRIES, "-p", "T:/);
   assert.match(staged, /versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing/);
   assert.match(staged, /const defeatRst = scanFlag === "-sS" \? "--defeat-rst-ratelimit" : ""/);
-  // 처리량 플래그는 스윕뿐 아니라 **식별 단계에도** 실린다. 미리보기가 실제 명령과
-  // 어긋나면 사용자가 보고 판단할 근거가 사라진다.
-  const stagedSteps = staged.split("title:");
-  for (const step of stagedSteps.slice(1)) {
-    assert.match(step, /\.\.\.THROUGHPUT/, `처리량 플래그가 빠진 단계: ${step.slice(0, 40)}`);
+  const stagedSteps = staged.split("title:").slice(1);
+  const stepFor = (title) => stagedSteps.find((step) => step.includes(title));
+
+  // 부하 상한은 nmap 이 실제로 존중하는 단계에만 실린다. 발견(-sn)은 nmap 문서상
+  // --min-hostgroup 이 무효라 엔진이 빼므로, 미리보기도 빼야 실제 argv 와 맞는다.
+  const discovery = stepFor("호스트 발견");
+  assert.match(discovery, /\.\.\.THROUGHPUT_DISCOVERY/);
+  assert.doesNotMatch(discovery, /\.\.\.THROUGHPUT[^_]/,
+    "-sn 미리보기에 --min-hostgroup 이 다시 실렸다");
+  assert.match(scanOptions, /const THROUGHPUT_DISCOVERY = \["--max-parallelism", "100"\]/);
+
+  // 나머지 단계(포트/버전 스캔)는 묶을 대상이 있으므로 전체 배열을 싣는다.
+  for (const step of stagedSteps.filter((s2) => !s2.includes("호스트 발견"))) {
+    assert.match(step, /\.\.\.THROUGHPUT[^_]/, `처리량 상한이 빠진 단계: ${step.slice(0, 40)}`);
   }
   // --defeat-rst-ratelimit 은 SYN 전용이다 — UDP 단계에 실리면 nmap 이 fatal 로 끝난다.
   for (const step of stagedSteps.filter((step) => /"-sU"/.test(step))) {
     assert.doesNotMatch(step, /defeatRst|DEFEAT_RST/);
     assert.match(step, /"--max-retries", UDP_MAX_RETRIES/);
   }
-  // 호스트/스크립트 타임아웃은 전 구간에서 뺐다 — 관측을 통째로 버리면서 시간도 못 줄였다.
-  assert.doesNotMatch(scanOptions, /--host-timeout|--script-timeout/);
+  // 호스트 상한만 뺐다. 스크립트 상한은 초과한 스크립트 인스턴스만 죽이고 포트 표는
+  // 남기므로(nmap 문서·실측 A/B) 그대로 둔다 — 둘은 성질이 다르다.
+  // argv 로 나가는 문자열만 본다 - 주석에서 "--host-timeout 과 달리" 라고 설명하는 것까지
+  // 막으면, 왜 스크립트 상한만 남겼는지 적어 둘 수가 없어진다.
+  assert.doesNotMatch(scanOptions, /"--host-timeout"/);
+  assert.match(scanOptions, /"--script-timeout"/);
+  assert.match(scanOptions, /const TCP_SCRIPT_TIMEOUT = "2m"/);
+  assert.match(scanOptions, /const UDP_SCRIPT_TIMEOUT = "3m"/);
   assert.match(scanOptions, /const THROUGHPUT = \["--min-hostgroup", "64", "--max-parallelism", "100"\]/);
   assert.match(scanOptions, /const MAX_RETRIES = "2"/);
   assert.match(scanOptions, /const UDP_MAX_RETRIES = "4"/);
@@ -819,6 +834,18 @@ test("scan history distinguishes retry queues and procedural completion", () => 
   assert.match(css, /\.stage-warning/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
 });
+
+test("the process watchdog is reachable from the staged scan form", () => {
+  const scans = source("../src/views/Scans.jsx");
+  // 호스트 상한을 없앤 대신 둔 제어가 화면에서 켤 수 없으면, 사용자는 보호만 잃고
+  // 대체는 얻지 못한다. 기본은 0(끔)이되 켜는 길은 있어야 한다.
+  assert.match(scans, /const \[watchdogMin, setWatchdogMin\] = useState\(0\)/);
+  assert.match(scans, /watchdog_seconds: Math\.max\(0, Math\.round\(watchdogMin \* 60\)\)/);
+  assert.match(scans, /실행 상한 — nmap 프로세스 하나당/);
+  // 워치독이 끊은 실행은 nmap 이 죽은 것과 구분해서 보여야 할 일이 갈린다.
+  assert.match(scans, /execution\.status === "watchdog"/);
+});
+
 
 test("scan history puts excluded ports in the main scope label", () => {
   assert.equal(formatScanPortScope({

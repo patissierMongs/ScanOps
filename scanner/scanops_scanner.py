@@ -22,6 +22,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+import threading
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -103,7 +104,7 @@ AUTO_TCP_DISCOVERY_FLAGS = [
 AUTO_TCP_IDENTIFY_FLAGS = [
     "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
     "--max-retries", MAX_RETRIES, DEFEAT_RST_FLAG, *THROUGHPUT_FLAGS,
-    "--script", DEFAULT_NSE_SCRIPTS,
+    "--script", DEFAULT_NSE_SCRIPTS, "--script-timeout", "10s",
 ]
 # UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 백오프를 막아 open|filtered 오판).
 # 역DNS 는 TCP identify 가 같은 호스트에서 이미 끝냄 → 중복 PTR 피하려 -n 유지.
@@ -643,6 +644,22 @@ def validate_scripts(scripts: str) -> str:
     return scripts
 
 
+def validate_watchdog(value: object) -> int:
+    """nmap 프로세스당 상한(초). 0 = 끔.
+
+    --host-timeout 을 되살리는 것이 아니다 - 그쪽은 상한에 걸린 호스트의 포트 표를 버리면서
+    실행을 성공으로 끝내 미관측 닫힘 권한까지 준다. 워치독은 밖에서 끝내므로 관측은 남고
+    권한은 없다.
+    """
+    try:
+        seconds = int(value or 0)
+    except (TypeError, ValueError):
+        raise ValueError("--watchdog 값은 초 단위 정수여야 합니다(끄려면 0).") from None
+    if not 0 <= seconds <= 24 * 60 * 60:
+        raise ValueError("--watchdog 값은 0-86400 초여야 합니다.")
+    return seconds
+
+
 def validate_stats_every(value: str) -> str:
     value = (value or STATS_EVERY_DEFAULT).strip()
     if not STATS_RE.match(value):
@@ -814,6 +831,7 @@ def build_base_flags(args: argparse.Namespace) -> list[str]:
     scripts = validate_scripts(args.scripts)
     if getattr(args, "no_scripts", False):
         flags = strip_flags(flags, set(), {"--script"})
+        flags = strip_flags(flags, set(), {"--script-timeout"})
     elif args.nse_default or scripts:
         flags = strip_value_flags(flags, {"--script"})
         flags.extend(["--script", scripts or DEFAULT_NSE_SCRIPTS])
@@ -939,12 +957,14 @@ def apply_auto_modifiers(flags: list[str], plan: dict, stage_id: str = "") -> li
     scripts = plan.get("scripts", "")
     if plan.get("no_scripts"):
         flags = strip_flags(flags, set(), {"--script"})
+        flags = strip_flags(flags, set(), {"--script-timeout"})
     elif scripts:
         selected = stage_scripts(scripts, stage_id)
         if selected:
             flags = replace_value_flag(flags, "--script", selected)
         else:
             flags = strip_flags(flags, set(), {"--script"})
+            flags = strip_flags(flags, set(), {"--script-timeout"})
     if plan.get("include_closed"):
         flags = strip_flags(flags, {"--open"})
     # discovery 단계엔 --open 을 절대 추가하지 않는다: 열린 TCP 0개인 up 호스트(UDP 전용)가 XML 에서
@@ -1151,7 +1171,39 @@ def decode_output(raw: bytes, fallback: str = "") -> str:
         return raw.decode(fallback or locale.getpreferredencoding(False) or "utf-8", "replace")
 
 
-def run_nmap_process(cmd: list[str], problems: list[str] | None = None) -> int:
+def repair_truncated_xml(path: Path) -> bool:
+    """중간에 끊긴 nmap XML 을 파싱 가능한 데까지만 남기고 닫는다(엔진 nmaprun 과 같은 규칙).
+
+    워치독이 프로세스를 끝내면 nmap 은 ``</nmaprun>`` 을 쓰지 못하고, 그 파일은 표준 파서가
+    통째로 거절한다 - 이미 끝난 호스트의 관측까지 함께 버려진다. 마지막 완결 ``</host>``
+    뒤를 잘라 루트만 닫는다. ``runstats`` 는 만들지 않으므로 이 산출물은 관측만 제공하고
+    미관측 닫힘 권한은 얻지 못한다(xml_run_completed 가 계속 거절한다).
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if not raw.strip():
+        return False
+    try:
+        ET.fromstring(raw)
+        return False
+    except ET.ParseError:
+        pass
+    cut = raw.rfind("</host>")
+    if cut == -1:
+        return False
+    repaired = raw[:cut + len("</host>")] + "\n</nmaprun>\n"
+    try:
+        ET.fromstring(repaired)
+        path.write_text(repaired, encoding="utf-8")
+    except (ET.ParseError, OSError):
+        return False
+    return True
+
+
+def run_nmap_process(cmd: list[str], problems: list[str] | None = None,
+                     watchdog_seconds: int = 0) -> int:
     """nmap 한 번 실행. 정지 신호를 받으면 곧바로 죽이지 않고 잠깐 기다린다.
 
     터미널 Ctrl+C 와 GUI [중지]는 프로세스 그룹 전체에 신호를 보내므로 nmap 도 같은 신호를
@@ -1165,6 +1217,20 @@ def run_nmap_process(cmd: list[str], problems: list[str] | None = None) -> int:
     # readline 은 개행이 도착하는 즉시 반환하므로 진행 표시가 밀리지 않는다.
     proc = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT)
+    # 프로세스당 상한(0 = 끔). --host-timeout 과 달리 밖에서 끝내므로, 그때까지 끝난
+    # 호스트의 관측은 남고(repair_truncated_xml) 실행은 비정상 종료라 닫힘 권한은 없다.
+    fired = threading.Event()
+    timer = None
+    if watchdog_seconds and watchdog_seconds > 0:
+        def _fire():
+            fired.set()
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        timer = threading.Timer(watchdog_seconds, _fire)
+        timer.daemon = True
+        timer.start()
     try:
         assert proc.stdout is not None
         for raw in proc.stdout:
@@ -1175,7 +1241,15 @@ def run_nmap_process(cmd: list[str], problems: list[str] | None = None) -> int:
                 stripped = line.strip()
                 if any(marker in stripped for marker in NMAP_UNCLEAN_MARKERS):
                     problems.append(stripped[:200])
-        return proc.wait()
+        rc = proc.wait()
+        if fired.is_set():
+            if problems is not None and len(problems) < _UNCLEAN_KEEP:
+                problems.append(
+                    f"watchdog: nmap 실행이 상한({watchdog_seconds}s)을 넘겨 중단됨")
+            # 워치독이 끊은 실행은 성공으로 보이면 안 된다 - 그래야 이 단계가 미관측
+            # 닫힘 권한을 얻지 못한다.
+            rc = rc or -1
+        return rc
     except KeyboardInterrupt:
         try:
             proc.wait(timeout=NMAP_STOP_GRACE_SECONDS)
@@ -1187,6 +1261,9 @@ def run_nmap_process(cmd: list[str], problems: list[str] | None = None) -> int:
                 proc.kill()
                 proc.wait()
         raise
+    finally:
+        if timer is not None:
+            timer.cancel()
 
 
 def open_ports_from_xml(path: Path, protocol: str = "tcp") -> list[int]:
@@ -2064,6 +2141,7 @@ def create_plan(args: argparse.Namespace) -> dict:
         "preset_options": getattr(args, "preset_options", None),
         "timing": getattr(args, "preset_timing", "") or "",
         "stats_every": validate_stats_every(args.stats_every),
+        "watchdog_seconds": validate_watchdog(getattr(args, "watchdog", 0)),
         # 상한은 더 이상 쓰지 않는다. 자리를 남기는 이유는 가져오기 계약(manifest)이 이
         # 필드를 읽기 때문이다 - 구형 manifest 와 같은 자리를 지켜야 서버가 "상한이 걸린
         # 실행은 미관측 닫힘 권한이 없다"는 판정을 계속 할 수 있다. 이 스캐너는 항상 "" 다.
@@ -2129,6 +2207,8 @@ def load_plan(path: str, nmap_override: str = "", dry_run: bool = False,
     # 거의 줄지 않으면서, 상한에 걸린 호스트는 포트 표 없이 성공 종료해 그 호스트의 기존
     # 발견을 통째로 닫아 버리는 쪽이 훨씬 비쌌다. manifest 계약을 위해 자리만 남긴다.
     plan["host_timeout"] = ""
+    plan["watchdog_seconds"] = resumed_value(
+        plan, "watchdog_seconds", 0, validate_watchdog)
     raw_targets = plan.get("raw_targets")
     if raw_targets is None:
         raw_targets = saved_batch_targets
@@ -2557,7 +2637,11 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     problems: list[str] = []
     retried_engine = ""
     try:
-        rc = run_nmap_process(cmd, problems)
+        watchdog = int(plan.get("watchdog_seconds") or 0)
+        rc = run_nmap_process(cmd, problems, watchdog_seconds=watchdog)
+        if watchdog:
+            # 끊긴 XML 을 살려 둔다 - 안 그러면 '관측은 남는다'는 말이 거짓이 된다.
+            repair_truncated_xml(Path(str(base) + ".xml"))
         # UDP 식별이 죽으면 다른 nsock 엔진으로 한 번만 다시 시도한다.
         # nsock 은 epoll → kqueue → poll → iocp → select 순으로 고르므로(nsock_engines.c)
         # Windows 기본은 poll 이다. nmap#3138 의 poll 결함은 7.98 에서 고쳐졌지만, 같은
@@ -2570,7 +2654,10 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
                   f"한 번 다시 시도합니다.", flush=True)
             print(f"    {display_command(retry_cmd)}", flush=True)
             retry_problems: list[str] = []
-            retry_rc = run_nmap_process(retry_cmd, retry_problems)
+            retry_rc = run_nmap_process(retry_cmd, retry_problems,
+                                        watchdog_seconds=watchdog)
+            if watchdog:
+                repair_truncated_xml(Path(str(base) + ".xml"))
             # 재시도가 더 나으면 그 결과를 채택한다. 아니면 원래 실패를 그대로 남긴다 —
             # 재시도가 실패했다고 첫 실행보다 나쁘게 기록할 이유는 없다.
             if retry_rc == 0 and not _stage_xml_truncated(base):
@@ -2845,6 +2932,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--open-only", action="store_true", help="Add --open. Faster/smaller, but closed ports are omitted from heatmap XML.")
     p.add_argument("--include-closed", action="store_true", help="Remove --open so closed/filtered ports remain in XML.")
     p.add_argument("--stats-every", default=STATS_EVERY_DEFAULT, help="nmap --stats-every value.")
+    p.add_argument("--watchdog", type=int, default=0, metavar="SECONDS",
+                   help="Kill any single nmap process that runs longer than SECONDS (0 = off). "
+                        "Unlike --host-timeout this keeps the observations written so far and "
+                        "marks the run as failed, so it never gains unobserved-closure authority.")
     p.add_argument("--intensity", choices=list(INTENSITY_CHOICES), default="normal",
                    help="gentle: safer for old/fragile gear (-T3, no --defeat-rst-ratelimit, capped rate/"
                         "parallelism/retries).")

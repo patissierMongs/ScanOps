@@ -365,7 +365,8 @@ def test_chunk_ingest_failure_rolls_back_batch_and_sets_terminal_failure(
 
     monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda _explicit="": "nmap")
     monkeypatch.setattr(scans_api.nmap_runner, "popen", fake_popen)
-    monkeypatch.setattr(scans_api, "_wait_scan_process", lambda _scan_id, _proc: 0)
+    monkeypatch.setattr(scans_api, "_wait_scan_process",
+                        lambda _scan_id, _proc, _watchdog=0: 0)
     monkeypatch.setattr(
         assets_api, "match_assets",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(

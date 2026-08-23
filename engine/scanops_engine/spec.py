@@ -23,6 +23,13 @@ DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,338
 DISCOVERY_PA = "-PA80,443,3389"
 DEFAULT_MIN_HOSTGROUP = 64
 DEFAULT_MAX_PARALLELISM = 100
+# NSE 스크립트 인스턴스 하나의 상한. --host-timeout 과 **성질이 다르다** - nmap 문서:
+# "Any script instance which exceeds that time will be terminated and no output will be
+# shown." 즉 초과한 스크립트만 죽고 포트 표는 그대로 남는다(실측 A/B 로도 확인됐다:
+# 상한이 걸려도 rc=0 · 완결 XML · port=open, 스크립트 출력만 생략).
+# 그래서 호스트 상한을 뺀 것과 달리 이쪽은 유지한다 - 느린 NSE 꼬리를 관측 손실 없이 자른다.
+DEFAULT_TCP_NSE_SCRIPT_TIMEOUT = "2m"
+DEFAULT_UDP_NSE_SCRIPT_TIMEOUT = "3m"
 # TCP 프로브 재전송 상한.
 DEFAULT_MAX_RETRIES = 2
 # UDP 재전송 상한. 닫힌 UDP 포트의 ICMP port-unreachable 을 대상 **OS 스택 자체가**

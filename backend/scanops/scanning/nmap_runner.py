@@ -58,6 +58,7 @@ AUTO_TCP_DISCOVERY_FLAGS = [
 AUTO_TCP_IDENTIFY_FLAGS = [
     "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
     "-T4", "--max-retries", MAX_RETRIES, DEFEAT_RST_FLAG, *THROUGHPUT_FLAGS,
+    "--script-timeout", "2m",
 ]
 # UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 적응형 백오프를 막아 open|filtered 오판).
 # --version-all 미적용: 강도 9 는 수다스러운/증폭형 UDP 서비스(SNMP·SSDP·DNS 등)에서 거대·비정상
@@ -65,6 +66,7 @@ AUTO_TCP_IDENTIFY_FLAGS = [
 AUTO_UDP_IDENTIFY_FLAGS = [
     "-sU", "-Pn", "-n", "-sV", "--open", "--reason",
     "-T4", "--max-retries", UDP_MAX_RETRIES, *THROUGHPUT_FLAGS,
+    "--script-timeout", "3m",
 ]
 
 

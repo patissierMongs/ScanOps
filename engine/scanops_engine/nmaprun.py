@@ -77,12 +77,19 @@ def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
     * ``--host-timeout`` 은 nmap 이 상한을 넘긴 호스트의 **포트 표를 아예 쓰지 않고**
       실행은 ``exit="success"`` 로 끝낸다. 그래서 그 호스트가 '살아 있는데 열린 포트가
       없다'로 읽혀 기존 발견이 전부 닫힌다 - 관측을 버리면서 그 사실을 숨긴다.
-    * 워치독은 nmap 을 **밖에서** 끝낸다. ``-oA`` 는 증분 기록이라 그때까지 쓰인 XML 은
-      디스크에 그대로 남고, 실행은 비정상 종료로 표시되어 닫힘 권한을 얻지 못한다
-      (산출물 완결성 검사가 ``<finished exit="success">`` 를 요구한다).
+    * 워치독은 nmap 을 **밖에서** 끝낸다. 실행은 비정상 종료로 표시되어 닫힘 권한을 얻지
+      못하고(산출물 완결성 검사가 ``<finished exit="success">`` 를 요구한다), 그때까지
+      끝난 호스트의 관측은 살린다.
 
     즉 워치독은 '못 본 것을 봤다고 말하는' 사고를 만들지 않는다. 그래서 상한을 되살리는
     대신 이쪽을 둔다.
+
+    다만 ``-oA`` 가 증분 기록이라는 것만으로는 부족하다 - 중간에 끊긴 XML 은
+    ``</nmaprun>`` 이 없어 표준 파서가 ``ParseError`` 를 내고, 그러면 **끝난 호스트의
+    관측까지 통째로 사라진다**(실측: 킬 직후 547바이트, "no element found"). SIGTERM·SIGINT
+    로 바꿔도 nmap 이 닫아 주지 않는다. 그래서 워치독이 끊은 뒤 ``_repair_truncated_xml``
+    로 마지막 완결 ``</host>`` 까지만 남기고 닫는다. ``runstats`` 는 만들지 않으므로 완결성
+    검사는 그대로 실패한다 - 관측은 살리되 닫힘 권한은 주지 않는다.
     """
     out_base = Path(out_base)
     cmd = build_command(nmap, args, out_base, sudo_mode=sudo_mode, stats=stats)
@@ -128,14 +135,56 @@ def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
     # 이유가 통째로 뒤집힌다. 여기서 실패로 못박는다.
     if watchdog_fired and rc == 0:
         rc = -1
+    # 끊긴 XML 을 살려 둔다. 이걸 안 하면 워치독이 '관측을 보존한다'는 말이 거짓이 된다.
+    repaired = _repair_truncated_xml(Path(str(out_base) + ".xml")) if watchdog_fired else False
     return {
         "rc": rc,
+        "xml_repaired": repaired,
         "seconds": round(time.time() - t0, 2),
         "cmd": cmd,
         "stopped": stopped,
         "timed_out_by_watchdog": watchdog_fired,
         "retransmission_cap_hosts": sorted(retransmission_cap_hosts, key=_ipkey),
     }
+
+
+def _repair_truncated_xml(path: Path) -> bool:
+    """중간에 끊긴 nmap XML 을 **파싱 가능한 데까지만** 남기고 닫는다.
+
+    워치독이 프로세스를 끝내면 nmap 은 ``</nmaprun>`` 을 쓰지 못한다. 그 파일은 표준 파서가
+    통째로 거절하므로, 이미 끝난 호스트의 관측까지 같이 버려진다 - 몇 시간짜리 스캔에서
+    그건 워치독을 둔 이유를 스스로 지우는 일이다.
+
+    마지막 완결 ``</host>`` 뒤를 잘라내고 루트만 닫는다. **``runstats`` 는 만들지 않는다** -
+    그것이 있어야 산출물 완결성 검사가 통과하므로, 없는 채로 두면 이 실행은 관측만 제공하고
+    미관측 닫힘 권한은 얻지 못한다. 그 성질이 이 함수의 존재 이유다.
+
+    반환: 손봤으면 True. 이미 온전하거나 살릴 호스트가 없으면 손대지 않고 False.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if not raw.strip():
+        return False
+    try:
+        ET.fromstring(raw)
+        return False                      # 이미 온전하다 - 건드리지 않는다
+    except ET.ParseError:
+        pass
+    cut = raw.rfind("</host>")
+    if cut == -1:
+        return False                      # 살릴 호스트가 없다 - 빈 파일로 두는 편이 정직하다
+    repaired = raw[:cut + len("</host>")] + "\n</nmaprun>\n"
+    try:
+        ET.fromstring(repaired)
+    except ET.ParseError:
+        return False
+    try:
+        path.write_text(repaired, encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 # ── XML 파싱 ──

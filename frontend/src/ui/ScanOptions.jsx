@@ -99,6 +99,14 @@ const DISCOVERY_PA = "-PA80,443,3389";
 // 미리보기가 실제 명령과 어긋나면 사용자가 보고 판단하는 근거가 사라진다.
 // 가속 옵션이 아니라 부하 상한이다(--max-parallelism 은 동시 프로브 상한).
 const THROUGHPUT = ["--min-hostgroup", "64", "--max-parallelism", "100"];
+// 호스트 발견(-sn)에는 --min-hostgroup 이 실리지 않는다. nmap 문서상 그 단계에는 효과가
+// 없어 엔진이 빼기 때문이다(Pipeline._throughput_args(groups_hosts=False)). 미리보기가
+// 실제 argv 와 어긋나면, 사용자는 돌지도 않는 옵션을 보고 판단하게 된다.
+const THROUGHPUT_DISCOVERY = ["--max-parallelism", "100"];
+// NSE 스크립트 인스턴스 상한(프로토콜별). --host-timeout 과 달리 초과한 스크립트만 죽고
+// 포트 표는 남으므로 유지한다.
+const TCP_SCRIPT_TIMEOUT = "2m";
+const UDP_SCRIPT_TIMEOUT = "3m";
 // --defeat-rst-ratelimit 는 SYN 스캔 전용이다(nmap 이 -sT/-sU/-sn 과 함께 주면 fatal 종료).
 const DEFEAT_RST = "--defeat-rst-ratelimit";
 const MAX_RETRIES = "2";
@@ -222,7 +230,7 @@ export default function ScanOptions({
           title: "호스트 발견",
           desc: "포트 스캔 전에 ICMP Echo와 TCP SYN/ACK probe로 응답 호스트만 추립니다.",
           cmd: commandText(["nmap", "--stats-every", "5s", "-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n",
-            timing, "--reason", "--max-retries", MAX_RETRIES, ...THROUGHPUT,
+            timing, "--reason", "--max-retries", MAX_RETRIES, ...THROUGHPUT_DISCOVERY,
             ...excludeArgs, "-oA", "scan_<id>.discovery", ...targets]),
         });
       }
@@ -241,7 +249,8 @@ export default function ScanOptions({
           cmd: commandText(["nmap", "--stats-every", "5s", scanFlag, "-Pn", "-sV", versionFlag, "--open",
             "--reason", timing, "--max-retries", MAX_RETRIES, "-p", "T:<TCP 탐색에서 열린 포트>",
             ...THROUGHPUT, defeatRst,
-            stagedScripts && "--script", stagedScripts, ...excludeArgs,
+            stagedScripts && "--script", stagedScripts,
+            stagedScripts && "--script-timeout", stagedScripts && TCP_SCRIPT_TIMEOUT, ...excludeArgs,
             "-oA", "scan_<id>.tcp_service_<host>", "<호스트 1대>"]),
         });
       }
@@ -260,6 +269,7 @@ export default function ScanOptions({
             versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing,
             "--max-retries", UDP_MAX_RETRIES, ...THROUGHPUT,
             "-p", "U:<UDP 탐색에서 열린 포트>", stagedScripts && "--script", stagedScripts,
+            stagedScripts && "--script-timeout", stagedScripts && UDP_SCRIPT_TIMEOUT,
             ...excludeArgs,
             "-oA", "scan_<id>.udp_service_<host>", "<호스트 1대>"]),
         });
@@ -281,7 +291,7 @@ export default function ScanOptions({
         desc: "앞 단계에서 살아있던 호스트의 열린 TCP에만 서비스·제품·버전·NSE 단서를 확인합니다.",
         cmd: commandText(["nmap", "--stats-every", "10s", "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
           "-T4", "--max-retries", MAX_RETRIES, DEFEAT_RST, ...THROUGHPUT,
-          tcpScripts && "--script", tcpScripts,
+          tcpScripts && "--script", tcpScripts, "--script-timeout", TCP_SCRIPT_TIMEOUT,
           "-p", "T:<1단계에서 발견된 TCP 포트>", ...excludeArgs,
           "-oA", "scan_<id>.tcp_identify", ...targets]),
       });
@@ -292,7 +302,7 @@ export default function ScanOptions({
         desc: "주요/지정 UDP에서 DNS·SNMP·NTP 같은 용도 단서를 확인합니다(강도 7 -sV — UDP는 version-all 미적용).",
         cmd: commandText(["nmap", "--stats-every", "10s", "-sU", "-Pn", "-n", "-sV", "--open",
           "--reason", "-T4", "--max-retries", UDP_MAX_RETRIES, ...THROUGHPUT,
-          udpScripts && "--script", udpScripts,
+          udpScripts && "--script", udpScripts, "--script-timeout", UDP_SCRIPT_TIMEOUT,
           "-p", udp, ...excludeArgs, "-oA", "scan_<id>.udp_identify", ...targets]),
       });
     }
