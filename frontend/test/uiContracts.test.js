@@ -855,6 +855,18 @@ test("the process watchdog is reachable from the staged scan form", () => {
   // [가져오기]로 그 폴더를 올리라고 안내하면 실행할 수 없는 절차를 시키는 것이다.
   assert.match(scans, /스캔 서버에 직접 접근할 수 있는 관리자만/);
   assert.doesNotMatch(scans, /그 폴더를 \[가져오기\]로/);
+  // 경고는 두 실행 방식 모두에 뜨므로, 회수 경로도 두 방식에 공통인 것을 말해야 한다.
+  // data/scans/scan_<id>/ 는 legacy(_basename)와 staged(out_dir)가 같이 쓰는 규칙이다.
+  const warning = scans.split("watchdogMin > 0 &&")[1].split("</section>")[0];
+  assert.match(warning, /data\/scans\/scan_/,
+    "회수 경로가 두 실행 방식에 공통인 폴더 규칙을 말하지 않는다");
+  // [실제 실행 명령] 의 -oA 는 단계 엔진에만 있다(legacy 는 command 에서 -oA·타깃을 빼고
+  // Nmap argv 이벤트도 안 남긴다). 그 안내는 반드시 staged 조건 안에 있어야 한다.
+  // 실제로 렌더되는 것만 본다 — 왜 staged 로 묶었는지 적어 둔 주석에도 -oA 가 나온다.
+  const oaMention = warning.indexOf("<code>-oA</code>");
+  assert.ok(oaMention !== -1, "argv 안내가 사라졌다");
+  assert.ok(warning.lastIndexOf("{staged &&", oaMention) !== -1,
+    "-oA 안내가 단계 스캔 조건 밖에 있다 — 한 번에 실행에는 그 패널이 없다");
   // 워치독이 끊은 실행은 nmap 이 죽은 것과 구분해서 보여야 할 일이 갈린다.
   assert.match(scans, /execution\.status === "watchdog"/);
 });
