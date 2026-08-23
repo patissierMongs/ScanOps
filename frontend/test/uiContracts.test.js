@@ -850,7 +850,11 @@ test("the process watchdog is reachable from the staged scan form", () => {
   assert.match(legacyBranch, /watchdog_seconds:/, "한 번에 실행 요청이 워치독을 안 보낸다");
   // 화면이 약속하는 것과 실제 동작이 어긋나면 안 된다. 지금은 상한에 걸린 실행의 관측이
   // 파일에만 남고 발견으로 인입되지는 않으므로, 그 한계를 화면이 말해야 한다.
-  assert.match(scans, /지금은 발견으로 인입되지 않습니다/);
+  assert.match(scans, /발견으로 인입되지\s*\n?\s*않습니다/);
+  // 산출물은 스캔 서버 파일시스템에 있고 웹에는 내려받는 경로가 없다. 원격 사용자에게
+  // [가져오기]로 그 폴더를 올리라고 안내하면 실행할 수 없는 절차를 시키는 것이다.
+  assert.match(scans, /스캔 서버에 직접 접근할 수 있는 관리자만/);
+  assert.doesNotMatch(scans, /그 폴더를 \[가져오기\]로/);
   // 워치독이 끊은 실행은 nmap 이 죽은 것과 구분해서 보여야 할 일이 갈린다.
   assert.match(scans, /execution\.status === "watchdog"/);
 });
