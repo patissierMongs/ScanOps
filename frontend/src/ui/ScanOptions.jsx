@@ -97,6 +97,7 @@ const DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,33
 const DISCOVERY_PA = "-PA80,443,3389";
 // 처리량 정책 — 백엔드 nmap_runner.THROUGHPUT_FLAGS / 엔진 Pipeline._throughput_args 와 같은 값.
 // 미리보기가 실제 명령과 어긋나면 사용자가 보고 판단하는 근거가 사라진다.
+// 가속 옵션이 아니라 부하 상한이다(--max-parallelism 은 동시 프로브 상한).
 const THROUGHPUT = ["--min-hostgroup", "64", "--max-parallelism", "100"];
 // --defeat-rst-ratelimit 는 SYN 스캔 전용이다(nmap 이 -sT/-sU/-sn 과 함께 주면 fatal 종료).
 const DEFEAT_RST = "--defeat-rst-ratelimit";

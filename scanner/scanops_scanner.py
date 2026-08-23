@@ -40,6 +40,9 @@ NMAP_STOP_GRACE_SECONDS = 5.0
 NMAP_KILL_GRACE_SECONDS = 3.0
 # 처리량 정책 — 모든 프로파일·자동 단계가 같은 값을 지도록 한 곳에서 정한다.
 # (웹의 scan_options·nmap_runner.THROUGHPUT_FLAGS 와 같은 값이어야 한다.)
+#
+# 가속 옵션이 아니다. --max-parallelism 은 동시 프로브의 상한, --min-hostgroup 은 포트/버전
+# 스캔 묶음 크기의 하한이다. 부하를 예측 가능하게 묶어 두는 것이 목적이다.
 MIN_HOSTGROUP = "64"
 MAX_PARALLELISM = "100"
 THROUGHPUT_FLAGS = ["--min-hostgroup", MIN_HOSTGROUP, "--max-parallelism", MAX_PARALLELISM]

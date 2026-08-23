@@ -194,18 +194,26 @@ class Pipeline:
             args += ["--exclude-ports", self.spec.exclude_ports.strip()]
         return args
 
-    def _throughput_args(self, syn: bool) -> list:
+    def _throughput_args(self, syn: bool, groups_hosts: bool = True) -> list:
         """모든 단계가 함께 지는 처리량 정책 — 한 곳에서만 정한다.
 
-        단계마다 손으로 적으면 어느 한 단계만 조용히 빠지고, 그 단계가 실행 전체의 꼬리가
-        된다. 예전에는 스윕에만 실려 있어서 식별 단계가 정확히 그 자리였다.
+        **이 셋은 가속 옵션이 아니다.** 셋 다 상한이거나 조건부 우회이고, 여기 있는 이유는
+        스캔 서버와 대상 장비의 부하를 예측 가능하게 묶어 두기 위해서다.
 
-        ``--defeat-rst-ratelimit`` 만 조건부다. nmap 은 이 플래그를 **SYN 스캔에서만** 받고
-        (``-sT``·``-sU``·``-sn`` 과 함께 주면 fatal 로 끝난다), 그래서 호출부가 그 실행이
-        SYN 인지를 알려 준다.
+        * ``--max-parallelism`` 은 동시 프로브의 **상한**이다(하한이 아니다). 그래서 이 값을
+          준다고 빨라지지 않는다 - 오히려 nmap 의 적응형 병렬성이 이보다 높이 올라갈 수
+          있는 빠른 LAN 에서는 스스로를 100 으로 묶는다. 그것이 의도다(부하 예측 가능성).
+        * ``--min-hostgroup`` 은 포트/버전 스캔의 묶음 크기 **하한**이다. nmap 문서는 이
+          옵션이 호스트 발견 단계(``-sn`` 포함)에는 **효과가 없다**고 명시하므로, 그 단계에는
+          싣지 않는다(``groups_hosts=False``) - 없는 효과를 명령줄에 적어 두면 읽는 사람이
+          그 단계도 묶여 도는 줄 안다.
+        * ``--defeat-rst-ratelimit`` 은 **SYN 스캔 전용**이다(``-sT``·``-sU``·``-sn`` 과 함께
+          주면 nmap 이 fatal 로 끝난다). 대상이 스스로 거는 RST 율제한 보호를 무시하므로
+          부하를 **올리는** 쪽이다 - 노후 장비 대역에는 gentle 강도를 쓴다.
         """
-        args = ["--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP),
-                "--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
+        args = ["--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
+        if groups_hosts:
+            args = ["--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP)] + args
         if syn:
             args.append("--defeat-rst-ratelimit")
         return args
@@ -288,9 +296,10 @@ class Pipeline:
         )
         args = ["-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", sp.timing,
                 "--reason", "--max-retries", str(sp.max_retries)]
-        # 발견은 -sn(포트 스캔 없음)이라 SYN 스캔이 아니다 — --defeat-rst-ratelimit 를 얹으면
-        # nmap 이 fatal 로 끝난다.
-        args += self._throughput_args(syn=False)
+        # 발견은 -sn 이라 두 가지가 함께 빠진다 - SYN 스캔이 아니므로
+        # --defeat-rst-ratelimit 를 얹으면 nmap 이 fatal 로 끝나고, nmap 문서상
+        # --min-hostgroup 은 호스트 발견 단계에 아무 효과가 없다.
+        args += self._throughput_args(syn=False, groups_hosts=False)
         args += self._exclude_args()
         args += list(self.spec.targets)
         base = self.out / "stage0-discovery"

@@ -32,10 +32,17 @@ DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,338
 DISCOVERY_PA = "-PA80,443,3389"
 # --open 제외: 열린 TCP 0개인 up 호스트(UDP 전용)를 nmap 이 XML 에서 빼버려 up_hosts 가 놓치고,
 # 그 호스트가 UDP 식별 대상에서 누락된다. 닫힌 포트는 <extraports> 로 요약돼 영향 없음.
-# 처리량 정책 — 모든 자동 단계가 같은 값을 지도록 한 곳에서 정한다. 단계마다 손으로 적으면
-# 어느 하나만 조용히 빠지고, 그 단계가 실행 전체의 꼬리가 된다.
+# 처리량 정책 — 모든 자동 단계가 같은 값을 지도록 한 곳에서 정한다.
+#
+# **가속 옵션이 아니다.** --max-parallelism 은 동시 프로브의 상한이고(하한이 아니다),
+# --min-hostgroup 은 포트/버전 스캔 묶음 크기의 하한이다. 여기 있는 이유는 스캔 서버와 대상
+# 장비의 부하를 예측 가능하게 묶어 두려는 것이다. 자동 워크플로의 세 단계는 모두 포트/버전
+# 스캔이라(-sS 발견 포함) --min-hostgroup 이 실제로 묶을 대상이 있다 - 엔진의 -sn 발견
+# 단계와 다른 점이다(그쪽은 nmap 문서상 효과가 없어 싣지 않는다).
+#
 # --defeat-rst-ratelimit 는 **SYN 스캔 전용**이라(nmap 은 -sT/-sU/-sn 과 함께 주면 fatal 로
-# 끝난다) 여기 넣지 않고, SYN 단계에만 따로 얹는다.
+# 끝난다) 여기 넣지 않고, SYN 단계에만 따로 얹는다. 이 플래그는 대상이 스스로 거는 보호를
+# 무시하므로 부하를 올리는 쪽이다.
 THROUGHPUT_FLAGS = ["--min-hostgroup", "64", "--max-parallelism", "100"]
 DEFEAT_RST_FLAG = "--defeat-rst-ratelimit"
 MAX_RETRIES = str(scan_options.MAX_RETRIES_DEFAULT)

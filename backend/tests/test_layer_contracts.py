@@ -702,14 +702,18 @@ def test_no_engine_stage_carries_a_host_or_script_timeout(tmp_path):
         assert "--script-timeout" not in argv, f"{key} 단계에 스크립트 상한이 되살아났다"
 
 
-def test_every_engine_stage_carries_the_same_throughput_policy(tmp_path):
-    """처리량 정책은 스윕뿐 아니라 **식별 단계까지** 전 구간이 함께 진다.
+def test_the_load_caps_are_carried_only_where_nmap_honours_them(tmp_path):
+    """처리량 플래그는 **가속이 아니라 부하 상한**이고, 효과가 있는 단계에만 싣는다.
 
-    한 단계만 빠지면 그 단계가 실행 전체의 꼬리가 되고, 그런데도 명령을 나란히 놓고 보기
-    전에는 그 사실이 드러나지 않는다.
+    `--max-parallelism` 은 동시 프로브의 상한이라 어느 단계든 의미가 있다(빠른 LAN 에서
+    적응형 병렬성을 100 으로 묶는 것이 의도다).
 
-    `--defeat-rst-ratelimit` 만 예외다. nmap 은 이 플래그를 SYN 스캔에서만 받고
-    (`-sT`·`-sU`·`-sn` 과 함께 주면 fatal 로 끝난다) 그래서 SYN 인 단계에만 실린다.
+    `--min-hostgroup` 은 다르다. nmap 문서는 이 옵션이 호스트 발견 단계(`-sn` 포함)에
+    **효과가 없다**고 명시한다. 없는 효과를 명령줄에 적어 두면 읽는 사람이 그 단계도 묶여
+    도는 줄 안다 - 그래서 발견 단계에서는 뺀다.
+
+    `--defeat-rst-ratelimit` 은 SYN 스캔 전용이다(`-sT`·`-sU`·`-sn` 과 함께 주면 nmap 이
+    fatal 로 끝난다).
     """
     seen = _stage_argvs(tmp_path)
     assert set(seen) == {
@@ -717,8 +721,17 @@ def test_every_engine_stage_carries_the_same_throughput_policy(tmp_path):
         "service:stage3-10_0_0_1-tcp", "service:stage3-10_0_0_1-udp",
     }
     for key, argv in seen.items():
+        assert argv[argv.index("--max-parallelism") + 1] == "100", f"{key}: 병렬 상한"
+
+    discovery = "discovery:stage0-discovery"
+    assert "--min-hostgroup" not in seen[discovery], "nmap 이 무시하는 옵션을 싣지 않는다"
+    for key, argv in seen.items():
+        if key == discovery:
+            continue
+        # 나머지는 포트/버전 스캔이라 실제로 묶을 대상이 있다(스윕은 배치 전체,
+        # 식별은 배치의 열린 포트 합집합을 한 프로세스로 돈다).
         assert argv[argv.index("--min-hostgroup") + 1] == "64", f"{key}: 호스트 그룹"
-        assert argv[argv.index("--max-parallelism") + 1] == "100", f"{key}: 병렬"
+
     syn = {"tcp:stage-tcp-b0", "service:stage3-10_0_0_1-tcp"}
     for key, argv in seen.items():
         assert ("--defeat-rst-ratelimit" in argv) is (key in syn), f"{key}: RST 율제한 우회"

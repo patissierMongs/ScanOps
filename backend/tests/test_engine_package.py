@@ -818,9 +818,10 @@ def test_default_discovery_and_tcp_sweep_argv_match_standalone_policy(
     assert counts["errors"] == 0
     assert calls == [
         ["-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4", "--reason",
-         # 발견은 -sn(포트 스캔 없음)이라 SYN 스캔이 아니다 - --defeat-rst-ratelimit 을
-         # 얹으면 nmap 이 fatal 로 끝난다.
-         "--max-retries", "2", "--min-hostgroup", "64", "--max-parallelism", "100",
+         # 발견은 -sn 이라 두 가지가 함께 빠진다 - SYN 스캔이 아니므로
+         # --defeat-rst-ratelimit 을 얹으면 nmap 이 fatal 로 끝나고, nmap 문서상
+         # --min-hostgroup 은 호스트 발견 단계에 아무 효과가 없다.
+         "--max-retries", "2", "--max-parallelism", "100",
          "--exclude", ",".join(excluded), target],
         ["-sS", "-Pn", "-n", "--open", "-T4", "--reason",
          "--max-retries", "2", "--min-hostgroup", "64", "--max-parallelism", "100",
