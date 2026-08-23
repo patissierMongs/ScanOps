@@ -818,12 +818,13 @@ def test_default_discovery_and_tcp_sweep_argv_match_standalone_policy(
     assert counts["errors"] == 0
     assert calls == [
         ["-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4", "--reason",
-         "--min-hostgroup", "64", "--max-retries", "2",
-         "--max-parallelism", "100",
+         # 발견은 -sn(포트 스캔 없음)이라 SYN 스캔이 아니다 - --defeat-rst-ratelimit 을
+         # 얹으면 nmap 이 fatal 로 끝난다.
+         "--max-retries", "2", "--min-hostgroup", "64", "--max-parallelism", "100",
          "--exclude", ",".join(excluded), target],
         ["-sS", "-Pn", "-n", "--open", "-T4", "--reason",
-         "--max-retries", "2", "--min-hostgroup", "64",
-         "--defeat-rst-ratelimit", "--max-parallelism", "100",
+         "--max-retries", "2", "--min-hostgroup", "64", "--max-parallelism", "100",
+         "--defeat-rst-ratelimit",
          "-p", "1-65535", "--exclude", ",".join(excluded), target],
     ]
     assert all(args.count("--exclude") == 1 for args in calls)
@@ -878,7 +879,8 @@ def test_pn_udp_sweep_argv_keeps_exclude_and_standalone_defaults(monkeypatch, tm
     assert counts["errors"] == 0
     assert calls == [[
         "-sU", "-Pn", "-n", "--open", "-T4", "--reason",
-        "--max-retries", "2", "-p",
+        # UDP 는 ICMP 율제한 때문에 TCP 보다 재전송을 넉넉히 준다.
+        "--max-retries", "4", "--min-hostgroup", "64", "--max-parallelism", "100", "-p",
         "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,"
         "514,520,623,1900,2049,4500,5060,5353,5355,11211",
         "--exclude", excluded, target,
@@ -975,10 +977,12 @@ def test_tcp_scan_type_controls_sweep_and_service_golden_argv(
     assert counts["errors"] == 0
     assert calls == [
         [scan_flag, "-Pn", "-n", "--open", "-T4", "--reason",
-         "--max-retries", "2", "--min-hostgroup", "64",
-         *defeat_rst, "--max-parallelism", "100", "-p", "80", ip],
+         "--max-retries", "2", "--min-hostgroup", "64", "--max-parallelism", "100",
+         *defeat_rst, "-p", "80", ip],
         [scan_flag, "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
-         "--max-retries", "2", "-p", "T:80", ip],
+         # 처리량 정책은 식별 단계에도 실린다 - 한 단계만 빠지면 그 단계가 꼬리가 된다.
+         "--max-retries", "2", "-p", "T:80",
+         "--min-hostgroup", "64", "--max-parallelism", "100", *defeat_rst, ip],
     ]
 
 
@@ -1098,14 +1102,16 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
     assert "--version-all" in tcp["args"] and "--version-all" not in udp["args"]
     assert tcp["args"] == [
         "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
-        "--max-retries", "2", "-p", "T:54842,54844", "--script", "banner",
-        "--script-timeout", "2m", "--exclude", excluded, ip,
+        "--max-retries", "2", "-p", "T:54842,54844",
+        "--min-hostgroup", "64", "--max-parallelism", "100", "--defeat-rst-ratelimit",
+        "--script", "banner", "--exclude", excluded, ip,
     ]
     # UDP도 웹에서 선택한 UDP/both 스크립트만 열린 UDP 포트 식별에 붙인다.
     assert udp["args"] == [
         "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
-        "--max-retries", "2", "-p", "U:63848", "--script", "dns-nsid",
-        "--script-timeout", "3m", "--exclude", excluded, ip,
+        "--max-retries", "4", "-p", "U:63848",
+        "--min-hostgroup", "64", "--max-parallelism", "100",
+        "--script", "dns-nsid", "--exclude", excluded, ip,
     ]
     state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
     assert ip in state["service_done"] and "job" in state["stages_done"]

@@ -996,6 +996,10 @@ function ExecutionGroups({ executions }) {
                     <span className="mono">{execution.status === "running"
                       ? `경과 ${fmtElapsed(liveSeconds)}` : fmtDur(execution.seconds)}</span>
                     <span>{execution.status === "running" ? "실행 중"
+                      /* 워치독은 우리가 프로세스 상한으로 끊은 것이다. nmap 이 죽은 것과
+                         구분해야 사용자가 할 일이 갈린다 — 상한을 늘릴지, 대상을 줄일지. */
+                      : execution.status === "watchdog"
+                        ? `실행 상한 초과 (${fmtDur(execution.watchdog_seconds)})`
                       : execution.status === "timeout" ? `시간 초과 ${execution.timeout_count}대`
                       : execution.retransmission_cap_count ? `재전송 한도 ${execution.retransmission_cap_count}대`
                       : execution.status === "error" ? `오류 · rc ${execution.rc}`

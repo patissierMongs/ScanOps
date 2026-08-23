@@ -1112,27 +1112,61 @@ def test_empty_scan_reports_done_with_warning(tmp_path):
     assert str(out / "e.127.0.0.1.tcp_discovery.xml") in manifest["import_xml_files"]
 
 
-def test_host_timeout_off_by_default_and_opt_in_for_all_auto_commands(tmp_path):
-    """고정 timeout은 정상적인 전 포트 결과를 버릴 수 있어 기본 끔, 명시값만 전 단계에 적용."""
+def test_no_auto_command_carries_a_host_or_script_timeout(tmp_path):
+    """상한은 전 구간에서 뺐다 - 실측 소요는 거의 안 줄면서 관측을 통째로 버렸다.
+
+    nmap 은 상한에 걸린 호스트의 포트 표를 쓰지 않고 실행은 exit="success" 로 끝낸다.
+    그 조합이 '살아 있는데 열린 포트가 없다'로 읽혀 그 호스트의 기존 발견을 전부 닫는다.
+    """
+    import pytest
+
     scanner = _load_scanner()
-    args = scanner.parser().parse_args(["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
+    args = scanner.parser().parse_args(
+        ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
     plan = scanner.create_plan(args)
     for cmd in (
         scanner.build_command(plan, 0, "tcp_discovery"),
         scanner.build_command(plan, 0, "tcp_identify", [22]),
         scanner.build_command(plan, 0, "udp_identify"),
+        scanner.build_command(plan, 0),
     ):
         assert "--host-timeout" not in cmd
+        assert "--script-timeout" not in cmd
+    assert plan["host_timeout"] == "", "manifest 계약을 위해 자리만 남기고 값은 늘 비어 있다"
 
-    on = scanner.parser().parse_args(
-        ["--dry-run", "--nmap", "nmap", "--host-timeout", "30m", "--output-dir", str(tmp_path), "127.0.0.1"])
-    plan_on = scanner.create_plan(on)
-    for cmd in (
-        scanner.build_command(plan_on, 0, "tcp_discovery"),
-        scanner.build_command(plan_on, 0, "tcp_identify", [22]),
-        scanner.build_command(plan_on, 0, "udp_identify"),
-    ):
-        assert cmd[cmd.index("--host-timeout") + 1] == "30m"
+    # 켜는 손잡이 자체가 없어졌다 - 남겨 두면 '실측 효과 없는데 관측만 버리는' 설정으로
+    # 다시 돌아갈 길이 열린다.
+    with pytest.raises(SystemExit):
+        scanner.parser().parse_args(
+            ["--dry-run", "--nmap", "nmap", "--host-timeout", "30m",
+             "--output-dir", str(tmp_path), "127.0.0.1"])
+
+
+def test_every_auto_command_carries_the_same_throughput_policy(tmp_path):
+    """처리량 정책은 발견·식별 전 단계가 함께 진다 - 한 단계만 빠지면 그게 꼬리가 된다.
+
+    --defeat-rst-ratelimit 만 예외다. nmap 은 SYN 스캔에서만 이 플래그를 받으므로
+    (-sU 와 함께 주면 fatal) UDP 단계에는 실리지 않는다.
+    """
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args(
+        ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
+    plan = scanner.create_plan(args)
+    stages = {
+        "tcp_discovery": scanner.build_command(plan, 0, "tcp_discovery"),
+        "tcp_identify": scanner.build_command(plan, 0, "tcp_identify", [22]),
+        "udp_identify": scanner.build_command(plan, 0, "udp_identify"),
+    }
+    for stage, cmd in stages.items():
+        assert cmd[cmd.index("--min-hostgroup") + 1] == "64", stage
+        assert cmd[cmd.index("--max-parallelism") + 1] == "100", stage
+    assert "--defeat-rst-ratelimit" in stages["tcp_discovery"]
+    assert "--defeat-rst-ratelimit" in stages["tcp_identify"]
+    assert "--defeat-rst-ratelimit" not in stages["udp_identify"]
+    # UDP 는 ICMP 율제한 때문에 재전송을 더 준다 - 아끼면 '닫힘'이 아니라 '못 봄'이 는다.
+    assert stages["tcp_discovery"][stages["tcp_discovery"].index("--max-retries") + 1] == "2"
+    assert stages["tcp_identify"][stages["tcp_identify"].index("--max-retries") + 1] == "2"
+    assert stages["udp_identify"][stages["udp_identify"].index("--max-retries") + 1] == "4"
 
 
 def test_ipv6_target_rejected(tmp_path):
@@ -1936,8 +1970,8 @@ def test_nonbatch_overlapping_targets_use_nmap_unique_and_keep_closure_authority
     assert manifest["import_contract"]["units"][0]["authoritative"] is True
 
 
-def test_manifest_contract_marks_failed_and_host_timeout_units_observation_only(tmp_path):
-    """실패 partial 및 host-timeout 성공은 rc만 믿고 미관측 닫힘 권한을 얻지 않는다."""
+def test_manifest_contract_marks_failed_units_observation_only(tmp_path):
+    """실패 partial 은 rc 만 믿고 미관측 닫힘 권한을 얻지 않는다."""
     fake_nmap = _fake_nmap(tmp_path)
 
     partial_out = tmp_path / "partial"
@@ -1957,16 +1991,32 @@ def test_manifest_contract_marks_failed_and_host_timeout_units_observation_only(
     assert discovery["authoritative"] is False
     assert discovery["closure_targets"] == []
 
-    timeout_out = tmp_path / "timeout"
-    timeout = _run_scanner([
-        "--nmap", str(fake_nmap), "--output-dir", str(timeout_out), "--name", "timeout",
-        "--workflow", "single", "--host-timeout", "30m", "127.0.0.1",
-    ])
-    assert timeout.returncode == 0, timeout.stderr + timeout.stdout
-    timeout_manifest = json.loads((timeout_out / "timeout.manifest.json").read_text(encoding="utf-8"))
-    unit = timeout_manifest["import_contract"]["units"][0]
-    assert unit["authoritative"] is False
-    assert unit["closure_targets"] == []
+
+def test_a_host_timeout_manifest_still_loses_closure_authority():
+    """구형 결과 폴더의 manifest 는 아직 host_timeout 을 들고 있을 수 있다.
+
+    상한에 걸린 호스트는 포트 표 없이 성공 종료하므로 그 실행은 부재를 말할 자격이 없다.
+    스캐너가 더 이상 상한을 걸지 않는다고 해서 이 판정을 지우면, 예전에 만든 폴더를
+    가져오는 순간 그때의 미탐이 그대로 되살아난다.
+    """
+    scanner = _load_scanner()
+    plan = {
+        "raw_targets": ["127.0.0.1"],
+        "exclude": [],
+        "max_hosts": 1024,
+        "batch_size": 1,
+        "batches": [["127.0.0.1"]],
+        "host_timeout": "30m",
+        "runs": [{
+            "stage_id": "single", "returncode": 0, "batch_index": 0, "clean": True,
+            "scan_targets": ["127.0.0.1"], "scan_targets_complete": True,
+            "xml": "", "skipped": False,
+        }],
+    }
+    contract = scanner.build_import_contract(plan)
+    assert contract is not None
+    assert contract["host_timeout"] == "30m"
+    assert all(unit["authoritative"] is False for unit in contract["units"])
 
 
 def test_import_contract_preserves_large_scan_legacy_compatibility():
@@ -2482,10 +2532,12 @@ def test_gentle_intensity_lowers_load_in_every_auto_stage(tmp_path):
         assert "--defeat-rst-ratelimit" not in command
         assert command[command.index("--max-retries") + 1] == "1"
         assert command[command.index("--max-rate") + 1] == "150"
-        assert command[command.index("--host-timeout") + 1] == "30m"
-    discovery = scanner.build_command(plan, 0, "tcp_discovery")
-    assert discovery[discovery.index("--max-parallelism") + 1] == "10"
-    assert discovery[discovery.index("--min-hostgroup") + 1] == "16"
+        # 저강도는 부하를 낮추지, 관측을 버리지 않는다 - 상한은 어느 강도에도 없다.
+        assert "--host-timeout" not in command
+        # 처리량 상한도 전 단계에서 함께 낮아져야 한다. 식별 단계만 100 으로 남으면
+        # 지키려던 노후 장비가 정확히 그 단계에서 두들겨 맞는다.
+        assert command[command.index("--max-parallelism") + 1] == "10"
+        assert command[command.index("--min-hostgroup") + 1] == "16"
 
 
 def test_gentle_intensity_applies_to_single_profiles():
@@ -2499,48 +2551,6 @@ def test_gentle_intensity_applies_to_single_profiles():
     assert flags[flags.index("--max-rate") + 1] == "150"
     # 포트 계약은 건드리지 않는다(QA-037/QA-048 유지).
     assert flags[flags.index("-p") + 1] == scanner.PRECISION_PORTS
-
-
-def test_gentle_host_timeout_default_is_opt_out_and_normal_stays_off(tmp_path):
-    scanner = _load_scanner()
-    common = ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path)]
-
-    normal = scanner.create_plan(scanner.parser().parse_args([*common, "10.0.0.1"]))
-    assert normal["host_timeout"] == ""  # QA-007: 기본 강도는 종전대로 꺼짐
-
-    gentle = scanner.create_plan(scanner.parser().parse_args(
-        [*common, "--intensity", "gentle", "10.0.0.1"]))
-    assert gentle["host_timeout"] == "30m"
-
-    override = scanner.create_plan(scanner.parser().parse_args(
-        [*common, "--intensity", "gentle", "--host-timeout", "5m", "10.0.0.1"]))
-    assert override["host_timeout"] == "5m"
-
-    disabled = scanner.create_plan(scanner.parser().parse_args(
-        [*common, "--intensity", "gentle", "--host-timeout", "0", "10.0.0.1"]))
-    assert disabled["host_timeout"] == ""
-
-    rate = scanner.create_plan(scanner.parser().parse_args(
-        [*common, "--intensity", "gentle", "--max-rate", "80", "10.0.0.1"]))
-    cmd = scanner.build_command(rate, 0, "tcp_discovery")
-    assert cmd[cmd.index("--max-rate") + 1] == "80"
-
-
-def test_gentle_intensity_survives_resume(tmp_path):
-    """저강도는 plan 을 통해 적용되므로 재개해도 같은 강도가 유지돼야 한다."""
-    scanner = _load_scanner()
-    plan = scanner.create_plan(scanner.parser().parse_args([
-        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
-        "--intensity", "gentle", "--exclude-ports", "3030", "10.0.0.1",
-    ]))
-    state = tmp_path / "g.state.json"
-    state.write_text(json.dumps(plan), encoding="utf-8")
-    loaded = scanner.load_plan(str(state), "nmap", True, "")
-    assert loaded["intensity"] == "gentle"
-    assert loaded["exclude_ports"] == "3030"
-    command = scanner.build_command(loaded, 0, "tcp_discovery")
-    assert "-T3" in command and "--defeat-rst-ratelimit" not in command
-    assert command[command.index("--exclude-ports") + 1] == "3030"
 
 
 def _resume_with_host_timeout(scanner, tmp_path, intensity: str, mutate):
@@ -2558,41 +2568,19 @@ def _resume_with_host_timeout(scanner, tmp_path, intensity: str, mutate):
             if "--host-timeout" in command else "")
 
 
-def test_saved_host_timeout_null_is_rejected_not_treated_as_off(tmp_path):
-    """state 의 `"host_timeout": null` 이 호스트당 상한을 조용히 풀면 안 된다 (GH-48).
+def test_a_saved_host_timeout_is_dropped_on_resume(tmp_path):
+    """구형 state 가 들고 있던 호스트당 상한은 이어받지 않는다.
 
-    저강도는 노후 장비를 지키려고 호스트당 30분 상한을 기본으로 켠다. 그런데 재개 경로가
-    이 필드를 검증하지 않으면, 손상되거나 미래 버전이 쓴 state 한 줄로 -T3·속도상한은
-    남은 채 상한만 사라진다 — 보호하려던 장비를 무한정 붙잡게 된다. intensity·max_rate 와
-    같은 fail-closed 규칙을 적용한다."""
-    import pytest
+    상한은 실측 소요를 거의 못 줄이면서, 걸린 호스트를 포트 표 없이 성공 종료시켜 그
+    호스트의 기존 발견을 통째로 닫았다. 재개가 그 값을 되살리면 같은 사고가 돌아온다.
+    손상된 값(`null`·숫자·아무 문자열)도 이제 실행을 막지 않는다 - 어차피 안 쓴다.
+    """
     scanner = _load_scanner()
-    with pytest.raises(ValueError, match="host-timeout"):
-        _resume_with_host_timeout(
-            scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", None))
-    # 문자열이 아닌 값도 같은 이유로 거절한다(숫자 30 을 '30초'로 넘겨짚지 않는다).
-    with pytest.raises(ValueError, match="host-timeout"):
-        _resume_with_host_timeout(
-            scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", 30))
-    with pytest.raises(ValueError, match="host-timeout"):
-        _resume_with_host_timeout(
-            scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", "곧"))
-
-
-def test_host_timeout_default_on_resume_follows_the_saved_intensity(tmp_path):
-    """키가 '아예 없는' 구버전 state 만 기본값으로 호환한다 — 그 기본값은 강도를 따른다."""
-    scanner = _load_scanner()
-    assert _resume_with_host_timeout(
-        scanner, tmp_path, "gentle", lambda p: p.pop("host_timeout")) == "30m"
-    assert _resume_with_host_timeout(
-        scanner, tmp_path, "normal", lambda p: p.pop("host_timeout")) == ""
-    # 명시적 opt-out 은 계약대로 유지된다(사람이 골랐다면 존중한다).
-    assert _resume_with_host_timeout(
-        scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", "")) == ""
-    assert _resume_with_host_timeout(
-        scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", "0")) == ""
-    # 저장된 정상 값은 그대로 살아난다.
-    assert _resume_with_host_timeout(scanner, tmp_path, "gentle", lambda p: None) == "30m"
+    for saved in ("30m", None, 30, "곧", ""):
+        assert _resume_with_host_timeout(
+            scanner, tmp_path, "gentle", lambda p, v=saved: p.__setitem__("host_timeout", v)) == ""
+    assert _resume_with_host_timeout(scanner, tmp_path, "gentle", lambda p: p.pop("host_timeout")) == ""
+    assert _resume_with_host_timeout(scanner, tmp_path, "normal", lambda p: None) == ""
 
 
 # ── GUI 계약 ───────────────────────────────────────────────────────────────────

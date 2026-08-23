@@ -416,12 +416,26 @@ test("staged preview mirrors discovery, protocol sweeps, and per-host service pr
     assert.match(staged, new RegExp(`title: "${title}"`));
   }
   assert.match(staged, /"-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n"/);
-  assert.match(staged, /"-n",\s*timing, "--reason", "--max-retries", "2"/);
-  assert.match(staged, /"--reason", timing, "--max-retries", "2", "-p", "T:/);
+  assert.match(staged, /"-n",\s*timing, "--reason", "--max-retries", MAX_RETRIES/);
+  assert.match(staged, /"--reason", timing, "--max-retries", MAX_RETRIES, "-p", "T:/);
   assert.match(staged, /versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing/);
   assert.match(staged, /const defeatRst = scanFlag === "-sS" \? "--defeat-rst-ratelimit" : ""/);
-  assert.match(staged, /"--min-hostgroup", "64", defeatRst/);
-  assert.match(staged, /"--max-parallelism", "100"/);
+  // 처리량 플래그는 스윕뿐 아니라 **식별 단계에도** 실린다. 미리보기가 실제 명령과
+  // 어긋나면 사용자가 보고 판단할 근거가 사라진다.
+  const stagedSteps = staged.split("title:");
+  for (const step of stagedSteps.slice(1)) {
+    assert.match(step, /\.\.\.THROUGHPUT/, `처리량 플래그가 빠진 단계: ${step.slice(0, 40)}`);
+  }
+  // --defeat-rst-ratelimit 은 SYN 전용이다 — UDP 단계에 실리면 nmap 이 fatal 로 끝난다.
+  for (const step of stagedSteps.filter((step) => /"-sU"/.test(step))) {
+    assert.doesNotMatch(step, /defeatRst|DEFEAT_RST/);
+    assert.match(step, /"--max-retries", UDP_MAX_RETRIES/);
+  }
+  // 호스트/스크립트 타임아웃은 전 구간에서 뺐다 — 관측을 통째로 버리면서 시간도 못 줄였다.
+  assert.doesNotMatch(scanOptions, /--host-timeout|--script-timeout/);
+  assert.match(scanOptions, /const THROUGHPUT = \["--min-hostgroup", "64", "--max-parallelism", "100"\]/);
+  assert.match(scanOptions, /const MAX_RETRIES = "2"/);
+  assert.match(scanOptions, /const UDP_MAX_RETRIES = "4"/);
   assert.match(staged, /"T:<TCP 탐색에서 열린 포트>"/);
   assert.match(staged, /"U:<UDP 탐색에서 열린 포트>"/);
   assert.match(staged, /versionFlag === "--version-light" && versionFlag/);

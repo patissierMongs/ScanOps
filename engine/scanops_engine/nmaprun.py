@@ -64,11 +64,25 @@ def build_command(nmap, args, out_base, sudo_mode="auto", stats="5s") -> list[st
 
 
 def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
-        stop_requested=None, poll_interval=0.1) -> dict:
+        stop_requested=None, poll_interval=0.1, watchdog_seconds=0) -> dict:
     """nmap 한 패스 — -oA out_base 강제 + --stats-every. stdout 스트리밍하며 progress(pct).
 
     stdout 유무와 무관하게 stop_requested 를 짧게 poll하고, 중지 시 이 호출이 소유한
-    프로세스 트리만 종료한다. 반환: {"rc", "seconds", "cmd", "stopped"}.
+    프로세스 트리만 종료한다.
+    반환: {"rc", "seconds", "cmd", "stopped", "timed_out_by_watchdog", ...}.
+
+    ``watchdog_seconds`` 는 **프로세스 단위** 상한이다(0 = 끔). ``--host-timeout`` 과는
+    성격이 다르다:
+
+    * ``--host-timeout`` 은 nmap 이 상한을 넘긴 호스트의 **포트 표를 아예 쓰지 않고**
+      실행은 ``exit="success"`` 로 끝낸다. 그래서 그 호스트가 '살아 있는데 열린 포트가
+      없다'로 읽혀 기존 발견이 전부 닫힌다 - 관측을 버리면서 그 사실을 숨긴다.
+    * 워치독은 nmap 을 **밖에서** 끝낸다. ``-oA`` 는 증분 기록이라 그때까지 쓰인 XML 은
+      디스크에 그대로 남고, 실행은 비정상 종료로 표시되어 닫힘 권한을 얻지 못한다
+      (산출물 완결성 검사가 ``<finished exit="success">`` 를 요구한다).
+
+    즉 워치독은 '못 본 것을 봤다고 말하는' 사고를 만들지 않는다. 그래서 상한을 되살리는
+    대신 이쪽을 둔다.
     """
     out_base = Path(out_base)
     cmd = build_command(nmap, args, out_base, sudo_mode=sudo_mode, stats=stats)
@@ -83,10 +97,16 @@ def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
         )
         reader.start()
         stopped = False
+        watchdog_fired = False
+        deadline = t0 + watchdog_seconds if watchdog_seconds and watchdog_seconds > 0 else None
         try:
             while proc.poll() is None:
                 if stop_requested is not None and stop_requested():
                     stopped = True
+                    terminate_owned(proc)
+                    break
+                if deadline is not None and time.time() >= deadline:
+                    watchdog_fired = True
                     terminate_owned(proc)
                     break
                 time.sleep(poll_interval)
@@ -103,11 +123,17 @@ def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
             if reader.is_alive() and proc.stdout is not None:
                 proc.stdout.close()
                 reader.join(timeout=0.5)
+    # 워치독이 끊은 실행은 rc 가 0 이어서는 안 된다. 종료 신호를 받은 nmap 이 0 으로 끝낼
+    # 수 있는데, 그대로 두면 '정상 완료'로 읽혀 미관측 닫힘 권한을 얻는다 - 워치독을 둔
+    # 이유가 통째로 뒤집힌다. 여기서 실패로 못박는다.
+    if watchdog_fired and rc == 0:
+        rc = -1
     return {
         "rc": rc,
         "seconds": round(time.time() - t0, 2),
         "cmd": cmd,
         "stopped": stopped,
+        "timed_out_by_watchdog": watchdog_fired,
         "retransmission_cap_hosts": sorted(retransmission_cap_hosts, key=_ipkey),
     }
 

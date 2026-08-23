@@ -464,6 +464,9 @@ button.sm.danger { color: var(--high); border-color: var(--high-bg); }
 .command-record.command-running { border-left-color: var(--accent); }
 .command-record.command-timeout, .command-record.command-error { border-left-color: var(--high); background: var(--high-bg); }
 .command-record.command-stopped { border-left-color: var(--medium); }
+/* 워치독이 끊은 실행 — 실패(붉은색)가 아니라 '판단이 필요함'이다. 상한을 늘릴지 대상을
+   줄일지는 사람이 정한다. 그때까지 쓰인 XML 은 남아 있다. */
+.command-record.command-watchdog { border-left-color: var(--medium); background: var(--medium-bg); }
 .command-record-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
 .command-record-head span { color: var(--muted); font-size: 10.5px; }
 .command-record code, .command-record small { display: block; white-space: normal; overflow-wrap: anywhere; font-size: 10px; }

@@ -93,7 +93,7 @@ def ensure_available() -> Path:
 def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options: list[str],
                    ports: str, nse: list[str] | None, out_dir: Path, batch_size: int,
                    discovery: str = "sn", rescan_units: list | None = None,
-                   exclude_ports: str = "", host_timeouts: dict | None = None) -> dict:
+                   exclude_ports: str = "", watchdog_seconds: int | None = None) -> dict:
     """ScanOps 옵션 키를 엔진 단계 설정으로 매핑. 스캔 기법/타이밍/버전강도/UDP/NSE 를 단계로 분배.
 
     one-liner 옵션(노핑·기법)은 엔진이 단계별로 알아서 처리하므로 그대로 옮기지 않는다.
@@ -104,12 +104,10 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
     if "connect" in opt and "udp" in opt:
         raise ValueError("TCP Connect 단계 스캔은 UDP 스캔과 함께 실행할 수 없습니다.")
     timing = next((_TIMING[k] for k in ("t0", "t1", "t2", "t3", "fast", "t5") if k in opt), "-T4")
-    max_retries = 2
-    # 호스트당 상한 — 단계마다 별개 값이다. 호출자가 안 주면 공용 레지스트리의 기본값을 쓴다.
-    # 여기서 문자열로 정규화해 두면 spec.validate() 가 문법만 확인하면 된다("" = 미적용).
-    limits = dict(scan_options.HOST_TIMEOUT_DEFAULTS)
-    limits.update({k: v for k, v in (host_timeouts or {}).items()
-                   if k in limits and isinstance(v, str)})
+    # 재전송 상한은 프로토콜마다 별개다 — UDP 는 ICMP 율제한 때문에 응답이 늦고 드물어,
+    # TCP 와 같은 값을 쓰면 '닫혔다'가 아니라 '못 봤다'가 늘어난다.
+    max_retries = scan_options.MAX_RETRIES_DEFAULT
+    udp_max_retries = scan_options.UDP_MAX_RETRIES_DEFAULT
     # The engine has protocol-specific stages, so its ``-p`` value does not need Nmap's
     # T:/U: selector used by the legacy combined workflow.
     tcp_spec = nmap_runner.auto_tcp_port_spec(ports)
@@ -123,10 +121,9 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
         "version_light": "version_light" in opt,
         "timing": timing,
         "max_retries": max_retries,
+        "udp_max_retries": udp_max_retries,
         "nse": scan_options.filter_nse_proto(selected_nse, "tcp"),
         "udp_nse": scan_options.filter_nse_proto(selected_nse, "udp"),
-        "host_timeout": limits["service"],
-        "udp_host_timeout": limits["service_udp"],
         "workers": scan_options.SERVICE_WORKERS_DEFAULT,
     }
     spec: dict = {
@@ -138,6 +135,10 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
         "out_dir": str(out_dir),
         "batch_size": int(batch_size),
         "sudo": "auto",
+        # nmap 프로세스당 상한(초). 0 = 끔. --host-timeout 과 달리 그때까지 쓰인 XML 을
+        # 남기고 실행을 비정상 종료로 표시하므로, 관측을 버리면서 성공으로 끝내지 않는다.
+        "watchdog_seconds": int(scan_options.WATCHDOG_SECONDS_DEFAULT
+                                if watchdog_seconds is None else watchdog_seconds),
         "stages": {
             "discovery": {
                 "enabled": True,
@@ -147,11 +148,9 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
             },
             "tcp": {"enabled": bool(tcp_spec), "ports": tcp_ports, "timing": timing,
                     "scan_type": "connect" if "connect" in opt else "syn",
-                    "min_rate": 0, "max_retries": max_retries,
-                    "host_timeout": limits["tcp"]},
+                    "min_rate": 0, "max_retries": max_retries},
             "udp": {"enabled": "udp" in opt and bool(udp_spec), "ports": udp_ports,
-                    "timing": timing, "max_retries": max_retries,
-                    "host_timeout": limits["udp"]},
+                    "timing": timing, "max_retries": udp_max_retries},
             "service": service,
         },
     }
@@ -1122,6 +1121,7 @@ def parse_events(out_dir) -> dict:
                 "reason": ev.get("reason") if isinstance(ev.get("reason"), str) else "",
                 "artifact": ev.get("artifact") if isinstance(ev.get("artifact"), str) else "",
                 "argv": argv, "status": "running", "started_at": ev.get("ts"),
+                "watchdog_seconds": 0,
                 "seconds": None, "timeout_count": 0, "timed_out": [],
                 "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
             }
@@ -1136,8 +1136,15 @@ def parse_events(out_dir) -> dict:
                 continue
             outcome = ev.get("outcome")
             execution.update({
-                "status": outcome if outcome in {"done", "timeout", "error", "stopped"}
+                # watchdog = 우리가 프로세스 상한으로 끊은 실행. rc 만 보면 nmap 이 죽은
+                # 것과 구분되지 않는데 사용자가 할 일이 다르다(전자는 원인 조사, 후자는
+                # 상한을 늘릴지 대상을 줄일지 결정).
+                "status": outcome
+                if outcome in {"done", "timeout", "error", "stopped", "watchdog"}
                 else "done",
+                "watchdog_seconds": ev.get("watchdog_seconds")
+                if isinstance(ev.get("watchdog_seconds"), int)
+                and not isinstance(ev.get("watchdog_seconds"), bool) else 0,
                 "seconds": ev.get("seconds") if isinstance(ev.get("seconds"), (int, float))
                 and not isinstance(ev.get("seconds"), bool) else None,
                 "rc": ev.get("rc") if isinstance(ev.get("rc"), int) else None,

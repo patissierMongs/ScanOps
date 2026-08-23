@@ -659,20 +659,15 @@ def _pipeline(tmp_path, spec_dict):
     return Pipeline(spec, _Sink(), "nmap"), spec
 
 
-def test_every_engine_stage_carries_its_own_host_timeout(tmp_path):
-    """`--host-timeout` 이 한 단계라도 빠지면 그 단계가 트러블메이커에 그대로 붙잡힌다.
-
-    그리고 값은 **단계마다 별개**여야 한다. TCP 전수는 포트 수(65535)가 소요를 지배하고
-    UDP 는 포트 수가 적은 대신 ICMP 율제한이 지배한다 - 한 값으로 묶으면 느린 쪽에 맞춰
-    빠른 쪽의 트러블메이커를 놓치거나, 빠른 쪽에 맞춰 정상 호스트를 포기한다.
-    """
+def _stage_argvs(tmp_path):
+    """네 단계 × 두 프로토콜의 실제 argv 를 한 번에 뽑는다 - 정책은 전 단계가 함께 진다."""
     pipe, spec = _pipeline(tmp_path, {
         "job_id": "j", "targets": ["10.0.0.1"], "out_dir": str(tmp_path),
         "stages": {
-            "discovery": {"host_timeout": "2m"},
-            "tcp": {"enabled": True, "ports": "1-65535", "host_timeout": "20m"},
-            "udp": {"enabled": True, "ports": "53", "host_timeout": "10m"},
-            "service": {"host_timeout": "10m", "udp_host_timeout": "5m"},
+            "discovery": {},
+            "tcp": {"enabled": True, "ports": "1-65535"},
+            "udp": {"enabled": True, "ports": "53"},
+            "service": {},
         },
     })
     seen = {}
@@ -688,18 +683,65 @@ def test_every_engine_stage_carries_its_own_host_timeout(tmp_path):
     pipe._sweep_batch("udp", 0, ["10.0.0.1"])
     pipe._probe_protocol("10.0.0.1", "tcp", [443], spec.service, confirm=False)
     pipe._probe_protocol("10.0.0.1", "udp", [53], spec.service, confirm=False)
+    return seen
 
-    def limit(key):
+
+def test_no_engine_stage_carries_a_host_or_script_timeout(tmp_path):
+    """상한은 전 구간에서 뺐다 - 시간은 거의 못 줄이면서 관측을 통째로 버렸다.
+
+    nmap 은 `--host-timeout` 에 걸린 호스트의 포트 표를 아예 쓰지 않고 실행은
+    `exit="success"` 로 끝낸다. 그래서 상한 하나가 그 호스트의 기존 발견을 전부 닫고
+    '정상처리'까지 만든다 - 되돌리기 가장 어려운 미탐이다. 되살아나면 그 사고도 같이
+    되살아나므로, 한 단계라도 새는지 계약으로 막는다.
+
+    끊는 수단이 필요하면 프로세스 워치독(JobSpec.watchdog_seconds)을 쓴다 - 그쪽은 그때까지
+    쓰인 XML 을 남기고 실행을 비정상 종료로 표시하므로 닫힘 권한을 얻지 못한다.
+    """
+    for key, argv in _stage_argvs(tmp_path).items():
+        assert "--host-timeout" not in argv, f"{key} 단계에 호스트 상한이 되살아났다"
+        assert "--script-timeout" not in argv, f"{key} 단계에 스크립트 상한이 되살아났다"
+
+
+def test_every_engine_stage_carries_the_same_throughput_policy(tmp_path):
+    """처리량 정책은 스윕뿐 아니라 **식별 단계까지** 전 구간이 함께 진다.
+
+    한 단계만 빠지면 그 단계가 실행 전체의 꼬리가 되고, 그런데도 명령을 나란히 놓고 보기
+    전에는 그 사실이 드러나지 않는다.
+
+    `--defeat-rst-ratelimit` 만 예외다. nmap 은 이 플래그를 SYN 스캔에서만 받고
+    (`-sT`·`-sU`·`-sn` 과 함께 주면 fatal 로 끝난다) 그래서 SYN 인 단계에만 실린다.
+    """
+    seen = _stage_argvs(tmp_path)
+    assert set(seen) == {
+        "discovery:stage0-discovery", "tcp:stage-tcp-b0", "udp:stage-udp-b0",
+        "service:stage3-10_0_0_1-tcp", "service:stage3-10_0_0_1-udp",
+    }
+    for key, argv in seen.items():
+        assert argv[argv.index("--min-hostgroup") + 1] == "64", f"{key}: 호스트 그룹"
+        assert argv[argv.index("--max-parallelism") + 1] == "100", f"{key}: 병렬"
+    syn = {"tcp:stage-tcp-b0", "service:stage3-10_0_0_1-tcp"}
+    for key, argv in seen.items():
+        assert ("--defeat-rst-ratelimit" in argv) is (key in syn), f"{key}: RST 율제한 우회"
+
+
+def test_udp_gets_more_retries_than_tcp_in_sweep_and_identify(tmp_path):
+    """UDP 무응답은 '닫힘'이 아니라 '못 봄'(open|filtered)이다.
+
+    닫힌 UDP 포트의 ICMP port-unreachable 은 대상 **OS 스택 자체가** 율제한한다(흔히 초당
+    1회). TCP 와 같은 재전송 상한을 쓰면 그 백오프를 못 기다려 실제로 닫힌 포트가 계속
+    판정 불가로 남는다 - 스윕과 식별 **양쪽 모두** 늘려야 의미가 있다.
+    """
+    seen = _stage_argvs(tmp_path)
+
+    def retries(key):
         argv = seen[key]
-        assert "--host-timeout" in argv, f"{key} 단계에 상한이 없다"
-        return argv[argv.index("--host-timeout") + 1]
+        return argv[argv.index("--max-retries") + 1]
 
-    assert limit("discovery:stage0-discovery") == "2m"
-    assert limit("tcp:stage-tcp-b0") == "20m"
-    assert limit("udp:stage-udp-b0") == "10m"
-    assert limit("service:stage3-10_0_0_1-tcp") == "10m"
-    # UDP 식별은 이 프로젝트에서 실제로 죽어 온 자리라 TCP 와 따로 더 짧게 잡는다.
-    assert limit("service:stage3-10_0_0_1-udp") == "5m"
+    assert retries("discovery:stage0-discovery") == "2"
+    assert retries("tcp:stage-tcp-b0") == "2"
+    assert retries("service:stage3-10_0_0_1-tcp") == "2"
+    assert retries("udp:stage-udp-b0") == "4"
+    assert retries("service:stage3-10_0_0_1-udp") == "4"
 
 
 def test_the_engine_records_what_each_nmap_process_covered(tmp_path):
@@ -855,78 +897,110 @@ def test_a_udp_timeout_does_not_strip_tcp_authority(tmp_path):
     assert ("10.0.0.1", "tcp") in absence and ("10.0.0.1", "udp") not in absence
 
 
-def test_the_web_request_carries_both_host_timeouts_into_the_spec():
-    """화면의 두 값이 실행 spec 까지 도달하는지 - 중간에서 끊기면 조용한 무시로 되돌아간다."""
+def test_the_retry_policy_reaches_the_spec_split_by_protocol():
+    """웹 요청이 만드는 spec 에도 프로토콜별 재전송 상한이 실제로 실리는지.
+
+    중간에서 끊기면 UI 는 4 를 말하는데 실행은 2 로 도는 조용한 불일치가 된다.
+    """
     from pathlib import Path
 
-    from scanops.api.scans import _host_timeouts
     from scanops.scanning import engine_runner, scan_options
 
-    class _Body:
-        host_timeout = "30m"
-        udp_host_timeout = "0"
-
     spec = engine_runner.build_job_spec(
-        1, ["10.0.0.1"], [], ["syn", "udp", "version"], "", None, Path("/tmp/x"), 64,
-        host_timeouts=_host_timeouts(_Body()))
-    assert spec["stages"]["tcp"]["host_timeout"] == "30m"
-    assert spec["stages"]["service"]["host_timeout"] == "30m"
-    # "0" 은 명시적 끄기다 - 빈 값(지정 없음)과 다르다.
-    assert spec["stages"]["udp"]["host_timeout"] == "0"
-
-    # 지정이 없으면 단계별 기본값을 쓴다.
-    class _Empty:
-        host_timeout = ""
-        udp_host_timeout = ""
-
-    plain = engine_runner.build_job_spec(
-        1, ["10.0.0.1"], [], ["syn", "udp", "version"], "", None, Path("/tmp/x"), 64,
-        host_timeouts=_host_timeouts(_Empty()))
-    assert plain["stages"]["tcp"]["host_timeout"] == scan_options.HOST_TIMEOUT_DEFAULTS["tcp"]
-    assert plain["stages"]["udp"]["host_timeout"] == scan_options.HOST_TIMEOUT_DEFAULTS["udp"]
-    assert (plain["stages"]["tcp"]["host_timeout"]
-            != plain["stages"]["udp"]["host_timeout"]), "TCP·UDP 상한은 따로 간다"
+        1, ["10.0.0.1"], [], ["syn", "udp", "version"], "", None, Path("/tmp/x"), 64)
+    stages = spec["stages"]
+    assert stages["discovery"]["max_retries"] == scan_options.MAX_RETRIES_DEFAULT
+    assert stages["tcp"]["max_retries"] == scan_options.MAX_RETRIES_DEFAULT
+    assert stages["service"]["max_retries"] == scan_options.MAX_RETRIES_DEFAULT
+    assert stages["udp"]["max_retries"] == scan_options.UDP_MAX_RETRIES_DEFAULT
+    assert stages["service"]["udp_max_retries"] == scan_options.UDP_MAX_RETRIES_DEFAULT
+    assert (scan_options.UDP_MAX_RETRIES_DEFAULT
+            > scan_options.MAX_RETRIES_DEFAULT), "UDP 는 TCP 보다 넉넉해야 한다"
+    # 상한은 더 이상 spec 에 실리지 않는다 - 남아 있으면 엔진이 그 값을 그대로 쓴다.
+    for stage in stages.values():
+        assert "host_timeout" not in stage and "udp_host_timeout" not in stage
+    # 워치독은 기본 꺼짐이다. 느린 망을 '실패'로 바꾸지 않으려면 켜는 쪽이 선택이어야 한다.
+    assert spec["watchdog_seconds"] == 0
 
 
-def test_the_scan_paths_share_one_host_timeout_grammar():
-    """상한 값의 문법이 갈리면 같은 값이 한쪽에서만 안전 제어가 된다.
+def test_the_watchdog_kills_the_process_without_forging_a_success(tmp_path):
+    """워치독은 `--host-timeout` 의 대체가 아니라 **정반대 성질**의 안전장치다.
 
-    특히 `None` 은 양쪽 모두 **거절**해야 한다. 조용히 ""(미적용)으로 바꾸면 state/spec 한
-    줄로 상한만 풀려 막으려던 지연이 그대로 돌아온다 - #48 이 정확히 그 사고였다.
+    `--host-timeout` 은 관측을 버리면서 실행을 `exit="success"` 로 끝내 미관측 닫힘 권한을
+    준다. 워치독은 프로세스를 밖에서 끝내므로 그때까지 쓰인 XML 은 남고, rc 가 0 이 아니라
+    닫힘 권한을 얻지 못한다. 그 성질이 뒤집히면 워치독을 둔 이유가 통째로 사라진다.
+    """
+    import os
+    import sys
+    import time as _time
+
+    import pytest
+
+    if os.name != "posix":
+        pytest.skip("스텁 실행기를 셸 스크립트로 만든다(검사 대상 로직은 OS 무관)")
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import nmaprun
+
+    # run() 은 argv 를 [nmap, --stats-every, .., -oA, base] 로 고정 조립한다. 그 모양을
+    # 그대로 받아 무시하고 잠들 스텁이 필요하다 - 진짜 nmap 을 몇 분씩 붙잡아 둘 수는 없다.
+    def stub(body: str) -> str:
+        path = tmp_path / f"stub-{abs(hash(body))}.sh"
+        path.write_text(f"#!/bin/sh\n{body}\n", encoding="ascii")
+        path.chmod(0o755)
+        return str(path)
+
+    started = _time.time()
+    result = nmaprun.run(
+        stub("exec sleep 30"), ["-sS"], tmp_path / "slow",
+        sudo_mode="never", stats="5s", watchdog_seconds=1, poll_interval=0.05,
+    )
+    assert result["timed_out_by_watchdog"] is True
+    assert result["rc"] != 0, "워치독이 끊은 실행이 성공으로 보이면 안 된다"
+    assert _time.time() - started < 20, "워치독이 실제로 끊지 못했다"
+
+    # 끄면(0) 그대로 끝까지 기다린다 - 기본값이 조용히 상한을 거는 일은 없어야 한다.
+    quick = nmaprun.run(
+        stub("exit 0"), ["-sS"], tmp_path / "quick",
+        sudo_mode="never", stats="5s", watchdog_seconds=0, poll_interval=0.05,
+    )
+    assert quick["timed_out_by_watchdog"] is False and quick["rc"] == 0
+
+
+def test_the_three_scan_paths_agree_on_the_throughput_numbers():
+    """웹·엔진·단독 스캐너가 같은 숫자를 써야 같은 프리셋이 같은 스캔이 된다.
+
+    엔진은 백엔드를 import 하지 않는 독립 패키지고 단독 스캐너는 별도 프로세스라, 세 곳이
+    사본을 들 수밖에 없다. 사본이 갈리는 것을 막는 자리는 여기뿐이다.
     """
     import re
     import sys
 
-    import pytest
-
     sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
-    from scanops_engine.spec import validate_host_timeout
+    from scanops_engine import spec as engine_spec
 
-    for good, want in (("15m", "15m"), ("30s", "30s"), ("2h", "2h"),
-                       ("900", "900"), ("0", ""), ("", ""), ("  10m  ", "10m")):
-        assert validate_host_timeout(good) == want
+    from scanops.scanning import nmap_runner, scan_options
 
-    for bad in ("15x", "m15", "-5m", "abc"):
-        with pytest.raises(ValueError):
-            validate_host_timeout(bad)
-    with pytest.raises(ValueError):
-        validate_host_timeout(None)      # 끄기가 아니라 거절
+    root = pathlib_Path(__file__).resolve().parents[2]
+    standalone = (root / "scanner" / "scanops_scanner.py").read_text(encoding="utf-8")
 
-    # 단독 스캐너는 별도 프로세스라 import 할 수 없다 - 문법 원본을 소스에서 읽어 대조한다.
-    text = (pathlib_Path(__file__).resolve().parents[2] / "scanner" / "scanops_scanner.py"
-            ).read_text(encoding="utf-8")
-    standalone = re.search(r"^STATS_RE = re\.compile\(r\"(.+?)\"\)", text, re.M).group(1)
-    engine = re.search(
-        r"^_HOST_TIMEOUT_RE = re\.compile\(r\"(.+?)\"\)",
-        (pathlib_Path(__file__).resolve().parents[2] / "engine" / "scanops_engine" / "spec.py"
-         ).read_text(encoding="utf-8"), re.M).group(1)
-    assert engine == standalone, "엔진과 단독 스캐너의 시간 형식이 달라졌다"
+    def const(name):
+        return re.search(rf'^{name} = "(.+?)"$', standalone, re.M).group(1)
 
-    # 기본값도 nmap 이 받는 형식이어야 한다 - 여기서 어긋나면 모든 단계 스캔이 400 이 된다.
-    from scanops.scanning import scan_options
-
-    for stage, value in scan_options.HOST_TIMEOUT_DEFAULTS.items():
-        assert validate_host_timeout(value) == value, f"{stage} 기본값이 문법에 안 맞는다"
+    assert const("MIN_HOSTGROUP") == str(engine_spec.DEFAULT_MIN_HOSTGROUP) == "64"
+    assert const("MAX_PARALLELISM") == str(engine_spec.DEFAULT_MAX_PARALLELISM) == "100"
+    assert (const("MAX_RETRIES") == str(engine_spec.DEFAULT_MAX_RETRIES)
+            == str(scan_options.MAX_RETRIES_DEFAULT) == nmap_runner.MAX_RETRIES)
+    assert (const("UDP_MAX_RETRIES") == str(engine_spec.DEFAULT_UDP_MAX_RETRIES)
+            == str(scan_options.UDP_MAX_RETRIES_DEFAULT) == nmap_runner.UDP_MAX_RETRIES)
+    by_key = {option["key"]: option["flags"] for option in scan_options.SCAN_OPTIONS}
+    assert by_key["min_hostgroup"] == ["--min-hostgroup", "64"]
+    assert by_key["max_parallel"] == ["--max-parallelism", "100"]
+    assert by_key["max_retries"] == ["--max-retries", nmap_runner.MAX_RETRIES]
+    # 상한 문법은 어느 층에도 남아 있으면 안 된다.
+    assert "--host-timeout" not in standalone and "--script-timeout" not in standalone
+    assert not hasattr(engine_spec, "validate_host_timeout")
+    assert not hasattr(scan_options, "HOST_TIMEOUT_DEFAULTS")
 
 
 def test_the_service_stage_probes_hosts_concurrently(tmp_path):

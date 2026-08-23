@@ -12,8 +12,7 @@ from pathlib import Path
 
 from . import nmaprun
 from .spec import (DEFAULT_MAX_PARALLELISM, DEFAULT_MIN_HOSTGROUP,
-                   DEFAULT_TCP_NSE_SCRIPT_TIMEOUT, DEFAULT_UDP_NSE_SCRIPT_TIMEOUT,
-                   DISCOVERY_PA, DISCOVERY_PS)
+                                      DISCOVERY_PA, DISCOVERY_PS)
 from .state import RunState
 
 
@@ -105,7 +104,8 @@ class Pipeline:
         self.sink.emit("command_start", execution_id=execution_id, argv=argv, **meta)
         r = nmaprun.run(self.nmap, args, base, sudo_mode=self.spec.sudo,
                         progress=lambda p: self.sink.emit("stage_progress", stage=stage, percent=p),
-                        stop_requested=self.state.stopped)
+                        stop_requested=self.state.stopped,
+                        watchdog_seconds=self.spec.watchdog_seconds)
         r["execution_id"] = execution_id
         timed_out = nmaprun.timed_out(Path(str(base) + ".xml")) if r["rc"] == 0 else []
         cap_hosts = [host for host in (r.get("retransmission_cap_hosts") or [])
@@ -125,11 +125,18 @@ class Pipeline:
                 "retransmission_cap_hit", stage=meta["stage"], hosts=cap_hosts,
                 count=len(cap_hosts), max_retries=retry_limit,
             )
-        outcome = "stopped" if r.get("stopped") else "error" if r["rc"] != 0 \
-            else "timeout" if timed_out else "done"
+        # 워치독이 끊은 실행은 '오류'가 아니라 '상한 초과'로 부른다. rc 만 보면 nmap 이 죽은
+        # 것과 우리가 끊은 것이 같아 보이는데, 사용자가 할 일이 다르다(전자는 원인 조사,
+        # 후자는 상한을 늘릴지 대상을 줄일지 결정).
+        outcome = ("stopped" if r.get("stopped")
+                   else "watchdog" if r.get("timed_out_by_watchdog")
+                   else "error" if r["rc"] != 0
+                   else "timeout" if timed_out else "done")
         self.sink.emit(
             "command_done", execution_id=execution_id, seconds=r["seconds"], rc=r["rc"],
             outcome=outcome, timed_out=timed_out, timeout_count=len(timed_out),
+            watchdog_seconds=(self.spec.watchdog_seconds
+                              if r.get("timed_out_by_watchdog") else 0),
             retransmission_cap_hosts=cap_hosts,
             retransmission_cap_count=len(cap_hosts), **meta,
         )
@@ -187,21 +194,21 @@ class Pipeline:
             args += ["--exclude-ports", self.spec.exclude_ports.strip()]
         return args
 
-    @staticmethod
-    def _timeout_args(value: str) -> list:
-        """``--host-timeout`` — 한 호스트가 실행 전체를 붙잡는 것을 막는다.
+    def _throughput_args(self, syn: bool) -> list:
+        """모든 단계가 함께 지는 처리량 정책 — 한 곳에서만 정한다.
 
-        단계마다 **별개 값**을 받는다. TCP 전수 스캔은 65535 포트를 훑는 반면 UDP 는 포트 수가
-        훨씬 적은 대신 ICMP 율제한에 걸려 느려지므로, 정상 호스트가 걸리지 않는 상한이 서로
-        다르다. 한 값으로 묶으면 둘 중 하나는 반드시 틀린다 - 느린 쪽에 맞추면 빠른 쪽의
-        트러블메이커를 못 걸러 내고, 빠른 쪽에 맞추면 정상 호스트를 포기한다.
+        단계마다 손으로 적으면 어느 한 단계만 조용히 빠지고, 그 단계가 실행 전체의 꼬리가
+        된다. 예전에는 스윕에만 실려 있어서 식별 단계가 정확히 그 자리였다.
 
-        nmap 은 상한을 넘긴 호스트만 포기하고 실행 자체는 ``exit="success"`` 로 끝내며,
-        그 호스트를 XML 에 ``<host timedout="true">`` 로 남긴다(포트 표는 쓰지 않는다).
-        그래서 '포기당한 호스트'는 부재를 말할 자격이 없다 - 그 판정은 백엔드가
-        coverage 기록으로 한다(run-state 의 coverage 배열).
+        ``--defeat-rst-ratelimit`` 만 조건부다. nmap 은 이 플래그를 **SYN 스캔에서만** 받고
+        (``-sT``·``-sU``·``-sn`` 과 함께 주면 fatal 로 끝난다), 그래서 호출부가 그 실행이
+        SYN 인지를 알려 준다.
         """
-        return ["--host-timeout", value] if value else []
+        args = ["--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP),
+                "--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
+        if syn:
+            args.append("--defeat-rst-ratelimit")
+        return args
 
     def _tcp_scan_flag(self) -> str:
         return {"syn": "-sS", "connect": "-sT"}[self.spec.tcp.scan_type]
@@ -280,10 +287,10 @@ class Pipeline:
             current_host_count=len(self.spec.targets),
         )
         args = ["-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", sp.timing,
-                "--reason", "--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP),
-                "--max-retries", str(sp.max_retries),
-                "--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
-        args += self._timeout_args(sp.host_timeout)
+                "--reason", "--max-retries", str(sp.max_retries)]
+        # 발견은 -sn(포트 스캔 없음)이라 SYN 스캔이 아니다 — --defeat-rst-ratelimit 를 얹으면
+        # nmap 이 fatal 로 끝난다.
+        args += self._throughput_args(syn=False)
         args += self._exclude_args()
         args += list(self.spec.targets)
         base = self.out / "stage0-discovery"
@@ -420,15 +427,10 @@ class Pipeline:
         args = [("-sU" if proto == "udp" else self._tcp_scan_flag()),
                 "-Pn", "-n", "--open",
                 sp.timing, "--reason", "--max-retries", str(sp.max_retries)]
-        if proto == "tcp":
-            args += ["--min-hostgroup", str(DEFAULT_MIN_HOSTGROUP)]
-            if self.spec.tcp.scan_type == "syn":
-                args.append("--defeat-rst-ratelimit")
-            args += ["--max-parallelism", str(DEFAULT_MAX_PARALLELISM)]
-            if sp.min_rate > 0:
-                args += ["--min-rate", str(sp.min_rate)]
+        args += self._throughput_args(syn=proto == "tcp" and self.spec.tcp.scan_type == "syn")
+        if proto == "tcp" and sp.min_rate > 0:
+            args += ["--min-rate", str(sp.min_rate)]
         args += ["-p", sp.ports]
-        args += self._timeout_args(sp.host_timeout)
         args += self._exclude_args()
         args += batch
         base = self.out / f"stage-{proto}-b{bi}"
@@ -605,18 +607,17 @@ class Pipeline:
             args.append("--version-all")
         elif sp.version_light:
             args.append("--version-light")
-        args += ["--open", "--reason", sp.timing, "--max-retries",
-                 str(retries if retries is not None else sp.max_retries), "-p", pspec]
+        if retries is None:
+            retries = sp.max_retries if proto == "tcp" else sp.udp_max_retries
+        args += ["--open", "--reason", sp.timing, "--max-retries", str(retries), "-p", pspec]
+        # 식별에도 같은 처리량 정책을 싣는다 — 예전에는 스윕에만 있어서 식별이 꼬리였다.
+        args += self._throughput_args(
+            syn=proto == "tcp" and self.spec.tcp.scan_type == "syn")
         # 웹에서 선택한 스크립트는 build_job_spec 이 TCP 와 UDP/both 로 나눠 준다. UDP 도 sweep 이
-        # 실제로 연 포트만 대상으로 실행하며, 스크립트·호스트 상한으로 느린 NSE 꼬리를 제한한다.
+        # 실제로 연 포트만 대상으로 실행한다.
         scripts = sp.nse if proto == "tcp" else sp.udp_nse
         if scripts:
-            script_timeout = (DEFAULT_TCP_NSE_SCRIPT_TIMEOUT if proto == "tcp"
-                              else DEFAULT_UDP_NSE_SCRIPT_TIMEOUT)
-            args += ["--script", ",".join(scripts),
-                     "--script-timeout", script_timeout]
-        limit = (sp.udp_host_timeout or sp.host_timeout) if proto == "udp" else sp.host_timeout
-        args += self._timeout_args(limit)
+            args += ["--script", ",".join(scripts)]
         args += self._exclude_args()
         return args
 

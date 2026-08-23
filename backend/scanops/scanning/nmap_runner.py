@@ -32,23 +32,32 @@ DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,338
 DISCOVERY_PA = "-PA80,443,3389"
 # --open 제외: 열린 TCP 0개인 up 호스트(UDP 전용)를 nmap 이 XML 에서 빼버려 up_hosts 가 놓치고,
 # 그 호스트가 UDP 식별 대상에서 누락된다. 닫힌 포트는 <extraports> 로 요약돼 영향 없음.
+# 처리량 정책 — 모든 자동 단계가 같은 값을 지도록 한 곳에서 정한다. 단계마다 손으로 적으면
+# 어느 하나만 조용히 빠지고, 그 단계가 실행 전체의 꼬리가 된다.
+# --defeat-rst-ratelimit 는 **SYN 스캔 전용**이라(nmap 은 -sT/-sU/-sn 과 함께 주면 fatal 로
+# 끝난다) 여기 넣지 않고, SYN 단계에만 따로 얹는다.
+THROUGHPUT_FLAGS = ["--min-hostgroup", "64", "--max-parallelism", "100"]
+DEFEAT_RST_FLAG = "--defeat-rst-ratelimit"
+MAX_RETRIES = str(scan_options.MAX_RETRIES_DEFAULT)
+# UDP 는 대상 OS 의 ICMP port-unreachable 율제한 때문에 응답이 늦게·드물게 온다. TCP 와 같은
+# 재전송 상한을 쓰면 '닫혔다'가 아니라 '못 봤다'(open|filtered)가 그만큼 늘어난다.
+UDP_MAX_RETRIES = str(scan_options.UDP_MAX_RETRIES_DEFAULT)
 AUTO_TCP_DISCOVERY_FLAGS = [
     "-sS", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4", "--reason",
-    "--min-hostgroup", "64", "--max-retries", "2",
-    "--defeat-rst-ratelimit", "--max-parallelism", "100",
+    "--max-retries", MAX_RETRIES, DEFEAT_RST_FLAG, *THROUGHPUT_FLAGS,
 ]
 # 식별은 발견된 생존 호스트만 대상(scans.py 가 discovery_live 주입)이라 -Pn 안전, -n 제거 → 역DNS 로
 # 호스트명 확보(용도 식별 근거). --version-all(intensity 9)로 rarity 높은 서비스(redis 등)까지 식별.
 AUTO_TCP_IDENTIFY_FLAGS = [
     "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
-    "-T4", "--max-retries", "2", "--script-timeout", "2m",
+    "-T4", "--max-retries", MAX_RETRIES, DEFEAT_RST_FLAG, *THROUGHPUT_FLAGS,
 ]
 # UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 적응형 백오프를 막아 open|filtered 오판).
 # --version-all 미적용: 강도 9 는 수다스러운/증폭형 UDP 서비스(SNMP·SSDP·DNS 등)에서 거대·비정상
 # 응답으로 nmap 을 fatal 종료시킬 위험이 크고 UDP 식별 이득은 미미 → 기본 -sV(강도 7)로 안전하게.
 AUTO_UDP_IDENTIFY_FLAGS = [
     "-sU", "-Pn", "-n", "-sV", "--open", "--reason",
-    "-T4", "--max-retries", "2", "--script-timeout", "3m",
+    "-T4", "--max-retries", UDP_MAX_RETRIES, *THROUGHPUT_FLAGS,
 ]
 
 

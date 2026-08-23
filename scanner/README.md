@@ -81,13 +81,17 @@ python3 scanops_scanner.py 10.0.0.0/24 --intensity gentle --max-rate 80   # 더 
 | RST 율제한 우회 | 사용 | **사용 안 함** |
 | 병렬 | `--max-parallelism 100` | `10` |
 | 호스트 그룹 | `--min-hostgroup 64` | `16` |
-| 재시도 | `--max-retries 2` | `1` |
+| 재시도 (TCP) | `--max-retries 2` | `1` |
+| 재시도 (UDP) | `--max-retries 4` | `1` |
 | 속도 상한 | 없음 | `--max-rate 150` |
-| 호스트당 상한 | 꺼짐 | `--host-timeout 30m` |
 
 가장 중요한 건 `--defeat-rst-ratelimit`을 쓰지 않는 것입니다. 이 플래그는 장비가 스스로 거는 RST
-율제한 보호를 무력화해 오래된 장비의 CPU 를 가장 확실하게 끌어올립니다. `--max-rate`/`--host-timeout`은
-`--intensity gentle`이 정한 기본값을 명시 지정으로 덮어쓸 수 있고, `--host-timeout 0`으로 끌 수 있습니다.
+율제한 보호를 무력화해 오래된 장비의 CPU 를 가장 확실하게 끌어올립니다. `--max-rate`는
+`--intensity gentle`이 정한 기본값을 명시 지정으로 덮어쓸 수 있습니다.
+
+UDP 재시도만 TCP 보다 높은 이유는 닫힌 UDP 포트의 ICMP port-unreachable 을 대상 **OS 스택 자체가**
+율제한하기 때문입니다(흔히 초당 1회). 재전송을 아끼면 실제로 닫힌 포트가 `open|filtered` 로 남아
+'닫혔다'가 아니라 '못 봤다'가 쌓입니다.
 저강도는 state 에 저장되어 `--resume` 으로 이어할 때도 같은 강도가 유지됩니다.
 
 ```bash
@@ -269,9 +273,11 @@ manifest가 누적되어 있어도 웹이 manifest별 XML 묶음으로 나누어
   - `done`: 모든 단계 성공. `partial`: 일부 단계 실패했지만 가져올 결과가 있음(사용 가능).
     `failed`: 가져올 결과가 전혀 없음(코드 1).
   - `--resume` 으로 실패/중단한 단계만 다시 시도할 수 있습니다(성공한 단계·배치는 건너뜀).
-- **호스트 시간 상한(opt-in)** — `--host-timeout`은 기본적으로 꺼져 있습니다. 필터링된 망의 전 포트
-  스캔은 고정 상한을 정상적으로 넘을 수 있고, nmap은 timeout 된 호스트 결과를 버린 채 성공 종료할 수
-  있기 때문입니다. 운영상 필요할 때만 `--host-timeout 30m`처럼 명시합니다.
+- **시간 상한 없음** — `--host-timeout`·`--script-timeout`은 어느 강도에서도 걸지 않습니다(플래그도
+  없앴습니다). 실측에서 소요는 거의 줄지 않은 반면, nmap 은 상한에 걸린 호스트의 포트 표를 **아예
+  쓰지 않고** 실행 자체는 `exit="success"` 로 끝냅니다. 그래서 상한 하나가 '살아 있는데 열린 포트가
+  없다'로 읽혀 그 호스트의 기존 발견을 전부 닫고 '정상처리'까지 만듭니다 — 되돌리기 가장 어려운
+  미탐입니다.
 - **결과 요약** — 스캔 끝에 `summary: live_hosts=.. open_tcp=.. open_udp=.. import_xml=..` 를 출력하고,
   관측 결과가 0이면(호스트 다운/도달 불가) 조용한 성공이 아니라 경고를 남깁니다. 정상 완료된 빈 XML은
   manifest와 함께 미관측 닫힘 판정에 사용할 수 있으므로 import 목록에는 남습니다.

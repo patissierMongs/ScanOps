@@ -70,12 +70,13 @@ class ScanRunIn(BaseModel):
     staged: bool = False           # estimate가 단계 엔진의 프로토콜 조합을 검증할 때만 사용
     discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
     udp_all_targets: bool = False  # auto: UDP 식별을 discovery live host 가 아닌 원본 타깃 전체로(-Pn)
-    # 호스트당 상한(nmap --host-timeout). TCP 와 UDP 를 **따로** 받는다 — 정상 호스트가
-    # 걸리지 않는 상한이 프로토콜마다 다르기 때문이다(TCP 는 포트 수, UDP 는 ICMP 율제한이
-    # 소요를 지배한다). 빈 값이면 단계별 기본값(scan_options.HOST_TIMEOUT_DEFAULTS).
-    # "0" 은 명시적 끄기다. None 은 받지 않는다 - 안전 제어가 조용히 풀리면 안 된다(#48).
-    host_timeout: str = ""
-    udp_host_timeout: str = ""
+    # nmap 프로세스당 상한(초). 0 = 끔(기본).
+    #
+    # --host-timeout 을 되살리는 것이 아니다 - 그쪽은 상한에 걸린 호스트의 포트 표를 통째로
+    # 버리면서 실행은 성공으로 끝내서, '살아 있는데 열린 포트가 없다'로 읽히는 미탐을 만들었다.
+    # 워치독은 프로세스를 밖에서 끝내므로 그때까지 -oA 로 쓰인 XML 은 남고, 실행이 비정상
+    # 종료라 미관측 닫힘 권한을 얻지 못한다.
+    watchdog_seconds: int = 0
 
 
 class KnownResultsIn(BaseModel):

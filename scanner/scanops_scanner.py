@@ -38,9 +38,16 @@ INTERRUPTED_MARK = ".interrupted"
 # 짧아야 부분 결과 저장과 state 기록이 끝난 뒤에 강제 종료가 온다.
 NMAP_STOP_GRACE_SECONDS = 5.0
 NMAP_KILL_GRACE_SECONDS = 3.0
-# 기본 미적용. 전 포트 스캔은 필터링된 망에서 고정 시간 상한을 정상적으로 넘을 수 있고,
-# nmap 은 timeout 된 호스트의 결과를 버린 채 성공 종료할 수 있다. 필요한 환경만 명시적으로 opt-in.
-HOST_TIMEOUT_DEFAULT = "0"
+# 처리량 정책 — 모든 프로파일·자동 단계가 같은 값을 지도록 한 곳에서 정한다.
+# (웹의 scan_options·nmap_runner.THROUGHPUT_FLAGS 와 같은 값이어야 한다.)
+MIN_HOSTGROUP = "64"
+MAX_PARALLELISM = "100"
+THROUGHPUT_FLAGS = ["--min-hostgroup", MIN_HOSTGROUP, "--max-parallelism", MAX_PARALLELISM]
+# --defeat-rst-ratelimit 는 **SYN 스캔 전용**이다(nmap 은 -sT/-sU/-sn 과 함께 주면 fatal).
+DEFEAT_RST_FLAG = "--defeat-rst-ratelimit"
+MAX_RETRIES = "2"
+# UDP 는 대상 OS 의 ICMP port-unreachable 율제한(흔히 초당 1회) 때문에 응답이 늦게·드물게 온다.
+UDP_MAX_RETRIES = "4"
 UDP_DEFAULT_PORTS = "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,514,520,623,1900,2049,4500,5060,5353,5355,11211"
 PRECISION_PORTS = f"T:1-65535,U:{UDP_DEFAULT_PORTS}"
 # 용도 식별형 NSE만(취약점/노이즈/부작용 스크립트 제외) — 빠르고 부작용 적게 '무엇/왜' 파악.
@@ -83,8 +90,7 @@ DISCOVERY_PA = "-PA80,443,3389"
 # 닫힌 포트는 어차피 <extraports> 로 요약되어 XML 이 커지지 않고, 열린 포트 추출에도 영향 없다.
 AUTO_TCP_DISCOVERY_FLAGS = [
     "-sS", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4", "--reason",
-    "--min-hostgroup", "64", "--max-retries", "2",
-    "--defeat-rst-ratelimit", "--max-parallelism", "100",
+    "--max-retries", MAX_RETRIES, DEFEAT_RST_FLAG, *THROUGHPUT_FLAGS,
     "-p", "T:1-65535",
 ]
 # identify 단계는 discovery 에서 살아난 호스트만 타깃(execute_auto 가 live_hosts 주입)이라
@@ -93,7 +99,8 @@ AUTO_TCP_DISCOVERY_FLAGS = [
 # 서비스는 그 자체가 취약점 → 강도를 낮추기보다 정상 식별하고 조치를 압박한다.
 AUTO_TCP_IDENTIFY_FLAGS = [
     "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
-    "--max-retries", "2", "--script", DEFAULT_NSE_SCRIPTS, "--script-timeout", "10s",
+    "--max-retries", MAX_RETRIES, DEFEAT_RST_FLAG, *THROUGHPUT_FLAGS,
+    "--script", DEFAULT_NSE_SCRIPTS,
 ]
 # UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 백오프를 막아 open|filtered 오판).
 # 역DNS 는 TCP identify 가 같은 호스트에서 이미 끝냄 → 중복 PTR 피하려 -n 유지.
@@ -101,7 +108,8 @@ AUTO_TCP_IDENTIFY_FLAGS = [
 # 응답으로 nmap 을 fatal 종료시킬 위험이 크고 UDP 식별 이득은 미미 → 기본 -sV(강도 7)로 안전하게.
 AUTO_UDP_IDENTIFY_FLAGS = [
     "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
-    "--max-retries", "2", "-p", f"U:{UDP_DEFAULT_PORTS}",
+    "--max-retries", UDP_MAX_RETRIES, *THROUGHPUT_FLAGS,
+    "-p", f"U:{UDP_DEFAULT_PORTS}",
 ]
 AUTO_STAGES = [
     ("tcp_discovery", "TCP 전체 포트 발견"),
@@ -122,8 +130,7 @@ PRESETS: dict[str, list[str]] = {
     # 그래서 phase1 도 기본 -sV(강도 7)로 안전하게 간다. 강도 9 TCP 식별이 필요하면 자동 워크플로 사용.
     "phase1": [
         "-sS", "-sU", "-Pn", "-n", "-sV", "--open", "--reason",
-        "-T4", "--max-retries", "2", "--min-hostgroup", "64",
-        "--max-parallelism", "100", "--defeat-rst-ratelimit",
+        "-T4", "--max-retries", MAX_RETRIES, DEFEAT_RST_FLAG, *THROUGHPUT_FLAGS,
         "-p", PRECISION_PORTS,
         "--script", DEFAULT_NSE_SCRIPTS,
     ],
@@ -174,10 +181,10 @@ OPTION_FLAGS: dict[str, list[str]] = {
     "t3": ["-T3"],
     "fast": ["-T4"],
     "t5": ["-T5"],
-    "max_retries": ["--max-retries", "2"],
-    "min_hostgroup": ["--min-hostgroup", "64"],
-    "max_parallel": ["--max-parallelism", "100"],
-    "defeat_rst": ["--defeat-rst-ratelimit"],
+    "max_retries": ["--max-retries", MAX_RETRIES],
+    "min_hostgroup": ["--min-hostgroup", MIN_HOSTGROUP],
+    "max_parallel": ["--max-parallelism", MAX_PARALLELISM],
+    "defeat_rst": [DEFEAT_RST_FLAG],
     "max_scan_delay": ["--max-scan-delay", "5ms"],
     "fragment": ["-f"],
 }
@@ -231,7 +238,6 @@ GENTLE_MAX_RETRIES = "1"
 # select 는 동시 소켓 수 제약이 있지만 UDP 식별은 포트 수가 적어 무해하다.
 UDP_RETRY_ENGINE = "select"
 GENTLE_MAX_RATE_DEFAULT = "150"   # packets/sec
-GENTLE_HOST_TIMEOUT_DEFAULT = "30m"
 # 허용 강도 — 파서 choices 와 state 재검증이 같은 목록을 쓴다.
 INTENSITY_CHOICES = ("normal", "gentle")
 
@@ -641,25 +647,6 @@ def validate_stats_every(value: str) -> str:
     return value
 
 
-def validate_host_timeout(value: object) -> str:
-    """호스트당 상한. 빈 값/0 이면 미적용. 그 외는 nmap 시간 형식(15m 등).
-
-    None 은 '끄기'가 아니라 거절이다. 이 값은 저강도(gentle)가 노후 장비를 지키려고 켜 두는
-    안전 제어라, 손상됐거나 미래 버전이 쓴 state 의 `"host_timeout": null` 을 조용히 ""(미적용)
-    으로 바꾸면 보호하려던 장비를 무한정 붙잡게 된다. 끄고 싶으면 ""/0 을 명시해야 한다.
-    (지정 없음 센티널인 None 은 create_plan 이 강도별 기본값으로 먼저 바꾼 뒤 여기 들어온다.)"""
-    if not isinstance(value, str):
-        raise ValueError(
-            f"--host-timeout 값이 문자열이 아닙니다: {value!r}. "
-            "끄려면 0 또는 빈 값을 명시하세요.")
-    value = value.strip()
-    if value in ("", "0"):
-        return ""
-    if not STATS_RE.match(value):
-        raise ValueError("--host-timeout 값은 15m, 30m 같은 nmap 시간 형식이어야 합니다(끄려면 0).")
-    return value
-
-
 def expand_targets(targets: list[str], cap: int) -> list[str]:
     # dict 로 누적해 '전개 도중'에도 중복/겹침을 제거한다(QA-018). 캡은 dedup 된 누적 개수로 검사하므로
     # 중복 대상이 캡을 헛되이 넘기지 않고(QA-053), 동시에 누적 폭발도 막는다(QA-015 유지).
@@ -824,7 +811,6 @@ def build_base_flags(args: argparse.Namespace) -> list[str]:
     scripts = validate_scripts(args.scripts)
     if getattr(args, "no_scripts", False):
         flags = strip_flags(flags, set(), {"--script"})
-        flags = strip_flags(flags, set(), {"--script-timeout"})
     elif args.nse_default or scripts:
         flags = strip_value_flags(flags, {"--script"})
         flags.extend(["--script", scripts or DEFAULT_NSE_SCRIPTS])
@@ -950,14 +936,12 @@ def apply_auto_modifiers(flags: list[str], plan: dict, stage_id: str = "") -> li
     scripts = plan.get("scripts", "")
     if plan.get("no_scripts"):
         flags = strip_flags(flags, set(), {"--script"})
-        flags = strip_flags(flags, set(), {"--script-timeout"})
     elif scripts:
         selected = stage_scripts(scripts, stage_id)
         if selected:
             flags = replace_value_flag(flags, "--script", selected)
         else:
             flags = strip_flags(flags, set(), {"--script"})
-            flags = strip_flags(flags, set(), {"--script-timeout"})
     if plan.get("include_closed"):
         flags = strip_flags(flags, {"--open"})
     # discovery 단계엔 --open 을 절대 추가하지 않는다: 열린 TCP 0개인 up 호스트(UDP 전용)가 XML 에서
@@ -1009,9 +993,6 @@ def build_command(plan: dict, index: int, stage_id: str = "", tcp_ports: list[in
     flags = build_auto_flags(plan, stage_id, tcp_ports) if stage_id else plan["base_flags"]
     # identify 단계는 discovery 생존 호스트(targets)로 좁힌다. 없으면 원본 배치 전체.
     scan_targets = targets if targets else plan["batches"][index]
-    host_timeout = plan.get("host_timeout", "")
-    # --host-timeout: 한 호스트가 무한정 멈추는 걸 막는다(nmap 이 해당 호스트만 포기, 0으로 정상 종료).
-    timeout_flags = ["--host-timeout", host_timeout] if host_timeout else []
     excludes = plan.get("exclude") or []
     # Nmap 7.99는 --exclude를 반복하면 누적하지 않고 마지막 값만 쓴다. CLI에서는 반복 입력을
     # 받되 실제 Nmap에는 검증·정규화된 전체 값을 쉼표로 합쳐 정확히 한 번만 전달한다.
@@ -1024,7 +1005,6 @@ def build_command(plan: dict, index: int, stage_id: str = "", tcp_ports: list[in
         plan["nmap"],
         "--unique",
         "--stats-every", plan["stats_every"],
-        *timeout_flags,
         *exclude_flags,
         *exclude_ports_flags,
         *flags,
@@ -2064,11 +2044,6 @@ def create_plan(args: argparse.Namespace) -> dict:
     if args.workflow == "auto" and args.tcp_only and ports_override and not protocol_ports(ports_override, "T"):
         raise ValueError("TCP만 옵션을 사용할 때는 TCP 포트를 지정해야 합니다. 예: --ports 22,443")
     intensity = validate_intensity(getattr(args, "intensity", "normal"))
-    # --host-timeout 은 None 센티널로 '사용자가 지정하지 않음'을 구분한다. 지정이 없으면 저강도에서만
-    # 30m 을 기본으로 켜고(느린 스캔이 한 호스트에 무한정 묶이지 않게), 기본 강도는 종전대로 꺼둔다(QA-007).
-    host_timeout_raw = getattr(args, "host_timeout", None)
-    if host_timeout_raw is None:
-        host_timeout_raw = GENTLE_HOST_TIMEOUT_DEFAULT if intensity == "gentle" else HOST_TIMEOUT_DEFAULT
     return {
         "tool": "scanops_scanner",
         "version": VERSION,
@@ -2086,7 +2061,10 @@ def create_plan(args: argparse.Namespace) -> dict:
         "preset_options": getattr(args, "preset_options", None),
         "timing": getattr(args, "preset_timing", "") or "",
         "stats_every": validate_stats_every(args.stats_every),
-        "host_timeout": validate_host_timeout(host_timeout_raw),
+        # 상한은 더 이상 쓰지 않는다. 자리를 남기는 이유는 가져오기 계약(manifest)이 이
+        # 필드를 읽기 때문이다 - 구형 manifest 와 같은 자리를 지켜야 서버가 "상한이 걸린
+        # 실행은 미관측 닫힘 권한이 없다"는 판정을 계속 할 수 있다. 이 스캐너는 항상 "" 다.
+        "host_timeout": "",
         "base_flags": build_base_flags(args),
         "scan_type": args.scan_type,
         "ports_override": ports_override,
@@ -2144,14 +2122,10 @@ def load_plan(path: str, nmap_override: str = "", dry_run: bool = False,
     plan["exclude_ports"] = resumed_value(plan, "exclude_ports", "", validate_exclude_ports)
     plan["intensity"] = resumed_value(plan, "intensity", "normal", validate_intensity)
     plan["max_rate"] = resumed_value(plan, "max_rate", "", validate_max_rate)
-    # host_timeout 도 같은 안전 제어다 — 저강도가 노후 장비를 지키려고 켜 두는 호스트당 상한이라,
-    # 검증에서 빠지면 `"host_timeout": null` 한 줄로 -T3·속도상한은 남은 채 상한만 조용히 풀린다.
-    # 구버전 호환 기본값은 방금 확정한 강도에서 계산해야 gentle 재개가 30m 을 잃지 않는다(GH-48).
-    plan["host_timeout"] = resumed_value(
-        plan, "host_timeout",
-        validate_host_timeout(
-            GENTLE_HOST_TIMEOUT_DEFAULT if plan["intensity"] == "gentle" else HOST_TIMEOUT_DEFAULT),
-        validate_host_timeout)
+    # 구형 state 가 쥐고 있던 호스트당 상한은 이어받지 않는다. 상한을 걸어도 실측 소요는
+    # 거의 줄지 않으면서, 상한에 걸린 호스트는 포트 표 없이 성공 종료해 그 호스트의 기존
+    # 발견을 통째로 닫아 버리는 쪽이 훨씬 비쌌다. manifest 계약을 위해 자리만 남긴다.
+    plan["host_timeout"] = ""
     raw_targets = plan.get("raw_targets")
     if raw_targets is None:
         raw_targets = saved_batch_targets
@@ -2868,12 +2842,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--open-only", action="store_true", help="Add --open. Faster/smaller, but closed ports are omitted from heatmap XML.")
     p.add_argument("--include-closed", action="store_true", help="Remove --open so closed/filtered ports remain in XML.")
     p.add_argument("--stats-every", default=STATS_EVERY_DEFAULT, help="nmap --stats-every value.")
-    p.add_argument("--host-timeout", default=None,
-                   help="Per-host nmap --host-timeout. Off by default (0); --intensity gentle defaults to 30m. "
-                        "Set e.g. 30m to opt in, or 0 to force off.")
     p.add_argument("--intensity", choices=list(INTENSITY_CHOICES), default="normal",
                    help="gentle: safer for old/fragile gear (-T3, no --defeat-rst-ratelimit, capped rate/"
-                        "parallelism/retries, 30m host timeout).")
+                        "parallelism/retries).")
     p.add_argument("--max-rate", default="", metavar="PPS",
                    help="nmap --max-rate packets/sec cap. Applied automatically by --intensity gentle "
                         f"(default {GENTLE_MAX_RATE_DEFAULT}) when unset.")

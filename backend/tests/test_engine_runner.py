@@ -30,10 +30,11 @@ def test_build_job_spec_maps_options_to_stages():
     assert st["udp"]["enabled"] is True
     assert st["udp"]["ports"] == "53"
     assert st["udp"]["timing"] == "-T3"
-    assert st["udp"]["max_retries"] == 2
+    assert st["udp"]["max_retries"] == 4   # UDP 는 ICMP 율제한 때문에 더 넉넉히
     assert st["service"]["version_all"] is True
     assert st["service"]["timing"] == "-T3"
     assert st["service"]["max_retries"] == 2
+    assert st["service"]["udp_max_retries"] == 4
     assert st["service"]["nse"] == ["http-headers", "ssl-cert"]
     assert "targets_ports" not in spec
 
@@ -56,15 +57,14 @@ def test_build_job_spec_enables_only_protocols_with_explicit_ports(
         "timing": "-T4",
         "scan_type": "syn",
         "min_rate": 0,
-        "max_retries": 2,
-        "host_timeout": scan_options.HOST_TIMEOUT_DEFAULTS["tcp"],
+        "max_retries": scan_options.MAX_RETRIES_DEFAULT,
     }
     assert spec["stages"]["udp"] == {
         "enabled": udp,
         "ports": udp_ports,
         "timing": "-T4",
-        "max_retries": 2,
-        "host_timeout": scan_options.HOST_TIMEOUT_DEFAULTS["udp"],
+        # UDP 무응답은 '닫힘'이 아니라 '못 봄'이다 - TCP 보다 재전송을 넉넉히 준다.
+        "max_retries": scan_options.UDP_MAX_RETRIES_DEFAULT,
     }
 
 
@@ -279,8 +279,37 @@ def test_parse_events_exposes_timeout_reason_and_exact_grouped_commands(tmp_path
         "status": "timeout", "started_at": 10.0, "seconds": 20.5,
         "timeout_count": 1, "timed_out": ["10.0.0.2"], "rc": 0,
         "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
+        # 워치독이 끊은 실행에만 값이 실린다. 이 실행은 nmap 자신의 host-timeout 이므로 0.
+        "watchdog_seconds": 0,
         "finished_at": 30.5,
     }]
+
+
+def test_parse_events_separates_a_watchdog_kill_from_an_nmap_error(tmp_path):
+    """워치독은 우리가 끊은 것이고 error 는 nmap 이 죽은 것이다.
+
+    rc 만 보면 둘이 같아 보이는데 사용자가 할 일이 다르다 - 전자는 상한을 늘릴지 대상을
+    줄일지 정하는 문제고, 후자는 원인을 조사할 문제다.
+    """
+    out = tmp_path / "scan_wd"
+    out.mkdir()
+    (out / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "ts": 0.0},
+        {"event": "command_start", "ts": 1.0, "execution_id": "w1", "stage": "tcp",
+         "group": "common", "reason": "sweep", "artifact": "stage-tcp-b0",
+         "argv": ["nmap.exe", "-sS", "10.0.0.1"]},
+        {"event": "command_done", "ts": 601.0, "execution_id": "w1", "stage": "tcp",
+         "group": "common", "reason": "sweep", "artifact": "stage-tcp-b0",
+         "seconds": 600.0, "rc": -1, "outcome": "watchdog", "watchdog_seconds": 600,
+         "timed_out": [], "timeout_count": 0,
+         "retransmission_cap_hosts": [], "retransmission_cap_count": 0},
+    ]), encoding="utf-8")
+
+    execution = engine_runner.parse_events(out)["executions"][0]
+    assert execution["status"] == "watchdog"
+    assert execution["watchdog_seconds"] == 600
+    # 상한에 걸린 호스트 목록과는 다른 개념이다 - 워치독은 프로세스를 통째로 끊는다.
+    assert execution["timed_out"] == [] and execution["timeout_count"] == 0
 
 
 def test_parse_events_exposes_retransmission_cap_as_a_stage_warning(tmp_path):
