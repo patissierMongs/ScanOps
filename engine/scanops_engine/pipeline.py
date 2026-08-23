@@ -102,10 +102,26 @@ class Pipeline:
         execution_id = f"{meta['artifact']}:{time.time_ns()}"
         argv = nmaprun.build_command(self.nmap, args, base, sudo_mode=self.spec.sudo)
         self.sink.emit("command_start", execution_id=execution_id, argv=argv, **meta)
-        r = nmaprun.run(self.nmap, args, base, sudo_mode=self.spec.sudo,
-                        progress=lambda p: self.sink.emit("stage_progress", stage=stage, percent=p),
-                        stop_requested=self.state.stopped,
-                        watchdog_seconds=self.spec.watchdog_seconds)
+        # 연 것은 반드시 닫는다. run() 이 던지면(프로세스 생성 실패, 로그 파일 열기 실패,
+        # KeyboardInterrupt 등) 이 아래의 command_done 도 상위의 job_done 도 기록되지
+        # 않는다. 읽는 쪽은 job_done 이 있을 때만 열린 실행을 닫으므로, 그 실행은 UI 에서
+        # 영원히 '실행 중' 으로 남고 경과시간이 폴링할 때마다 늘어난다 - 워커가 이미
+        # 실패로 마감한 스캔에서도 그렇다.
+        started = time.time()
+        try:
+            r = nmaprun.run(
+                self.nmap, args, base, sudo_mode=self.spec.sudo,
+                progress=lambda p: self.sink.emit("stage_progress", stage=stage, percent=p),
+                stop_requested=self.state.stopped,
+                watchdog_seconds=self.spec.watchdog_seconds)
+        except BaseException as exc:
+            self.sink.emit(
+                "command_done", execution_id=execution_id,
+                seconds=round(time.time() - started, 2), rc=None, outcome="error",
+                timed_out=[], timeout_count=0, watchdog_seconds=0,
+                retransmission_cap_hosts=[], retransmission_cap_count=0,
+                error=type(exc).__name__, **meta)
+            raise
         r["execution_id"] = execution_id
         timed_out = nmaprun.timed_out(Path(str(base) + ".xml")) if r["rc"] == 0 else []
         cap_hosts = [host for host in (r.get("retransmission_cap_hosts") or [])

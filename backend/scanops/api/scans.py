@@ -3367,6 +3367,16 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
     # The database lifecycle is authoritative. An empty/truncated event stream must not make a
     # terminal scan look like it is still running after a restart or worker failure.
     overall["status"] = scan.status
+    # 같은 이유가 실행 기록에도 적용된다. 엔진이 command_start 를 남기고 command_done 을
+    # 못 남긴 채 죽으면(프로세스 강제 종료, 머신 손실) 그 실행은 계속 '실행 중' 이고,
+    # 경과시간이 폴링할 때마다 늘어난다 - 스캔이 이미 실패로 마감된 뒤에도 그렇다.
+    # 생산자 쪽은 예외 경로에서 닫도록 고쳤지만(pipeline._nmap), 그쪽이 손쓸 수 없는
+    # 종료도 있으므로 여기서 한 번 더 막는다.
+    if scan.status not in ("running", "canceling"):
+        for execution in executions:
+            if execution.get("status") == "running":
+                execution["status"] = "error"
+                execution["interrupted"] = True
     return {
         "scan_id": scan_id,
         "status": scan.status,

@@ -995,7 +995,8 @@ function ExecutionGroups({ executions }) {
                     <b>{STAGE_LABEL[execution.stage] || execution.stage}</b>
                     <span className="mono">{execution.status === "running"
                       ? `경과 ${fmtElapsed(liveSeconds)}` : fmtDur(execution.seconds)}</span>
-                    <span>{execution.status === "running" ? "실행 중"
+                    <span>{execution.interrupted ? "기록 없이 종료"
+                      : execution.status === "running" ? "실행 중"
                       /* 워치독은 우리가 프로세스 상한으로 끊은 것이다. nmap 이 죽은 것과
                          구분해야 사용자가 할 일이 갈린다 — 상한을 늘릴지, 대상을 줄일지. */
                       : execution.status === "watchdog"

@@ -980,6 +980,95 @@ def test_the_watchdog_kills_the_process_without_forging_a_success(tmp_path):
     assert quick["timed_out_by_watchdog"] is False and quick["rc"] == 0
 
 
+def test_a_crashed_nmap_call_still_closes_its_execution_record(tmp_path):
+    """연 것은 반드시 닫는다.
+
+    `command_start` 뒤 `nmaprun.run()` 이 던지면 뒤따르는 `command_done` 도, 상위의
+    `job_done` 도 기록되지 않는다. 읽는 쪽은 `job_done` 이 있을 때만 열린 실행을 닫으므로
+    그 실행은 UI 에서 영원히 '실행 중' 으로 남고, 경과시간이 폴링할 때마다 늘어난다 -
+    워커가 이미 그 스캔을 실패로 마감한 뒤에도 그렇다.
+    """
+    import sys
+
+    import pytest
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import nmaprun
+
+    events = []
+
+    class _Sink:
+        def emit(self, event, **fields):
+            events.append((event, fields))
+
+    pipe, _spec = _pipeline(tmp_path, {
+        "job_id": "j", "targets": ["10.0.0.1"], "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": True, "ports": "22"}},
+    })
+    pipe.sink = _Sink()
+
+    def boom(*args, **kwargs):
+        raise OSError("cannot spawn nmap")
+
+    original, nmaprun.run = nmaprun.run, boom
+    try:
+        with pytest.raises(OSError):
+            pipe._sweep_batch("tcp", 0, ["10.0.0.1"])
+    finally:
+        nmaprun.run = original
+
+    names = [event for event, _ in events]
+    assert names.count("command_start") == names.count("command_done") == 1, names
+    done = next(fields for event, fields in events if event == "command_done")
+    assert done["outcome"] == "error" and done["rc"] is None
+    assert done["error"] == "OSError"
+    # 예외는 삼키지 않는다 - 실패를 기록만 하고 성공처럼 넘어가면 더 나쁘다.
+
+
+def test_a_terminal_scan_never_reports_a_still_running_command(tmp_path, monkeypatch):
+    """생산자가 손쓸 수 없는 종료(프로세스 강제 종료·머신 손실)도 있다.
+
+    그때는 DB 의 lifecycle 이 유일한 진실이다. 스캔이 끝난 것으로 마감됐는데 실행 기록만
+    '실행 중' 이면, 화면은 폴링할 때마다 늘어나는 경과시간을 계속 보여준다.
+    """
+    import json
+    import time as _time
+
+    from scanops.scanning import engine_runner
+
+    out = tmp_path / "scan_1"
+    out.mkdir()
+    started = _time.time() - 3600
+    (out / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "ts": started},
+        {"event": "stage_start", "ts": started, "stage": "tcp"},
+        {"event": "command_start", "ts": started, "execution_id": "x1", "stage": "tcp",
+         "group": "common", "reason": "sweep", "artifact": "stage-tcp-b0",
+         "argv": ["nmap.exe", "-sS", "10.0.0.1"]},
+    ]), encoding="utf-8")
+
+    # 이벤트만 보면 아직 도는 중이고 경과시간이 계속 자란다.
+    live = engine_runner.parse_events(out)["executions"][0]
+    assert live["status"] == "running" and live["seconds"] >= 3599
+
+    # API 는 DB 의 terminal status 로 그 기록을 닫아야 한다.
+    from scanops.api import scans as scans_api
+
+    executions = [dict(live)]
+    scan_status = "failed"
+    if scan_status not in ("running", "canceling"):
+        for execution in executions:
+            if execution.get("status") == "running":
+                execution["status"] = "error"
+                execution["interrupted"] = True
+    assert executions[0]["status"] == "error" and executions[0]["interrupted"] is True
+    # 위 블록은 scan_stages 안의 로직과 같은 모양이어야 한다 - 소스에서 대조한다.
+    source = (pathlib_Path(scans_api.__file__)).read_text(encoding="utf-8")
+    body = source.split("def scan_stages(")[1]
+    assert 'execution["interrupted"] = True' in body
+    assert 'if scan.status not in ("running", "canceling"):' in body
+
+
 def test_the_three_scan_paths_agree_on_the_throughput_numbers():
     """웹·엔진·단독 스캐너가 같은 숫자를 써야 같은 프리셋이 같은 스캔이 된다.
 
