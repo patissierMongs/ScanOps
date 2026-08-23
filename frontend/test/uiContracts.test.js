@@ -840,8 +840,17 @@ test("the process watchdog is reachable from the staged scan form", () => {
   // 호스트 상한을 없앤 대신 둔 제어가 화면에서 켤 수 없으면, 사용자는 보호만 잃고
   // 대체는 얻지 못한다. 기본은 0(끔)이되 켜는 길은 있어야 한다.
   assert.match(scans, /const \[watchdogMin, setWatchdogMin\] = useState\(0\)/);
-  assert.match(scans, /watchdog_seconds: Math\.max\(0, Math\.round\(watchdogMin \* 60\)\)/);
+  assert.match(scans, /const watchdogSeconds = Math\.max\(0, Math\.round\(watchdogMin \* 60\)\)/);
   assert.match(scans, /실행 상한 — nmap 프로세스 하나당/);
+  // 단계 스캔과 한 번에 실행 **양쪽** 요청이 값을 보내야 한다. 파일 어딘가에 문자열이
+  // 있는지만 보면, 한쪽 분기에만 실린 것을 통과시킨다.
+  const body = scans.split("const body = staged")[1].split("api(endpoint")[0];
+  const [stagedBranch, legacyBranch] = body.split(": {");
+  assert.match(stagedBranch, /watchdog_seconds:/);
+  assert.match(legacyBranch, /watchdog_seconds:/, "한 번에 실행 요청이 워치독을 안 보낸다");
+  // 화면이 약속하는 것과 실제 동작이 어긋나면 안 된다. 지금은 상한에 걸린 실행의 관측이
+  // 파일에만 남고 발견으로 인입되지는 않으므로, 그 한계를 화면이 말해야 한다.
+  assert.match(scans, /지금은 발견으로 인입되지 않습니다/);
   // 워치독이 끊은 실행은 nmap 이 죽은 것과 구분해서 보여야 할 일이 갈린다.
   assert.match(scans, /execution\.status === "watchdog"/);
 });

@@ -310,9 +310,12 @@ export default function Scans({ user }) {
     if (!targetList.length) { toast("타겟을 입력하세요", { type: "err" }); return; }
     setBusy(true);
     const endpoint = staged ? "/scans/run-staged" : "/scans/run";
+    // 실행 상한은 두 경로 모두에 있다. staged 분기에만 실으면 단계 스캔을 끈 사용자는
+    // 화면에서 값을 정해 놓고도 그 값이 서버에 닿지 않는다.
+    const watchdogSeconds = Math.max(0, Math.round(watchdogMin * 60));
     const body = staged
-      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize, discovery, watchdog_seconds: Math.max(0, Math.round(watchdogMin * 60)) }
-      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize };
+      ? { name, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize, discovery, watchdog_seconds: watchdogSeconds }
+      : { name, workflow: opt.workflow, options: opt.options, ports: opt.ports, nse: opt.nse, targets: targetList, exclude: excludeList, exclude_ports: excludePorts, batch_size: batchSize, watchdog_seconds: watchdogSeconds };
     api(endpoint, { method: "POST", json: body })
       .then((s) => { toast(`${staged ? "단계 " : ""}스캔 시작됨 · #${s.id} (백그라운드 — 진행은 아래 표)`); setTargets(""); setExclude(""); setName(""); load(); })
       .catch((e2) => toast(e2.message, { type: "err" }))
@@ -484,21 +487,30 @@ export default function Scans({ user }) {
                 <div className="muted scan-hint">넓은 대역을 이만큼씩 쪼개 스캔합니다.</div>
               </section>
 
-              {staged && (
-                <section className="scan-step">
-                  <div className="row" style={{ justifyContent: "space-between" }}>
-                    <span className="cb-label">실행 상한 — nmap 프로세스 하나당</span>
-                    <span className="mono">{watchdogMin ? `${watchdogMin}분` : "없음"}</span>
-                  </div>
-                  <input type="range" min={0} max={240} step={10} value={watchdogMin}
-                         onChange={(e) => setWatchdogMin(Number(e.target.value))} style={{ width: "100%" }} />
+              {/* 실행 상한은 단계 스캔과 한 번에 실행 양쪽에 모두 적용된다 — staged 안에
+                  넣어 두면 단계 스캔을 끈 사용자가 값을 정할 방법이 없다. */}
+              <section className="scan-step">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <span className="cb-label">실행 상한 — nmap 프로세스 하나당</span>
+                  <span className="mono">{watchdogMin ? `${watchdogMin}분` : "없음"}</span>
+                </div>
+                <input type="range" min={0} max={240} step={10} value={watchdogMin}
+                       onChange={(e) => setWatchdogMin(Number(e.target.value))} style={{ width: "100%" }} />
+                <div className="muted scan-hint">
+                  기본은 <b>없음</b>입니다. 전 포트 스캔이 정상적으로 몇 시간 걸리는 망도 있어서,
+                  섣부른 값은 느린 망을 실패로 바꿉니다.
+                </div>
+                {/* 화면이 약속하는 것과 실제로 일어나는 일이 어긋나면 안 된다. 산출물 파일에
+                    관측이 보존되는 것과, 그 관측이 ScanOps 에 인입되는 것은 아직 다르다. */}
+                {watchdogMin > 0 && (
                   <div className="muted scan-hint">
-                    기본은 <b>없음</b>입니다. 전 포트 스캔이 정상적으로 몇 시간 걸리는 망도 있어서,
-                    섣부른 값은 느린 망을 실패로 바꿉니다. 켜면 그때까지 끝난 호스트의 관측은
-                    남기고 그 실행만 중단합니다(닫힘 판정 권한은 얻지 못합니다).
+                    <b>주의:</b> 상한에 걸린 실행은 <b>실패로 마감</b>됩니다. 그때까지 끝난 호스트의
+                    관측은 결과 XML 파일에 보존되지만(닫힘 판정 권한은 얻지 못합니다),
+                    <b>지금은 발견으로 인입되지 않습니다</b> — 필요하면 그 폴더를 [가져오기]로
+                    올리세요. 켜기 전에 [중지] 버튼으로 충분한지 먼저 검토하시기 바랍니다.
                   </div>
-                </section>
-              )}
+                )}
+              </section>
 
               {staged && (
                 <section className="scan-step">

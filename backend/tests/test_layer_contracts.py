@@ -1164,9 +1164,20 @@ def test_every_surface_that_lost_the_host_timeout_can_turn_the_watchdog_on():
     assert '_wait_scan_process(scan_id, proc, int(st.get("watchdog_seconds")' in scans_src, \
         "청킹 배치가 상한을 안 받는다"
 
-    # 5) 웹 UI 가 실제로 그 필드를 보낸다(계약이 있어도 화면이 안 보내면 못 켠다).
+    # 5) 웹 UI 가 실제로 그 필드를 보낸다. 파일 어딘가에 문자열이 있는지만 보면 안 된다 -
+    #    이전 판이 정확히 그렇게 검사해서, staged 분기에만 실린 것을 통과시켰다.
+    #    **두 요청 분기를 각각 뜯어** 확인한다.
     ui = (root / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
-    assert "watchdog_seconds:" in ui, "staged 요청 본문이 워치독을 안 보낸다"
+    body = ui.split("const body = staged")[1].split("api(endpoint")[0]
+    staged_branch, legacy_branch = body.split(": {", 1)
+    assert "watchdog_seconds:" in staged_branch, "staged 요청 본문이 워치독을 안 보낸다"
+    assert "watchdog_seconds:" in legacy_branch, "legacy/auto 요청 본문이 워치독을 안 보낸다"
+
+    # 6) 컨트롤 자체가 staged 전용으로 숨겨져 있으면 안 된다 - 백엔드는 두 경로 모두
+    #    받는데 화면에서 단계 스캔을 끄면 값을 정할 방법이 없어진다.
+    control = ui.split("실행 상한 — nmap 프로세스 하나당")[0]
+    tail = control.rsplit("<section", 1)[1] if "<section" in control else control
+    assert "{staged &&" not in tail, "실행 상한 컨트롤이 staged 전용으로 갇혀 있다"
 
 
 def test_the_three_scan_paths_agree_on_the_throughput_numbers():
