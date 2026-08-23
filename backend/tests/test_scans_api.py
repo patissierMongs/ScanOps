@@ -2722,6 +2722,56 @@ def test_engine_log_problems_finds_what_the_xml_never_records():
         assert engine_runner.log_problems(_Path(tmp) / "missing.log") == []
 
 
+def test_watchdog_out_of_range_is_rejected_before_any_job_is_created(client, monkeypatch):
+    """요청 경계에서 걸러야 한다 - 레거시 경로는 이 값을 threading.Timer 에 그대로 넘긴다.
+
+    제약 없는 int 였을 때 -1 · 86401 · 10**100 이 전부 통과했다. 마지막 값은
+    threading.TIMEOUT_MAX(약 9.2e9)를 넘어 타이머 스레드가 OverflowError 로 즉시 죽는다 -
+    API 는 스캔을 시작했다고 응답하는데 상한만 조용히 사라진다. 사용자가 켰다고 믿는 보호가
+    없는 채로 도는, 가장 나쁜 실패 방식이다.
+
+    그래서 **작업을 만들기 전에** 422 로 거절하고, 스캔 행도 남지 않아야 한다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.scanning import chunker
+
+    h = _auth(client, "admin")
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    body = {
+        "name": "wd", "workflow": "auto", "options": ["syn"], "ports": "T:80",
+        "targets": ["127.0.0.1"], "batch_size": 256,
+    }
+    before_count = len(client.get("/api/scans", headers=h).json())
+
+    for bad in (-1, 86401, 10 ** 100):
+        for endpoint in ("/api/scans/run", "/api/scans/run-staged"):
+            payload = {**body, "watchdog_seconds": bad}
+            if endpoint.endswith("run-staged"):
+                payload["discovery"] = "pn"
+            response = client.post(endpoint, headers=h, json=payload)
+            assert response.status_code == 422, (
+                f"{endpoint} 가 watchdog_seconds={bad} 를 수락했다: {response.text[:200]}")
+
+    # 거절된 요청이 스캔 행을 남기면 안 된다 - '시작했다'는 흔적만 남는 것이 더 나쁘다.
+    assert len(client.get("/api/scans", headers=h).json()) == before_count
+
+    # 경계값은 그대로 받아야 한다(과잉 거절이 아니어야 한다).
+    ok = client.post("/api/scans/run", headers=h,
+                     json={**body, "watchdog_seconds": 86400})
+    assert ok.status_code == 200, ok.text
+    state = chunker.read_state(scans_api._basename(ok.json()["id"]))
+    assert state["watchdog_seconds"] == 86400
+
+
 def test_windows_ansi_error_text_does_not_hide_the_marker():
     """오류 문구가 ANSI 코드페이지라 UTF-8 로 못 읽혀도 표식 탐지는 살아 있어야 한다."""
     import tempfile

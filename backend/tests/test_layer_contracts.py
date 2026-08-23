@@ -1135,6 +1135,12 @@ def test_every_surface_that_lost_the_host_timeout_can_turn_the_watchdog_on():
     """
     from pathlib import Path as _Path
 
+    import sys
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import spec as engine_spec
+
+    from scanops.scanning import scan_options
     from scanops.schemas import ScanRunIn
 
     root = pathlib_Path(__file__).resolve().parents[2]
@@ -1145,10 +1151,23 @@ def test_every_surface_that_lost_the_host_timeout_can_turn_the_watchdog_on():
     assert '"watchdog_seconds": validate_watchdog(' in standalone
     assert "watchdog_seconds=watchdog" in standalone, "plan 값이 실행 루프까지 안 간다"
 
-    # 2) 웹 API 계약: 요청 본문이 값을 받고 기본은 끔이다.
+    # 2) 웹 API 계약: 요청 본문이 값을 받고 기본은 끔이며, **범위를 경계에서 거절**한다.
+    #    레거시 경로가 이 값을 threading.Timer 에 그대로 넘기므로, TIMEOUT_MAX 를 넘는
+    #    값은 타이머 스레드가 즉시 죽어 '요청은 수락됐는데 상한만 없는' 상태가 된다.
+    import pytest as _pytest
+
     assert ScanRunIn.model_fields["watchdog_seconds"].default == 0
     body = ScanRunIn(targets=["10.0.0.1"], watchdog_seconds=900)
     assert body.watchdog_seconds == 900
+    for bad in (-1, scan_options.WATCHDOG_SECONDS_MAX + 1, 10 ** 100):
+        with _pytest.raises(ValueError):
+            ScanRunIn(targets=["10.0.0.1"], watchdog_seconds=bad)
+
+    # 세 층의 상한이 같아야 한다 - 갈리면 한 층에서 통과한 값이 다른 층에서 거절된다.
+    engine_max = engine_spec._MAX_WATCHDOG_SECONDS
+    standalone_src = (root / "scanner" / "scanops_scanner.py").read_text(encoding="utf-8")
+    assert scan_options.WATCHDOG_SECONDS_MAX == engine_max == 24 * 60 * 60
+    assert "0 <= seconds <= 24 * 60 * 60" in standalone_src
 
     # 3) staged: 요청 값이 엔진 spec 까지 실린다.
     from scanops.scanning import engine_runner

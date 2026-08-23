@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+from .scanning import scan_options
 
 
 # ---- auth / user ----
@@ -76,7 +78,15 @@ class ScanRunIn(BaseModel):
     # 버리면서 실행은 성공으로 끝내서, '살아 있는데 열린 포트가 없다'로 읽히는 미탐을 만들었다.
     # 워치독은 프로세스를 밖에서 끝내므로 그때까지 -oA 로 쓰인 XML 은 남고, 실행이 비정상
     # 종료라 미관측 닫힘 권한을 얻지 못한다.
-    watchdog_seconds: int = 0
+    #
+    # 범위를 여기서 못박는다. 제약 없는 int 면 -1 · 86401 · 10**100 이 전부 통과하고,
+    # 레거시 경로가 그 값을 threading.Timer 에 그대로 넘긴다. TIMEOUT_MAX 를 넘는 값은
+    # 타이머 스레드가 OverflowError 로 즉시 죽어서, 요청은 수락됐는데 상한만 조용히
+    # 사라진다. 잘못된 값은 작업을 만들기 **전에** 422 로 거절하는 것이 맞다.
+    watchdog_seconds: int = Field(
+        default=scan_options.WATCHDOG_SECONDS_DEFAULT,
+        ge=0, le=scan_options.WATCHDOG_SECONDS_MAX,
+    )
 
 
 class KnownResultsIn(BaseModel):

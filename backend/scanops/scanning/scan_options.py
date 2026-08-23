@@ -168,6 +168,14 @@ UDP_MAX_RETRIES_DEFAULT = 4
 # 미탐을 만들었다. 워치독은 프로세스를 밖에서 끝내므로 그때까지 쓰인 XML 은 남고 실행은
 # 비정상 종료라 닫힘 권한을 얻지 못한다.
 WATCHDOG_SECONDS_DEFAULT = 0
+# 상한의 상한(24시간). 엔진 spec(_MAX_WATCHDOG_SECONDS)·단독 스캐너(validate_watchdog)와
+# 같은 값이어야 한다 - 계약 테스트가 셋의 일치를 검사한다.
+#
+# 요청 경계에서 반드시 걸러야 한다. 레거시 경로는 이 값을 그대로 threading.Timer 에 넘기는데,
+# threading.TIMEOUT_MAX(약 9.2e9)를 넘는 값은 타이머 스레드가 OverflowError 로 즉시 죽는다.
+# 그러면 API 는 스캔을 시작했다고 응답하는데 상한은 조용히 사라진다 - 사용자가 켰다고 믿는
+# 보호가 없는 채로 도는, 가장 나쁜 실패 방식이다.
+WATCHDOG_SECONDS_MAX = 24 * 60 * 60
 
 _BY_KEY = {o["key"]: o for o in SCAN_OPTIONS}
 _NSE_KEYS = {s["key"] for s in NSE_SCRIPTS}
