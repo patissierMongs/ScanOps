@@ -287,6 +287,7 @@ def test_parse_events_exposes_timeout_reason_and_exact_grouped_commands(tmp_path
         # 지연 진단 재료 - 이벤트에 없으면 0/빈 값이지 누락이 아니다.
         "phases": {}, "hosts_found": 0, "open_ports": 0,
         "inferred_open": 0, "products": 0, "empty": False,
+        "proto": "", "hosts": [], "label": "", "ports": "",
     }]
 
 

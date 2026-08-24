@@ -2011,3 +2011,18 @@ def test_the_trace_panel_reads_the_fields_the_backend_actually_sends(tmp_path):
 
     # 패널을 여는 첫 가드가 실제로 통과해야 한다 - 통과 못 하면 패널 자체가 안 그려진다.
     assert trace["runs_total"] > 0
+
+    # 생산자가 대상·포트를 실어야 '호스트별 소요' 와 진행 중 표가 채워진다. 안 실으면
+    # 그 섹션은 오류 없이 **영원히 빈 채로** 남는다 - 실제로 그렇게 만들었다가 놓쳤다.
+    meta_src = (pathlib_Path(__file__).resolve().parents[2]
+                / "engine" / "scanops_engine" / "pipeline.py").read_text(encoding="utf-8")
+    produced = meta_src.split("def _execution_meta")[1].split("def ")[0]
+    for key in ("hosts", "label", "ports", "proto"):
+        assert f'"{key}"' in produced, f"생산자가 {key} 를 안 싣는다"
+    parser_src = (pathlib_Path(__file__).resolve().parents[2]
+                  / "backend" / "scanops" / "scanning"
+                  / "engine_runner.py").read_text(encoding="utf-8")
+    started = parser_src.split('elif e == "command_start"')[1].split("elif e ==")[0]
+    for key in ("hosts", "label", "ports", "proto"):
+        assert f'"{key}"' in started, f"파서가 {key} 를 실행 기록에 안 담는다"
+    assert trace["by_host"], "호스트별 소요가 비었다 - 그 섹션은 화면에 안 나온다"

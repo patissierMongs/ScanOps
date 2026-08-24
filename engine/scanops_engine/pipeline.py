@@ -15,6 +15,7 @@ from .spec import (DEFAULT_MAX_PARALLELISM, DEFAULT_MIN_HOSTGROUP,
                    DEFAULT_TCP_NSE_SCRIPT_TIMEOUT, DEFAULT_UDP_NSE_SCRIPT_TIMEOUT,
                                       DISCOVERY_PA, DISCOVERY_PS)
 from .state import RunState
+import re
 
 
 # UDP 식별이 죽었을 때 한 번 갈아 끼울 nsock 엔진. nmap#3138 의 유지관리자 우회책이며
@@ -23,6 +24,10 @@ _UDP_RETRY_ENGINE = "select"
 # 실패한 UDP 묶음을 포트별로 쪼갤 때의 상한. 넘으면 쪼개지 않고 그 실행을 저하로 남긴다 —
 # 죽은 실행이 포트를 많이 물고 있으면 쪼개는 것 자체가 프로세스 폭증이 된다.
 _MAX_SPLIT_UNITS = 32
+
+
+# 명령줄 맨 뒤의 타깃. 옵션과 구분하려면 시작 문자가 - 가 아니어야 한다.
+_TARGET_RE = re.compile(r"^(?!-)[0-9A-Za-z_.:/-]+$")
 
 
 class _LockedSink:
@@ -85,12 +90,24 @@ class Pipeline:
             reason = "공통 실행의 실패를 격리하거나 지정된 재스캔 범위만 정확히 확인합니다."
         if "--nsock-engine" in args:
             reason = "UDP 서비스 프로브 오류 뒤 nsock 엔진을 변경해 같은 범위를 복구합니다."
+        # 지연 진단이 읽는 값들. 대상과 포트를 실을 자리가 없으면 화면의 '호스트별 소요'
+        # 와 진행 중 표가 영원히 빈 채로 남는다 - 어느 호스트가 끌고 있는지가 이 도구를
+        # 쓰는 이유 중 하나다. argv 에서 되짚지 않고 실제로 올린 값을 그대로 적는다.
+        hosts = [a for a in args if _TARGET_RE.match(a)]
+        try:
+            ports = args[args.index("-p") + 1]
+        except (ValueError, IndexError):
+            ports = ""
         return {
             "stage": ui_stage,
             "group": "individual" if individual else "common",
             "role": role,
             "reason": reason,
             "artifact": name,
+            "proto": proto,
+            "hosts": hosts,
+            "label": hosts[0] if len(hosts) == 1 else f"{len(hosts)}대",
+            "ports": ports,
         }
 
     def _nmap(self, stage, args, base, fatal=True) -> dict:

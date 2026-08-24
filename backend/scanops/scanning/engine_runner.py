@@ -1178,6 +1178,11 @@ def parse_events(out_dir) -> dict:
                 "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
                 "phases": {}, "hosts_found": 0, "open_ports": 0,
                 "inferred_open": 0, "products": 0, "empty": False,
+                # 지연 진단이 읽는 값. 없으면 '호스트별 소요' 와 진행 중 표가 빈 채로 남는다.
+                "proto": ev.get("proto") if isinstance(ev.get("proto"), str) else "",
+                "hosts": [h for h in (ev.get("hosts") or []) if isinstance(h, str)],
+                "label": ev.get("label") if isinstance(ev.get("label"), str) else "",
+                "ports": ev.get("ports") if isinstance(ev.get("ports"), str) else "",
             }
             if ev.get("role") in {"authority", "enrichment"}:
                 execution["role"] = ev["role"]
