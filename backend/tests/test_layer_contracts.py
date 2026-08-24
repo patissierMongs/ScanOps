@@ -1897,3 +1897,73 @@ def test_a_watchdog_stop_is_not_reported_as_a_launch_failure(tmp_path, monkeypat
         raise AssertionError("띄우지도 못했는데 실패로 처리되지 않았다")
     except scans_api._WorkerFailure as exc:
         assert exc.code == "nmap_launch_failed"
+
+
+def test_a_failed_retry_never_destroys_the_first_attempts_artifacts(tmp_path):
+    """재시도는 임시 base 로 돌고, **채택했을 때만** 원래 자리를 덮어야 한다.
+
+    같은 ``-oA`` 를 쓰면 nmap 이 시작하자마자 첫 실행의 파일을 잘라 버린다. 워치독이 끊은 뒤
+    복구해 둔 관측이 그 순간 사라지고, 재시도까지 실패하면 첫 실행이 남긴 부분 관측만 더
+    나쁜 것으로 바뀐다 - terminal 인입은 부분 stage3 산출물도 읽으므로 그 손실이 그대로
+    결과가 된다.
+
+    엔진과 단독 스캐너가 **같은 규칙**을 써야 한다. 한쪽만 고치면 같은 실패가 경로에 따라
+    다르게 끝난다.
+    """
+    import importlib.util
+    import sys
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import nmaprun
+
+    spec = importlib.util.spec_from_file_location(
+        "standalone_for_retry",
+        pathlib_Path(__file__).resolve().parents[2] / "scanner" / "scanops_scanner.py",
+    )
+    standalone = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(standalone)
+
+    base = tmp_path / "stage3-udp-b0-g0"
+    alt = nmaprun.retry_base(base)
+    # 접두사여야 이름이 단계로 끝난다 - 단계를 이름 끝으로 판별하는 곳이 여럿이다.
+    assert alt.name == "retry~stage3-udp-b0-g0"
+    assert alt.name.endswith(base.name)
+
+    for suffix in nmaprun.OUTPUT_SUFFIXES:
+        (tmp_path / f"stage3-udp-b0-g0{suffix}").write_text("first", encoding="utf-8")
+        (tmp_path / f"retry~stage3-udp-b0-g0{suffix}").write_text("worse", encoding="utf-8")
+
+    # 채택하지 않으면 첫 실행이 그대로 남고 재시도 파일은 사라진다.
+    nmaprun.discard_artifacts(alt)
+    for suffix in nmaprun.OUTPUT_SUFFIXES:
+        kept = tmp_path / f"stage3-udp-b0-g0{suffix}"
+        assert kept.read_text(encoding="utf-8") == "first", "첫 실행 산출물이 사라졌다"
+        assert not (tmp_path / f"retry~stage3-udp-b0-g0{suffix}").exists(), "유령 파일이 남았다"
+
+    # 채택하면 그때 옮긴다.
+    for suffix in nmaprun.OUTPUT_SUFFIXES:
+        (tmp_path / f"retry~stage3-udp-b0-g0{suffix}").write_text("better", encoding="utf-8")
+    nmaprun.adopt_artifacts(alt, base)
+    for suffix in nmaprun.OUTPUT_SUFFIXES:
+        assert (tmp_path / f"stage3-udp-b0-g0{suffix}").read_text(encoding="utf-8") == "better"
+        assert not (tmp_path / f"retry~stage3-udp-b0-g0{suffix}").exists()
+
+    # 채택 조건은 '읽을 수 있는 산출물이 실제로 있는가' 다. 파일이 없을 때도 참인 조건을
+    # 쓰면 아무것도 남기지 못한 재시도를 멀쩡하다고 읽는다.
+    empty = tmp_path / "nothing"
+    assert nmaprun.xml_usable(empty) is False
+    (tmp_path / "nothing.xml").write_text("<nmaprun><host", encoding="utf-8")
+    assert nmaprun.xml_usable(empty) is False
+    (tmp_path / "nothing.xml").write_text("<nmaprun></nmaprun>", encoding="utf-8")
+    assert nmaprun.xml_usable(empty) is True
+
+    # 두 경로가 같은 이름 규칙을 쓰는지 - 단독 스캐너도 접두사여야 한다.
+    std_alt = standalone.Path(str(base)).with_name(f"retry~{base.name}")
+    assert std_alt.name == alt.name
+
+    # 엔진의 그룹 UDP 폴백이 실제로 임시 base 를 쓰는지 소스에서 확인한다.
+    pipeline_src = (pathlib_Path(__file__).resolve().parents[2]
+                    / "engine" / "scanops_engine" / "pipeline.py").read_text(encoding="utf-8")
+    fallback = pipeline_src.split('_UDP_RETRY_ENGINE] + args')[1].split("self.sink.emit")[0]
+    assert "alt_base" in fallback, "그룹 UDP 재시도가 첫 실행과 같은 base 를 쓴다"
+    assert "adopt_artifacts" in fallback and "discard_artifacts" in fallback

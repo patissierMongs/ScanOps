@@ -339,7 +339,9 @@ def expected_enrichment_xml(out_dir, spec: dict) -> list[Path]:
 _MAX_SPLIT_UNITS = 32
 
 
-def _enrichment_units(out_dir, spec: dict) -> list[tuple[list[Path], list[Path]]]:
+def _enrichment_units(out_dir, spec: dict,
+                      superseded: set[str] | None = None,
+                      ) -> list[tuple[list[Path], list[Path]]]:
     """(ip, proto) 마다 (묶음 산출물, 대체 가능한 분할 산출물).
 
     정상 경로는 프로토콜당 한 프로세스라 묶음 파일 하나가 나온다. 그 묶음이 죽으면 엔진이
@@ -357,6 +359,9 @@ def _enrichment_units(out_dir, spec: dict) -> list[tuple[list[Path], list[Path]]
     state = _read_state(out)
     open_map = state.get("open_map") or {}
     units: list[tuple[list[Path], list[Path]]] = []
+    # 실패해서 대체 실행에 자리를 넘긴 묶음 산출물. 호출부가 '기대 밖' 으로 다시 세지
+    # 않도록 이름만 넘긴다 - 실제 증거 손실은 대체 집합의 기대치가 판단한다.
+    superseded = superseded if superseded is not None else set()
     covered: set[tuple[str, str, int]] = set()
     # 새 엔진은 공통 포트가 많은 배치를 한 Nmap으로 식별한다. 생산자가 coverage에 정확한
     # 산출물·호스트를 적으므로, 성공한 배치 산출물 하나를 호스트별 파일 N개로 지어내지 않는다.
@@ -364,9 +369,15 @@ def _enrichment_units(out_dir, spec: dict) -> list[tuple[list[Path], list[Path]]
         if not isinstance(entry, dict) or entry.get("role") != "enrichment":
             continue
         artifact, proto = entry.get("artifact"), entry.get("proto")
-        if (not entry.get("finished") or not isinstance(artifact, str)
-                or proto not in {"tcp", "udp"}
+        if (not isinstance(artifact, str) or proto not in {"tcp", "udp"}
                 or not artifact.startswith(f"stage3-{proto}-b")):
+            continue
+        if not entry.get("finished"):
+            # 실패한 묶음이다. 이 자리에서 빼면 그 파일이 어느 기대 집합에도 안 들어가고,
+            # 기대 밖 산출물을 훑는 마지막 단계가 그것을 손상으로 다시 센다 - 호스트별
+            # 대체 실행이 **전부** 성공해 증거를 되찾았어도 nse_degraded 와 호스트 없는
+            # artifact_broken 이 남는다. 대체된 산출물이라는 사실만 기록하고 넘어간다.
+            superseded.add(artifact)
             continue
         units.append(([out / artifact], []))
         hosts = entry.get("hosts")
@@ -770,8 +781,9 @@ def artifact_report(out_dir, spec: dict, force_scanned_hosts: bool = False) -> d
     if not force_scanned_hosts:
         # 전체 스캔에서 stage3 는 enrichment 다. 어긋나도 sweep 의 안전한 권한을 뺏지 않지만,
         # 증거가 빠졌다는 사실은 남겨야 한다 — 안 그러면 손실이 정상 완료로 숨는다.
-        units = _enrichment_units(out, spec)
-        seen: set[str] = set()
+        superseded: set[str] = set()
+        units = _enrichment_units(out, spec, superseded)
+        seen: set[str] = superseded
         for grouped, split in units:
             seen |= {p.name for p in grouped} | {p.name for p in split}
             # 묶음이 온전하면 그것으로 끝. 아니면 쪼갠 집합이 **전부** 완결됐는지 본다 —

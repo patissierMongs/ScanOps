@@ -2428,3 +2428,66 @@ def test_closure_audit_bounds_a_legacy_scan_by_the_ports_it_actually_scanned(tmp
                           "tcp": {"enabled": True, "ports": ""}},
                "targets": ["10.0.0.1"]}
     assert audit_closures._covers(unknown, state, "10.0.0.1", 443, "tcp") is None
+
+
+def test_a_fully_recovered_group_does_not_report_its_superseded_artifact(tmp_path):
+    """묶음이 죽고 호스트별 대체가 **전부** 살아났으면 증거 손실이 아니다.
+
+    실패한 묶음 coverage 항목을 기대 집합에서 통째로 빼면, 그 파일이 어느 기대치에도 안
+    들어가고 '기대 밖 산출물' 을 훑는 마지막 단계가 그것을 손상으로 다시 센다. 결과는
+    완전히 복구된 스캔에 `nse_degraded` 와 호스트 없는 `artifact_broken` 이 붙는 것 -
+    운영자는 있지도 않은 증거 손실을 쫓게 된다.
+    """
+    spec = {
+        "job_id": 1, "targets": ["10.0.0.1"],
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": False, "ports": ""},
+                   "udp": {"enabled": True, "ports": "53,161"},
+                   "service": {"enabled": True, "nse": [], "confirm": False}},
+    }
+    # 묶음 하나가 죽었고(finished=false), 그 자리를 호스트별 실행이 대신했다.
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "open_map": {"10.0.0.1": {"udp": [53, 161]}},
+        "coverage": [{"role": "enrichment", "artifact": "stage3-udp-b0-g0.xml",
+                      "proto": "udp", "finished": False,
+                      "hosts": ["10.0.0.1"], "ports": "U:53,161"}],
+    }), encoding="utf-8")
+    (tmp_path / "stage3-udp-b0-g0.xml").write_text(_TRUNCATED_XML, encoding="utf-8")
+    # 대체 실행: 포트별로 쪼개 전부 완결됐다.
+    for port in (53, 161):
+        (tmp_path / f"stage3-10_0_0_1-udp{port}.xml").write_text(_FINISHED_XML, encoding="utf-8")
+
+    report = engine_runner.artifact_report(tmp_path, spec, force_scanned_hosts=False)
+    assert report["enrichment_broken"] == [], (
+        f"완전 복구인데 증거 손실로 보고했다: {report['enrichment_broken']}"
+    )
+    assert report["enrichment_missing"] == []
+
+
+def test_a_partially_recovered_group_still_reports_what_was_lost(tmp_path):
+    """반대 경계 — 대체가 일부만 살아났으면 그 손실은 그대로 남아야 한다.
+
+    대체된 산출물을 '기대 밖' 에서 빼는 것이 손실을 통째로 감추는 쪽으로 넘어가면 안 된다.
+    """
+    spec = {
+        "job_id": 1, "targets": ["10.0.0.1"],
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": False, "ports": ""},
+                   "udp": {"enabled": True, "ports": "53,161"},
+                   "service": {"enabled": True, "nse": [], "confirm": False}},
+    }
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "open_map": {"10.0.0.1": {"udp": [53, 161]}},
+        "coverage": [{"role": "enrichment", "artifact": "stage3-udp-b0-g0.xml",
+                      "proto": "udp", "finished": False,
+                      "hosts": ["10.0.0.1"], "ports": "U:53,161"}],
+    }), encoding="utf-8")
+    (tmp_path / "stage3-udp-b0-g0.xml").write_text(_TRUNCATED_XML, encoding="utf-8")
+    (tmp_path / "stage3-10_0_0_1-udp53.xml").write_text(_FINISHED_XML, encoding="utf-8")
+    # 161 은 되찾지 못했다.
+    (tmp_path / "stage3-10_0_0_1-udp161.xml").write_text(_TRUNCATED_XML, encoding="utf-8")
+
+    report = engine_runner.artifact_report(tmp_path, spec, force_scanned_hosts=False)
+    lost = set(report["enrichment_broken"]) | set(report["enrichment_missing"])
+    assert lost, "부분 복구인데 손실을 하나도 보고하지 않았다"
+    assert any("udp161" in name for name in lost), lost

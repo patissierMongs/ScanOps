@@ -1,5 +1,6 @@
 """Compact terminal observability projections and lifecycle contracts."""
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -366,5 +367,68 @@ def test_the_retry_offer_matches_what_the_retry_endpoint_accepts(client):
         assert scans_api._durable_retry_detail(db, mixed.id)["required"] is True
         assert both["retry_status"] == "required"
         assert both["quality_status"] == "error"      # 섞인 오류도 그대로 보인다
+    finally:
+        db.close()
+
+
+def test_a_finished_scan_keeps_the_diagnostics_the_live_view_showed():
+    """완료된 스캔의 상세도 라이브와 같은 것을 보여야 한다.
+
+    terminal 상태에서는 응답이 이벤트 대신 DB 행에서 만들어진다. 그 투영이 진단값을
+    빠뜨리면 상한이나 호스트 시간 초과가 있었던 실행이 화면에서 '시간 초과 undefined대'
+    처럼 그려지고, 어느 호스트가 걸렸는지도 사라진다 - `command_done` 이 그 값을 이미
+    기록해 두었는데도.
+    """
+    init_db()
+    db = SessionLocal()
+    try:
+        scan = _scan(db, "진단")
+        materialize_terminal_observability(db, scan.id, executions=[{
+            "id": "stage3-udp-b0-g0.xml:1", "stage": "udp_service", "group": "common",
+            "artifact": "stage3-udp-b0-g0.xml", "argv": ["nmap", "-sU"],
+            "status": "timeout", "seconds": 12.0, "rc": 0,
+            "watchdog_seconds": 600, "timeout_count": 2,
+            "timed_out": ["10.0.0.1", "10.0.0.2"],
+            "retransmission_cap_count": 1, "retransmission_cap_hosts": ["10.0.0.3"],
+        }], issues=[], hosts=[])
+        db.commit()
+        row = db.query(ScanExecution).filter_by(scan_id=scan.id).one()
+        assert row.diagnostics_json == {
+            "watchdog_seconds": 600, "timeout_count": 2,
+            "timed_out": ["10.0.0.1", "10.0.0.2"],
+            "retransmission_cap_count": 1, "retransmission_cap_hosts": ["10.0.0.3"],
+        }, f"진단값이 저장되지 않았다: {row.diagnostics_json}"
+    finally:
+        db.close()
+
+    # 응답 투영도 라이브와 같은 모양이어야 한다 - 저장만 하고 안 실어 보내면 소용이 없다.
+    api_src = (Path(__file__).resolve().parents[1]
+               / "scanops" / "api" / "scans.py").read_text(encoding="utf-8")
+    projection = api_src.split("} for row in durable_executions]")[0]
+    projection = projection[projection.rindex("executions = ["):]
+    for key in ("watchdog_seconds", "timeout_count", "timed_out",
+                "retransmission_cap_count", "retransmission_cap_hosts"):
+        assert key in projection, f"완료된 스캔 응답에 {key} 가 없다"
+    assert "row.diagnostics_json" in projection
+
+
+def test_an_execution_without_diagnostics_stores_nothing():
+    """반대 경계 — 진단값이 없으면 빈 dict 로 자리를 차지하지 않는다.
+
+    옛 행은 이 값이 애초에 없었다. None 이어야 화면이 기본값으로 그린다.
+    """
+    init_db()
+    db = SessionLocal()
+    try:
+        scan = _scan(db, "평범")
+        materialize_terminal_observability(db, scan.id, executions=[{
+            "id": "stage-tcp-b0.xml:1", "stage": "tcp", "status": "done",
+            "seconds": 1.0, "rc": 0,
+            "watchdog_seconds": 0, "timeout_count": 0, "timed_out": [],
+            "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
+        }], issues=[], hosts=[])
+        db.commit()
+        row = db.query(ScanExecution).filter_by(scan_id=scan.id).one()
+        assert row.diagnostics_json is None
     finally:
         db.close()

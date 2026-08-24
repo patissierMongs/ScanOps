@@ -3573,6 +3573,11 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
             "argv": row.argv_json or [], "status": row.status,
             "started_at": row.started_at, "finished_at": row.finished_at,
             "seconds": row.seconds, "rc": row.return_code,
+            # 라이브 뷰와 **같은 모양**이어야 한다. 빠뜨리면 완료된 스캔에서 상한·시간 초과
+            # 정보가 사라져 화면이 'undefined대' 를 그린다.
+            "watchdog_seconds": 0, "timeout_count": 0, "timed_out": [],
+            "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
+            **(row.diagnostics_json or {}),
         } for row in durable_executions]
         issues = [{
             "issue_key": row.issue_key, "type": row.kind, "stage": row.stage,

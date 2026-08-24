@@ -189,6 +189,53 @@ def _repair_truncated_xml(path: Path) -> bool:
 
 # ── XML 파싱 ──
 
+# nmap 이 -oA 로 함께 쓰는 확장자. 재시도를 채택·폐기할 때 셋을 같이 다뤄야 한다.
+OUTPUT_SUFFIXES = (".xml", ".nmap", ".gnmap")
+
+
+def retry_base(base: Path) -> Path:
+    """재시도용 임시 산출물 base.
+
+    접미사가 아니라 **접두사**로 만든다 - 산출물 이름은 `...<단계>` 로 끝나고 단계를 그
+    끝으로 판별하는 곳이 여럿이라, 뒤에 붙이면 재시도만 단계를 잃는다.
+    """
+    return base.with_name(f"retry~{base.name}")
+
+
+def adopt_artifacts(src_base: Path, dst_base: Path) -> None:
+    """재시도 산출물을 원래 자리로 옮긴다 - 채택했을 때만 부른다."""
+    for suffix in OUTPUT_SUFFIXES:
+        src = Path(str(src_base) + suffix)
+        if src.exists():
+            src.replace(Path(str(dst_base) + suffix))
+
+
+def discard_artifacts(base: Path) -> None:
+    """채택하지 않은 산출물을 지운다 - 결과 폴더에 유령 파일을 남기지 않는다."""
+    for suffix in OUTPUT_SUFFIXES:
+        try:
+            Path(str(base) + suffix).unlink()
+        except OSError:
+            pass
+
+
+def xml_usable(base: Path) -> bool:
+    """읽을 수 있는 산출물이 실제로 있는가.
+
+    '끊기지 않았다' 로는 부족하다 - 파일이 **없을 때도** 그 말이 참이라, 아무것도 남기지
+    못한 실행을 '멀쩡하다' 로 읽는다. 재시도를 채택할지 정하는 자리에서는 그 차이가
+    '부분 결과' 와 '완주' 를 가른다.
+    """
+    path = Path(str(base) + ".xml")
+    if not path.exists():
+        return False
+    try:
+        ET.parse(path)
+        return True
+    except (ET.ParseError, OSError):
+        return False
+
+
 def _ipkey(ip: str):
     try:
         return tuple(int(o) for o in ip.split("."))

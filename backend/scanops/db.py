@@ -61,6 +61,12 @@ def _migrate() -> None:
             conn.exec_driver_sql("ALTER TABLE risk_rules ADD COLUMN product VARCHAR(128) DEFAULT ''")
         if rule_cols and "cpe" not in rule_cols:
             conn.exec_driver_sql("ALTER TABLE risk_rules ADD COLUMN cpe VARCHAR(128) DEFAULT ''")
+        exec_cols = {r[1] for r in
+                     conn.exec_driver_sql("PRAGMA table_info(scan_executions)").fetchall()}
+        if exec_cols and "diagnostics_json" not in exec_cols:
+            # 소급 backfill 은 하지 않는다 - 옛 행에는 그 값이 애초에 없었다. None 이면
+            # 화면이 기본값으로 그리고, 다음 스캔부터 채워진다.
+            conn.exec_driver_sql("ALTER TABLE scan_executions ADD COLUMN diagnostics_json JSON")
         cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(findings)").fetchall()}
         if "owner" not in cols:  # 자산대장 담당자명 전파용 컬럼
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN owner VARCHAR(128) DEFAULT ''")

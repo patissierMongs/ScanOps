@@ -130,6 +130,10 @@ class ScanExecution(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     return_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 실행 진단값(watchdog_seconds · timeout_count · timed_out · retransmission_cap_*).
+    # 컬럼을 다섯 개 만들지 않고 JSON 하나로 모은다 - 이 값들은 함께 읽히고, 나중에 항목이
+    # 늘어도 마이그레이션이 더 필요하지 않다. 없으면 None 이고 화면은 기본값으로 그린다.
+    diagnostics_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class ScanQualityIssue(Base):

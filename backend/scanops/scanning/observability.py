@@ -29,6 +29,27 @@ _HOST_STATUS_FIELDS = (
 )
 
 
+# 라이브 실행 뷰가 쓰는 진단 필드. 여기 없는 것은 화면도 안 그린다.
+_DIAGNOSTIC_INTS = ("watchdog_seconds", "timeout_count", "retransmission_cap_count")
+_DIAGNOSTIC_LISTS = ("timed_out", "retransmission_cap_hosts")
+
+
+def _diagnostics(raw: Mapping) -> dict | None:
+    """실행의 진단값만 추린다. 하나도 없으면 None - 빈 dict 로 자리만 차지하지 않는다."""
+    out: dict = {}
+    for key in _DIAGNOSTIC_INTS:
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value:
+            out[key] = value
+    for key in _DIAGNOSTIC_LISTS:
+        value = raw.get(key)
+        if isinstance(value, list):
+            hosts = [item for item in value if isinstance(item, str)]
+            if hosts:
+                out[key] = hosts
+    return out or None
+
+
 def _text(value, limit: int | None = None) -> str:
     result = value if isinstance(value, str) else ""
     return result[:limit] if limit is not None else result
@@ -146,6 +167,9 @@ def materialize_terminal_observability(
         row.finished_at = _datetime(raw.get("finished_at"))
         row.seconds = _seconds(raw.get("seconds"))
         row.return_code = _return_code(raw.get("rc", raw.get("return_code")))
+        # 완료된 스캔의 상세도 라이브와 같은 것을 보여야 한다. 이 값들을 안 남기면 상한이나
+        # 호스트 시간 초과가 있었던 실행이 '시간 초과 undefined대' 처럼 그려진다.
+        row.diagnostics_json = _diagnostics(raw)
     db.flush()  # issue의 execution_key를 새 행 id로 연결한다.
 
     issue_input: dict[str, Mapping] = {}

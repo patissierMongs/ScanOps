@@ -676,9 +676,18 @@ class Pipeline:
         if not ok and not r.get("stopped") and proto == "udp" and not self.state.stopped():
             retry_started = time.time()
             failed_execution_id = r.get("execution_id")
+            # **임시 base 로 돌린다.** 같은 -oA 를 쓰면 nmap 이 시작하자마자 첫 실행의
+            # 산출물을 잘라 버린다. 워치독이 끊은 뒤 복구해 둔 관측이 바로 그때 사라지고,
+            # 재시도까지 실패하면 첫 실행이 남긴 부분 관측만 더 나쁜 것으로 바뀐다 -
+            # terminal 인입은 부분 stage3 산출물도 읽으므로 그 손실이 그대로 결과가 된다.
+            alt_base = nmaprun.retry_base(base)
             r = self._nmap("service", ["--nsock-engine", _UDP_RETRY_ENGINE] + args,
-                           base, fatal=not isolate)
-            ok = not r.get("stopped") and r["rc"] == 0
+                           alt_base, fatal=not isolate)
+            ok = not r.get("stopped") and r["rc"] == 0 and nmaprun.xml_usable(alt_base)
+            if ok:
+                nmaprun.adopt_artifacts(alt_base, base)
+            else:
+                nmaprun.discard_artifacts(alt_base)
             self.sink.emit(
                 "service_retry", stage="service", proto=proto,
                 hosts=list(targets), ports=list(ports), port_spec=pspec,
