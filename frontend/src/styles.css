@@ -620,3 +620,41 @@ button.sm.danger:hover { background: var(--high-bg); }
   .notification-history-detail .pre { min-width: 70vw; }
   .stage-recovery { grid-template-columns: 1fr; }
 }
+
+/* ---------- 실행 추적 (지연 진단) ---------- */
+/* 평소엔 접혀 있고 필요할 때만 펼치는 자리. 상태를 읽는 표를 밀어내지 않도록
+   기본은 한 줄짜리 요약이고, 펼쳤을 때만 표가 나온다. */
+.trace { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.trace > summary {
+  cursor: pointer; padding: 8px 11px; font-size: 12px; font-weight: 600;
+  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; list-style: none;
+}
+.trace > summary::-webkit-details-marker { display: none; }
+.trace > summary::before { content: "▸"; color: var(--muted); font-weight: 400; }
+.trace[open] > summary::before { content: "▾"; }
+.trace[open] > summary { border-bottom: 1px solid var(--line-soft); }
+.trace-summary-meta { font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--muted); }
+.trace-section { padding: 9px 11px; }
+.trace-section + .trace-section { border-top: 1px solid var(--line-soft); }
+.trace-section h5 { margin: 0 0 6px; font-size: 11px; color: var(--ink-soft); letter-spacing: 0.02em; }
+.trace-note { margin: 5px 0 0; font-size: 11px; color: var(--muted); line-height: 1.4; }
+.trace-tbl { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.trace-tbl td { padding: 3px 6px; vertical-align: top; border: 0; }
+.trace-tbl td:first-child { padding-left: 0; }
+.trace-tbl td:last-child { padding-right: 0; }
+.trace-num { text-align: right; white-space: nowrap; }
+.trace-sub { font-size: 10.5px; color: var(--muted); }
+/* 포트 스펙은 전체 포트 범위처럼 길어질 수 있다 — 표를 밀지 않도록 잘라 두고 title 로 전체를 준다. */
+.trace-ports { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.trace-barcell { width: 34%; padding-top: 8px; }
+.trace-bar { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.trace-bar-fill { height: 100%; background: var(--accent); }
+.trace-share { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+.trace-phases { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 3px; }
+.trace-phases .tag { font-size: 10px; padding: 1px 6px; }
+.trace-yield { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+/* 성공으로 끝났는데 산출물이 빈 식별 실행 — 소요만 보면 정상과 구분되지 않는다.
+   실패일 수도, 포트가 닫힌 것일 수도 있어 단정하는 붉은색 대신 '봐야 할 것' 색을 쓴다. */
+.trace-yield.is-empty, .trace-yield.is-empty b { color: var(--medium); }
+.trace-runs tr.is-empty td { background: var(--medium-bg); }
+.trace-tbl tr.is-long td { background: var(--medium-bg); }

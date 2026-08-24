@@ -902,6 +902,7 @@ def parse_events(out_dir) -> dict:
     overall = {"status": "running", "percent": None, "seconds": None, "counts": {}}
     if not path.exists():
         return {"stages": [], "overall": overall, "current": current, "executions": [],
+                "trace": empty_trace(),
                 "recoveries": [], "quality_issues": []}
 
     def slot(name):
@@ -1175,6 +1176,8 @@ def parse_events(out_dir) -> dict:
                 "watchdog_seconds": 0,
                 "seconds": None, "timeout_count": 0, "timed_out": [],
                 "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
+                "phases": {}, "hosts_found": 0, "open_ports": 0,
+                "inferred_open": 0, "products": 0, "empty": False,
             }
             if ev.get("role") in {"authority", "enrichment"}:
                 execution["role"] = ev["role"]
@@ -1210,6 +1213,17 @@ def parse_events(out_dir) -> dict:
                     if isinstance(host, str)
                 ],
                 "finished_at": ev.get("ts"),
+                # 지연 진단 재료. nmap 내부 단계별 체류시간과 이 실행이 실제로 담은 것.
+                "phases": {name: float(spent)
+                           for name, spent in (ev.get("phases") or {}).items()
+                           if isinstance(name, str)
+                           and isinstance(spent, (int, float))
+                           and not isinstance(spent, bool)}
+                if isinstance(ev.get("phases"), dict) else {},
+                **{key: ev.get(key) if isinstance(ev.get(key), int)
+                   and not isinstance(ev.get(key), bool) else 0
+                   for key in ("hosts_found", "open_ports", "inferred_open", "products")},
+                "empty": bool(ev.get("empty")),
             })
             for kind, hosts in (
                 ("host_timeout", execution["timed_out"]),
@@ -1293,11 +1307,58 @@ def parse_events(out_dir) -> dict:
             ]
             if stage.get("status") == "warning" and not stage["issues"]:
                 stage["status"] = "done" if stage.get("percent") == 100 else "running"
+    ordered = [executions[key] for key in execution_order if key in executions]
     return {
         "stages": stage_list, "overall": overall, "current": current,
-        "executions": [executions[key] for key in execution_order if key in executions],
+        "executions": ordered, "trace": fold_trace(ordered),
         "recoveries": recoveries, "quality_issues": quality_issues,
     }
+
+
+def fold_trace(executions: list[dict], now: float | None = None) -> dict:
+    """실행 기록을 '어디서 지연이 생기는가' 에 답하는 네 갈래로 접는다.
+
+    진행률 하나로는 몇 시간짜리 스캔에서 무엇이 시간을 쓰는지 알 수 없고, 단계 요약도
+    합계만 말한다. 지연의 실제 단위는 **nmap 프로세스 하나**다.
+
+    * ``running`` — 지금 도는 실행. 오래 걸리는 중인 것을 먼저 보여 준다.
+    * ``by_stage`` — 단계별 합계. 어느 단계가 전체를 끌고 있는지.
+    * ``by_phase`` — nmap **내부** 단계별 합계. 같은 10분이라도 포트스캔에 쓴 10분과
+      서비스 식별에 쓴 10분은 원인도 대책도 다르다.
+    * ``slowest`` — 가장 오래 걸린 실행. 수확량을 함께 보여 주므로 '107초 돌고 빈 산출물'
+      이 정상 완료와 구분된다.
+    """
+    now = time.time() if now is None else now
+    by_stage: dict[str, float] = {}
+    by_phase: dict[str, float] = {}
+    running, finished = [], []
+    for run in executions:
+        stage = run.get("stage") or "?"
+        if run.get("status") == "running":
+            started = run.get("started_at")
+            elapsed = run.get("seconds")
+            running.append({**run, "elapsed": elapsed})
+            spent = elapsed if isinstance(elapsed, (int, float)) else 0.0
+        else:
+            spent = run.get("seconds") or 0.0
+            finished.append(run)
+        by_stage[stage] = round(by_stage.get(stage, 0.0) + (spent or 0.0), 1)
+        for phase, value in (run.get("phases") or {}).items():
+            by_phase[phase] = round(by_phase.get(phase, 0.0) + value, 1)
+    total = round(sum(by_stage.values()), 1)
+    return {
+        "total_seconds": total,
+        "running": running,
+        "by_stage": sorted(({"stage": k, "seconds": v} for k, v in by_stage.items()),
+                           key=lambda row: -row["seconds"]),
+        "by_phase": sorted(({"phase": k, "seconds": v} for k, v in by_phase.items()),
+                           key=lambda row: -row["seconds"]),
+        "slowest": sorted(finished, key=lambda run: -(run.get("seconds") or 0.0))[:8],
+    }
+
+
+def empty_trace() -> dict:
+    return fold_trace([], 0.0)
 
 
 _HOST_STAGE_FIELD = {

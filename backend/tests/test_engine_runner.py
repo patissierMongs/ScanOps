@@ -284,6 +284,9 @@ def test_parse_events_exposes_timeout_reason_and_exact_grouped_commands(tmp_path
         # 워치독이 끊은 실행에만 값이 실린다. 이 실행은 nmap 자신의 host-timeout 이므로 0.
         "watchdog_seconds": 0,
         "finished_at": 30.5,
+        # 지연 진단 재료 - 이벤트에 없으면 0/빈 값이지 누락이 아니다.
+        "phases": {}, "hosts_found": 0, "open_ports": 0,
+        "inferred_open": 0, "products": 0, "empty": False,
     }]
 
 
@@ -1037,3 +1040,66 @@ def test_a_resumed_service_stage_clears_the_normalized_error_slot(tmp_path):
     kept = engine_runner.parse_events(_events(tmp_path, same_attempt))
     assert {s["stage"]: s["status"] for s in kept["stages"]}.get("tcp_service") == "error"
     assert [i for i in kept.get("quality_issues", []) if i.get("kind") == "command_error"]
+
+
+def test_the_trace_answers_where_the_time_went(tmp_path):
+    """지연 진단 — 총 소요만으로는 "어디서 느려졌나" 에 답할 수 없다.
+
+    진행률 하나로는 몇 시간짜리 스캔에서 무엇이 시간을 쓰는지 모르고, 단계 요약도 합계만
+    말한다. 지연의 실제 단위는 nmap 프로세스 하나이고, 같은 10분이라도 포트스캔에 쓴 10분과
+    서비스 식별에 쓴 10분은 원인도 대책도 다르다.
+
+    수확량을 함께 실어야 '107초 돌고 빈 산출물' 이 정상 완료와 구분된다 - 실제로 그렇게
+    마감된 실행이 32대분 식별을 통째로 잃은 적이 있다.
+    """
+    out = tmp_path / "scan_trace"
+    out.mkdir()
+
+    def start(eid, stage, artifact):
+        return {"event": "command_start", "ts": 1.0, "execution_id": eid, "stage": stage,
+                "group": "common", "reason": stage, "artifact": artifact,
+                "argv": ["nmap", "-sS"]}
+
+    def done(eid, stage, seconds, phases, yields, empty=False):
+        hosts, opened, inferred, products = yields
+        return {"event": "command_done", "ts": 1.0 + seconds, "execution_id": eid,
+                "stage": stage, "seconds": seconds, "rc": 0, "outcome": "done",
+                "phases": phases, "hosts_found": hosts, "open_ports": opened,
+                "inferred_open": inferred, "products": products, "empty": empty}
+
+    (out / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "ts": 0.0},
+        start("a", "tcp", "stage-tcp-b0"),
+        done("a", "tcp", 120.0,
+             {"보고 전": 3.0, "SYN Stealth Scan": 110.0, "Service scan": 7.0}, (4, 9, 2, 6)),
+        start("b", "tcp_service", "stage3-tcp-b0-g0"),
+        done("b", "tcp_service", 107.0, {"Service scan": 100.0, "NSE": 7.0},
+             (4, 0, 0, 0), empty=True),
+        {"event": "job_done", "ts": 230.0, "status": "done", "seconds": 230.0},
+    ]), encoding="utf-8")
+
+    trace = engine_runner.parse_events(out)["trace"]
+    assert trace["total_seconds"] == 227.0
+    # 어느 **단계**가 끌었나.
+    assert [(r["stage"], r["seconds"]) for r in trace["by_stage"]] == [
+        ("tcp", 120.0), ("tcp_service", 107.0)]
+    # 어느 **nmap 내부 단계**가 끌었나 - 두 실행에 걸친 같은 이름은 합산된다.
+    by_phase = dict((r["phase"], r["seconds"]) for r in trace["by_phase"])
+    assert by_phase["SYN Stealth Scan"] == 110.0
+    assert by_phase["Service scan"] == 107.0        # 7.0 + 100.0
+    assert by_phase["보고 전"] == 3.0
+    # 가장 오래 걸린 실행이 먼저, 수확량과 함께.
+    slowest = trace["slowest"]
+    assert [r["stage"] for r in slowest] == ["tcp", "tcp_service"]
+    assert slowest[0]["open_ports"] == 9 and slowest[0]["inferred_open"] == 2
+    assert slowest[1]["empty"] is True, "빈 산출물이 정상 완료와 구분되지 않는다"
+
+
+def test_the_trace_survives_when_the_event_stream_says_nothing(tmp_path):
+    """이벤트가 없어도 화면이 깨지면 안 된다 - 빈 모양은 있어야 한다."""
+    out = tmp_path / "scan_empty"
+    out.mkdir()
+    (out / "events.ndjson").write_text("", encoding="utf-8")
+    trace = engine_runner.parse_events(out)["trace"]
+    assert trace["total_seconds"] == 0
+    assert trace["by_stage"] == [] and trace["by_phase"] == [] and trace["slowest"] == []

@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from datetime import datetime
 from pathlib import Path as pathlib_Path
 
 from tests.conftest import make_user, token_for
@@ -3161,3 +3162,66 @@ def test_a_whole_scans_folder_splits_into_one_row_per_actual_run(client):
     assert "scan_9 단계 스캔 묶음" in names
     assert "scan_3.b0 자동 스캔 묶음" in names, "레거시 묶음 규칙이 깨졌다"
     assert "my_own_nmap.xml" in names, "직접 돌린 nmap XML 을 못 받는다"
+
+
+def test_an_imported_scan_shows_the_time_it_actually_ran(client):
+    """가져온 스캔의 소요시간은 **XML 이 밝힌 실제 구간**이어야 한다.
+
+    예전에는 `started_at` 에 인입 최신성용 시각을, `finished_at` 에 업로드 인입 시각을 넣어
+    한 달 전 XML 이 '한 달짜리 스캔' 으로 보였다. 그렇다고 표시를 지우면 어느 단계가 시간을
+    썼는지 볼 방법이 함께 사라진다 - 이 도구를 쓰는 이유가 그 추적이다. XML 이 두 값을 이미
+    들고 있으므로 그것을 읽는다.
+    """
+    h = _auth(client)
+    # 한 달 전에 시작해 480초 동안 돈 스캔.
+    xml = (
+        '<?xml version="1.0"?><nmaprun start="1779458000">'
+        '<scaninfo type="syn" protocol="tcp" numservices="1" services="22"/>'
+        '<host><status state="up"/><address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+        '<port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/>'
+        '<service name="ssh"/></port></ports></host>'
+        '<runstats><finished time="1779458480" exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>'
+    ).encode()
+
+    r = client.post("/api/scans/import", headers=h,
+                    files={"file": ("old.xml", xml, "text/xml")})
+    assert r.status_code == 200, r.text
+    scan = client.get(f"/api/scans/{r.json()['scan_id']}", headers=h).json()
+
+    started = datetime.fromisoformat(scan["started_at"])
+    finished = datetime.fromisoformat(scan["finished_at"])
+    assert (finished - started).total_seconds() == 480, (
+        f"실제 실행 시간이 아니다: {scan['started_at']} ~ {scan['finished_at']}"
+    )
+
+    # 화면이 그 값을 실제로 그려야 한다 - 가져온 스캔이라고 지우면 안 된다.
+    ui = (pathlib_Path(__file__).resolve().parents[2]
+          / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
+    duration = ui.split("function scanDuration")[1].split("\n}")[0]
+    assert 'scanKind(scan).key === "import"' not in duration, (
+        "가져온 스캔의 소요시간을 화면에서 지웠다 - 지연 추적이 목적인데 숫자를 없앤 셈이다"
+    )
+
+
+def test_an_import_without_runstats_keeps_its_ingest_timestamps(client):
+    """반대 경계 — XML 이 시각을 안 밝히면 지어내지 않는다.
+
+    부분 산출물에는 `runstats` 가 없다. 그때 시작·종료를 임의로 채우면 없는 사실을 만든다.
+    """
+    h = _auth(client)
+    partial = (
+        '<?xml version="1.0"?><nmaprun>'
+        '<scaninfo type="syn" protocol="tcp" numservices="1" services="22"/>'
+        '<host><status state="up"/><address addr="10.0.0.2" addrtype="ipv4"/><ports>'
+        '<port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/>'
+        '<service name="ssh"/></port></ports></host></nmaprun>'
+    ).encode()
+    r = client.post("/api/scans/import", headers=h,
+                    files={"file": ("partial.xml", partial, "text/xml")})
+    assert r.status_code == 200, r.text
+    scan = client.get(f"/api/scans/{r.json()['scan_id']}", headers=h).json()
+    # 인입이 정한 값이 그대로 남는다(둘 다 존재하고, 음수 구간이 아니다).
+    assert scan["started_at"] and scan["finished_at"]
+    assert (datetime.fromisoformat(scan["finished_at"])
+            - datetime.fromisoformat(scan["started_at"])).total_seconds() >= 0

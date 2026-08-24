@@ -149,13 +149,19 @@ class Pipeline:
                    else "watchdog" if r.get("timed_out_by_watchdog")
                    else "error" if r["rc"] != 0
                    else "timeout" if timed_out else "done")
+        # 지연 진단의 두 재료. **총 소요만으로는 답이 안 나온다** - 같은 10분이라도 어느
+        # nmap 내부 단계에 썼는지(phases), 그리고 그러고도 무엇을 담았는지(yield)를 알아야
+        # 다음 스캔에서 무엇을 바꿀지 정할 수 있다. 107초 돌고 빈 산출물을 남긴 실행이
+        # '완료' 와 구분되지 않던 것이 이 값이 없을 때의 모습이다.
         self.sink.emit(
             "command_done", execution_id=execution_id, seconds=r["seconds"], rc=r["rc"],
             outcome=outcome, timed_out=timed_out, timeout_count=len(timed_out),
             watchdog_seconds=(self.spec.watchdog_seconds
                               if r.get("timed_out_by_watchdog") else 0),
             retransmission_cap_hosts=cap_hosts,
-            retransmission_cap_count=len(cap_hosts), **meta,
+            retransmission_cap_count=len(cap_hosts),
+            phases=r.get("phases") or {},
+            **nmaprun.artifact_yield(Path(str(base) + ".xml")), **meta,
         )
         if r.get("stopped"):
             self.sink.emit(

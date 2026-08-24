@@ -42,17 +42,52 @@ def _need_sudo(mode: str) -> bool:
     return os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0
 
 
-def _stream_output(stream, log, progress, retransmission_cap_hosts) -> None:
+# nmap 이 --stats-every 로 찍는 단계 진행 줄. 예:
+#   "SYN Stealth Scan Timing: About 42.86% done; ETC: 14:30 (0:00:30 remaining)"
+#   "Service scan Timing: About 12.50% done; ETC: ..."
+# 이름이 곧 nmap 내부 단계다 - 포트스캔이 오래 걸리는 것과 서비스 식별이 오래 걸리는 것은
+# 원인도 대책도 다른데, 바깥에서 잰 총 소요는 둘을 구분해 주지 못한다.
+_PHASE_RE = re.compile(
+    r"^(?P<phase>[A-Za-z0-9][A-Za-z0-9 ./_-]*?)\s+Timing:\s+About\s+[\d.]+%\s+done")
+# 첫 stats 줄이 나오기 전 구간. nmap 이 아직 아무 단계도 보고하지 않았다(호스트 발견·DNS
+# 해석·시작 준비). 어느 단계에도 귀속시키지 않고 이 이름 그대로 남긴다.
+_PHASE_UNREPORTED = "보고 전"
+
+
+def _stream_output(stream, log, progress, retransmission_cap_hosts,
+                   phases=None, clock=time.time) -> None:
+    """stdout 을 로그에 흘리면서 진행률·재전송 상한·**단계별 체류시간**을 뽑는다.
+
+    체류시간은 stats 줄 사이의 간격을 **직전에 관측된 단계**에 닫는다. 뒤에 오는 줄이
+    말하는 단계에 귀속시키면 첫 줄 이전의 시간이 그 단계로 들어가고, 샘플 간격이
+    불균등할수록 원인을 크게 오표시한다 - 0·5·7·20초에 SYN·SYN·Service 가 찍히면
+    SYN 7초 / Service 13초가 되어, 아직 시작도 안 한 Service 가 13초를 뒤집어쓴다.
+
+    첫 관측 이전 구간은 어느 단계도 아니므로 `보고 전` 으로 남긴다. 마지막 줄 이후의
+    꼬리는 그때 돌던 단계(직전에 관측된 것)에 닫는다 - 같은 규칙이다.
+    """
+    last = clock()
+    current = None
     for line in stream:
         log.write(line)
         log.flush()
         if m := _RETRANSMISSION_CAP_RE.search(line):
             retransmission_cap_hosts.add(m.group(1))
+        if phases is not None and (m := _PHASE_RE.search(line)):
+            now = clock()
+            bucket = current if current is not None else _PHASE_UNREPORTED
+            phases[bucket] = round(phases.get(bucket, 0.0) + max(0.0, now - last), 1)
+            last = now
+            current = m.group("phase").strip()
         if progress and (m := _PCT_RE.search(line)):
             try:
                 progress(float(m.group(1)))
             except Exception:
                 pass
+    if phases is not None:
+        # 스트림이 닫혔다 = 프로세스가 끝났다. 마지막 구간도 같은 규칙으로 닫는다.
+        bucket = current if current is not None else _PHASE_UNREPORTED
+        phases[bucket] = round(phases.get(bucket, 0.0) + max(0.0, clock() - last), 1)
 
 
 def build_command(nmap, args, out_base, sudo_mode="auto", stats="5s") -> list[str]:
@@ -98,9 +133,12 @@ def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
         proc = popen_owned(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            text=True, bufsize=1)
         retransmission_cap_hosts = set()
+        # nmap 이 스스로 보고한 단계별 체류시간. 같은 10분이라도 포트스캔에 쓴 10분과
+        # 서비스 식별에 쓴 10분은 원인도 대책도 다르다.
+        phases: dict[str, float] = {}
         reader = threading.Thread(
             target=_stream_output,
-            args=(proc.stdout, log, progress, retransmission_cap_hosts), daemon=True,
+            args=(proc.stdout, log, progress, retransmission_cap_hosts, phases), daemon=True,
         )
         reader.start()
         stopped = False
@@ -139,6 +177,7 @@ def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
     repaired = _repair_truncated_xml(Path(str(out_base) + ".xml")) if watchdog_fired else False
     return {
         "rc": rc,
+        "phases": phases,
         "xml_repaired": repaired,
         "seconds": round(time.time() - t0, 2),
         "cmd": cmd,
@@ -234,6 +273,40 @@ def xml_usable(base: Path) -> bool:
         return True
     except (ET.ParseError, OSError):
         return False
+
+
+def artifact_yield(xml_path) -> dict:
+    """산출물이 실제로 **무엇을 담았는지** — 호스트 / 확정 열림 / 무응답 추정 / 버전 식별 수.
+
+    소요만 적어 두면 107초를 돌고 빈 파일을 남긴 실행이 '성공' 과 구분되지 않는다. 실제로
+    그렇게 마감된 실행이 32대분 식별을 통째로 잃었다. 수확량은 그 실패를 화면에서 즉시
+    보이게 하는 유일한 값이다.
+
+    ``open`` 과 ``open|filtered`` 를 **나눠 센다.** nmap 정의상 후자는 열린지 필터링됐는지
+    가르지 못한 상태라, 합쳐서 '열림' 이라고 적으면 불확실성을 확정으로 바꾸는 거짓 양성이
+    된다 - 이 저장소의 observation 경로도 두 상태를 구분한다.
+    """
+    hosts = _hosts(xml_path)
+    confirmed = inferred = products = 0
+    for host in hosts:
+        for port in host.findall("ports/port"):
+            state = port.find("state")
+            value = (state.get("state") or "") if state is not None else ""
+            if value == "open":
+                confirmed += 1
+            elif value.startswith("open"):        # open|filtered
+                inferred += 1
+            service = port.find("service")
+            if service is not None and (service.get("product") or "").strip():
+                products += 1
+    return {
+        "hosts_found": len(hosts),
+        "open_ports": confirmed,
+        "inferred_open": inferred,
+        "products": products,
+        # 볼 것이 있어서 돈 실행인데 아무것도 담지 못했다는 사실.
+        "empty": bool(hosts) and confirmed == 0 and inferred == 0,
+    }
 
 
 def _ipkey(ip: str):

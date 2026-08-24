@@ -35,7 +35,8 @@ from ..scanning import (
 )
 from ..scanning.presets import PRESETS
 from ..scanning.ingest import ingest
-from ..scanning.nmap_parse import observed_at, parse_xml, probed_identity, up_hosts
+from ..scanning.nmap_parse import (observed_at, parse_xml, probed_identity, scan_finished,
+                                   scan_start, up_hosts)
 from .audit import record
 from .deps import current_user, require_role
 
@@ -2154,12 +2155,59 @@ def _import_single_xml(
     except Exception:
         _fail_import(db, scan.id, artifact_paths)
         raise
+    # 실행 시간은 XML 이 스스로 밝힌 것을 쓴다 - 인입 시각을 쓰면 '가져오기까지 걸린 시간'
+    # 이 소요시간으로 둔갑한다.
+    _apply_xml_runtime(scan, [xml_bytes])
     reviews = [xml_verdict.review(xml_bytes, name, stage)]
     _import_review(scan, reviews)
     db.commit()
     record(db, user, "SCAN_IMPORT", target=name, detail=f"#{scan.id}")
     return {"scan_id": scan.id, "name": scan.name, "counts": counts,
             "files": [name], "reviews": reviews}
+
+
+def _xml_ran_between(payloads: list[bytes]):
+    """가져온 산출물이 **실제로 돈** 구간 (시작, 종료). 못 읽으면 그 자리는 None.
+
+    가져오기는 `started_at` 에 인입 최신성 판단용 시각(observed_at = 종료 시각)을 넣고
+    `finished_at` 에는 업로드를 인입한 시각을 넣었다. 그 둘을 빼면 실행 시간이 아니라
+    '스캔한 뒤 가져오기까지 걸린 시간' 이 나온다 - 한 달 전 XML 을 올리면 한 달짜리 스캔으로
+    보인다.
+
+    그렇다고 소요시간을 **지워 버리면** 어느 단계가 시간을 썼는지 볼 방법이 함께 사라진다.
+    XML 이 두 값을 이미 들고 있으므로(`<nmaprun start=>` · `<runstats><finished time=>`)
+    그것을 읽는다. 없으면 None 을 돌려 호출부가 기존 값을 그대로 쓰게 둔다 - 지어내지 않는다.
+
+    인입의 최신성 판단(`scan_date`)은 건드리지 않는다. 그쪽은 '언제 관측했나' 이고 여기는
+    '얼마나 걸렸나' 라, 같은 값을 쓸 이유가 없다.
+    """
+    starts = [t for t in (scan_start(raw) for raw in payloads) if t is not None]
+    ends = [t for t in (scan_finished(raw) for raw in payloads) if t is not None]
+    return (min(starts) if starts else None), (max(ends) if ends else None)
+
+
+def _apply_xml_runtime(scan, payloads: list[bytes]) -> None:
+    """가져온 스캔의 소요시간을 XML 이 밝힌 실제 구간으로 맞춘다."""
+    started, finished = _xml_ran_between(payloads)
+    if started is not None:
+        scan.started_at = started
+    if finished is not None:
+        scan.finished_at = finished
+
+
+def _xml_finished_at(payloads: list[bytes]):
+    """가져온 산출물이 **실제로 끝난** 시각(<runstats><finished time=>) 중 가장 늦은 것.
+
+    가져오기는 `started_at` 을 XML 안의 과거 스캔 시각으로 두면서 `finished_at` 은 업로드를
+    인입한 시각으로 두었다. 그 둘을 빼면 실행 시간이 아니라 '스캔한 뒤 가져오기까지 걸린
+    시간' 이 나온다 - 한 달 전 XML 을 올리면 한 달짜리 스캔으로 보인다.
+
+    그렇다고 소요시간을 **지워 버리면** 어느 단계가 시간을 썼는지 볼 방법이 함께 사라진다.
+    XML 이 그 값을 이미 들고 있으므로 그것을 읽는다. 없으면(runstats 가 없는 부분 산출물)
+    None 을 돌려 호출부가 인입 시각을 그대로 쓰게 둔다 - 지어내지 않는다.
+    """
+    times = [t for t in (scan_finished(raw) for raw in payloads) if t is not None]
+    return max(times) if times else None
 
 
 def _stage_artifact_name(scan_id: int, stage: str, batch: int, many: bool) -> str:
@@ -2402,6 +2450,8 @@ def _import_stage_bundle(db: Session, user: User, display: str,
         _fail_import(db, scan.id, artifact_paths)
         raise
     files = [item["name"] for _base, stages in batches for item in stages.values()]
+    # 묶음은 산출물이 여럿이다. 실행 구간은 가장 이른 시작부터 가장 늦은 종료까지다.
+    _apply_xml_runtime(scan, [item["bytes"] for item in all_items])
     reviews = [xml_verdict.review(item["bytes"], item["name"], stage)
                for _base, stages in batches for stage, item in sorted(stages.items())]
     _import_review(scan, reviews)
@@ -3630,6 +3680,9 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
         "overall": overall,
         "current": derived.get("current") or {},
         "executions": executions,
+        # 지연 진단 - 실행 기록을 '어디서 시간을 쓰는가' 로 접은 것. 완료된 스캔은 DB
+        # 투영을 쓰므로 그쪽 실행 기록으로 다시 접는다. 이벤트가 사라져도 같은 답이 나온다.
+        "trace": engine_runner.fold_trace(executions),
         "issues": issues,
         "recoveries": derived.get("recoveries") or [],
         "hosts": hosts,

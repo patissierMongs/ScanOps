@@ -6,6 +6,7 @@ import { formatScanPortScope } from "../lib/scanScope.js";
 import { useToast } from "../ui/Toast.jsx";
 import ScanOptions from "../ui/ScanOptions.jsx";
 import { scanKind, scanNotice, scanStatus, shouldLoadStages } from "../lib/scanStatus.js";
+import ScanTrace from "../ui/ScanTrace.jsx";
 
 const isActive = (s) => s === "running" || s === "canceling";
 
@@ -59,10 +60,10 @@ function fmtElapsed(sec) {
 function scanDuration(scan, liveProgress) {
   if (liveProgress?.elapsed_seconds != null) return liveProgress.elapsed_seconds;
   if (!scan?.started_at || !scan?.finished_at) return null;
-  // 가져온 스캔은 `started_at` 이 **XML 안의 과거 스캔 시각**이고 `finished_at` 은 업로드를
-  // 인입한 시각이다. 빼면 실행 시간이 아니라 '스캔한 뒤 가져오기까지 걸린 시간' 이 나온다 -
-  // 한 달 전 XML 을 올리면 한 달짜리 스캔으로 보인다. 그 값은 없느니만 못하다.
-  if (scanKind(scan).key === "import") return null;
+  // 가져온 스캔도 소요시간을 보여 준다. `finished_at` 은 인입 시각이 아니라 **XML 이 스스로
+  // 밝힌 종료 시각**(runstats/finished)으로 저장하므로(_xml_finished_at), 빼면 실제 실행
+  // 시간이 나온다. 예전에는 인입 시각을 써서 한 달 전 XML 이 한 달짜리 스캔으로 보였는데,
+  // 그렇다고 값을 지우면 어느 단계가 시간을 썼는지 볼 방법이 함께 사라진다.
   const seconds = (new Date(scan.finished_at).getTime() - new Date(scan.started_at).getTime()) / 1000;
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
 }
@@ -923,6 +924,8 @@ function ScanDetails({ scan, detail }) {
           <code className="mono">{scan.command}</code>
         </div>
       )}
+      {/* 지연 진단은 평소에 접어 둔다 — 필요할 때만 펼쳐 보는 정보다. */}
+      <ScanTrace trace={detail?.trace} />
       <ExecutionGroups executions={executions} />
     </div>
   );

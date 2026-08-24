@@ -622,16 +622,18 @@ test("the staged preview matches how the engine actually groups service probes",
   assert.doesNotMatch(raw, /const stagedScripts/, "프로토콜별로 나누지 않은 목록이 남아 있다");
 });
 
-test("an imported scan never reports the wait until upload as its runtime", () => {
+test("an imported scan reports the time it actually ran", () => {
   const scans = source("../src/views/Scans.jsx").replace(/\/\/[^\n]*/g, "");
   const fn = scans.split("function scanDuration(")[1].split("\n}")[0];
-  // 가져온 스캔은 started_at 이 XML 안의 과거 시각이고 finished_at 은 업로드 인입 시각이다.
-  // 빼면 '스캔한 뒤 가져오기까지 걸린 시간' 이 나온다 - 한 달 전 XML 이 한 달짜리 스캔이 된다.
-  assert.match(fn, /scanKind\(scan\)\.key === "import"/,
-    "가져온 스캔에도 두 시각의 차이를 소요시간으로 보여 준다");
-  const guard = fn.indexOf('key === "import"');
-  const subtract = fn.indexOf("finished_at).getTime()");
-  assert.ok(guard !== -1 && guard < subtract, "가져오기 판정이 계산보다 뒤에 있다");
+  // 예전에는 started_at 이 XML 안의 과거 시각이고 finished_at 이 업로드 인입 시각이라,
+  // 한 달 전 XML 이 한 달짜리 스캔으로 보였다. 그래서 가져온 스캔의 소요시간을 통째로
+  // 지웠는데 - 그건 잘못된 절반이다. 지연 추적이 이 화면의 존재 이유인데 숫자를 없앴다.
+  //
+  // 서버가 두 값을 **XML 이 밝힌 실제 구간**으로 저장하므로(_apply_xml_runtime) 화면은
+  // 그냥 빼면 된다. 다시 지우지 않도록 못박는다.
+  assert.doesNotMatch(fn, /scanKind\(scan\)\.key === "import"/,
+    "가져온 스캔의 소요시간을 화면에서 지웠다 - 추적을 없애는 방향의 수정이다");
+  assert.match(fn, /finished_at\)\.getTime\(\)/, "소요시간 계산 자체가 사라졌다");
 });
 
 test("recovery evidence uses the schema the stages API actually sends", () => {
@@ -1066,4 +1068,28 @@ test("an observed exposure is shown as the fact that drove the grade", () => {
   const cols = source("../src/lib/columns.js");
   assert.match(cols, /key: "exposure", label: "노출 관측"/);
   assert.ok(PRESETS.find((p) => p.id === "p_risk").cols.includes("exposure"));
+});
+
+test("the delay trace panel is present and collapsed by default", () => {
+  // 이 화면의 존재 이유가 "어디서 지연이 생기는가" 다. 한 번 리베이스하면서 이 패널을
+  // 통째로 잃은 적이 있어(codex 것으로 대체된다고 판단), 다시 사라지지 않게 못박는다.
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /import ScanTrace from/, "지연 진단 패널이 화면에서 빠졌다");
+  assert.match(scans, /<ScanTrace trace=\{detail\?\.trace\}/, "패널에 trace 가 안 간다");
+
+  const panel = source("../src/ui/ScanTrace.jsx");
+  // 평소엔 접혀 있어야 한다 - 늘 펼쳐 두면 상태를 읽는 표를 밀어낸다.
+  assert.match(panel, /<details/, "접었다 펴는 자리가 아니다");
+  assert.doesNotMatch(panel, /<details[^>]*\sopen[\s>]/, "기본이 펼침이다");
+  // 네 갈래가 모두 있어야 "어디서" 에 답한다.
+  for (const [key, why] of [
+    ["running", "지금 도는 실행"],
+    ["by_stage", "단계별 합계"],
+    ["by_phase", "nmap 내부 단계별 합계"],
+    ["slowest", "가장 오래 걸린 실행"],
+  ]) {
+    assert.ok(panel.includes(key), `${why}(${key})가 빠졌다`);
+  }
+  // 수확량이 있어야 '107초 돌고 빈 산출물' 이 정상 완료와 구분된다.
+  assert.match(panel, /empty/, "빈 산출물 표시가 없다");
 });
