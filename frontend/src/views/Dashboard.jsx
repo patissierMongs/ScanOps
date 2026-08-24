@@ -32,7 +32,16 @@ export default function Dashboard({ onNav }) {
   return (
     <div className="content">
       <div className="stats">
-        <div className="stat"><div className="n">{d.open_total}</div><div className="l">열린 발견</div></div>
+        <div className="stat"><div className="n">{d.open_total}</div><div className="l">활성 발견</div></div>
+        <div className="stat"><div className="n">{d.confirmed_open_total ?? 0}</div><div className="l">응답 확인</div></div>
+        <div className="stat">
+          <div className="n" style={{ color: d.confirmation_required_total ? "var(--medium)" : "var(--ink)" }}>
+            {d.confirmation_required_total ?? 0}
+          </div>
+          <div className="l">재확인 필요</div>
+        </div>
+        <div className="stat"><div className="n">{d.allowed_open_total ?? 0}</div><div className="l">허용된 활성</div></div>
+        <div className="stat"><div className="n">{d.unresolved_total ?? 0}</div><div className="l">미해결</div></div>
         <div className="stat">
           <div className="n" style={{ color: d.overdue ? "var(--high)" : "var(--ink)" }}>{d.overdue}</div>
           <div className="l">마감 초과</div>
@@ -43,7 +52,6 @@ export default function Dashboard({ onNav }) {
           </div>
           <div className="l">금지·상 {d.by_risk.banned ? `(금지 ${d.by_risk.banned})` : ""}</div>
         </div>
-        <div className="stat"><div className="n">{d.by_status["미조치"] || 0}</div><div className="l">미조치</div></div>
       </div>
 
       <div className="panel">
@@ -51,19 +59,19 @@ export default function Dashboard({ onNav }) {
         <div className="row">
           {RISK_ORDER.map((r) => (
             <span key={r} className={"pill " + r} style={{ fontSize: 12 }}>
-              {RISK_LABEL[r]} {d.by_risk[r] || 0}
+              {RISK_LABEL[r]} {(d.unresolved_by_risk || d.by_risk)[r] || 0}
             </span>
           ))}
         </div>
       </div>
 
       <div className="panel">
-        <h3>부서별 미조치</h3>
+        <h3>부서별 미해결</h3>
         {d.by_dept.length === 0 ? (
           <div className="muted">데이터 없음</div>
         ) : (
           <table className="tbl">
-            <thead><tr><th>부서</th><th>건수</th></tr></thead>
+            <thead><tr><th>부서</th><th>미해결</th></tr></thead>
             <tbody>
               {d.by_dept.map((x) => (
                 <tr key={x.dept}><td>{x.dept}</td><td className="mono">{x.count}</td></tr>
@@ -79,11 +87,12 @@ export default function Dashboard({ onNav }) {
           <div className="muted">스캔 이력 없음 — <button type="button" className="linkbtn inline-action" onClick={() => onNav("scans")}>스캔 실행/가져오기</button></div>
         ) : (
           <table className="tbl recent-scans-table">
-            <thead><tr><th>이름</th><th>상태</th><th>호스트</th><th>포트</th></tr></thead>
+            <thead><tr><th>이름</th><th>실행자</th><th>상태</th><th>호스트</th><th>포트</th></tr></thead>
             <tbody>
               {d.recent_scans.map((s) => (
                 <tr key={s.id}>
-                  <td>{s.name}</td><td><span className={`pill ${scanStatus(s.status).cls}`}>{scanStatus(s.status).label}</span></td>
+                  <td>{s.name}</td><td>{s.created_by_name || <span className="muted">—</span>}</td>
+                  <td><span className={`pill ${scanStatus(s.status).cls}`}>{scanStatus(s.status).label}</span></td>
                   <td className="mono">{s.host_count}</td><td className="mono">{s.port_count}</td>
                 </tr>
               ))}

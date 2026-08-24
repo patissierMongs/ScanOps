@@ -20,6 +20,8 @@ import math
 import os
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -92,7 +94,7 @@ def ensure_available() -> Path:
 def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options: list[str],
                    ports: str, nse: list[str] | None, out_dir: Path, batch_size: int,
                    discovery: str = "sn", rescan_units: list | None = None,
-                   exclude_ports: str = "", host_timeouts: dict | None = None) -> dict:
+                   exclude_ports: str = "", watchdog_seconds: int | None = None) -> dict:
     """ScanOps 옵션 키를 엔진 단계 설정으로 매핑. 스캔 기법/타이밍/버전강도/UDP/NSE 를 단계로 분배.
 
     one-liner 옵션(노핑·기법)은 엔진이 단계별로 알아서 처리하므로 그대로 옮기지 않는다.
@@ -103,27 +105,26 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
     if "connect" in opt and "udp" in opt:
         raise ValueError("TCP Connect 단계 스캔은 UDP 스캔과 함께 실행할 수 없습니다.")
     timing = next((_TIMING[k] for k in ("t0", "t1", "t2", "t3", "fast", "t5") if k in opt), "-T4")
-    max_retries = 2
-    # 호스트당 상한 — 단계마다 별개 값이다. 호출자가 안 주면 공용 레지스트리의 기본값을 쓴다.
-    # 여기서 문자열로 정규화해 두면 spec.validate() 가 문법만 확인하면 된다("" = 미적용).
-    limits = dict(scan_options.HOST_TIMEOUT_DEFAULTS)
-    limits.update({k: v for k, v in (host_timeouts or {}).items()
-                   if k in limits and isinstance(v, str)})
+    # 재전송 상한은 프로토콜마다 별개다 — UDP 는 ICMP 율제한 때문에 응답이 늦고 드물어,
+    # TCP 와 같은 값을 쓰면 '닫혔다'가 아니라 '못 봤다'가 늘어난다.
+    max_retries = scan_options.MAX_RETRIES_DEFAULT
+    udp_max_retries = scan_options.UDP_MAX_RETRIES_DEFAULT
     # The engine has protocol-specific stages, so its ``-p`` value does not need Nmap's
     # T:/U: selector used by the legacy combined workflow.
     tcp_spec = nmap_runner.auto_tcp_port_spec(ports)
     udp_spec = nmap_runner.auto_udp_port_spec(ports)
     tcp_ports = tcp_spec.removeprefix("T:")
     udp_ports = udp_spec.removeprefix("U:")
+    selected_nse = list(scan_options.NSE_DEFAULT_KEYS if nse is None else nse)
     service = {
         "enabled": True,
         "version_all": not options or ("version_all" in opt and "version_light" not in opt),
         "version_light": "version_light" in opt,
         "timing": timing,
         "max_retries": max_retries,
-        "nse": list(scan_options.NSE_DEFAULT_KEYS if nse is None else nse),
-        "host_timeout": limits["service"],
-        "udp_host_timeout": limits["service_udp"],
+        "udp_max_retries": udp_max_retries,
+        "nse": scan_options.filter_nse_proto(selected_nse, "tcp"),
+        "udp_nse": scan_options.filter_nse_proto(selected_nse, "udp"),
         "workers": scan_options.SERVICE_WORKERS_DEFAULT,
     }
     spec: dict = {
@@ -135,6 +136,10 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
         "out_dir": str(out_dir),
         "batch_size": int(batch_size),
         "sudo": "auto",
+        # nmap 프로세스당 상한(초). 0 = 끔. --host-timeout 과 달리 그때까지 쓰인 XML 을
+        # 남기고 실행을 비정상 종료로 표시하므로, 관측을 버리면서 성공으로 끝내지 않는다.
+        "watchdog_seconds": int(scan_options.WATCHDOG_SECONDS_DEFAULT
+                                if watchdog_seconds is None else watchdog_seconds),
         "stages": {
             "discovery": {
                 "enabled": True,
@@ -144,11 +149,9 @@ def build_job_spec(scan_id: int, targets: list[str], exclude: list[str], options
             },
             "tcp": {"enabled": bool(tcp_spec), "ports": tcp_ports, "timing": timing,
                     "scan_type": "connect" if "connect" in opt else "syn",
-                    "min_rate": 0, "max_retries": max_retries,
-                    "host_timeout": limits["tcp"]},
+                    "min_rate": 0, "max_retries": max_retries},
             "udp": {"enabled": "udp" in opt and bool(udp_spec), "ports": udp_ports,
-                    "timing": timing, "max_retries": max_retries,
-                    "host_timeout": limits["udp"]},
+                    "timing": timing, "max_retries": udp_max_retries},
             "service": service,
         },
     }
@@ -337,7 +340,9 @@ def expected_enrichment_xml(out_dir, spec: dict) -> list[Path]:
 _MAX_SPLIT_UNITS = 32
 
 
-def _enrichment_units(out_dir, spec: dict) -> list[tuple[list[Path], list[Path]]]:
+def _enrichment_units(out_dir, spec: dict,
+                      superseded: set[str] | None = None,
+                      ) -> list[tuple[list[Path], list[Path]]]:
     """(ip, proto) 마다 (묶음 산출물, 대체 가능한 분할 산출물).
 
     정상 경로는 프로토콜당 한 프로세스라 묶음 파일 하나가 나온다. 그 묶음이 죽으면 엔진이
@@ -352,8 +357,39 @@ def _enrichment_units(out_dir, spec: dict) -> list[tuple[list[Path], list[Path]]
     if not svc.get("enabled", True):
         return []
     confirm = bool(svc.get("confirm", False))
-    open_map = _read_state(out).get("open_map") or {}
+    state = _read_state(out)
+    open_map = state.get("open_map") or {}
     units: list[tuple[list[Path], list[Path]]] = []
+    # 실패해서 대체 실행에 자리를 넘긴 묶음 산출물. 호출부가 '기대 밖' 으로 다시 세지
+    # 않도록 이름만 넘긴다 - 실제 증거 손실은 대체 집합의 기대치가 판단한다.
+    superseded = superseded if superseded is not None else set()
+    covered: set[tuple[str, str, int]] = set()
+    # 새 엔진은 공통 포트가 많은 배치를 한 Nmap으로 식별한다. 생산자가 coverage에 정확한
+    # 산출물·호스트를 적으므로, 성공한 배치 산출물 하나를 호스트별 파일 N개로 지어내지 않는다.
+    for entry in state.get("coverage") or []:
+        if not isinstance(entry, dict) or entry.get("role") != "enrichment":
+            continue
+        artifact, proto = entry.get("artifact"), entry.get("proto")
+        if (not isinstance(artifact, str) or proto not in {"tcp", "udp"}
+                or not artifact.startswith(f"stage3-{proto}-b")):
+            continue
+        if not entry.get("finished"):
+            # 실패한 묶음이다. 이 자리에서 빼면 그 파일이 어느 기대 집합에도 안 들어가고,
+            # 기대 밖 산출물을 훑는 마지막 단계가 그것을 손상으로 다시 센다 - 호스트별
+            # 대체 실행이 **전부** 성공해 증거를 되찾았어도 nse_degraded 와 호스트 없는
+            # artifact_broken 이 남는다. 대체된 산출물이라는 사실만 기록하고 넘어간다.
+            superseded.add(artifact)
+            continue
+        units.append(([out / artifact], []))
+        hosts = entry.get("hosts")
+        port_text = entry.get("ports")
+        try:
+            ports = {int(port) for port in str(port_text).split(":")[-1].split(",")}
+        except ValueError:
+            ports = set()
+        if isinstance(hosts, list):
+            covered.update((host, proto, port) for host in hosts if isinstance(host, str)
+                           for port in ports)
     for ip, protos in sorted((open_map or {}).items()):
         if not isinstance(protos, dict):
             continue
@@ -361,8 +397,10 @@ def _enrichment_units(out_dir, spec: dict) -> list[tuple[list[Path], list[Path]]
             raw = protos.get(proto)
             if not raw:
                 continue
+            ports = sorted({int(p) for p in raw if (ip, proto, int(p)) not in covered})
+            if not ports:
+                continue
             grouped = _stage3_expected(out, ip, proto, confirm)
-            ports = sorted({int(p) for p in raw})
             split: list[Path] = []
             if proto == "udp" and 1 < len(ports) <= _MAX_SPLIT_UNITS:
                 for port in ports:
@@ -539,6 +577,45 @@ def gave_up_hosts(out_dir) -> list[str]:
     return [h for h in (_read_state(Path(out_dir)).get("gave_up") or []) if isinstance(h, str)]
 
 
+def _retry_ip_key(value: str):
+    try:
+        return (0, int(ipaddress.ip_address(value)))
+    except ValueError:
+        return (1, value)
+
+
+def gave_up_detail(out_dir) -> dict:
+    """Persistent retry queue from timeout and retransmission-cap evidence."""
+    state = _read_state(Path(out_dir))
+    by_stage = {}
+    reasons_by_stage = {}
+
+    def merge(raw, reason):
+        if not isinstance(raw, dict):
+            return
+        for stage, hosts in raw.items():
+            if not isinstance(stage, str) or not isinstance(hosts, list):
+                continue
+            clean = sorted({host for host in hosts if isinstance(host, str)}, key=_retry_ip_key)
+            if not clean:
+                continue
+            by_stage[stage] = sorted(set(by_stage.get(stage, [])) | set(clean), key=_retry_ip_key)
+            stage_reasons = reasons_by_stage.setdefault(stage, {})
+            for host in clean:
+                host_reasons = stage_reasons.setdefault(host, [])
+                if reason not in host_reasons:
+                    host_reasons.append(reason)
+
+    merge(state.get("gave_up_by_stage") or {}, "host_timeout")
+    merge(state.get("retransmission_cap_by_stage") or {}, "retransmission_cap")
+    targets = sorted({host for hosts in by_stage.values() for host in hosts}, key=_retry_ip_key)
+    if not targets:
+        targets = sorted(set(gave_up_hosts(out_dir)), key=_retry_ip_key)
+    return {"required": bool(targets), "count": len(targets),
+            "targets": targets, "by_stage": by_stage,
+            "reasons_by_stage": reasons_by_stage}
+
+
 def coverage_entries(out_dir) -> list[dict]:
     """엔진이 nmap 을 돌리며 적어 둔 커버리지 기록(run-state 의 ``coverage``).
 
@@ -705,8 +782,9 @@ def artifact_report(out_dir, spec: dict, force_scanned_hosts: bool = False) -> d
     if not force_scanned_hosts:
         # 전체 스캔에서 stage3 는 enrichment 다. 어긋나도 sweep 의 안전한 권한을 뺏지 않지만,
         # 증거가 빠졌다는 사실은 남겨야 한다 — 안 그러면 손실이 정상 완료로 숨는다.
-        units = _enrichment_units(out, spec)
-        seen: set[str] = set()
+        superseded: set[str] = set()
+        units = _enrichment_units(out, spec, superseded)
+        seen: set[str] = superseded
         for grouped, split in units:
             seen |= {p.name for p in grouped} | {p.name for p in split}
             # 묶음이 온전하면 그것으로 끝. 아니면 쪼갠 집합이 **전부** 완결됐는지 본다 —
@@ -798,20 +876,53 @@ def is_done(out_dir) -> bool:
 
 # ── 이벤트 → 단계 요약 ──
 
+
+def canonical_stage(stage: str, proto: str = "") -> str:
+    """One stage vocabulary for events, durable issues, retries, and the UI."""
+    if stage in {"service:tcp", "tcp_service"} or stage == "service" and proto == "tcp":
+        return "tcp_service"
+    if stage in {"service:udp", "udp_service"} or stage == "service" and proto == "udp":
+        return "udp_service"
+    return stage if stage in {"discovery", "tcp", "udp"} else stage or ""
+
 def parse_events(out_dir) -> dict:
     """events.ndjson 을 단계 요약으로 접는다(라이브 진행·이력 공용). 파일 없으면 빈 결과."""
     path = Path(out_dir) / "events.ndjson"
     stages: dict[str, dict] = {}
     order: list[str] = []
+    executions: dict[str, dict] = {}
+    execution_order: list[str] = []
+    recoveries: list[dict] = []
+    quality_issues: list[dict] = []
+    # events.ndjson 은 append-only 라 재개하면 이전 시도의 이벤트가 그대로 남는다. 어느
+    # 시도에서 난 오류인지 알아야 '재개해서 성공한 단계' 와 '이번에도 실패한 단계' 를
+    # 가를 수 있다. job_start 마다 회차가 올라간다.
+    attempt = 0
+    superseded: set[tuple] = set()
+    current: dict = {}
     overall = {"status": "running", "percent": None, "seconds": None, "counts": {}}
     if not path.exists():
-        return {"stages": [], "overall": overall}
+        return {"stages": [], "overall": overall, "current": current, "executions": [],
+                "trace": empty_trace(),
+                "recoveries": [], "quality_issues": []}
 
     def slot(name):
         if name and name not in stages:
-            stages[name] = {"stage": name, "status": "pending", "percent": 0, "counts": {}}
+            stages[name] = {
+                "stage": name, "status": "pending", "percent": 0,
+                "counts": {}, "issues": [],
+            }
             order.append(name)
         return stages.get(name, {})
+
+    def mapped_stage(name, event):
+        proto = event.get("proto")
+        mapped = canonical_stage(name, proto if proto in {"tcp", "udp"} else "")
+        if mapped != "service":
+            return mapped
+        if current.get("stage") in {"tcp_service", "udp_service"}:
+            return current["stage"]
+        return name
 
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
@@ -824,37 +935,317 @@ def parse_events(out_dir) -> dict:
         if not isinstance(e, str):
             continue
         if (
-            e in {"stage_start", "stage_progress", "stage_done", "error"}
+            e in {"stage_start", "stage_progress", "stage_activity", "stage_done", "error",
+                  "hosts_gave_up", "retransmission_cap_hit", "command_start", "command_done"}
             and (not isinstance(st, str) or not st)
         ):
             continue
-        if e == "stage_start":
-            slot(st).update({"status": "running", "percent": 0})
-        elif e == "stage_progress":
+        if e == "stage_plan":
+            plan = ev.get("stages")
+            if isinstance(plan, list):
+                for name in plan:
+                    if isinstance(name, str) and name:
+                        slot(name)
+        elif e == "stage_start":
+            # 재개해서 같은 단계를 다시 도는 경우, 이전 시도의 실패는 이번 시도가 대신한다.
+            # 안 걷어내면 stage_done 이 그 error 를 그대로 보존하고 옛 command_error 가
+            # 미해결 품질 이슈로 남아, 스캔은 done 인데 타임라인·품질은 실패로 보고한다.
+            #
+            # **원시 이름만 보면 안 된다.** 실패 이벤트는 proto 에 따라 정규화되므로
+            # (`service` + proto=tcp -> `tcp_service`), 재스캔 생산자가 내는
+            # `stage_start(stage="service")` 는 오류가 든 슬롯과 이름이 다르다. 이미 있는
+            # 정규화 슬롯까지 함께 본다 - 없는 슬롯을 새로 만들지는 않는다.
+            for name in (st, *(("tcp_service", "udp_service") if st == "service" else ())):
+                if name != st and name not in stages:
+                    continue
+                target = slot(name)
+                # **같은 시도 안의 재시작은 건드리지 않는다.** 배치마다 stage_start 가 다시
+                # 나오므로(_scan_batches), 회차를 안 보고 지우면 배치 0 의 실패가 배치 1
+                # 시작에 조용히 사라진다.
+                if (target.get("status") == "error"
+                        and target.get("_error_attempt", attempt) < attempt):
+                    superseded.add((name, target.get("_error_attempt")))
+                    target["issues"] = [issue for issue in target.get("issues", [])
+                                        if issue.get("type") != "command_error"]
+                    # 정규화로 생긴 슬롯은 이번 시도의 `stage_done` 을 받지 못한다 - 그쪽은
+                    # 원시 이름(`service`)으로 오기 때문이다. `running` 으로 두면 끝난
+                    # 스캔에 영원히 도는 단계가 남으므로, 같은 일을 다시 해서 끝난 것으로
+                    # 닫는다. 원시 슬롯은 뒤따르는 stage_done 이 제 상태를 채운다.
+                    if name != st:
+                        target["status"] = "done"
+                        target["percent"] = 100
+                    else:
+                        target["status"] = "running"
+                        target["percent"] = target.get("percent") or 0
+                    target.pop("error", None)
+                    target.pop("_error_attempt", None)
+                elif (name == st
+                      and target.get("status") not in {"done", "stopped", "error"}):
+                    target["status"] = "running"
+                    target["percent"] = target.get("percent") or 0
+        elif e == "stage_activity":
+            s = slot(st)
             progress = ev.get("percent")
             if isinstance(progress, (int, float)) and not isinstance(progress, bool) and math.isfinite(progress):
-                slot(st)["percent"] = max(0, min(100, progress))
+                s["percent"] = max(0, min(100, progress))
+            s["status"] = "running"
+            focus = {"stage": st}
+            hosts = ev.get("current_hosts")
+            if isinstance(hosts, list):
+                focus["hosts"] = [h for h in hosts[:8] if isinstance(h, str)]
+            for key in ("batch", "batch_total", "current_host_count",
+                        "completed_hosts", "total_hosts"):
+                value = ev.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    focus[key] = value
+            if ev.get("progress_mode") == "batch":
+                focus["progress_mode"] = "batch"
+            current = focus
+        elif e == "stage_progress":
+            progress = ev.get("percent")
+            mapped = st
+            if st == "service" and current.get("stage") in {"tcp_service", "udp_service"}:
+                mapped = current["stage"]
+            if isinstance(progress, (int, float)) and not isinstance(progress, bool) and math.isfinite(progress):
+                # 포트 스윕 Nmap 퍼센트는 현재 배치 안의 값이다. 배치 위치를 더해 단계 전체
+                # 퍼센트로 바꾼다. 호스트별 서비스 프로브는 여러 Nmap이 동시에 떠 있으므로
+                # 개별 프로세스 퍼센트로 전체를 덮지 않고 stage_activity의 완료 호스트 수를 쓴다.
+                batch_progress = (
+                    current.get("stage") == mapped and current.get("batch_total")
+                    and (mapped == st or current.get("progress_mode") == "batch")
+                )
+                if batch_progress:
+                    progress = ((current.get("batch", 1) - 1) + progress / 100) \
+                               / current["batch_total"] * 100
+                if st != "service" or mapped == st or current.get("progress_mode") == "batch":
+                    slot(mapped)["percent"] = max(0, min(100, progress))
             else:
-                slot(st)
-            stages[st]["status"] = "running"
+                slot(mapped)
+            if stages[mapped].get("status") not in {"warning", "error"}:
+                stages[mapped]["status"] = "running"
+            if not current:
+                current = {"stage": mapped}
         elif e == "hosts_up":
             slot("discovery")["counts"]["live"] = ev.get("count")
+        elif e == "hosts_gave_up":
+            mapped = mapped_stage(st, ev)
+            s = slot(mapped)
+            hosts = ev.get("hosts")
+            hosts = [host for host in hosts if isinstance(host, str)] \
+                if isinstance(hosts, list) else []
+            count = ev.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                count = len(hosts)
+            s["issues"].append({
+                "type": "host_timeout", "count": count, "hosts": hosts,
+                "message": f"호스트 {count}대가 제한 시간 안에 이 단계를 끝내지 못했습니다.",
+            })
+            s["status"] = "warning"
+            s["timeout_count"] = s.get("timeout_count", 0) + count
+        elif e == "retransmission_cap_hit":
+            mapped = mapped_stage(st, ev)
+            s = slot(mapped)
+            hosts = ev.get("hosts")
+            hosts = [host for host in hosts if isinstance(host, str)] \
+                if isinstance(hosts, list) else []
+            count = ev.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                count = len(hosts)
+            retries = ev.get("max_retries")
+            retries = retries if isinstance(retries, int) and not isinstance(retries, bool) else "?"
+            s["issues"].append({
+                "type": "retransmission_cap", "count": count, "hosts": hosts,
+                "message": f"호스트 {count}대에서 포트 재전송 한도({retries}회)에 도달했습니다.",
+            })
+            s["status"] = "warning"
+        elif e in {"service_retry", "service_split"}:
+            mapped = mapped_stage(st, ev)
+            hosts = ev.get("hosts")
+            hosts = [host for host in hosts if isinstance(host, str)] \
+                if isinstance(hosts, list) else []
+            if not hosts and isinstance(ev.get("ip"), str):
+                hosts = [ev["ip"]]
+            ports = ev.get("ports")
+            ports = [port for port in ports if isinstance(port, int) and not isinstance(port, bool)] \
+                if isinstance(ports, list) else []
+            recovery = {
+                "type": "retry" if e == "service_retry" else "split",
+                "stage": mapped, "proto": ev.get("proto") if ev.get("proto") in {"tcp", "udp"} else "",
+                "hosts": hosts, "ports": ports,
+                "port_spec": ev.get("port_spec") if isinstance(ev.get("port_spec"), str) else "",
+                "reason": ev.get("reason") if isinstance(ev.get("reason"), str) else "",
+                "outcome": ev.get("outcome") if ev.get("outcome") in {"recovered", "degraded", "failed", "stopped"}
+                else "",
+                "recovered": ev.get("recovered") is True,
+            }
+            for key in ("engine", "units", "recovered_units", "failed_units", "seconds", "rc"):
+                value = ev.get(key)
+                if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                    recovery[key] = value
+            for key in ("recovery_of_execution_id", "execution_id"):
+                value = ev.get(key)
+                if isinstance(value, str) and value:
+                    recovery[key] = value
+            recoveries.append(recovery)
+        elif e == "service_degraded":
+            mapped = mapped_stage(st, ev)
+            s = slot(mapped)
+            hosts = ev.get("hosts")
+            hosts = [host for host in hosts if isinstance(host, str)] \
+                if isinstance(hosts, list) else []
+            if not hosts and isinstance(ev.get("ip"), str):
+                hosts = [ev["ip"]]
+            ports = ev.get("failed_ports") or ev.get("ports")
+            ports = [port for port in ports if isinstance(port, int) and not isinstance(port, bool)] \
+                if isinstance(ports, list) else []
+            proto = ev.get("proto") if ev.get("proto") in {"tcp", "udp"} else ""
+            message = ev.get("message") if isinstance(ev.get("message"), str) \
+                else "서비스 프로브가 일부 또는 전부 완료되지 않았습니다."
+            issue = {
+                "type": "service_degraded", "count": len(hosts) or 1,
+                "hosts": hosts, "proto": proto, "ports": ports,
+                "port_spec": ev.get("port_spec") if isinstance(ev.get("port_spec"), str) else "",
+                "message": message,
+            }
+            s["issues"].append(issue)
+            s["status"] = "warning"
+            for host in hosts or [""]:
+                quality_issues.append({
+                    "kind": "service_degraded", "stage": mapped, "host_ip": host,
+                    "proto": proto, "port_spec": issue["port_spec"], "message": message,
+                })
         elif e == "stage_done":
             s = slot(st)
             cnts = ev.get("counts", {})
             if not isinstance(cnts, dict):
                 cnts = {}
-            s.update({"status": "stopped" if cnts.get("stopped") else "done",
-                      "percent": 100, "seconds": ev.get("seconds"), "counts": cnts})
+            if cnts.get("stopped"):
+                status = "stopped"
+            elif s.get("status") == "error":
+                status = "error"
+            elif s.get("issues"):
+                status = "warning"
+            else:
+                status = "done"
+            # warning 은 호스트 일부를 재시도 큐에 보존한 채 해당 단계 자체는 끝난 것이다.
+            # 반대로 error/stopped 를 100%로 칠하면 "전체 절차 완료율"이 실패 직후 100%가
+            # 되어 버린다. 마지막으로 실제 관측한 진행률을 그대로 둔다.
+            percent = 100 if status in {"done", "warning"} else (s.get("percent") or 0)
+            s.update({"status": status, "percent": percent,
+                      "seconds": ev.get("seconds"), "counts": cnts})
+            if current.get("stage") == st:
+                current = {}
         elif e == "error":
+            st = mapped_stage(st, ev)
             s = slot(st)
-            label = {"discovery": "호스트 발견", "tcp": "TCP 탐색", "udp": "UDP 탐색",
-                     "service": "서비스 식별"}.get(st, "스캔")
+            label = {"discovery": "호스트 발견", "tcp": "TCP 포트 발견",
+                     "tcp_service": "TCP 서비스 프로브", "udp": "UDP 포트 발견",
+                     "udp_service": "UDP 서비스 프로브", "service": "서비스 식별"}.get(st, "스캔")
             # 원시 이벤트의 cmd/path/rc는 서버 로그에만 남기고 API에는 안정적 메시지만 노출한다.
             s["error"] = f"{label} 단계 실행에 실패했습니다."
-            s["status"] = "error"
+            fatal = ev.get("fatal") is not False
+            s["issues"].append({
+                "type": "command_error", "count": 1, "message": s["error"],
+                "fatal": fatal,
+                "execution_key": ev.get("execution_id")
+                if isinstance(ev.get("execution_id"), str) else "",
+            })
+            s["status"] = "error" if fatal else "warning"
+            s["_error_attempt"] = attempt
+            if fatal:
+                quality_issues.append({
+                    "_attempt": attempt,
+                    "kind": "command_error", "stage": st, "host_ip": "",
+                    "proto": ev.get("proto") if ev.get("proto") in {"tcp", "udp"} else "",
+                    "port_spec": "", "message": s["error"],
+                    "execution_key": ev.get("execution_id")
+                    if isinstance(ev.get("execution_id"), str) else "",
+                })
+        elif e == "command_start":
+            execution_id = ev.get("execution_id")
+            argv = ev.get("argv")
+            if not isinstance(execution_id, str) or not isinstance(argv, list):
+                continue
+            argv = [arg for arg in argv if isinstance(arg, str)]
+            execution = {
+                "id": execution_id, "stage": st,
+                "group": ev.get("group") if ev.get("group") in {"common", "individual"}
+                else "common",
+                "reason": ev.get("reason") if isinstance(ev.get("reason"), str) else "",
+                "artifact": ev.get("artifact") if isinstance(ev.get("artifact"), str) else "",
+                "argv": argv, "status": "running", "started_at": ev.get("ts"),
+                "watchdog_seconds": 0,
+                "seconds": None, "timeout_count": 0, "timed_out": [],
+                "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
+                "phases": {}, "hosts_found": 0, "open_ports": 0,
+                "inferred_open": 0, "products": 0, "empty": False,
+                # 지연 진단이 읽는 값. 없으면 '호스트별 소요' 와 진행 중 표가 빈 채로 남는다.
+                "proto": ev.get("proto") if isinstance(ev.get("proto"), str) else "",
+                "hosts": [h for h in (ev.get("hosts") or []) if isinstance(h, str)],
+                "label": ev.get("label") if isinstance(ev.get("label"), str) else "",
+                "ports": ev.get("ports") if isinstance(ev.get("ports"), str) else "",
+            }
+            if ev.get("role") in {"authority", "enrichment"}:
+                execution["role"] = ev["role"]
+            executions[execution_id] = execution
+            execution_order.append(execution_id)
+        elif e == "command_done":
+            execution_id = ev.get("execution_id")
+            execution = executions.get(execution_id)
+            if execution is None:
+                continue
+            outcome = ev.get("outcome")
+            execution.update({
+                # watchdog = 우리가 프로세스 상한으로 끊은 실행. rc 만 보면 nmap 이 죽은
+                # 것과 구분되지 않는데 사용자가 할 일이 다르다(전자는 원인 조사, 후자는
+                # 상한을 늘릴지 대상을 줄일지 결정).
+                "status": outcome
+                if outcome in {"done", "timeout", "error", "stopped", "watchdog"}
+                else "done",
+                "watchdog_seconds": ev.get("watchdog_seconds")
+                if isinstance(ev.get("watchdog_seconds"), int)
+                and not isinstance(ev.get("watchdog_seconds"), bool) else 0,
+                "seconds": ev.get("seconds") if isinstance(ev.get("seconds"), (int, float))
+                and not isinstance(ev.get("seconds"), bool) else None,
+                "rc": ev.get("rc") if isinstance(ev.get("rc"), int) else None,
+                "timeout_count": ev.get("timeout_count")
+                if isinstance(ev.get("timeout_count"), int) else 0,
+                "timed_out": [host for host in (ev.get("timed_out") or [])
+                              if isinstance(host, str)],
+                "retransmission_cap_count": ev.get("retransmission_cap_count")
+                if isinstance(ev.get("retransmission_cap_count"), int) else 0,
+                "retransmission_cap_hosts": [
+                    host for host in (ev.get("retransmission_cap_hosts") or [])
+                    if isinstance(host, str)
+                ],
+                "finished_at": ev.get("ts"),
+                # 지연 진단 재료. nmap 내부 단계별 체류시간과 이 실행이 실제로 담은 것.
+                "phases": {name: float(spent)
+                           for name, spent in (ev.get("phases") or {}).items()
+                           if isinstance(name, str)
+                           and isinstance(spent, (int, float))
+                           and not isinstance(spent, bool)}
+                if isinstance(ev.get("phases"), dict) else {},
+                **{key: ev.get(key) if isinstance(ev.get(key), int)
+                   and not isinstance(ev.get(key), bool) else 0
+                   for key in ("hosts_found", "open_ports", "inferred_open", "products")},
+                "empty": bool(ev.get("empty")),
+            })
+            for kind, hosts in (
+                ("host_timeout", execution["timed_out"]),
+                ("retransmission_cap", execution["retransmission_cap_hosts"]),
+            ):
+                for host in hosts:
+                    quality_issues.append({
+                        "kind": kind, "stage": execution["stage"], "host_ip": host,
+                        "proto": "udp" if execution["stage"].startswith("udp") else "tcp"
+                        if execution["stage"].startswith("tcp") else "",
+                        "port_spec": "", "message": "",
+                        "execution_key": execution_id,
+                    })
         elif e == "job_start":
             overall["status"] = "running"
+            attempt += 1
         elif e == "job_done":
             status = ev.get("status")
             if not isinstance(status, str) or status not in {"done", "stopped", "failed"}:
@@ -873,14 +1264,299 @@ def parse_events(out_dir) -> dict:
             overall.update({"status": status, "seconds": seconds, "counts": counts})
 
     stage_list = [stages[s] for s in order]
-    done = sum(1 for s in stage_list if s["status"] in ("done", "stopped"))
-    if overall["status"] != "running":
+    if overall["status"] == "done":
         overall["percent"] = 100
     elif stage_list:
-        cur = next((s for s in stage_list if s["status"] == "running"), None)
-        frac = (cur["percent"] or 0) / 100.0 if cur else 0
-        overall["percent"] = round(min(done + frac, len(stage_list)) / len(stage_list) * 100, 1)
-    return {"stages": stage_list, "overall": overall}
+        # 시간 경과나 프로세스 상태가 아니라, 계획된 단계 중 실제로 끝난 비율이다.
+        total = sum(100 if s["status"] in ("done", "warning") else (s.get("percent") or 0)
+                    for s in stage_list)
+        overall["percent"] = round(min(total / len(stage_list), 100), 1)
+    now = time.time()
+    for execution in executions.values():
+        if execution["status"] != "running":
+            continue
+        started_at = execution.get("started_at")
+        if (
+            isinstance(started_at, (int, float))
+            and not isinstance(started_at, bool)
+            and math.isfinite(started_at)
+        ):
+            execution["seconds"] = round(max(now - started_at, 0), 1)
+    recovered_execution_keys = {
+        recovery.get("recovery_of_execution_id") for recovery in recoveries
+        # 빈 값은 담지 않는다. 아래 검사가 `execution_key` 가 없는 이슈까지
+        # (service_degraded 처럼) 통째로 지워 버린다 - 예전에는 command_error 조건이
+        # 그것을 가리고 있었다.
+        if recovery.get("recovered") is True and recovery.get("recovery_of_execution_id")
+    }
+    quality_issues = [
+        issue for issue in quality_issues
+        # 대체된 실행에서 나온 것은 **종류를 가리지 않고** 뺀다. 예전에는 그 실행의
+        # command_error 만 뺐는데, 같은 실행이 남긴 retransmission_cap·host_timeout 은
+        # 그대로 살아남아 호스트가 재스캔 대기열에 계속 남았다 - 대체 실행이 그 호스트를
+        # 성공적으로 다시 훑었는데도. 대체된 산출물의 진단은 이미 사라진 파일의 것이다.
+        if issue.get("execution_key") not in recovered_execution_keys
+        # 재개가 대신한 시도의 실패는 남기지 않는다 - 남기면 성공한 스캔이 영영
+        # '확인 필요' 로 보이고 재시도 안내가 사라지지 않는다.
+        and (issue.get("kind"), issue.get("stage"), issue.get("_attempt")) not in {
+            ("command_error", stage, att) for stage, att in superseded
+        }
+    ]
+    for issue in quality_issues:
+        issue.pop("_attempt", None)
+    for stage in stage_list:
+        stage.pop("_error_attempt", None)
+    if recovered_execution_keys:
+        for stage in stage_list:
+            stage["issues"] = [
+                issue for issue in stage.get("issues", [])
+                if issue.get("execution_key") not in recovered_execution_keys
+            ]
+            if stage.get("status") == "warning" and not stage["issues"]:
+                stage["status"] = "done" if stage.get("percent") == 100 else "running"
+    ordered = [executions[key] for key in execution_order if key in executions]
+    return {
+        "stages": stage_list, "overall": overall, "current": current,
+        "executions": ordered, "trace": fold_trace(ordered),
+        "recoveries": recoveries, "quality_issues": quality_issues,
+    }
+
+
+def _saved_spec(out: Path) -> dict:
+    """결과 폴더에 남은 실행 사양. 없거나 깨졌으면 빈 dict - 지어내지 않는다."""
+    try:
+        data = json.loads((out / "spec.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _superseded_grouped(out: Path, state: dict, confirm: bool) -> set[str]:
+    """실패해서 호스트별 대체 실행에 자리를 넘긴 묶음 산출물 이름.
+
+    묶음이 죽어도 파싱 가능한 **부분** XML 은 남는다. 그 파일을 그대로 읽으면 나중에
+    성공한 호스트별 probe 의 서비스·NSE 식별을 덮어쓴다 - 파일명 정렬상 호스트별
+    산출물(`stage3-10_0_0_1-...`)이 묶음(`stage3-udp-b0-g0`)보다 **먼저** 읽히고,
+    stage3 는 뒤에 읽은 것이 이기기 때문이다(확인 패스가 기본을 이겨야 하므로).
+
+    그래서 대체된 묶음은 인입에서 빼야 한다. 성공한 묶음은 그대로 읽는다.
+    """
+    superseded = set()
+    for entry in state.get("coverage") or []:
+        if not isinstance(entry, dict) or entry.get("role") != "enrichment":
+            continue
+        artifact = entry.get("artifact")
+        if not isinstance(artifact, str) or entry.get("finished"):
+            continue
+        proto = entry.get("proto")
+        if proto not in {"tcp", "udp"} or not artifact.startswith(f"stage3-{proto}-b"):
+            # 묶음이 아니다(호스트별 probe). 대체할 것이 없으므로 그 관측은 그대로 쓴다 -
+            # 워치독이 끊었어도 복구된 XML 에 끝난 호스트의 서비스·NSE 가 들어 있다.
+            continue
+        hosts = [h for h in (entry.get("hosts") or []) if isinstance(h, str)]
+        try:
+            ports = {int(port) for port in str(entry.get("ports")).split(":")[-1].split(",")}
+        except ValueError:
+            ports = set()
+        # **대체가 실제로 성공한 것만** 뺀다. 호스트별 실행이 그 호스트의 포트를 전부
+        # 되찾았을 때만 묶음이 대체된 것이다. 아니면 묶음의 부분 관측이 그 호스트에 대해
+        # 유일한 증거이므로 버리면 식별이 스윕의 '정체 불명' 으로 되돌아간다.
+        if hosts and ports and all(
+            _complete(_stage3_expected(out, host, f"{proto}{port}", confirm))
+            or _complete(_stage3_expected(out, host, proto, confirm))
+            for host in hosts for port in ports
+        ):
+            superseded.add(artifact)
+    return superseded
+
+
+_TRACE_MAX_HOSTS = 12
+_TRACE_MAX_SLOWEST = 8
+
+
+def _elapsed(run: dict, spent: float, now: float) -> float:
+    """도는 중인 실행의 경과 시간. 시작 시각을 못 읽으면 이미 알던 값 그대로."""
+    if spent:
+        return spent
+    started = run.get("started_at")
+    if isinstance(started, bool):
+        return spent
+    if isinstance(started, (int, float)):
+        return round(max(now - started, 0.0), 1)
+    if isinstance(started, datetime):
+        stamp = started if started.tzinfo else started.replace(tzinfo=timezone.utc)
+        return round(max(now - stamp.timestamp(), 0.0), 1)
+    return spent
+
+
+def fold_trace(executions: list[dict], now: float | None = None) -> dict:
+    """실행 기록을 '어디서 지연이 생기는가' 에 답하는 갈래로 접는다.
+
+    진행률 하나로는 몇 시간짜리 스캔에서 무엇이 시간을 쓰는지 알 수 없고, 단계 요약도
+    합계만 말한다. 지연의 실제 단위는 **nmap 프로세스 하나**다.
+
+    * ``running`` — 지금 도는 실행. 오래 걸리는 중인 것을 먼저 보여 준다.
+    * ``by_stage`` — 단계별 합계와 실행 횟수.
+    * ``by_phase`` — nmap **내부** 단계별 합계. 같은 10분이라도 포트스캔에 쓴 10분과
+      서비스 식별에 쓴 10분은 원인도 대책도 다르다.
+    * ``by_host`` — 호스트별 합계. **호스트당 프로세스를 세우는 식별 단계만** 센다.
+      배치 스윕은 여러 대를 한 프로세스로 돌아 한 대에 귀속시킬 수 없다.
+    * ``slowest`` — 가장 오래 걸린 실행. 수확량을 함께 보여 주므로 '107초 돌고 빈 산출물'
+      이 정상 완료와 구분된다.
+
+    키 이름은 화면(`ScanTrace.jsx`)이 읽는 그대로다. 한쪽만 바꾸면 패널이 조용히 빈 채로
+    남는다 - 실제로 그렇게 되살렸다가 아무것도 안 그려진 적이 있다.
+    """
+    now = time.time() if now is None else now
+    by_stage: dict[tuple, dict] = {}
+    by_phase: dict[str, float] = {}
+    by_host: dict[str, dict] = {}
+    running, finished = [], []
+    for run in executions:
+        stage, proto = run.get("stage") or "?", run.get("proto") or ""
+        seconds = run.get("seconds")
+        spent = seconds if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else 0.0
+        if run.get("status") == "running":
+            # 도는 중인 실행에는 `seconds` 가 없다(command_done 이 아직 안 왔다). 그것을
+            # 그대로 경과로 쓰면 '지금 실행 중' 표가 영원히 '0초 경과' 를 그리고, 오래
+            # 걸리는 실행을 짚어 주는 임계값도 절대 안 걸린다 - 지연이 어디서 나는지
+            # 보려고 만든 표가 정작 지연을 못 가리킨다. 시작 시각에서 직접 잰다.
+            running.append({**run, "elapsed_seconds": _elapsed(run, spent, now)})
+        else:
+            finished.append({**run, "seconds": spent})
+        slot = by_stage.setdefault((stage, proto),
+                                   {"stage": stage, "proto": proto, "runs": 0, "seconds": 0.0})
+        slot["runs"] += 1
+        slot["seconds"] = round(slot["seconds"] + spent, 1)
+        for phase, value in (run.get("phases") or {}).items():
+            by_phase[phase] = round(by_phase.get(phase, 0.0) + value, 1)
+        # 호스트별은 한 대만 상대한 실행에서만 셀 수 있다.
+        hosts = [h for h in (run.get("hosts") or []) if isinstance(h, str)]
+        if len(hosts) == 1:
+            row = by_host.setdefault(hosts[0], {"host": hosts[0], "runs": 0, "seconds": 0.0})
+            row["runs"] += 1
+            row["seconds"] = round(row["seconds"] + spent, 1)
+    host_rows = sorted(by_host.values(), key=lambda r: -r["seconds"])
+    slow_rows = sorted(finished, key=lambda r: -(r["seconds"] or 0.0))
+    return {
+        "runs_total": len(executions),
+        "seconds_total": round(sum(row["seconds"] for row in by_stage.values()), 1),
+        "running": running,
+        "by_stage": sorted(by_stage.values(), key=lambda r: -r["seconds"]),
+        "by_phase": sorted(({"phase": k, "seconds": v} for k, v in by_phase.items()),
+                           key=lambda r: -r["seconds"]),
+        "by_host": host_rows[:_TRACE_MAX_HOSTS],
+        "by_host_truncated": len(host_rows) > _TRACE_MAX_HOSTS,
+        "slowest": slow_rows[:_TRACE_MAX_SLOWEST],
+        "slowest_truncated": len(slow_rows) > _TRACE_MAX_SLOWEST,
+    }
+
+
+def empty_trace() -> dict:
+    return fold_trace([], 0.0)
+
+
+_HOST_STAGE_FIELD = {
+    "discovery": "discovery_status",
+    "tcp": "tcp_sweep_status",
+    "tcp_service": "tcp_service_status",
+    "udp": "udp_sweep_status",
+    "udp_service": "udp_service_status",
+}
+
+
+def terminal_observability(out_dir, spec: dict | None = None) -> dict:
+    """Build deterministic terminal DB inputs from the authoritative sidecars.
+
+    This does not write the database. Running scans continue to read the sidecars directly;
+    the API calls this only while committing a terminal scan.  Keeping the conversion here
+    makes reconciliation and the normal worker use the exact same projection.
+    """
+    out = Path(out_dir)
+    parsed = parse_events(out)
+    state = _read_state(out)
+    saved = spec if isinstance(spec, dict) else {}
+    plan = {
+        stage.get("stage") for stage in parsed.get("stages", [])
+        if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+    }
+    host_rows: dict[str, dict] = {}
+
+    def host_row(host) -> dict | None:
+        if not isinstance(host, str) or not host:
+            return None
+        row = host_rows.setdefault(host, {"host_ip": host})
+        for stage, field in _HOST_STAGE_FIELD.items():
+            row.setdefault(field, "unknown" if stage in plan else "not_planned")
+        return row
+
+    # 저장된 spec 의 targets 는 **주소 표현**이다. 기본 단계 스캔은 `-sn` 발견을 쓰므로
+    # `10.0.0.0/24` 같은 문자열이 그대로 들어 있다. 그걸 호스트로 넣으면 그 토큰 자체가
+    # 가짜 관측 행이 되어 `not_responding` 으로 찍히고, 정작 응답하지 않은 실제 주소들은
+    # 행이 없다 - 없는 호스트를 하나 만들고 있는 호스트들을 빠뜨리는 셈이다.
+    #
+    # 구체적인 IP 만 받는다. `--discovery pn` 경로는 실제 호스트 목록이 그대로 들어오므로
+    # 그쪽의 미응답 기록은 지금처럼 남는다. 범위를 펼치지는 않는다 - /16 하나가 65,536 개
+    # 행이 되고, 응답하지 않은 주소는 어차피 지금도 행이 없다.
+    for host in saved.get("targets", []) if isinstance(saved.get("targets"), list) else []:
+        if isinstance(host, str) and _is_ip(host):
+            host_row(host)
+    live = {host for host in (state.get("live") or []) if isinstance(host, str)}
+    for host in live:
+        row = host_row(host)
+        if row is not None:
+            row["discovery_status"] = "done"
+    discovery = next(
+        (stage for stage in parsed.get("stages", []) if stage.get("stage") == "discovery"),
+        None,
+    )
+    if discovery and discovery.get("status") in {"done", "warning"}:
+        for host, row in host_rows.items():
+            if host not in live and row["discovery_status"] == "unknown":
+                row["discovery_status"] = "not_responding"
+
+    coverage = state.get("coverage") or []
+    if isinstance(coverage, list):
+        for entry in coverage:
+            if not isinstance(entry, dict):
+                continue
+            proto = entry.get("proto")
+            if proto not in {"tcp", "udp"}:
+                continue
+            artifact = entry.get("artifact") if isinstance(entry.get("artifact"), str) else ""
+            field = f"{proto}_service_status" if artifact.startswith("stage3-") \
+                else f"{proto}_sweep_status"
+            status = "done" if entry.get("finished") is True else "error"
+            for host in entry.get("hosts", []) if isinstance(entry.get("hosts"), list) else []:
+                row = host_row(host)
+                if row is not None:
+                    row[field] = status
+
+    issue_inputs = []
+    for raw in parsed.get("quality_issues", []):
+        if not isinstance(raw, dict) or not isinstance(raw.get("kind"), str):
+            continue
+        issue = dict(raw)
+        issue["detail"] = raw.get("message") if isinstance(raw.get("message"), str) else ""
+        issue_inputs.append(issue)
+        row = host_row(issue.get("host_ip"))
+        field = _HOST_STAGE_FIELD.get(issue.get("stage"))
+        if row is not None and field:
+            row[field] = {
+                "host_timeout": "timeout",
+                "retransmission_cap": "warning",
+                "service_degraded": "degraded",
+                "command_error": "error",
+            }.get(issue["kind"], "warning")
+
+    return {
+        "executions": parsed.get("executions") or [],
+        "issues": issue_inputs,
+        "hosts": list(host_rows.values()),
+        "recoveries": parsed.get("recoveries") or [],
+        "stages": parsed.get("stages") or [],
+        "overall": parsed.get("overall") or {},
+    }
 
 
 # ── 결과 인입 ──
@@ -931,7 +1607,15 @@ def collect_results(out_dir, scope_keys: set | None = None,
                     # therefore must not erase an existing identity when stage3 misses a key.
                     f["identity_observed"] = False
                     by_key.setdefault((f["host_ip"], f["port"], f["proto"]), f)
+    # 대체된 묶음은 읽지 않는다 - 읽으면 부분 결과가 성공한 호스트별 probe 를 덮는다.
+    # confirm 여부는 state 가 들고 있는 spec 에서 읽는다 - collect_results 는 spec 을
+    # 받지 않는다(재개·재스캔이 같은 함수를 쓴다).
+    saved = _saved_spec(out)
+    svc = ((saved.get("stages") or {}).get("service") or {})
+    superseded = _superseded_grouped(out, state, bool(svc.get("confirm", False)))
     for x in sorted(out.glob("stage3-*.xml")):
+        if x.name in superseded:
+            continue
         try:
             raw = x.read_bytes()
             fnd = parse_xml(raw)

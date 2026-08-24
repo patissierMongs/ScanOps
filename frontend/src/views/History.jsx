@@ -82,6 +82,10 @@ export default function History() {
                   <span className="muted"> · {identity}{serviceContext}</span>
                 </div>
                 <div className="d">{ev.detail}</div>
+                <div className="event-provenance">
+                  <span>{ev.actor_name || (ev.actor_user_id ? `사용자 #${ev.actor_user_id}` : "스캔 자동 처리")}</span>
+                  {ev.scan_id && <span className="mono">스캔 #{ev.scan_id}{ev.scan_name ? ` · ${ev.scan_name}` : ""}</span>}
+                </div>
                 <div className="when">{String(ev.created_at).slice(0, 19).replace("T", " ")}</div>
               </div>
             );

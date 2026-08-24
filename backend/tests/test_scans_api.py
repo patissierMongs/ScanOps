@@ -4,6 +4,9 @@ import json
 
 import pytest
 
+from datetime import datetime
+from pathlib import Path as pathlib_Path
+
 from tests.conftest import make_user, token_for
 
 XML = "tests/fixtures/sample_scan.xml"
@@ -431,6 +434,7 @@ def test_excludes_are_deduplicated_and_persisted_compact_for_estimate_legacy_and
         "exclude": ["127.0.0.1", "127.0.0.3/32", "127.0.0.1"],
         "workflow": "manual",
         "ports": "T:443",
+        "exclude_ports": "2222",
         "options": ["syn"],
         "batch_size": 256,
     }
@@ -452,6 +456,12 @@ def test_excludes_are_deduplicated_and_persisted_compact_for_estimate_legacy_and
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     assert spec["targets"] == ["127.0.0.0", "127.0.0.2"]
     assert spec["exclude"] == ["127.0.0.1", "127.0.0.3"]
+    assert spec["exclude_ports"] == "2222"
+
+    history = client.get("/api/scans", headers=h).json()
+    staged_history = next(row for row in history if row["id"] == staged.json()["id"])
+    assert staged_history["summary"]["excluded_ports"] == "2222"
+    assert staged_history["summary"]["targets"] == "127.0.0.0 – 127.0.0.2 · 대상 2대"
 
 
 def test_staged_pn_spec_uses_expanded_effective_hosts_for_engine_batching(
@@ -857,7 +867,7 @@ def test_legacy_auto_applies_one_canonical_exclude_to_all_nmap_stages(monkeypatc
 
     captured = []
 
-    def write_stage(_scan_id, argv, _log_path):
+    def write_stage(_scan_id, argv, _log_path, _watchdog=0, _out_base=None):
         captured.append(argv)
         base = Path(argv[argv.index("-oA") + 1])
         if str(base).endswith(".udp_identify"):
@@ -1208,7 +1218,8 @@ def test_import_bundle_preserves_discovery_and_scopes_closure(client):
     assert r.json()["imported"] == 1
     assert r.json()["counts"]["closed"] == 1
 
-    findings = client.get("/api/findings?state=", headers=h).json()
+    # 미확정 관측은 평소 접혀 있다 - 여기서 볼 것은 인입이 상태를 보존하는가이므로 펼친다.
+    findings = client.get("/api/findings?state=&hide_unconfirmed=false", headers=h).json()
     by_port = {(f["proto"], f["port"]): f for f in findings}
     assert by_port[("tcp", 22)]["state"] == "open"
     assert by_port[("tcp", 80)]["state"] == "closed"
@@ -1262,7 +1273,7 @@ def test_auto_discovery_fallback_preserves_existing_identity_and_evidence(
     finally:
         db.close()
 
-    def write_stage(_scan_id, argv, _log_path):
+    def write_stage(_scan_id, argv, _log_path, _watchdog=0, _out_base=None):
         base = Path(argv[argv.index("-oA") + 1])
         if str(base).endswith(".tcp_discovery"):
             xml = _scan_xml(
@@ -1488,7 +1499,8 @@ def test_udp_stage_import_does_not_close_existing_tcp(client):
     r = client.post("/api/scans/import", headers=h, files={"file": ("scan_a.udp_identify.xml", udp, "text/xml")})
     assert r.status_code == 200, r.text
 
-    findings = client.get("/api/findings?state=", headers=h).json()
+    # 미확정 관측은 평소 접혀 있다 - 여기서 볼 것은 인입이 상태를 보존하는가이므로 펼친다.
+    findings = client.get("/api/findings?state=&hide_unconfirmed=false", headers=h).json()
     by_port = {(f["proto"], f["port"]): f for f in findings}
     assert by_port[("tcp", 22)]["state"] == "open"
     assert by_port[("udp", 53)]["state"] == "open|filtered"
@@ -1511,7 +1523,8 @@ def test_limited_legacy_scan_only_closes_ports_in_scaninfo_scope(client):
     r = client.post("/api/scans/import", headers=h, files={"file": ("limited.xml", limited, "text/xml")})
     assert r.status_code == 200, r.text
     assert r.json()["counts"]["closed"] == 1
-    findings = client.get("/api/findings?state=", headers=h).json()
+    # 미확정 관측은 평소 접혀 있다 - 여기서 볼 것은 인입이 상태를 보존하는가이므로 펼친다.
+    findings = client.get("/api/findings?state=&hide_unconfirmed=false", headers=h).json()
     by_port = {f["port"]: f for f in findings}
     assert by_port[22]["state"] == "closed"
     assert by_port[80]["state"] == "open"
@@ -2258,7 +2271,7 @@ def test_scan_summary_says_전체_instead_of_a_port_count(client):
     full = summarize_command(
         "nmap -sS -p T:1-65535 --stats-every 10s 10.0.0.0/24", "10.0.0.0/24")
     assert full["ports"] == "전체" and full["protocols"] == ["TCP"]
-    assert full["targets"] == "10.0.0.0/24"
+    assert full["targets"] == "10.0.0.0 – 10.0.0.255 · 대상 256대"
 
     # 전체에서 일부만 뺀 경우는 개수가 아니라 그 사실이 중요하다.
     partial = summarize_command(
@@ -2266,7 +2279,7 @@ def test_scan_summary_says_전체_instead_of_a_port_count(client):
         "10.0.0.0/24")
     assert partial["ports"] == "전체 (일부 제외)"
     assert partial["excluded_ports"] == "9100,515"
-    assert partial["targets"] == "10.0.0.0/24 (일부 제외)"
+    assert partial["targets"] == "10.0.0.0 – 10.0.0.255 · 대상 255대"
 
     # 두 프로토콜을 다른 범위로 스캔했으면 둘 다 적는다. TCP 범위만 보이면 그 옆의 UDP
     # 뱃지와 붙어 'UDP 도 22,80 을 봤다'로 읽힌다 - 실제로는 53 하나뿐이다.
@@ -2282,7 +2295,11 @@ def test_scan_summary_says_전체_instead_of_a_port_count(client):
 
     many = summarize_command("nmap -sS -p 1-65535 10.0.0.1 10.0.0.2 10.0.0.3",
                              "10.0.0.1 10.0.0.2 10.0.0.3")
-    assert many["targets"] == "10.0.0.1 외 2건"
+    assert many["targets"] == "10.0.0.1 – 10.0.0.3 · 대상 3대"
+
+    unordered = summarize_command(
+        "nmap -sS -p 22 10.0.0.9 10.0.0.2 10.0.0.15", "10.0.0.9 10.0.0.2 10.0.0.15")
+    assert unordered["targets"] == "10.0.0.2 – 10.0.0.15 · 대상 3대"
 
 
 def test_scan_list_carries_the_summary(client):
@@ -2299,6 +2316,331 @@ def test_scan_list_carries_the_summary(client):
     assert rows[0]["summary"]["ports"] == "전체 (일부 제외)"
     assert rows[0]["summary"]["protocols"] == ["TCP"]
     assert rows[0]["command"]          # 원문은 상세에서 볼 수 있게 남아 있다
+
+
+def test_timed_out_hosts_are_retained_and_retried_as_a_narrow_staged_scan(
+    client, monkeypatch, tmp_path,
+):
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.scans_dir.mkdir(parents=True)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    db = SessionLocal()
+    source = ScanRun(
+        name="원본", targets="10.0.0.1 10.0.0.2 10.0.0.3", status="done",
+        command="단계스캔(엔진) · TCP 전체 · UDP 53 · --exclude-ports 2222",
+    )
+    db.add(source)
+    db.commit()
+    source_id = source.id
+    db.close()
+
+    source_dir = scans_api._settings.scans_dir / f"scan_{source_id}"
+    source_dir.mkdir()
+    spec = {
+        "job_id": f"scan_{source_id}",
+        "targets": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+        "exclude": ["10.0.0.99"], "exclude_ports": "2222", "batch_size": 2,
+        "out_dir": str(source_dir),
+        "stages": {
+            "discovery": {"enabled": True, "mode": "sn"},
+            "tcp": {"enabled": True, "ports": "1-65535"},
+            "udp": {"enabled": True, "ports": "53"},
+            "service": {"enabled": True, "version_all": False},
+        },
+        "scanops": {"scope_keys": [
+            "10.0.0.1|22|tcp", "10.0.0.2|443|tcp", "10.0.0.3|53|udp",
+        ]},
+    }
+    (source_dir / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    (source_dir / "run-state.json").write_text(json.dumps({
+        "gave_up": ["10.0.0.3", "10.0.0.2"],
+        "gave_up_by_stage": {
+            "tcp": ["10.0.0.2"], "service:udp": ["10.0.0.3"],
+        },
+        "retransmission_cap_by_stage": {"udp": ["10.0.0.1"]},
+    }), encoding="utf-8")
+
+    before = client.get("/api/scans", headers=h).json()[0]
+    assert before["retry_status"] == "required"
+    assert before["retry_count"] == 3
+    assert before["retry_stages"] == ["tcp", "service:udp", "udp"]
+
+    response = client.post(f"/api/scans/{source_id}/retry-timeouts", headers=h)
+    assert response.status_code == 200, response.text
+    child_id = response.json()["id"]
+    child_spec = json.loads((
+        scans_api._settings.scans_dir / f"scan_{child_id}" / "spec.json"
+    ).read_text(encoding="utf-8"))
+    assert child_spec["targets"] == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    assert child_spec["exclude"] == []
+    assert child_spec["exclude_ports"] == "2222"
+    assert child_spec["stages"]["discovery"] == {"enabled": True, "mode": "pn"}
+    assert all(
+        child_spec["stages"][stage]["max_retries"] == 4
+        for stage in ("tcp", "udp", "service")
+    )
+    assert child_spec["scanops"]["scope_keys"] == [
+        "10.0.0.1|22|tcp", "10.0.0.2|443|tcp", "10.0.0.3|53|udp",
+    ]
+    assert child_spec["scanops"]["retry_of"] == source_id
+    assert child_spec["scanops"]["retry_targets"] == [
+        "10.0.0.1", "10.0.0.2", "10.0.0.3",
+    ]
+
+    history = client.get("/api/scans", headers=h).json()
+    original = next(scan for scan in history if scan["id"] == source_id)
+    assert original["retry_status"] == "running"
+    assert original["retry_required"] is False
+    assert original["retry_scan_id"] == child_id
+    duplicate = client.post(f"/api/scans/{source_id}/retry-timeouts", headers=h)
+    assert duplicate.status_code == 400 and "이미 진행 중" in duplicate.json()["detail"]
+
+    db = SessionLocal()
+    child = db.get(ScanRun, child_id)
+    child.status = "done"
+    db.commit()
+    db.close()
+    resolved = client.get("/api/scans", headers=h).json()
+    original = next(scan for scan in resolved if scan["id"] == source_id)
+    assert original["retry_status"] == "resolved"
+    again = client.post(f"/api/scans/{source_id}/retry-timeouts", headers=h)
+    assert again.status_code == 400 and "이미 완료" in again.json()["detail"]
+
+
+def test_durable_retry_resolves_only_exact_successful_host_and_stage_and_delete_reopens(
+    client, tmp_path, monkeypatch,
+):
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanQualityIssue, ScanRun
+    from scanops.scanning import observability
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    db = SessionLocal()
+    try:
+        source = ScanRun(name="source", status="done")
+        child = ScanRun(name="child", status="running")
+        db.add_all([source, child])
+        db.flush()
+        observability.materialize_terminal_observability(db, source.id, issues=[
+            {"issue_key": "tcp-a", "kind": "host_timeout", "stage": "tcp",
+             "host_ip": "10.0.0.1", "detail": "tcp timeout"},
+            {"issue_key": "tcp-b", "kind": "host_timeout", "stage": "tcp",
+             "host_ip": "10.0.0.2", "detail": "tcp timeout"},
+            {"issue_key": "udp-a", "kind": "host_timeout", "stage": "udp",
+             "host_ip": "10.0.0.1", "detail": "udp timeout"},
+        ])
+        observability.set_quality_retry(
+            db, source.id, child.id, issue_keys=["tcp-a", "tcp-b", "udp-a"],
+        )
+        source_id, child_id = source.id, child.id
+        db.commit()
+    finally:
+        db.close()
+
+    child_dir = scans_api._settings.scans_dir / f"scan_{child_id}"
+    child_dir.mkdir(parents=True)
+    spec = {
+        "targets": ["10.0.0.1", "10.0.0.2"],
+        "scanops": {"retry_of": source_id},
+    }
+    (child_dir / "events.ndjson").write_text("\n".join(json.dumps(event) for event in [
+        {"event": "stage_plan", "stages": ["tcp"]},
+        {"event": "command_start", "stage": "tcp", "execution_id": "retry-tcp",
+         "group": "common", "role": "authority", "reason": "retry",
+         "artifact": "stage-tcp-b0", "argv": ["nmap", "10.0.0.1", "10.0.0.2"],
+         "ts": 10},
+        {"event": "command_done", "stage": "tcp", "execution_id": "retry-tcp",
+         "outcome": "timeout", "seconds": 2, "rc": 0,
+         "timed_out": ["10.0.0.2"], "timeout_count": 1,
+         "retransmission_cap_hosts": [], "retransmission_cap_count": 0, "ts": 12},
+        {"event": "job_done", "status": "done", "seconds": 2, "counts": {}},
+    ]), encoding="utf-8")
+    (child_dir / "run-state.json").write_text(json.dumps({
+        "live": ["10.0.0.1", "10.0.0.2"],
+        "coverage": [{
+            "artifact": "stage-tcp-b0.xml", "proto": "tcp", "role": "authority",
+            "hosts": ["10.0.0.1", "10.0.0.2"], "ports": "T:1-65535", "finished": True,
+        }],
+    }), encoding="utf-8")
+
+    db = SessionLocal()
+    try:
+        child = db.get(ScanRun, child_id)
+        scans_api._materialize_engine_terminal(
+            db, child, child_dir, spec,
+            {name: [] for name in (
+                "authority_missing", "authority_broken",
+                "enrichment_missing", "enrichment_broken",
+            )}, [],
+        )
+        child.status = "done"
+        db.commit()
+        by_key = {
+            issue.issue_key: issue for issue in db.query(ScanQualityIssue).filter_by(
+                scan_id=source_id
+            )
+        }
+        assert by_key["tcp-a"].resolved_by_scan_id == child_id
+        assert by_key["tcp-b"].resolved_by_scan_id is None
+        assert by_key["udp-a"].resolved_by_scan_id is None
+    finally:
+        db.close()
+
+    listed = next(row for row in client.get("/api/scans", headers=h).json()
+                  if row["id"] == source_id)
+    detailed = client.get(f"/api/scans/{source_id}", headers=h).json()
+    assert listed["retry_status"] == detailed["retry_status"] == "required"
+    assert listed["retry_count"] == detailed["retry_count"] == 2
+    import shutil
+    shutil.rmtree(child_dir)
+    stages = client.get(f"/api/scans/{child_id}/stages", headers=h).json()
+    assert stages["source"] == "db"
+    assert stages["executions"][0]["id"] == "retry-tcp"
+    assert stages["hosts"][0]["tcp_sweep_status"] in {"done", "timeout"}
+
+    make_user("delete-admin", "delete-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'delete-admin', 'delete-pass-1234')}"}
+    assert client.delete(f"/api/scans/{child_id}", headers=admin).status_code == 200
+    db = SessionLocal()
+    try:
+        by_key = {
+            issue.issue_key: issue for issue in db.query(ScanQualityIssue).filter_by(
+                scan_id=source_id
+            )
+        }
+        assert all(issue.retry_scan_id is None for issue in by_key.values())
+        assert all(issue.resolved_by_scan_id is None for issue in by_key.values())
+    finally:
+        db.close()
+    reopened = next(row for row in client.get("/api/scans", headers=h).json()
+                    if row["id"] == source_id)
+    assert reopened["retry_status"] == "required"
+    assert reopened["retry_count"] == 2
+    assert reopened["unresolved_issue_count"] == 3
+
+
+def test_scan_list_and_detail_expose_the_same_creator_and_quality_summary(client):
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun, User
+    from scanops.scanning import observability
+
+    make_user("scan-owner", "owner-pass-1234", role="auditor")
+    h = {"Authorization": f"Bearer {token_for(client, 'scan-owner', 'owner-pass-1234')}"}
+    db = SessionLocal()
+    try:
+        owner = db.query(User).filter_by(username="scan-owner").one()
+        scan = ScanRun(name="owned", status="done", created_by=owner.id)
+        db.add(scan)
+        db.flush()
+        observability.materialize_terminal_observability(db, scan.id, issues=[{
+            "issue_key": "cap-a", "kind": "retransmission_cap", "stage": "tcp",
+            "host_ip": "10.0.0.9", "detail": "max retries 2",
+        }])
+        scan_id = scan.id
+        db.commit()
+    finally:
+        db.close()
+
+    listed = next(row for row in client.get("/api/scans", headers=h).json()
+                  if row["id"] == scan_id)
+    detail = client.get(f"/api/scans/{scan_id}", headers=h).json()
+
+    for key in (
+        "created_by", "created_by_name", "quality_status", "unresolved_issue_count",
+        "unresolved_host_count", "retry_status", "retry_count", "retry_stages",
+    ):
+        assert detail[key] == listed[key]
+    assert listed["created_by_name"] == "scan-owner"
+    assert listed["quality_status"] == "warning"
+    assert listed["unresolved_issue_count"] == listed["unresolved_host_count"] == 1
+
+
+def test_retry_endpoint_uses_durable_issues_when_run_state_is_missing(
+    client, monkeypatch, tmp_path,
+):
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanQualityIssue, ScanRun
+    from scanops.scanning import observability
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.ensure_dirs()
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    db = SessionLocal()
+    try:
+        source = ScanRun(name="durable source", status="done", targets="10.0.0.2")
+        db.add(source)
+        db.flush()
+        observability.materialize_terminal_observability(db, source.id, issues=[{
+            "issue_key": "tcp-timeout", "kind": "host_timeout", "stage": "tcp",
+            "host_ip": "10.0.0.2", "detail": "timeout",
+        }])
+        source_id = source.id
+        db.commit()
+    finally:
+        db.close()
+    source_dir = scans_api._settings.scans_dir / f"scan_{source_id}"
+    source_dir.mkdir()
+    (source_dir / "spec.json").write_text(json.dumps({
+        "job_id": f"scan_{source_id}", "targets": ["10.0.0.2"], "exclude": [],
+        "exclude_ports": "", "batch_size": 1, "out_dir": str(source_dir),
+        "stages": {
+            "discovery": {"enabled": True, "mode": "sn"},
+            "tcp": {"enabled": True, "ports": "1-65535", "max_retries": 2},
+            "udp": {"enabled": False, "ports": "", "max_retries": 2},
+            "service": {"enabled": True, "max_retries": 2, "version_all": False},
+        },
+        "scanops": {"scope_keys": ["10.0.0.2|443|tcp"]},
+    }), encoding="utf-8")
+    assert not (source_dir / "run-state.json").exists()
+
+    response = client.post(f"/api/scans/{source_id}/retry-timeouts", headers=h)
+
+    assert response.status_code == 200, response.text
+    child_id = response.json()["id"]
+    child_spec = json.loads((
+        scans_api._settings.scans_dir / f"scan_{child_id}" / "spec.json"
+    ).read_text(encoding="utf-8"))
+    assert child_spec["targets"] == ["10.0.0.2"]
+    assert child_spec["scanops"]["retry_stages"] == ["tcp"]
+    db = SessionLocal()
+    try:
+        issue = db.query(ScanQualityIssue).filter_by(
+            scan_id=source_id, issue_key="tcp-timeout",
+        ).one()
+        assert issue.retry_scan_id == child_id
+        assert issue.resolved_by_scan_id is None
+    finally:
+        db.close()
 
 
 def test_deleting_a_scan_removes_only_the_findings_it_alone_proves(client):
@@ -2386,6 +2728,56 @@ def test_engine_log_problems_finds_what_the_xml_never_records():
         assert engine_runner.log_problems(_Path(tmp) / "missing.log") == []
 
 
+def test_watchdog_out_of_range_is_rejected_before_any_job_is_created(client, monkeypatch):
+    """요청 경계에서 걸러야 한다 - 레거시 경로는 이 값을 threading.Timer 에 그대로 넘긴다.
+
+    제약 없는 int 였을 때 -1 · 86401 · 10**100 이 전부 통과했다. 마지막 값은
+    threading.TIMEOUT_MAX(약 9.2e9)를 넘어 타이머 스레드가 OverflowError 로 즉시 죽는다 -
+    API 는 스캔을 시작했다고 응답하는데 상한만 조용히 사라진다. 사용자가 켰다고 믿는 보호가
+    없는 채로 도는, 가장 나쁜 실패 방식이다.
+
+    그래서 **작업을 만들기 전에** 422 로 거절하고, 스캔 행도 남지 않아야 한다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.scanning import chunker
+
+    h = _auth(client, "admin")
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    body = {
+        "name": "wd", "workflow": "auto", "options": ["syn"], "ports": "T:80",
+        "targets": ["127.0.0.1"], "batch_size": 256,
+    }
+    before_count = len(client.get("/api/scans", headers=h).json())
+
+    for bad in (-1, 86401, 10 ** 100):
+        for endpoint in ("/api/scans/run", "/api/scans/run-staged"):
+            payload = {**body, "watchdog_seconds": bad}
+            if endpoint.endswith("run-staged"):
+                payload["discovery"] = "pn"
+            response = client.post(endpoint, headers=h, json=payload)
+            assert response.status_code == 422, (
+                f"{endpoint} 가 watchdog_seconds={bad} 를 수락했다: {response.text[:200]}")
+
+    # 거절된 요청이 스캔 행을 남기면 안 된다 - '시작했다'는 흔적만 남는 것이 더 나쁘다.
+    assert len(client.get("/api/scans", headers=h).json()) == before_count
+
+    # 경계값은 그대로 받아야 한다(과잉 거절이 아니어야 한다).
+    ok = client.post("/api/scans/run", headers=h,
+                     json={**body, "watchdog_seconds": 86400})
+    assert ok.status_code == 200, ok.text
+    state = chunker.read_state(scans_api._basename(ok.json()["id"]))
+    assert state["watchdog_seconds"] == 86400
+
+
 def test_windows_ansi_error_text_does_not_hide_the_marker():
     """오류 문구가 ANSI 코드페이지라 UTF-8 로 못 읽혀도 표식 탐지는 살아 있어야 한다."""
     import tempfile
@@ -2398,3 +2790,756 @@ def test_windows_ansi_error_text_does_not_hide_the_marker():
             b"NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed "
             + "액세스 권한에 의해 금지된 방법".encode("cp949") + b" (10013)\n")
         assert engine_runner.log_problems(log)
+
+
+# ── 단계 스캔 결과 폴더 가져오기 ──
+
+_ENGINE_SN = (
+    '<?xml version="1.0"?><nmaprun start="1782050000">'
+    '<host><status state="up" reason="echo-reply"/>'
+    '<address addr="127.0.0.1" addrtype="ipv4"/></host>'
+    '<runstats><finished time="1782050000" exit="success"/>'
+    '<hosts up="1" down="0" total="1"/></runstats></nmaprun>'
+).encode()
+
+
+def _engine_files(run="scan_7"):
+    """단계 엔진이 결과 폴더에 실제로 남기는 이름들."""
+    tcp = '<scaninfo type="syn" protocol="tcp" numservices="2" services="22,80"/>'
+    udp = '<scaninfo type="udp" protocol="udp" numservices="1" services="161"/>'
+    return [
+        (f"{run}/stage0-discovery.xml", _ENGINE_SN),
+        (f"{run}/stage-tcp-b0.xml", _scan_xml(1782050001, tcp,
+                                              _port("tcp", 22) + _port("tcp", 80))),
+        (f"{run}/stage-udp-b0.xml", _scan_xml(1782050002, udp,
+                                              _port("udp", 161, service="svc"))),
+        (f"{run}/stage3-tcp-b0-g0.xml", _scan_xml(1782050003, tcp,
+                                                  _port("tcp", 22, service="ssh")
+                                                  + _port("tcp", 80, service="http"))),
+        (f"{run}/stage3-udp-b0-g0.xml", _scan_xml(1782050004, udp,
+                                                  _port("udp", 161, service="snmp"))),
+    ]
+
+
+def _upload(client, h, files):
+    return client.post(
+        "/api/scans/import-bundle", headers=h,
+        files=[("files", (n, b, "application/octet-stream")) for n, b in files],
+    )
+
+
+def test_every_artifact_the_engine_writes_is_recognised_as_part_of_its_run(client):
+    """엔진이 남기는 이름을 하나라도 못 알아보면 그 파일만 낱개 행으로 떨어진다.
+
+    호스트 격리 재시도의 접미사는 프로토콜(`tcp`)일 때도 있고 포트가 붙은 tag(`tcp443`,
+    `udp161`)일 때도 있다 - 후자를 놓치면 공통 실행이 실패해 격리로 넘어간 호스트의 결과가
+    이력에 따로 흩어진다. 마침 그런 실행이 가장 봐야 할 실행이다.
+
+    묶음은 **실제 배치**(`bN`)로 하고, 같은 배치·같은 역할의 다른 파일은 슬롯 접미사로
+    가른다. 파일마다 배치를 하나씩 만들면 배치 하나짜리 스캔이 이력에 '4배치' 로 적히고
+    스윕과 식별이 서로 무관한 단계처럼 보인다.
+    """
+    from scanops.api.scans import _engine_stage_info
+
+    slots: dict[tuple, str] = {}
+    for name, expected_batch, expected_role in (
+        ("scan_7/stage0-discovery.xml", "b0", "engine_discovery"),
+        ("scan_7/stage-tcp-b0.xml", "b0", "tcp_discovery"),
+        ("scan_7/stage-udp-b0.xml", "b0", "udp_sweep"),
+        ("scan_7/stage-tcp-b3.xml", "b3", "tcp_discovery"),
+        ("scan_7/stage3-tcp-b0-g0.xml", "b0", "tcp_identify"),
+        ("scan_7/stage3-tcp-b0-g2.xml", "b0", "tcp_identify"),
+        ("scan_7/stage3-udp-b1-g0.xml", "b1", "udp_identify"),
+        ("scan_7/stage3-10_0_0_5-tcp.xml", "b0", "tcp_identify"),
+        ("scan_7/stage3-10_0_0_5-udp-confirm.xml", "b0", "udp_identify"),
+        ("scan_7/stage3-10_0_0_5-tcp443.xml", "b0", "tcp_identify"),
+        ("scan_7/stage3-10_0_0_5-udp161-confirm.xml", "b0", "udp_identify"),
+    ):
+        info = _engine_stage_info(name)
+        assert info is not None, f"엔진 산출물을 못 알아본다: {name}"
+        run_key, batch, slot = info
+        assert run_key == "scan_7"
+        assert batch == expected_batch, f"{name}: 배치 {batch}"
+        # 스윕은 열림만 증명하므로 식별과 **다른 역할**이어야 한다 - 같으면 빈 식별이 스윕을 덮는다.
+        assert slot.split("#", 1)[0] == expected_role, f"{name}: 역할 {slot}"
+        # 자리가 겹치면 뒤에 온 파일이 앞엣것을 조용히 덮어쓴다.
+        assert (batch, slot) not in slots, (
+            f"{name} 이 {slots.get((batch, slot))} 와 같은 자리({batch}/{slot})를 쓴다"
+        )
+        slots[(batch, slot)] = name
+
+    # 실제 배치는 넷(b0·b1·b3)이 아니라 셋이다 - 파일 수만큼 배치가 생기면 안 된다.
+    assert {batch for batch, _slot in slots} == {"b0", "b1", "b3"}
+
+    # 남의 것을 가져가면 안 된다 - 단독 스캐너 모양과 직접 돌린 nmap XML 은 각자 경로가 있다.
+    for name in ("scan_3.b0.tcp_discovery.xml", "my_own_nmap.xml", "scan_5.xml",
+                 "stage_notes.xml", "stage3.xml"):
+        assert _engine_stage_info(name) is None, f"엔진 것이 아닌데 가져갔다: {name}"
+
+
+def test_a_single_batch_folder_is_recorded_as_one_batch(client):
+    """배치 하나짜리 스캔이 이력에 여러 배치로 적히면 안 된다.
+
+    파일마다 합성 배치 키를 주면 `len(batches)` 가 파일 수가 되어 '· 3배치' 처럼 적히고,
+    단계 산출물도 배치 번호가 제각각 붙는다. 배치는 스캔이 대상을 나눈 단위이지 산출물
+    개수가 아니다.
+    """
+    h = _auth(client)
+    r = _upload(client, h, _engine_files())        # stage0 + 스윕 2 + 식별 2 = 파일 5개, 배치 1개
+    assert r.status_code == 200, r.text
+    scan_id = r.json()["scans"][0]["scan_id"]
+    command = client.get(f"/api/scans/{scan_id}", headers=h).json()["command"]
+    assert "배치" not in command, f"배치 하나인데 배치 수가 적혔다: {command}"
+
+
+def test_a_staged_result_folder_imports_as_one_scan_not_one_row_per_file(client):
+    """결과 폴더 하나 = 이력 한 줄.
+
+    단계 엔진은 파일명에 실행 식별자를 넣지 않고 **폴더 하나를 실행 하나**로 쓴다. 파일명
+    base 로 묶는 규칙(STAGE_FILE_RE)이 이 이름들에 하나도 맞지 않아, 예전에는 파일마다 별도
+    스캔 행이 생겼다 - 결과 폴더를 통째로 가져오면 이력이 아무 말도 하지 않는 줄로 찼다.
+    """
+    h = _auth(client)
+    files = _engine_files()
+    r = _upload(client, h, files)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["file_count"] == len(files)
+    assert body["imported"] == 1, f"파일마다 행이 생겼다: {body['scans']}"
+    assert body["failed"] == 0
+    assert "단계 스캔 묶음" in body["scans"][0]["name"]
+
+
+def test_the_staged_folder_keeps_identification_over_the_sweep_for_both_protocols(client):
+    """스윕은 열림을 증명하고 식별은 정체를 밝힌다 - 남는 것은 식별 쪽이어야 한다.
+
+    TCP 는 원래 그랬지만 UDP 는 두 단계 결과가 한 통에 들어가 같은 포트가 두 번 담겼고,
+    어느 쪽이 남는지가 파일명 정렬에 좌우됐다.
+    """
+    h = _auth(client)
+    assert _upload(client, h, _engine_files()).status_code == 200
+    rows = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=h).json()
+    by_port = {(f["proto"], f["port"]): f for f in rows}
+    assert len(rows) == 3, rows
+    assert by_port[("tcp", 22)]["service"] == "ssh"
+    assert by_port[("tcp", 80)]["service"] == "http"
+    assert by_port[("udp", 161)]["service"] == "snmp", "UDP 는 스윕 결과가 식별을 덮었다"
+
+
+def test_host_discovery_never_closes_a_port_it_did_not_look_at(client):
+    """`-sn` 산출물은 포트를 하나도 보지 않는다(<scaninfo> 가 아예 없다).
+
+    관측하지 않은 것으로 닫으면 열린 포트가 '정상처리' 로 사라진다 - 이 저장소가 내내
+    막아 온 미탐이다. 발견 단계는 살아 있는 호스트만 보태고 닫힘 범위에는 들어가지 않는다.
+    """
+    h = _auth(client)
+    tcp = '<scaninfo type="syn" protocol="tcp" numservices="2" services="22,80"/>'
+    # 스윕이 22·80 을 열린 것으로 봤고, 같은 폴더의 발견 파일에는 포트가 없다.
+    files = [
+        ("scan_8/stage-tcp-b0.xml", _scan_xml(1782050001, tcp,
+                                              _port("tcp", 22) + _port("tcp", 80))),
+        ("scan_8/stage0-discovery.xml", _ENGINE_SN),
+    ]
+    assert _upload(client, h, files).status_code == 200
+    rows = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=h).json()
+    assert {f["port"]: f["state"] for f in rows} == {22: "open", 80: "open"}
+    assert all(f["status"] != "정상처리" for f in rows)
+
+
+def _udp_xml(start, ports, service="snmp", scanned="161,162"):
+    body = "".join(
+        f'<port protocol="udp" portid="{n}"><state state="open|filtered" reason="no-response"/>'
+        f'<service name="{service}" method="table" conf="3"/></port>' for n in ports
+    )
+    return _scan_xml(
+        start, f'<scaninfo type="udp" protocol="udp" numservices="2" services="{scanned}"/>',
+        body, host="10.42.0.1")
+
+
+def test_an_empty_identification_stage_never_closes_what_the_sweep_proved_open(client):
+    """식별은 **보강**이지 스윕에 대한 권한이 아니다.
+
+    스윕이 161 을 열린 것으로 증명했는데 같은 배치의 stage3 가 아무 응답도 못 받는 일은
+    흔하다(UDP 는 특히). 그때 스윕 증거까지 사라지면 이미 열려 있던 발견이 닫히고
+    '정상처리' 가 되어 감사 이력까지 망가진다 - 되돌리기 가장 어려운 미탐이다.
+
+    실제 실행 경로(`engine_runner.collect_results`)는 스윕을 fallback 으로 깔고 stage3 가
+    **보고한 키만** 덮어쓴다. 가져오기가 그 규칙과 갈리면 같은 산출물이 돌린 경로냐 가져온
+    경로냐에 따라 다른 결론을 낸다.
+    """
+    h = _auth(client)
+    # 1) 스윕만 먼저 인입해 열린 발견을 만든다.
+    first = _upload(client, h, [("scan_42/stage-udp-b0.xml", _udp_xml(1782050001, [161]))])
+    assert first.status_code == 200, first.text
+    before = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                        headers=h).json()
+    assert [(f["port"], f["state"]) for f in before] == [(161, "open|filtered")]
+
+    # 2) 같은 스윕 + 아무것도 못 찾은 stage3 를 함께 인입한다.
+    again = _upload(client, h, [
+        ("scan_42/stage-udp-b0.xml", _udp_xml(1782050001, [161])),
+        ("scan_42/stage3-udp-b0-g0.xml", _udp_xml(1782050002, [])),
+    ])
+    assert again.status_code == 200, again.text
+    assert again.json()["counts"]["closed"] == 0, "빈 식별 단계가 스윕의 양성 관측을 닫았다"
+    after = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                       headers=h).json()
+    assert [(f["port"], f["state"], f["status"]) for f in after] == [
+        (161, "open|filtered", "미조치")
+    ]
+
+
+def test_no_engine_artifact_is_dropped_when_another_shares_its_batch(client):
+    """같은 (배치, 역할) 자리에 두 파일이 들어오면 뒤엣것이 앞엣것을 조용히 덮어썼다.
+
+    엔진은 서비스 식별을 배치 안에서 여러 `gN` 으로 나눈다. 그 그룹들이 서로 다른 포트를
+    봤는데 하나만 남으면 나머지 관측이 통째로 사라진다 - 파일은 올렸고 오류도 없으니
+    사라졌다는 사실조차 안 보인다.
+    """
+    h = _auth(client)
+    files = [
+        ("scan_42/stage-udp-b0.xml", _udp_xml(1782050001, [161, 162])),
+        # 같은 배치의 서로 다른 식별 그룹이 각각 다른 포트를 밝힌다.
+        ("scan_42/stage3-udp-b0-g0.xml", _udp_xml(1782050002, [161], service="snmp")),
+        ("scan_42/stage3-udp-b0-g1.xml", _udp_xml(1782050003, [162], service="snmptrap")),
+    ]
+    r = _upload(client, h, files)
+    assert r.status_code == 200, r.text
+    assert r.json()["imported"] == 1
+    rows = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=h).json()
+    by_port = {f["port"]: f["service"] for f in rows}
+    assert by_port == {161: "snmp", 162: "snmptrap"}, (
+        f"식별 그룹이 서로를 덮었다: {by_port}"
+    )
+
+
+def test_the_sweep_never_overwrites_what_identification_found(client):
+    """스윕은 **열림만 증명**한다 - 서비스 정체는 식별 단계가 밝힌다.
+
+    두 단계를 같은 자리에 담으면 배치 키 정렬상 스윕이 뒤에 처리되어(`svc-b0-g0` <
+    `sweep-b0`) 식별이 밝힌 서비스명을 덮어쓴다. 실제 실행 경로
+    (`engine_runner.collect_results`)가 스윕 행에 `identity_observed=False` 를 붙이는 이유가
+    이것이다 - "Sweep proves openness only ... must not erase an existing identity".
+
+    서비스명을 서로 다르게 두어야 이 덮어쓰기가 보인다. 같은 이름이면 어느 쪽이 남든 표가
+    똑같아, 검사하지 않는 테스트가 된다(실제로 그렇게 놓쳤다).
+    """
+    h = _auth(client)
+    r = _upload(client, h, [
+        # 스윕은 정체를 모른 채 열림만 본다.
+        ("scan_42/stage-udp-b0.xml", _udp_xml(1782050001, [161], service="unknown")),
+        # 식별이 같은 포트를 snmp 로 밝힌다.
+        ("scan_42/stage3-udp-b0-g0.xml", _udp_xml(1782050002, [161], service="snmp")),
+    ])
+    assert r.status_code == 200, r.text
+    rows = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=h).json()
+    assert [f["service"] for f in rows] == ["snmp"], (
+        f"스윕이 식별을 덮어썼다: {[(f['port'], f['service']) for f in rows]}"
+    )
+
+
+def test_identification_wins_only_for_the_keys_it_actually_reported(client):
+    """식별이 다룬 포트만 서비스 정보를 얻고, 나머지는 스윕 증거 그대로 남아야 한다."""
+    h = _auth(client)
+    r = _upload(client, h, [
+        ("scan_42/stage-udp-b0.xml", _udp_xml(1782050001, [161, 162])),
+        ("scan_42/stage3-udp-b0-g0.xml", _udp_xml(1782050002, [161], service="snmp")),
+    ])
+    assert r.status_code == 200 and r.json()["counts"]["closed"] == 0
+    rows = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=h).json()
+    by_port = {f["port"]: f for f in rows}
+    assert set(by_port) == {161, 162}, "식별이 안 다룬 포트가 사라졌다"
+    assert by_port[161]["service"] == "snmp"
+    # 162 는 스윕만 봤다 - 열림은 증명됐지만 정체는 관측되지 않았다.
+    assert by_port[162]["state"] == "open|filtered"
+
+
+def test_a_confirm_probe_never_replaces_the_base_probe_it_followed(client):
+    """확인(confirm) probe 는 기본 probe 와 **별개 파일**이다.
+
+    `Pipeline._probe_unit()` 은 기본 격리 probe 가 아무것도 못 찾으면 같은 단위의 확인
+    probe 를 추가로 돌린다. 그래서 두 파일이 한 폴더에 함께 남는 것이 정상이다:
+
+        stage3-10_42_0_1-udp53.xml
+        stage3-10_42_0_1-udp53-confirm.xml
+
+    `-confirm` 을 정규식에서 소비만 하고 슬롯에 안 넣으면 둘이 같은 자리를 다투고, 프런트
+    정렬 순서상 confirm 이 먼저 와서 **기본 파일이 확인 파일을 덮는다.** 그러면 손상된
+    확인 산출물이 원자적 거절 계약에 닿기도 전에 사라져, 스캔이 `done` 으로 기록되고
+    감사 파일 목록에서도 실패가 없어진다 - 서비스 확인이 끝난 것처럼 보인다.
+    """
+    from scanops.api.scans import _engine_stage_info
+
+    base_name = "scan_confirm/stage3-10_42_0_1-udp53.xml"
+    confirm_name = "scan_confirm/stage3-10_42_0_1-udp53-confirm.xml"
+    base_info, confirm_info = _engine_stage_info(base_name), _engine_stage_info(confirm_name)
+    assert base_info[1:] != confirm_info[1:], (
+        f"기본과 확인이 같은 자리를 쓴다: {base_info[1:]}"
+    )
+
+    h = _auth(client)
+    udp = '<scaninfo type="udp" protocol="udp" numservices="1" services="53"/>'
+    good = _scan_xml(1782050001, udp, _port("udp", 53, service="domain"), host="10.42.0.1")
+    # 중간에서 끊긴 확인 산출물 - 원자적 거절 계약에 닿아야 한다.
+    broken = b'<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="10.42.0.1"'
+
+    # **프런트가 보내는 순서 그대로** 넣는다. confirm 이 먼저다.
+    ordered = sorted([(base_name, good), (confirm_name, broken)], key=lambda kv: kv[0])
+    assert ordered[0][0] == confirm_name, "정렬 가정이 깨졌다 - 순서가 바뀌면 결함이 안 드러난다"
+
+    r = _upload(client, h, ordered)
+    # 손상된 확인 산출물이 조용히 사라지면 안 된다 - 단위가 통째로 거절되어야 한다.
+    body = r.json()
+    assert r.status_code == 400, (
+        f"손상된 확인 산출물이 조용히 성공으로 바뀌었다: {body.get('scans') or body}"
+    )
+    assert "XML" in body["detail"]
+    # 거절된 단위는 스캔 행도 남기지 않는다 - '시작했다' 는 흔적만 남는 것이 더 나쁘다.
+    assert client.get("/api/scans", headers=h).json() == []
+
+
+def test_the_imported_timeline_shows_every_stage_that_actually_ran(client):
+    """발견으로는 인입되는데 타임라인에서는 사라지면 안 된다.
+
+    같은 배치에 같은 역할의 파일이 여럿이면 슬롯 접미사가 붙는다(`tcp_identify#g0`).
+    타임라인이 정확한 역할 이름만 찾으면 그 산출물들이 통째로 빠진다 - 실측으로 5개 파일을
+    올렸는데 `tcp_discovery` 한 줄만 남았다. 스캔이 무엇을 돌렸는지 화면이 거짓으로 말한다.
+    """
+    h = _auth(client)
+    r = _upload(client, h, _engine_files())        # 발견·TCP스윕·UDP스윕·TCP식별·UDP식별
+    assert r.status_code == 200, r.text
+    scan_id = r.json()["scans"][0]["scan_id"]
+    stages = client.get(f"/api/scans/{scan_id}", headers=h).json().get("stages_json") or []
+    assert [s["stage"] for s in stages] == [
+        "discovery", "tcp_discovery", "udp", "tcp_identify", "udp_identify"
+    ], f"타임라인에서 단계가 빠졌다: {[s['stage'] for s in stages]}"
+
+    # 화면이 이름을 아는 단계여야 한다 - 이름 없는 칩은 사용자에게 아무 말도 못 한다.
+    labels = (pathlib_Path(__file__).resolve().parents[2]
+              / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
+    label_map = labels.split("const STAGE_LABEL = {")[1].split("};")[0]
+    for stage in {s["stage"] for s in stages}:
+        assert f"{stage}:" in label_map, f"화면이 모르는 단계 이름: {stage}"
+
+
+def test_a_whole_scans_folder_splits_into_one_row_per_actual_run(client):
+    """`data/scans/` 를 통째로 올려도 실행별로 갈려야 한다.
+
+    폴더에는 세 가지가 섞여 있다: 단계 스캔 폴더, 레거시가 흩어 놓은 파일, 사람이 직접 돌린
+    nmap XML. 여기에 XML 이 아닌 부산물(run-state.json, -oA 가 남긴 .nmap)도 딸려 온다.
+    """
+    h = _auth(client)
+    tcp = '<scaninfo type="syn" protocol="tcp" numservices="2" services="22,80"/>'
+    files = [
+        *[(f"scans/{n}", b) for n, b in _engine_files("scan_7")],
+        ("scans/scan_9/stage0-discovery.xml", _ENGINE_SN),
+        ("scans/scan_9/stage-tcp-b0.xml",
+         _scan_xml(1782050005, tcp, _port("tcp", 22), host="10.2.0.1")),
+        ("scans/scan_3.b0.tcp_discovery.xml",
+         _scan_xml(1782050006, tcp, _port("tcp", 22), host="10.3.0.1")),
+        ("scans/scan_3.b0.tcp_identify.xml",
+         _scan_xml(1782050007, tcp, _port("tcp", 22, service="ssh"), host="10.3.0.1")),
+        ("scans/my_own_nmap.xml",
+         _scan_xml(1782050008, tcp, _port("tcp", 80), host="10.4.0.1")),
+        ("scans/scan_7/run-state.json", b"{}"),
+        ("scans/scan_7/stage-tcp-b0.nmap", b"# nmap text output"),
+    ]
+    r = _upload(client, h, files)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # XML 이 아닌 두 개는 세지도 않는다.
+    assert body["file_count"] == len(files) - 2
+    # 단계 폴더 2개 + 레거시 묶음 1개 + 직접 돌린 nmap 1개.
+    assert body["imported"] == 4, [s["name"] for s in body["scans"]]
+    assert body["failed"] == 0
+    names = " ".join(s["name"] for s in body["scans"])
+    assert "scan_7 단계 스캔 묶음" in names
+    assert "scan_9 단계 스캔 묶음" in names
+    assert "scan_3.b0 자동 스캔 묶음" in names, "레거시 묶음 규칙이 깨졌다"
+    assert "my_own_nmap.xml" in names, "직접 돌린 nmap XML 을 못 받는다"
+
+
+def test_an_imported_scan_shows_the_time_it_actually_ran(client):
+    """가져온 스캔의 소요시간은 **XML 이 밝힌 실제 구간**이어야 한다.
+
+    예전에는 `started_at` 에 인입 최신성용 시각을, `finished_at` 에 업로드 인입 시각을 넣어
+    한 달 전 XML 이 '한 달짜리 스캔' 으로 보였다. 그렇다고 표시를 지우면 어느 단계가 시간을
+    썼는지 볼 방법이 함께 사라진다 - 이 도구를 쓰는 이유가 그 추적이다. XML 이 두 값을 이미
+    들고 있으므로 그것을 읽는다.
+    """
+    h = _auth(client)
+    # 한 달 전에 시작해 480초 동안 돈 스캔.
+    xml = (
+        '<?xml version="1.0"?><nmaprun start="1779458000">'
+        '<scaninfo type="syn" protocol="tcp" numservices="1" services="22"/>'
+        '<host><status state="up"/><address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+        '<port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/>'
+        '<service name="ssh"/></port></ports></host>'
+        '<runstats><finished time="1779458480" exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>'
+    ).encode()
+
+    r = client.post("/api/scans/import", headers=h,
+                    files={"file": ("old.xml", xml, "text/xml")})
+    assert r.status_code == 200, r.text
+    scan = client.get(f"/api/scans/{r.json()['scan_id']}", headers=h).json()
+
+    started = datetime.fromisoformat(scan["started_at"])
+    finished = datetime.fromisoformat(scan["finished_at"])
+    assert (finished - started).total_seconds() == 480, (
+        f"실제 실행 시간이 아니다: {scan['started_at']} ~ {scan['finished_at']}"
+    )
+
+    # 화면이 그 값을 실제로 그려야 한다 - 가져온 스캔이라고 지우면 안 된다.
+    ui = (pathlib_Path(__file__).resolve().parents[2]
+          / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
+    duration = ui.split("function scanDuration")[1].split("\n}")[0]
+    assert 'scanKind(scan).key === "import"' not in duration, (
+        "가져온 스캔의 소요시간을 화면에서 지웠다 - 지연 추적이 목적인데 숫자를 없앤 셈이다"
+    )
+
+
+def test_an_import_without_runstats_keeps_its_ingest_timestamps(client):
+    """반대 경계 — XML 이 시각을 안 밝히면 지어내지 않는다.
+
+    부분 산출물에는 `runstats` 가 없다. 그때 시작·종료를 임의로 채우면 없는 사실을 만든다.
+    """
+    h = _auth(client)
+    partial = (
+        '<?xml version="1.0"?><nmaprun>'
+        '<scaninfo type="syn" protocol="tcp" numservices="1" services="22"/>'
+        '<host><status state="up"/><address addr="10.0.0.2" addrtype="ipv4"/><ports>'
+        '<port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/>'
+        '<service name="ssh"/></port></ports></host></nmaprun>'
+    ).encode()
+    r = client.post("/api/scans/import", headers=h,
+                    files={"file": ("partial.xml", partial, "text/xml")})
+    assert r.status_code == 200, r.text
+    scan = client.get(f"/api/scans/{r.json()['scan_id']}", headers=h).json()
+    # 인입이 정한 값이 그대로 남는다(둘 다 존재하고, 음수 구간이 아니다).
+    assert scan["started_at"] and scan["finished_at"]
+    assert (datetime.fromisoformat(scan["finished_at"])
+            - datetime.fromisoformat(scan["started_at"])).total_seconds() >= 0
+
+
+def test_deleting_a_chunked_scan_takes_its_sibling_artifacts_with_it(client):
+    """삭제한 스캔의 증거 파일이 디스크에 남으면 안 된다.
+
+    레거시/자동(청크) 스캔은 base 옆에 형제 파일을 흩뿌린다 - 배치별 XML, 그 로그,
+    재개 상태 scan_N.chunks.json. 예전에는 raw_xml_path 와 log_path 에 적힌 두 개만
+    지워서, 이력만 사라지고 XML 증거와 재개 상태는 영원히 남았다.
+
+    동시에, 접두사로 지워서 옆 스캔을 말려 죽이면 안 된다 - scan_1 을 지울 때
+    scan_12 는 그대로여야 한다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    make_user("chunkboss", "boss-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'chunkboss', 'boss-pass-1234')}"}
+
+    db = SessionLocal()
+    target = ScanRun(name="chunked", status="done")
+    db.add(target); db.commit()
+    scan_id = target.id
+    scans_dir = scans_api._settings.scans_dir
+    scans_dir.mkdir(parents=True, exist_ok=True)
+    siblings = [
+        scans_dir / f"scan_{scan_id}.xml",
+        scans_dir / f"scan_{scan_id}.b0.tcp_discovery.xml",
+        scans_dir / f"scan_{scan_id}.b0.tcp_discovery.log",
+        scans_dir / f"scan_{scan_id}.b1.udp_identify.gnmap",
+        scans_dir / f"scan_{scan_id}.chunks.json",
+    ]
+    for path in siblings:
+        path.write_text("evidence", encoding="utf-8")
+    target.raw_xml_path = str(siblings[0])
+    target.log_path = str(siblings[2])
+    # 접두사가 겹치는 이웃. 이 스캔은 지우지 않았으니 파일도 그대로여야 한다.
+    neighbour = scans_dir / f"scan_{scan_id}0.xml"
+    neighbour.write_text("남의 증거", encoding="utf-8")
+    db.commit(); db.close()
+
+    assert client.delete(f"/api/scans/{scan_id}", headers=admin).status_code == 200
+
+    left = [p.name for p in siblings if p.exists()]
+    assert not left, f"삭제한 스캔의 증거가 디스크에 남았다: {left}"
+    assert neighbour.exists(), "접두사가 겹치는 다른 스캔의 파일을 지웠다"
+    neighbour.unlink()
+
+
+def test_a_finding_survives_while_any_scan_still_observed_it(client):
+    """세 번 관측된 발견은 가운데 스캔이 살아 있는 한 지워지면 안 된다.
+
+    마지막 스캔을 먼저 지우면 last_scan_id 가 NULL 이 되고, 이어서 첫 스캔을 지우면
+    '이 발견을 가리키는 스캔이 하나도 없다' 는 조건이 참이 된다 - 가운데 스캔과 그
+    관측이 멀쩡한데도 발견·이력·사람이 달아 둔 상태와 메모가 함께 사라진다.
+
+    살아남을 때는 참조도 고쳐져야 한다. NULL 로 남으면 다음 삭제에서 같은 함정에
+    다시 걸리고, 그때는 정말 근거가 없어진 것과 구분되지 않는다.
+    """
+    from scanops.db import SessionLocal
+    from scanops.models import EndpointObservation, Finding, FindingEvent, ScanRun
+
+    make_user("threeboss", "boss-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'threeboss', 'boss-pass-1234')}"}
+
+    db = SessionLocal()
+    first = ScanRun(name="1st", status="done")
+    middle = ScanRun(name="2nd", status="done")
+    last = ScanRun(name="3rd", status="done")
+    db.add_all([first, middle, last]); db.commit()
+    key = "10.9.9.9|8080|tcp"
+    finding = Finding(finding_key=key, host_ip="10.9.9.9", port=8080, proto="tcp",
+                      state="open", status="in_progress", owner="담당자",
+                      first_scan_id=first.id, last_scan_id=last.id)
+    db.add(finding); db.commit()
+    db.add_all([
+        FindingEvent(finding_id=finding.id, scan_id=first.id, type="NEW_OPEN"),
+        FindingEvent(finding_id=finding.id, scan_id=middle.id, type="SERVICE_CHANGED"),
+        FindingEvent(finding_id=finding.id, scan_id=last.id, type="VERSION_CHANGED"),
+        EndpointObservation(scan_id=middle.id, finding_key=key, host_ip="10.9.9.9",
+                            port=8080, proto="tcp", state="open", evidence_kind="observed"),
+    ])
+    db.commit()
+    ids = (first.id, middle.id, last.id, finding.id)
+    db.close()
+    first_id, middle_id, last_id, finding_id = ids
+
+    assert client.delete(f"/api/scans/{last_id}", headers=admin).status_code == 200
+    r = client.delete(f"/api/scans/{first_id}", headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["findings_deleted"] == 0, "가운데 스캔이 살아 있는데 발견을 지웠다"
+
+    db = SessionLocal()
+    try:
+        kept = db.get(Finding, finding_id)
+        assert kept is not None, "아직 관측이 남아 있는 발견이 사라졌다"
+        assert kept.status == "in_progress" and kept.owner == "담당자"
+        assert kept.first_scan_id == kept.last_scan_id == middle_id, (
+            "살아남은 근거로 참조가 복구되지 않았다 - 다음 삭제에서 같은 함정에 걸린다"
+        )
+        events = db.query(FindingEvent).filter_by(finding_id=finding_id).all()
+        # 이력은 감사 추적이라 스캔이 사라져도 남는다 - 다만 사라진 스캔을 가리키지는
+        # 않는다(유령 ID 방지). 살아 있는 스캔의 이벤트만 그 스캔을 계속 가리킨다.
+        assert len(events) == 3, "발견의 이력이 함께 지워졌다"
+        assert [e.type for e in events if e.scan_id is not None] == ["SERVICE_CHANGED"]
+        assert {e.scan_id for e in events if e.scan_id is not None} == {middle_id}
+    finally:
+        db.close()
+
+    # 이제 마지막 근거까지 지우면 그때는 발견도 함께 사라진다.
+    assert client.delete(f"/api/scans/{middle_id}", headers=admin).json()["findings_deleted"] == 1
+    db = SessionLocal()
+    try:
+        assert db.get(Finding, finding_id) is None
+    finally:
+        db.close()
+
+
+def test_repaired_provenance_follows_observation_time_not_scan_id(client):
+    """참조를 복구할 때 첫/마지막은 **관측 시각**으로 고른다.
+
+    과거 XML 을 나중에 가져오면 늦게 만들어진 스캔이 first_scan_id 가 되는 것이 정상이다
+    (ingest 가 명시적으로 그렇게 한다). 그런데 복구를 스캔 id 최소/최대로 하면 새로 만든
+    스캔이 '첫 관측' 자리에 앉아, 발견 상세의 이력이 first_seen/last_seen 과 어긋난다.
+    """
+    from scanops.db import SessionLocal
+    from scanops.models import Finding, FindingEvent, ScanRun
+    from datetime import datetime, timedelta, timezone
+
+    make_user("provboss", "boss-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'provboss', 'boss-pass-1234')}"}
+
+    db = SessionLocal()
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc).replace(tzinfo=None)
+    # id 순서와 관측 시각 순서가 **반대**다 - 나중에 만든 스캔이 더 오래된 결과를 담았다.
+    edge = ScanRun(name="경계", status="done")
+    newer_scan_older_data = ScanRun(name="나중에 가져온 옛 결과", status="done")
+    older_scan_newer_data = ScanRun(name="먼저 만든 최신 결과", status="done")
+    db.add_all([edge, older_scan_newer_data, newer_scan_older_data]); db.commit()
+    finding = Finding(finding_key="10.5.5.5|443|tcp", host_ip="10.5.5.5", port=443,
+                      proto="tcp", state="open",
+                      first_seen=base, last_seen=base + timedelta(days=30),
+                      first_scan_id=edge.id, last_scan_id=edge.id)
+    db.add(finding); db.commit()
+    db.add_all([
+        FindingEvent(finding_id=finding.id, scan_id=edge.id, type="NEW_OPEN",
+                     created_at=base + timedelta(days=15)),
+        # id 는 더 큰데 관측은 더 이르다.
+        FindingEvent(finding_id=finding.id, scan_id=newer_scan_older_data.id,
+                     type="NEW_OPEN", created_at=base),
+        FindingEvent(finding_id=finding.id, scan_id=older_scan_newer_data.id,
+                     type="VERSION_CHANGED", created_at=base + timedelta(days=30)),
+    ])
+    db.commit()
+    ids = (edge.id, finding.id, newer_scan_older_data.id, older_scan_newer_data.id)
+    db.close()
+    edge_id, finding_id, oldest_observation, newest_observation = ids
+    assert oldest_observation > newest_observation, "id 와 시각이 반대인 상황을 못 만들었다"
+
+    assert client.delete(f"/api/scans/{edge_id}", headers=admin).status_code == 200
+
+    db = SessionLocal()
+    try:
+        kept = db.get(Finding, finding_id)
+        assert kept is not None
+        assert kept.first_scan_id == oldest_observation, (
+            "가장 이른 관측이 아니라 가장 작은 스캔 id 를 첫 관측으로 삼았다"
+        )
+        assert kept.last_scan_id == newest_observation, (
+            "가장 늦은 관측이 아니라 가장 큰 스캔 id 를 마지막 관측으로 삼았다"
+        )
+    finally:
+        db.close()
+
+
+def test_a_retry_can_close_what_the_original_scan_first_discovered(
+    client, monkeypatch, tmp_path,
+):
+    """원본이 처음 찾아낸 포트도 재스캔이 닫을 수 있어야 한다.
+
+    닫힘 권한(scope_keys)을 원본의 **실행 전** 목록에서만 가져오면, 그 스캔이 처음
+    발견한 endpoint 는 영원히 들어오지 못한다. 재시도가 '이제 닫혔다' 를 증명해도
+    발견은 열린 채 남고, 품질 이슈는 해결 처리되어 재스캔 안내까지 사라진다 - 손댈
+    방법이 없는 낡은 열린 포트가 된다.
+
+    동시에, 원본이 보지 **않은** 포트에는 권한을 주면 안 된다. 재스캔은 원본 spec 의
+    포트 범위를 그대로 쓰므로, 다른 스캔이 더 넓은 범위에서 찾은 발견까지 넣으면
+    훑지도 않을 포트를 닫게 된다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import EndpointObservation, ScanRun
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.scans_dir.mkdir(parents=True)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *a, **k): pass
+        def start(self): pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    db = SessionLocal()
+    source = ScanRun(name="원본", targets="10.0.0.1", status="done",
+                     command="단계스캔(엔진) · TCP 전체")
+    other = ScanRun(name="더 넓게 본 다른 스캔", targets="10.0.0.1", status="done")
+    db.add_all([source, other]); db.commit()
+    source_id = source.id
+    db.add_all([
+        # 원본이 **처음** 찾은 포트 - 실행 전 목록에는 없다.
+        EndpointObservation(scan_id=source.id, finding_key="10.0.0.1|8080|tcp",
+                            host_ip="10.0.0.1", port=8080, proto="tcp",
+                            state="open", evidence_kind="positive"),
+        # 원본이 닫힘으로 본 것 - 이미 권한이 있고 중복으로 들어오면 안 된다.
+        EndpointObservation(scan_id=source.id, finding_key="10.0.0.1|22|tcp",
+                            host_ip="10.0.0.1", port=22, proto="tcp",
+                            state="closed", evidence_kind="absence"),
+        # **다른** 스캔이 본 포트 - 이 재스캔의 범위가 아니다.
+        EndpointObservation(scan_id=other.id, finding_key="10.0.0.1|9999|tcp",
+                            host_ip="10.0.0.1", port=9999, proto="tcp",
+                            state="open", evidence_kind="positive"),
+    ])
+    db.commit(); db.close()
+
+    source_dir = scans_api._settings.scans_dir / f"scan_{source_id}"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "spec.json").write_text(json.dumps({
+        "job_id": f"scan_{source_id}", "targets": ["10.0.0.1"],
+        "out_dir": str(source_dir),
+        "stages": {"discovery": {"enabled": True, "mode": "sn"},
+                   "tcp": {"enabled": True, "ports": "1-65535"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": True, "version_all": False}},
+        "scanops": {"scope_keys": ["10.0.0.1|22|tcp"]},
+    }), encoding="utf-8")
+    (source_dir / "run-state.json").write_text(json.dumps({
+        "gave_up": ["10.0.0.1"], "gave_up_by_stage": {"tcp": ["10.0.0.1"]},
+    }), encoding="utf-8")
+
+    response = client.post(f"/api/scans/{source_id}/retry-timeouts", headers=h)
+    assert response.status_code == 200, response.text
+    child_id = response.json()["id"]
+    keys = json.loads((
+        scans_api._settings.scans_dir / f"scan_{child_id}" / "spec.json"
+    ).read_text(encoding="utf-8"))["scanops"]["scope_keys"]
+
+    assert "10.0.0.1|8080|tcp" in keys, "원본이 처음 찾은 포트를 재스캔이 닫을 수 없다"
+    assert "10.0.0.1|22|tcp" in keys and keys.count("10.0.0.1|22|tcp") == 1
+    assert "10.0.0.1|9999|tcp" not in keys, (
+        "이 재스캔이 훑지도 않을 포트에 닫힘 권한을 줬다"
+    )
+
+
+def test_a_finding_survives_a_scan_that_predates_the_observation_ledger(client):
+    """관측 원장이 없던 시절의 스캔도 근거다 - 흔적이 없다고 근거가 없는 게 아니다.
+
+    원장이 생기기 전 DB 에서는 값이 그대로인 재관측이 아무 흔적도 남기지 않는다.
+    인입은 새로 열림/닫힘/재개방/식별 변경에만 이벤트를 쓰고 나머지는 unchanged 로
+    세고 지나간다. A·B·C 에서 관측된 발견에서 B 가 그런 재관측이면, C 와 A 를 지웠을 때
+    '뒷받침하는 스캔이 없다' 로 보인다 - B 의 결과가 멀쩡히 남아 있는데도 발견과
+    사람이 달아 둔 상태·담당자·메모가 사라진다.
+    """
+    from datetime import datetime, timedelta
+    from scanops.db import SessionLocal
+    from scanops.models import EndpointObservation, Finding, FindingEvent, ScanRun
+
+    make_user("legacyboss", "boss-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'legacyboss', 'boss-pass-1234')}"}
+
+    base = datetime(2026, 2, 1)
+    db = SessionLocal()
+    first = ScanRun(name="A", status="done", started_at=base)
+    middle = ScanRun(name="B(원장 이전)", status="done", started_at=base + timedelta(days=5))
+    last = ScanRun(name="C", status="done", started_at=base + timedelta(days=10))
+    db.add_all([first, middle, last]); db.commit()
+    key = "10.7.7.7|1521|tcp"
+    finding = Finding(finding_key=key, host_ip="10.7.7.7", port=1521, proto="tcp",
+                      state="open", status="in_progress", owner="DBA",
+                      first_seen=base, last_seen=base + timedelta(days=10),
+                      first_scan_id=first.id, last_scan_id=last.id)
+    db.add(finding); db.commit()
+    # A 와 C 만 흔적을 남겼다. B 는 '값이 그대로인 재관측' 이라 이벤트도 원장도 없다.
+    db.add_all([
+        FindingEvent(finding_id=finding.id, scan_id=first.id, type="NEW_OPEN",
+                     created_at=base),
+        FindingEvent(finding_id=finding.id, scan_id=last.id, type="VERSION_CHANGED",
+                     created_at=base + timedelta(days=10)),
+        EndpointObservation(scan_id=first.id, finding_key=key, host_ip="10.7.7.7",
+                            port=1521, proto="tcp", state="open",
+                            evidence_kind="positive", observed_at=base),
+        EndpointObservation(scan_id=last.id, finding_key=key, host_ip="10.7.7.7",
+                            port=1521, proto="tcp", state="open",
+                            evidence_kind="positive",
+                            observed_at=base + timedelta(days=10)),
+    ])
+    db.commit()
+    ids = (first.id, middle.id, last.id, finding.id)
+    db.close()
+    first_id, middle_id, last_id, finding_id = ids
+
+    assert client.delete(f"/api/scans/{last_id}", headers=admin).status_code == 200
+    r = client.delete(f"/api/scans/{first_id}", headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["findings_deleted"] == 0, (
+        "원장이 없던 시절의 스캔이 아직 뒷받침하는데 발견을 지웠다"
+    )
+
+    db = SessionLocal()
+    try:
+        kept = db.get(Finding, finding_id)
+        assert kept is not None and kept.owner == "DBA" and kept.status == "in_progress"
+        assert kept.first_scan_id == kept.last_scan_id == middle_id, (
+            "참조가 살아남은 스캔으로 복구되지 않았다"
+        )
+    finally:
+        db.close()

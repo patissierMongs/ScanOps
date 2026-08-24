@@ -32,23 +32,41 @@ DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,338
 DISCOVERY_PA = "-PA80,443,3389"
 # --open 제외: 열린 TCP 0개인 up 호스트(UDP 전용)를 nmap 이 XML 에서 빼버려 up_hosts 가 놓치고,
 # 그 호스트가 UDP 식별 대상에서 누락된다. 닫힌 포트는 <extraports> 로 요약돼 영향 없음.
+# 처리량 정책 — 모든 자동 단계가 같은 값을 지도록 한 곳에서 정한다.
+#
+# **가속 옵션이 아니다.** --max-parallelism 은 동시 프로브의 상한이고(하한이 아니다),
+# --min-hostgroup 은 포트/버전 스캔 묶음 크기의 하한이다. 여기 있는 이유는 스캔 서버와 대상
+# 장비의 부하를 예측 가능하게 묶어 두려는 것이다. 자동 워크플로의 세 단계는 모두 포트/버전
+# 스캔이라(-sS 발견 포함) --min-hostgroup 이 실제로 묶을 대상이 있다 - 엔진의 -sn 발견
+# 단계와 다른 점이다(그쪽은 nmap 문서상 효과가 없어 싣지 않는다).
+#
+# --defeat-rst-ratelimit 는 **SYN 스캔 전용**이라(nmap 은 -sT/-sU/-sn 과 함께 주면 fatal 로
+# 끝난다) 여기 넣지 않고, SYN 단계에만 따로 얹는다. 이 플래그는 대상이 스스로 거는 보호를
+# 무시하므로 부하를 올리는 쪽이다.
+THROUGHPUT_FLAGS = ["--min-hostgroup", "64", "--max-parallelism", "100"]
+DEFEAT_RST_FLAG = "--defeat-rst-ratelimit"
+MAX_RETRIES = str(scan_options.MAX_RETRIES_DEFAULT)
+# UDP 는 대상 OS 의 ICMP port-unreachable 율제한 때문에 응답이 늦게·드물게 온다. TCP 와 같은
+# 재전송 상한을 쓰면 '닫혔다'가 아니라 '못 봤다'(open|filtered)가 그만큼 늘어난다.
+UDP_MAX_RETRIES = str(scan_options.UDP_MAX_RETRIES_DEFAULT)
 AUTO_TCP_DISCOVERY_FLAGS = [
     "-sS", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4", "--reason",
-    "--min-hostgroup", "64", "--max-retries", "2",
-    "--defeat-rst-ratelimit", "--max-parallelism", "100",
+    "--max-retries", MAX_RETRIES, DEFEAT_RST_FLAG, *THROUGHPUT_FLAGS,
 ]
 # 식별은 발견된 생존 호스트만 대상(scans.py 가 discovery_live 주입)이라 -Pn 안전, -n 제거 → 역DNS 로
 # 호스트명 확보(용도 식별 근거). --version-all(intensity 9)로 rarity 높은 서비스(redis 등)까지 식별.
 AUTO_TCP_IDENTIFY_FLAGS = [
     "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
-    "-T4", "--max-retries", "2", "--script-timeout", "10s",
+    "-T4", "--max-retries", MAX_RETRIES, DEFEAT_RST_FLAG, *THROUGHPUT_FLAGS,
+    "--script-timeout", "2m",
 ]
 # UDP: --max-scan-delay 금지(닫힌 포트 ICMP rate-limit 적응형 백오프를 막아 open|filtered 오판).
 # --version-all 미적용: 강도 9 는 수다스러운/증폭형 UDP 서비스(SNMP·SSDP·DNS 등)에서 거대·비정상
 # 응답으로 nmap 을 fatal 종료시킬 위험이 크고 UDP 식별 이득은 미미 → 기본 -sV(강도 7)로 안전하게.
 AUTO_UDP_IDENTIFY_FLAGS = [
     "-sU", "-Pn", "-n", "-sV", "--open", "--reason",
-    "-T4", "--max-retries", "2", "--script-timeout", "10s",
+    "-T4", "--max-retries", UDP_MAX_RETRIES, *THROUGHPUT_FLAGS,
+    "--script-timeout", "3m",
 ]
 
 
@@ -128,6 +146,49 @@ def xml_of(basename: Path) -> Path:
 
 def normal_log_of(basename: Path) -> Path:
     return Path(str(basename) + ".nmap")
+
+
+def repair_truncated_xml(path: Path) -> bool:
+    """중간에 끊긴 nmap XML 을 **파싱 가능한 데까지만** 남기고 닫는다.
+
+    워치독이 프로세스를 끝내면 nmap 은 ``</nmaprun>`` 을 쓰지 못한다. 그 파일은 표준 파서가
+    통째로 거절하므로 이미 끝난 호스트의 관측까지 같이 버려진다 - 몇 시간짜리 스캔에서는
+    워치독을 둔 이유를 스스로 지우는 일이다(실측: 587바이트, ParseError).
+
+    마지막 완결 ``</host>`` 뒤를 잘라내고 루트만 닫는다. **``runstats`` 는 만들지 않는다** -
+    그것이 있어야 산출물 완결성 검사가 통과하므로, 없는 채로 두면 이 실행은 관측만 제공하고
+    미관측 닫힘 권한은 얻지 못한다. 그 성질이 이 함수의 존재 이유다.
+
+    단계 엔진(``scanops_engine.nmaprun``)과 단독 스캐너에도 같은 함수가 있다. 엔진은 따로
+    설치되는 패키지라 백엔드가 그것을 import 할 수 없어(``ensure_available``) 세 경로가 각자
+    들고 있고, 계약 테스트가 같은 입력에 같은 결과를 내는지 검사한다.
+
+    반환: 손봤으면 True. 이미 온전하거나 살릴 호스트가 없으면 손대지 않고 False.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if not raw.strip():
+        return False
+    try:
+        ET.fromstring(raw)
+        return False                      # 이미 온전하다 - 건드리지 않는다
+    except ET.ParseError:
+        pass
+    cut = raw.rfind("</host>")
+    if cut == -1:
+        return False                      # 살릴 호스트가 없다 - 빈 파일로 두는 편이 정직하다
+    repaired = raw[:cut + len("</host>")] + "\n</nmaprun>\n"
+    try:
+        ET.fromstring(repaired)
+    except ET.ParseError:
+        return False
+    try:
+        path.write_text(repaired, encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 def build_command(nmap: str, preset: str, targets: list[str], out_basename: Path,

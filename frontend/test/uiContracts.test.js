@@ -7,11 +7,12 @@ import {
   stateWithEvidence,
 } from "../src/lib/columns.js";
 import { deadlinePatchValue } from "../src/lib/findingPatch.js";
-import { SCAN_STATUS, scanKind, scanNotice, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
+import { SCAN_STATUS, qualityBadge, scanKind, scanNotice, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
 import { splitScanTokens } from "../src/lib/scanTargets.js";
 import { toastAnnouncement, toastDuration } from "../src/lib/toast.js";
 import { matchesFilter, parseNeedle } from "../src/lib/filterText.js";
 import { formatImportSummary } from "../src/lib/scanImports.js";
+import { formatScanPortScope } from "../src/lib/scanScope.js";
 import { matchFocus } from "../src/lib/ruleFocus.js";
 import { PAGE_SIZES } from "../src/lib/pageSize.js";
 
@@ -175,8 +176,19 @@ test("scan details expose persisted timeline and safe failure fields", () => {
   assert.match(scans, /withPersistedStages/);
   assert.match(scans, /\/scans\/\$\{scan\.id\}\/stages/);
   assert.match(scans, /timeline_available/);
+  assert.match(scans, /<RetryQueue retry=\{detail\.retry\}/);
+  assert.match(scans, /<StageRecoveries recoveries=\{recoveries\}/);
+  assert.match(scans, /<StageIssueDetails issues=\{issues\}/);
+  assert.match(scans, /<ExecutionGroups executions=\{executions\}/);
   assert.match(scans, /failure_message/);
   assert.match(scans, /failure_code/);
+});
+
+test("a running Nmap execution is never labeled complete", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /execution\.status === "running" \? "실행 중"/);
+  assert.match(scans, /`경과 \$\{fmtElapsed\(liveSeconds\)\}`/);
+  assert.match(scans, /window\.setInterval\(\(\) => setNow\(Date\.now\(\)\), 1000\)/);
 });
 
 test("heatmap and notification mirrors use display identity with service context", () => {
@@ -186,6 +198,54 @@ test("heatmap and notification mirrors use display identity with service context
   assert.match(heatmap, /primaryServiceIdentity\(finding\)/);
   assert.match(notifications, /const identity = primaryServiceIdentity\(f\)/);
   assert.match(notifications, /\(서비스: \$\{f\.service\}\)/);
+  assert.match(notifications, /RISK_LABEL\[f\.risk_level\]/);
+  assert.match(notifications, /f\.needs_confirmation \? " · 재확인 필요"/);
+});
+
+test("dashboard separates active evidence from actionable unresolved findings", () => {
+  const dashboard = source("../src/views/Dashboard.jsx");
+  assert.match(dashboard, /confirmed_open_total/);
+  assert.match(dashboard, /confirmation_required_total/);
+  assert.match(dashboard, /allowed_open_total/);
+  assert.match(dashboard, /unresolved_total/);
+  assert.match(dashboard, /부서별 미해결/);
+  assert.match(dashboard, /unresolved_by_risk/);
+});
+
+test("notification history exposes immutable body targets and actor", () => {
+  const notifications = source("../src/views/Notifications.jsx");
+  assert.match(notifications, /h\.sent_by_name/);
+  assert.match(notifications, /h\.finding_count/);
+  assert.match(notifications, /h\.finding_ids\.join/);
+  assert.match(notifications, /h\.body \|\| "\(저장된 본문 없음\)"/);
+});
+
+test("scan detail separates recoveries from unresolved quality issues", () => {
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /function StageRecoveries/);
+  assert.match(scans, /복구 시도/);
+  assert.match(scans, /service_degraded/);
+  assert.match(scans, /resolved_by_scan_id/);
+  assert.match(scans, /created_by_name/);
+  assert.match(scans, /프로브 결과 \{serviceResults\}개 endpoint/);
+});
+
+test("heatmap shows present evidence and reports missing legacy artifacts", () => {
+  const heatmap = source("../src/views/Heatmap.jsx");
+  assert.match(heatmap, /quality_warnings/);
+  assert.match(heatmap, /confirmed_open_count/);
+  assert.match(heatmap, /confirmation_required_count/);
+  assert.match(heatmap, /row\.endpoint_state/);
+  assert.match(heatmap, /row\.state_evidence/);
+});
+
+test("admin audit history has a dedicated view and remains admin-only", () => {
+  const app = source("../src/App.jsx");
+  const audit = source("../src/views/Audit.jsx");
+  assert.match(app, /\{ k: "audit", label: "감사 이력", ico: "≣", admin: true \}/);
+  assert.match(audit, /api\(`\/audit\?\$\{qs\.toString\(\)\}`\)/);
+  assert.match(audit, /row\.actor_name/);
+  assert.match(audit, /row\.ok \? "성공" : "실패"/);
 });
 
 test("Server changes have a localized history label and filter", () => {
@@ -238,7 +298,7 @@ test("scan exclusions share one deduplicated token contract across estimate and 
   assert.equal((scans.match(/exclude: excludeList/g) || []).length, 4);
   assert.match(scans, /\/scans\/run-command[\s\S]*?exclude: excludeList/);
   assert.match(scans, /const previewExcludes = est\?\.exclude \?\? excludeList/);
-  assert.match(scans, /targets=\{targetList\} excludes=\{previewExcludes\} staged=\{staged\}/);
+  assert.match(scans, /targets=\{targetList\} excludes=\{previewExcludes\} excludePorts=\{excludePorts\} staged=\{staged\}/);
   assert.match(scans, /setTargets\(""\); setExclude\(""\); setName\(""\)/);
   assert.match(scans, /htmlFor="scan-exclude"/);
   assert.match(scans, /aria-describedby="scan-exclude-help"/);
@@ -346,7 +406,7 @@ test("timing controls and presets resolve to one backend-visible timing", () => 
   assert.match(toggle, /n\.add\(k\)/);
 });
 
-test("staged preview mirrors discovery, protocol sweeps, and per-host service probes", () => {
+test("staged preview mirrors discovery, protocol sweeps, and grouped service probes", () => {
   const scanOptions = source("../src/ui/ScanOptions.jsx").replace(/\r\n/g, "\n");
   const staged = scanOptions.slice(
     scanOptions.indexOf("if (staged) {"),
@@ -356,18 +416,64 @@ test("staged preview mirrors discovery, protocol sweeps, and per-host service pr
     assert.match(staged, new RegExp(`title: "${title}"`));
   }
   assert.match(staged, /"-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n"/);
-  assert.match(staged, /"-n",\s*timing, "--reason", "--max-retries", "2"/);
-  assert.match(staged, /"--reason", timing, "--max-retries", "2", "-p", "T:/);
+  assert.match(staged, /"-n",\s*timing, "--reason", "--max-retries", MAX_RETRIES/);
+  assert.match(staged, /"--reason", timing, "--max-retries", MAX_RETRIES,\s*"-p", "T:/);
   assert.match(staged, /versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing/);
   assert.match(staged, /const defeatRst = scanFlag === "-sS" \? "--defeat-rst-ratelimit" : ""/);
-  assert.match(staged, /"--min-hostgroup", "64", defeatRst/);
-  assert.match(staged, /"--max-parallelism", "100"/);
-  assert.match(staged, /"T:<TCP 탐색에서 열린 포트>"/);
-  assert.match(staged, /"U:<UDP 탐색에서 열린 포트>"/);
+  const stagedSteps = staged.split("title:").slice(1);
+  const stepFor = (title) => stagedSteps.find((step) => step.includes(title));
+
+  // 부하 상한은 nmap 이 실제로 존중하는 단계에만 실린다. 발견(-sn)은 nmap 문서상
+  // --min-hostgroup 이 무효라 엔진이 빼므로, 미리보기도 빼야 실제 argv 와 맞는다.
+  const discovery = stepFor("호스트 발견");
+  assert.match(discovery, /\.\.\.THROUGHPUT_DISCOVERY/);
+  assert.doesNotMatch(discovery, /\.\.\.THROUGHPUT[^_]/,
+    "-sn 미리보기에 --min-hostgroup 이 다시 실렸다");
+  assert.match(scanOptions, /const THROUGHPUT_DISCOVERY = \["--max-parallelism", "100"\]/);
+
+  // 나머지 단계(포트/버전 스캔)는 묶을 대상이 있으므로 전체 배열을 싣는다.
+  for (const step of stagedSteps.filter((s2) => !s2.includes("호스트 발견"))) {
+    assert.match(step, /\.\.\.THROUGHPUT[^_]/, `처리량 상한이 빠진 단계: ${step.slice(0, 40)}`);
+  }
+  // --defeat-rst-ratelimit 은 SYN 전용이다 — UDP 단계에 실리면 nmap 이 fatal 로 끝난다.
+  for (const step of stagedSteps.filter((step) => /"-sU"/.test(step))) {
+    assert.doesNotMatch(step, /defeatRst|DEFEAT_RST/);
+    assert.match(step, /"--max-retries", UDP_MAX_RETRIES/);
+  }
+  // 호스트 상한만 뺐다. 스크립트 상한은 초과한 스크립트 인스턴스만 죽이고 포트 표는
+  // 남기므로(nmap 문서·실측 A/B) 그대로 둔다 — 둘은 성질이 다르다.
+  // argv 로 나가는 문자열만 본다 - 주석에서 "--host-timeout 과 달리" 라고 설명하는 것까지
+  // 막으면, 왜 스크립트 상한만 남겼는지 적어 둘 수가 없어진다.
+  assert.doesNotMatch(scanOptions, /"--host-timeout"/);
+  assert.match(scanOptions, /"--script-timeout"/);
+  assert.match(scanOptions, /const TCP_SCRIPT_TIMEOUT = "2m"/);
+  assert.match(scanOptions, /const UDP_SCRIPT_TIMEOUT = "3m"/);
+  assert.match(scanOptions, /const THROUGHPUT = \["--min-hostgroup", "64", "--max-parallelism", "100"\]/);
+  assert.match(scanOptions, /const MAX_RETRIES = "2"/);
+  assert.match(scanOptions, /const UDP_MAX_RETRIES = "4"/);
+  // 식별은 배치 단위로 돈다 - TCP 는 열린 포트 합집합을 한 프로세스로, UDP 는 같은 포트가
+  // 열린 호스트끼리 묶어서. 호스트 1대짜리 자리표시자는 실제 실행과 어긋난다.
+  assert.match(staged, /"T:<배치에서 열린 TCP 합집합>"/);
+  assert.match(staged, /"U:<함께 열린 UDP 포트>"/);
   assert.match(staged, /versionFlag === "--version-light" && versionFlag/);
-  assert.match(staged, /"<호스트 1대>"/);
-  assert.match(source("../src/views/Scans.jsx"), /targets=\{targetList\} excludes=\{previewExcludes\} staged=\{staged\}/);
+  assert.doesNotMatch(staged.replace(/\/\/[^\n]*/g, ""), /"<호스트 1대>"/,
+    "식별을 호스트 1대 명령으로 보여 준다 - 실제 대상 규모를 낮춰 말한다");
+  assert.match(source("../src/views/Scans.jsx"), /targets=\{targetList\} excludes=\{previewExcludes\} excludePorts=\{excludePorts\} staged=\{staged\}/);
+  assert.match(source("../src/views/Scans.jsx"), /excludePorts=\{excludePorts\}/);
+  assert.match(scanOptions, /excludePorts\s*=\s*""/);
+  assert.match(scanOptions, /"--exclude-ports",\s*excludedPortSpec/);
   assert.match(scanOptions, /단계별 명령 템플릿/);
+});
+
+test("finding and event views expose the scan and actor provenance already stored by the server", () => {
+  const findings = source("../src/views/Findings.jsx");
+  const history = source("../src/views/History.jsx");
+  assert.match(findings, /finding\.first_scan_id/);
+  assert.match(findings, /finding\.last_scan_id/);
+  assert.match(findings, /ev\.actor_name/);
+  assert.match(findings, /ev\.scan_id/);
+  assert.match(history, /ev\.actor_name/);
+  assert.match(history, /ev\.scan_name/);
 });
 
 test("scan screen shows target and run first, with everything else folded away", () => {
@@ -453,6 +559,103 @@ test("web scan can exclude ports, and the estimate sees the same value", () => {
   assert.match(scans, /id="scan-exclude-ports"/);
   // 실행 두 경로와 예상치 호출이 모두 같은 값을 실어 보낸다.
   assert.equal((scans.match(/exclude_ports: excludePorts/g) || []).length, 3);
+});
+
+test("unconfirmed observations are folded away but never silently", () => {
+  const findings = source("../src/views/Findings.jsx");
+  // 두 축을 따로 켜고 끌 수 있어야 무엇 때문에 안 보였는지 알 수 있다(hideAllowed 와 같은 이유).
+  assert.match(findings, /const \[hideUnconfirmed, setHideUnconfirmed\] = useState\(true\)/,
+    "미확정 토글이 없거나 기본이 '보임' 이다");
+  assert.match(findings, /const \[hideTcpwrapped, setHideTcpwrapped\] = useState\(true\)/,
+    "tcpwrapped 토글이 없거나 기본이 '보임' 이다");
+
+  // 서버가 페이지를 자르기 전에 걸러야 한다 - 화면에서 걸러내면 건수·내보내기가 어긋난다.
+  const qs = findings.split("const queryString = useMemo")[1].split("}, [")[0];
+  assert.match(qs, /hide_unconfirmed/, "미확정 토글이 서버로 안 간다");
+  assert.match(qs, /hide_tcpwrapped/, "tcpwrapped 토글이 서버로 안 간다");
+  // 내보내기도 같은 queryString 을 쓰므로 표와 파일이 갈리지 않는다.
+  assert.match(findings, /new URLSearchParams\(queryString\)[\s\S]{0,200}findings\/export/);
+
+  // 접은 건수를 화면이 말해야 한다. 열린 포트를 말없이 감추는 것은 이 도구가 내내 막아 온
+  // 거짓 음성과 같은 모양이다 - 토글 존재만으로는 그 사실이 사용자에게 닿지 않는다.
+  assert.match(findings, /hidden\.unconfirmed \? `[^`]*접힘/,
+    "미확정 접힘 건수를 화면이 말하지 않는다");
+  assert.match(findings, /hidden\.tcpwrapped \? `[^`]*접힘/,
+    "tcpwrapped 접힘 건수를 화면이 말하지 않는다");
+
+  // [필터 제거]는 기본으로 되돌린다 - 접힘이 기본이므로 두 토글도 다시 켜져야 한다.
+  const clear = findings.split("function clearFilters()")[1].split("\n  }")[0];
+  assert.match(clear, /setHideUnconfirmed\(true\)/);
+  assert.match(clear, /setHideTcpwrapped\(true\)/);
+});
+
+test("the api helper hands back the counts the server folded", () => {
+  const api = source("../src/api.js");
+  assert.match(api, /X-Hidden-Unconfirmed/);
+  assert.match(api, /X-Hidden-Tcpwrapped/);
+  // 헤더가 없거나 숫자가 아니면 0 - 접힘 표시가 NaN 으로 새면 아무도 못 읽는다.
+  assert.match(api, /Number\.isFinite\(v\) \? v : 0/);
+});
+
+test("the staged preview matches how the engine actually groups service probes", () => {
+  const raw = source("../src/ui/ScanOptions.jsx");
+  // 렌더되는 코드만 본다. 왜 이렇게 묶었는지 적어 둔 주석에도 같은 말이 나온다.
+  const opts = raw.replace(/\/\/[^\n]*/g, "");
+  const steps = opts.split("if (staged) {")[1].split("} else if")[0];
+  const tcpStep = steps.split('title: "TCP 서비스 식별"')[1].split("});")[0];
+  const udpStep = steps.split('title: "UDP 서비스 식별"')[1].split("});")[0];
+
+  // 엔진은 배치의 열린 포트 합집합을 한 프로세스로, UDP 는 같은 포트가 열린 호스트끼리 묶어
+  // 돈다(Pipeline._service_batch). 호스트 1대짜리 명령으로 보여 주면 대상 규모와 프로세스
+  // 수를 낮춰 말하게 되고, 운영자는 승인할 부하를 잘못 본다.
+  assert.doesNotMatch(tcpStep, /호스트 1대/, "TCP 식별을 호스트 1대 명령으로 보여 준다");
+  assert.doesNotMatch(udpStep, /호스트 1대/, "UDP 식별을 호스트 1대 명령으로 보여 준다");
+  assert.match(tcpStep, /sweepTargets/, "TCP 식별이 배치 대상을 안 싣는다");
+
+  // 선택한 NSE 는 백엔드가 프로토콜별로 나눠 싣는다(scan_options.filter_nse_proto).
+  // 나누지 않으면 돌지도 않을 TCP 전용 스크립트가 UDP 명령에, 그 반대도 그대로 보인다.
+  assert.match(tcpStep, /tcpScripts && "--script"/);
+  assert.match(udpStep, /udpScripts && "--script"/);
+  assert.doesNotMatch(tcpStep, /stagedScripts/, "TCP 미리보기가 UDP 전용 스크립트까지 보여 준다");
+  assert.doesNotMatch(udpStep, /stagedScripts/, "UDP 미리보기가 TCP 전용 스크립트까지 보여 준다");
+  // 나누지 않은 목록 자체가 남아 있으면 다음 사람이 다시 집어 든다.
+  assert.doesNotMatch(raw, /const stagedScripts/, "프로토콜별로 나누지 않은 목록이 남아 있다");
+});
+
+test("an imported scan reports the time it actually ran", () => {
+  const scans = source("../src/views/Scans.jsx").replace(/\/\/[^\n]*/g, "");
+  const fn = scans.split("function scanDuration(")[1].split("\n}")[0];
+  // 예전에는 started_at 이 XML 안의 과거 시각이고 finished_at 이 업로드 인입 시각이라,
+  // 한 달 전 XML 이 한 달짜리 스캔으로 보였다. 그래서 가져온 스캔의 소요시간을 통째로
+  // 지웠는데 - 그건 잘못된 절반이다. 지연 추적이 이 화면의 존재 이유인데 숫자를 없앴다.
+  //
+  // 서버가 두 값을 **XML 이 밝힌 실제 구간**으로 저장하므로(_apply_xml_runtime) 화면은
+  // 그냥 빼면 된다. 다시 지우지 않도록 못박는다.
+  assert.doesNotMatch(fn, /scanKind\(scan\)\.key === "import"/,
+    "가져온 스캔의 소요시간을 화면에서 지웠다 - 추적을 없애는 방향의 수정이다");
+  assert.match(fn, /finished_at\)\.getTime\(\)/, "소요시간 계산 자체가 사라졌다");
+});
+
+test("recovery evidence uses the schema the stages API actually sends", () => {
+  const scans = source("../src/views/Scans.jsx").replace(/\/\/[^\n]*/g, "");
+  const block = scans.split("recoveries.map(")[1].split("</section>")[0];
+  // 서버(engine_runner.parse_events)는 type 을 "split" | "retry" 로 정규화하고 호스트를
+  // hosts 배열로 준다. 옛 이벤트 이름을 보면 포트 분할 복구가 전부 '대체 엔진 재시도' 로
+  // 표기되고, 어느 호스트에서 무엇이 돌았는지가 증거에서 통째로 빠진다.
+  assert.match(block, /recovery\.type === "split"/, "복구 종류를 옛 이벤트 이름으로 본다");
+  assert.doesNotMatch(block, /service_split/, "정규화 전 이름이 남아 있다");
+  assert.match(block, /recovery\.hosts/, "복구가 다룬 호스트를 안 보여 준다");
+});
+
+test("a stage that never ran is not called complete", () => {
+  const scans = source("../src/views/Scans.jsx").replace(/\/\/[^\n]*/g, "");
+  const chip = scans.split("const extra =")[1].split(";")[0];
+  // 생존 호스트가 0이면 뒤 단계는 돌 것이 없다. '완료' 로 부르면 훑고 온 단계와 구분되지
+  // 않고, 아무것도 안 붙이면 전체 100% 옆에 '대기' 칩이 영원히 남는다.
+  assert.match(chip, /counts\?\.skipped/, "생략된 단계를 훑고 온 단계와 같게 부른다");
+  const skipped = chip.indexOf("skipped");
+  const done = chip.indexOf('status === "done"');
+  assert.ok(skipped !== -1 && skipped < done, "생략 판정이 완료 판정보다 뒤에 있어 가려진다");
 });
 
 test("findings colour indicators are per-element and persist", async () => {
@@ -597,17 +800,34 @@ test("an allowed finding is folded on a different axis than a resolved one", () 
 test("a rule's match count leads to the findings it actually matched", () => {
   // 건수만 보여 주면 '그래서 어떤 건데?' 를 매번 손으로 찾아야 한다. 서버 _match_count 와
   // 같은 기준이어야 건수와 목록이 어긋나지 않는다.
+  const unfolded = {
+    hideNormal: false, hideAllowed: false, hideUnconfirmed: false, hideTcpwrapped: false,
+  };
   assert.deepEqual(matchFocus({ kind: "service_rule", service: "telnet" }), {
-    filters: { service: "telnet" }, match: "exact", hideNormal: false, hideAllowed: false,
+    filters: { service: "telnet" }, match: "exact", ...unfolded,
   });
   assert.deepEqual(matchFocus({ kind: "port_rule", port: 3389, service: "" }), {
-    filters: { port: "3389" }, match: "exact", hideNormal: false, hideAllowed: false,
+    filters: { port: "3389" }, match: "exact", ...unfolded,
   });
   assert.deepEqual(matchFocus({ kind: "product_rule", product: "vsftpd" }), {
-    filters: { product: "vsftpd" }, match: "contains", hideNormal: false, hideAllowed: false,
+    filters: { product: "vsftpd" }, match: "contains", ...unfolded,
   });
-  // 허용 규칙의 매칭은 기본으로 접혀 있다 - 그대로 이동하면 빈 목록만 보인다.
-  assert.equal(matchFocus({ kind: "cpe_rule", cpe: "openssh" }).hideAllowed, false);
+  // 목록 화면이 평소 접는 축은 **전부** 풀어야 한다. `_match_count` 는
+  // ACTIVE_FINDING_STATES(open + open|filtered)를 세고 상태·허용·식별로 거르지 않으므로,
+  // 하나라도 접힌 채로 이동하면 "3건" 을 눌렀는데 빈 목록이나 모자란 목록이 나온다.
+  for (const rule of [{ kind: "cpe_rule", cpe: "openssh" },
+                      { kind: "service_rule", service: "telnet" }]) {
+    const focus = matchFocus(rule);
+    for (const axis of Object.keys(unfolded)) {
+      assert.equal(focus[axis], false, `${rule.kind}: ${axis} 가 접힌 채로 이동한다`);
+    }
+  }
+  // 발견 화면은 없는 값을 '접힘' 으로 읽는다(`focus.hideUnconfirmed ?? true`) - 필드를
+  // 빠뜨리면 조용히 접힌다. 그래서 존재 자체를 확인한다.
+  const focusKeys = Object.keys(matchFocus({ kind: "service_rule", service: "x" }));
+  for (const axis of Object.keys(unfolded)) {
+    assert.ok(focusKeys.includes(axis), `matchFocus 가 ${axis} 를 안 보낸다`);
+  }
 
   const rules = source("../src/views/Rules.jsx");
   assert.match(rules, /onShowMatches\(matchFocus\(r\)\)/);
@@ -696,7 +916,8 @@ test("an imported run is drawn exactly like one that ran in the web UI", () => {
   assert.equal(shouldLoadStages({ status: "done", command: "단계스캔(엔진) · TCP 443" }), true);
   const scans = source("../src/views/Scans.jsx");
   // 엔진 단계와 가져오기 단계를 같은 라벨 표에서 그린다.
-  assert.match(scans, /tcp_discovery: "TCP 발견", tcp_identify: "TCP 식별", udp_identify: "UDP 식별"/);
+  assert.match(scans, /tcp_discovery: "TCP 포트 발견", tcp_identify: "TCP 서비스 프로브"/);
+  assert.match(scans, /udp_identify: "UDP 서비스 프로브"/);
   assert.match(scans, /withPersistedStages\(prev, list\)/);
 });
 
@@ -710,6 +931,92 @@ test("a running scan says which batch and stage it is on", () => {
   // 배치 번호는 사람이 세는 방식(1부터)이되 총 개수를 넘지 않는다(마지막 배치에서 N+1/N 방지).
   assert.match(scans, /배치 \$\{Math\.min\(p\.batches_done \+ 1, total\)\}\/\$\{total\}/);
   assert.match(scans, /\(\$\{p\.batch_size\}대씩\)/);
+  assert.match(scans, /tcp_service: "TCP 서비스 프로브"/);
+  assert.match(scans, /udp_service: "UDP 서비스 프로브"/);
+  assert.match(scans, /현재 대상 · \{currentHosts\(current\)\}/);
+  assert.match(scans, /current\.completed_hosts \|\| 0\}\/\{current\.total_hosts\}대 완료/);
+});
+
+test("scan history distinguishes retry queues and procedural completion", () => {
+  const scans = source("../src/views/Scans.jsx");
+  const css = source("../src/styles.css");
+  assert.match(scans, /재스캔 필요 · \{scan\.retry_count\}대/);
+  assert.match(scans, /\/scans\/\$\{scan\.id\}\/retry-timeouts/);
+  assert.match(scans, /포트 재전송 한도 도달/);
+  assert.match(scans, /retransmission_cap_hosts/);
+  assert.match(scans, /aria-label="전체 절차 완료율"/);
+  assert.match(scans, /function procedurePercent\(stages\)/);
+  assert.match(scans, /\["done", "warning"\]\.includes\(stage\.status\)/);
+  assert.match(css, /\.stage-running/);
+  assert.match(css, /\.stage-warning/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+});
+
+test("the process watchdog is reachable from the staged scan form", () => {
+  const scans = source("../src/views/Scans.jsx");
+  // 호스트 상한을 없앤 대신 둔 제어가 화면에서 켤 수 없으면, 사용자는 보호만 잃고
+  // 대체는 얻지 못한다. 기본은 0(끔)이되 켜는 길은 있어야 한다.
+  assert.match(scans, /const \[watchdogMin, setWatchdogMin\] = useState\(0\)/);
+  assert.match(scans, /const watchdogSeconds = Math\.max\(0, Math\.round\(watchdogMin \* 60\)\)/);
+  assert.match(scans, /실행 상한 — nmap 프로세스 하나당/);
+  // 단계 스캔과 한 번에 실행 **양쪽** 요청이 값을 보내야 한다. 파일 어딘가에 문자열이
+  // 있는지만 보면, 한쪽 분기에만 실린 것을 통과시킨다.
+  const body = scans.split("const body = staged")[1].split("api(endpoint")[0];
+  const [stagedBranch, legacyBranch] = body.split(": {");
+  assert.match(stagedBranch, /watchdog_seconds:/);
+  assert.match(legacyBranch, /watchdog_seconds:/, "한 번에 실행 요청이 워치독을 안 보낸다");
+  // 화면이 약속하는 것과 실제 동작이 어긋나면 안 된다. 지금은 상한에 걸린 실행의 관측이
+  // 파일에만 남고 발견으로 인입되지는 않으므로, 그 한계를 화면이 말해야 한다.
+  assert.match(scans, /발견으로 인입되지\s*\n?\s*않습니다/);
+  // 산출물은 스캔 서버 파일시스템에 있고 웹에는 내려받는 경로가 없다. 원격 사용자에게
+  // [가져오기]로 그 폴더를 올리라고 안내하면 실행할 수 없는 절차를 시키는 것이다.
+  assert.match(scans, /스캔 서버에 직접 접근할 수 있는 관리자만/);
+  assert.doesNotMatch(scans, /그 폴더를 \[가져오기\]로/);
+  // 경고는 두 실행 방식 모두에 뜨는데, 산출물 모양은 **공통이 아니다**. scan_<id> 가
+  // 디렉터리인 것은 단계 엔진뿐이고(out_dir 을 mkdir 한다), 레거시는 같은 문자열을 파일
+  // 접두사로 써서 data/scans/ 바로 아래에 scan_<id>.b<배치>.<단계>.xml 로 흩어 놓는다.
+  // 한쪽 규칙만 적으면 다른 쪽을 쓴 관리자는 없는 폴더를 연다.
+  const warning = scans.split("watchdogMin > 0 &&")[1].split("</section>")[0];
+  const shown = warning.replace(/\{\/\*[\s\S]*?\*\/\}/g, "");  // 주석 말고 렌더되는 것만
+  assert.match(shown, /staged \? \(/, "회수 경로 안내가 실행 방식별로 갈리지 않는다");
+  const [stagedHint, legacyHint] = shown.split("staged ? (")[1].split(") : (");
+  assert.match(stagedHint, /scan_&lt;스캔번호&gt;\//,
+    "단계 스캔 안내가 스캔별 폴더를 말하지 않는다");
+  assert.match(legacyHint, /\.b&lt;배치&gt;\.&lt;단계&gt;\.xml/,
+    "한 번에 실행 안내가 흩어진 파일 이름을 말하지 않는다");
+  assert.doesNotMatch(legacyHint, /scan_&lt;스캔번호&gt;\//,
+    "한 번에 실행에 없는 폴더를 열라고 안내한다");
+  // [실제 실행 명령] 의 -oA 는 단계 엔진에만 있다(legacy 는 command 에서 -oA·타깃을 빼고
+  // Nmap argv 이벤트도 안 남긴다). 그 안내는 반드시 단계 스캔 분기 안에만 있어야 한다.
+  // 위에서 주석을 걷어낸 것을 쓴다 — 왜 갈랐는지 적어 둔 주석에도 -oA 가 나온다.
+  assert.match(stagedHint, /<code>-oA<\/code>/, "argv 안내가 사라졌다");
+  assert.doesNotMatch(legacyHint, /-oA/,
+    "-oA 안내가 한 번에 실행에도 뜬다 — 그쪽에는 그 패널이 없다");
+  // 워치독이 끊은 실행은 nmap 이 죽은 것과 구분해서 보여야 할 일이 갈린다.
+  assert.match(scans, /execution\.status === "watchdog"/);
+});
+
+
+test("scan history puts excluded ports in the main scope label", () => {
+  assert.equal(formatScanPortScope({
+    protocols: ["TCP"], ports: "전체 (일부 제외)", excluded_ports: "2222",
+  }), "TCP 전체: 2222 제외");
+  assert.equal(formatScanPortScope({
+    protocols: ["TCP", "UDP"], ports: "TCP 전체 · UDP 53,161 (일부 제외)",
+    excluded_ports: "2222,U:161",
+  }), "TCP 전체 · UDP 53,161: 2222,U:161 제외");
+  assert.equal(formatScanPortScope({ protocols: ["TCP"], ports: "전체" }), "TCP 전체");
+});
+
+test("scan history table wraps cell contents without losing its column layout", () => {
+  const scans = source("../src/views/Scans.jsx");
+  const css = source("../src/styles.css");
+  assert.match(scans, /className="tbl scan-history-table"/);
+  assert.match(scans, /<colgroup>/);
+  assert.match(scans, /className="scan-history-actions"/);
+  assert.match(css, /\.scan-history-table\s*\{[^}]*table-layout:\s*fixed/);
+  assert.match(css, /\.scan-history-table td\s*\{[^}]*white-space:\s*normal/);
+  assert.match(css, /\.scan-history-actions\s*\{[^}]*flex-wrap:\s*wrap/);
 });
 
 test("a finished batched scan still says how it was split", () => {
@@ -761,4 +1068,90 @@ test("an observed exposure is shown as the fact that drove the grade", () => {
   const cols = source("../src/lib/columns.js");
   assert.match(cols, /key: "exposure", label: "노출 관측"/);
   assert.ok(PRESETS.find((p) => p.id === "p_risk").cols.includes("exposure"));
+});
+
+test("the delay trace panel is present and collapsed by default", () => {
+  // 이 화면의 존재 이유가 "어디서 지연이 생기는가" 다. 한 번 리베이스하면서 이 패널을
+  // 통째로 잃은 적이 있어(codex 것으로 대체된다고 판단), 다시 사라지지 않게 못박는다.
+  const scans = source("../src/views/Scans.jsx");
+  assert.match(scans, /import ScanTrace from/, "지연 진단 패널이 화면에서 빠졌다");
+  assert.match(scans, /<ScanTrace trace=\{detail\?\.trace\}/, "패널에 trace 가 안 간다");
+
+  const panel = source("../src/ui/ScanTrace.jsx");
+  // 평소엔 접혀 있어야 한다 - 늘 펼쳐 두면 상태를 읽는 표를 밀어낸다.
+  assert.match(panel, /<details/, "접었다 펴는 자리가 아니다");
+  assert.doesNotMatch(panel, /<details[^>]*\sopen[\s>]/, "기본이 펼침이다");
+  // 네 갈래가 모두 있어야 "어디서" 에 답한다.
+  for (const [key, why] of [
+    ["running", "지금 도는 실행"],
+    ["by_stage", "단계별 합계"],
+    ["by_phase", "nmap 내부 단계별 합계"],
+    ["slowest", "가장 오래 걸린 실행"],
+  ]) {
+    assert.ok(panel.includes(key), `${why}(${key})가 빠졌다`);
+  }
+  // 수확량이 있어야 '107초 돌고 빈 산출물' 이 정상 완료와 구분된다.
+  assert.match(panel, /empty/, "빈 산출물 표시가 없다");
+});
+
+test("a retry badge never hides issues that retrying cannot fix", () => {
+  // 재시도 가능한 이슈(host_timeout 1대) + 재시도 불가 이슈(artifact_missing 1건).
+  // 백엔드는 retry_status="required", quality_status="error", 총 2건을 준다.
+  const mixed = {
+    retry_status: "required", retry_count: 1, quality_status: "error",
+    unresolved_issue_count: 2, unresolved_other_count: 1,
+  };
+  assert.deepEqual(qualityBadge(mixed), { count: 1, label: "품질 오류" });
+
+  // 재시도 이슈뿐이면 재스캔 배지가 이미 그것을 말하므로 품질 배지는 접는다.
+  assert.equal(qualityBadge({
+    retry_status: "required", quality_status: "warning",
+    unresolved_issue_count: 1, unresolved_other_count: 0,
+  }), null);
+
+  // 재스캔을 제안하지 않는 스캔에서는 전부를 말한다.
+  assert.deepEqual(qualityBadge({
+    retry_status: "none", quality_status: "error",
+    unresolved_issue_count: 2, unresolved_other_count: 2,
+  }), { count: 2, label: "품질 오류" });
+
+  assert.equal(qualityBadge({ retry_status: "none", unresolved_issue_count: 0 }), null);
+
+  // 배지를 그리는 쪽이 실제로 이 함수를 쓰는가 - 컴포넌트가 자체 계산으로 되돌아가면
+  // 위 네 가지가 다 통과해도 화면은 예전처럼 감춘다.
+  assert.match(source("../src/views/Scans.jsx"), /function QualityBadge[\s\S]{0,200}qualityBadge\(scan\)/);
+});
+
+test("a UDP probe that only found inferred-open ports does not read as empty-handed", () => {
+  // UDP 식별은 대개 `open|filtered` 만 남긴다. 서버는 그것을 `inferred_open` 으로 따로
+  // 세고, 봤기 때문에 `empty` 로도 안 부른다. 그런데 화면이 그 수를 안 그리면 endpoint 를
+  // 실제로 담은 실행이 '열림 0 · 버전 0' 으로만 보인다 - 아무것도 못 한 실행처럼 읽힌다.
+  const panel = source("../src/ui/ScanTrace.jsx");
+  const yieldFn = panel.slice(panel.indexOf("function Yield("));
+  const body = yieldFn.slice(0, yieldFn.indexOf("\n}"));
+  assert.match(body, /run\.inferred_open/, "수확량 표시가 무응답 추정 열림을 빼놓는다");
+  // 서버가 그 이름으로 보내는지도 같이 못박는다 - 한쪽만 바뀌면 조용히 안 그려진다.
+  const folded = source("../../backend/scanops/scanning/engine_runner.py");
+  assert.match(folded, /"inferred_open"/,
+    "서버가 그 이름으로 보내지 않는다 - 화면 검사만 통과하는 빈 검사가 된다");
+});
+
+test("a completed scan's advisory note is not dressed up as a failure in the history row", () => {
+  // nse_degraded·observation_incomplete 는 '실패'가 아니라 '참고'다(scanNotice 가 그렇게
+  // 판정한다). 상세는 그 판정을 쓰는데 이력 행은 모든 메시지를 실패 색으로 그려서,
+  // 펼쳐 보기 전까지 완료된 스캔이 실패한 것으로 읽혔다.
+  const notice = scanNotice({ failure_code: "nse_degraded", failure_message: "부가 정보 일부 누락" });
+  const failure = scanNotice({ failure_code: "nmap_launch_failed", failure_message: "실행 실패" });
+  assert.equal(notice.tone, "notice");
+  assert.equal(failure.tone, "failure");
+
+  // 이력 행이 그 판정을 실제로 쓰는가 - 안 쓰면 위 두 줄이 통과해도 화면은 그대로다.
+  const view = source("../src/views/Scans.jsx");
+  const line = view.slice(view.indexOf("function ScanNoticeLine("));
+  const body = line.slice(0, line.indexOf("\n}"));
+  assert.match(body, /scanNotice\(scan\)/, "이력 행이 상세와 다른 판정을 쓴다");
+  assert.match(body, /notice\.tone/, "판정을 받아 놓고 표시에 쓰지 않는다");
+  // 옛 방식(무조건 실패 색)이 남아 있지 않은가.
+  assert.ok(!/\{s\.failure_message && <div className="scan-failure">/.test(view),
+    "이력 행이 여전히 모든 메시지를 실패로 그린다");
 });

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..identity import display_identity
 from ..models import ACTIVE_FINDING_STATES, Finding, FindingEvent
 from .nmap_parse import server_observed
+from .observability import record_endpoint_observations
 
 
 def _now() -> datetime:
@@ -96,6 +97,13 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
     counts = {"new": 0, "reopened": 0, "service_changed": 0,
               "version_changed": 0, "server_changed": 0, "unchanged": 0, "closed": 0}
     seen: set[str] = set()
+    # 호출자가 변화 집합을 요청하지 않아도 EndpointObservation은 같은 판정을 써야 한다.
+    # 로컬 집합을 따로 만들지 않으면 'API 응답용 set을 넘긴 경로'와 평범한 ingest 경로의
+    # 역사 데이터가 달라진다.
+    tracked_applied = applied_keys if applied_keys is not None else set()
+    tracked_absences = closed_keys if closed_keys is not None else set()
+    absence_observed_at: dict[str, datetime] = {}
+    applied_absence_keys: set[str] = set()
 
     for f in findings:
         key = _key(f)
@@ -106,10 +114,8 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
         # 스캔 시각으로 되돌아간다.
         when = _as_when(f.get("observed_at"), scan_date)
         row = db.query(Finding).filter(Finding.finding_key == key).first()
-        if applied_keys is not None and (
-            row is None or not _is_older(when, row.last_seen)
-        ):
-            applied_keys.add(key)
+        if row is None or not _is_older(when, row.last_seen):
+            tracked_applied.add(key)
         if row is None:
             row = Finding(finding_key=key, first_scan_id=scan_id, first_seen=when, **_observed(f))
             row.last_scan_id = scan_id
@@ -222,11 +228,17 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
                 continue        # 이 산출물보다 나중에 관측된 사실이 있다 - 우리 증거가 낡았다
             # 여기까지 왔으면 이 실행이 그 포트의 부재를 권위 있게 관측한 것이다.
             # 상태가 이미 닫힘이어도 '이번에도 없었다' 는 관측이므로 증거에는 남는다.
-            if closed_keys is not None:
-                closed_keys.add(key)
-            if row is None or row.state not in ACTIVE_FINDING_STATES:
+            tracked_absences.add(key)
+            if row is None:
+                # scope 문자열만 있고 이 endpoint가 한 번도 Finding이었던 적이 없다. 이 키를
+                # 관측 원장에 만들면 넓은 -p 범위가 closed 행으로 팽창한다. 기존 merged XML용
+                # closed_keys 계약은 유지하되 compact observation에서는 제외한다.
+                continue
+            absence_observed_at[key] = closed_at
+            if row.state not in ACTIVE_FINDING_STATES:
                 continue
             _close_row(db, row, scan_id, closed_at)
+            applied_absence_keys.add(key)
             counts["closed"] += 1
     elif scanned_hosts:
         hosts = sorted(scanned_hosts)
@@ -248,10 +260,23 @@ def ingest(db: Session, scan_id: int, findings: list[dict], scanned_hosts: set[s
                 closed_at = stamp or when
             if _is_older(closed_at, row.last_seen):
                 continue
-            if closed_keys is not None:
-                closed_keys.add(row.finding_key)
+            tracked_absences.add(row.finding_key)
+            absence_observed_at[row.finding_key] = closed_at
             _close_row(db, row, scan_id, closed_at)
+            applied_absence_keys.add(row.finding_key)
             counts["closed"] += 1
+
+    # Finding current projection과 같은 transaction·같은 normalized rows를 쓴다. helper는
+    # 포트 범위를 확장하지 않고 위에서 권위가 확인된 absence key만 받는다.
+    record_endpoint_observations(
+        db,
+        scan_id,
+        findings,
+        applied_keys=tracked_applied,
+        absences=absence_observed_at,
+        applied_absence_keys=applied_absence_keys,
+        scan_date=scan_date,
+    )
 
     if commit:
         db.commit()

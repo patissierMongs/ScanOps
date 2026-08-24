@@ -299,7 +299,10 @@ def _smoke_artifact(kind: str, app: Path, run_root: Path,
                 "name": f"{kind} package runtime smoke",
                 "targets": [HOST],
                 "ports": f"T:{api_port}",
-                "options": ["fast", "version_light"],
+                # Windows loopback에서 연속 SYN sweep/-sV가 Npcap 캡처 상태에 따라
+                # 간헐적으로 자기 포트를 놓친다. 패키지 검증의 대상은 launcher/embedded
+                # runtime/engine 연결이므로 TCP Connect로 결정적인 로컬 증거를 만든다.
+                "options": ["connect", "fast", "version_light"],
                 "nse": ["http-headers", "http-server-header"],
                 "batch_size": 1,
                 "discovery": "pn",
@@ -309,8 +312,14 @@ def _smoke_artifact(kind: str, app: Path, run_root: Path,
         stages = _wait_scan(api, token, scan_id, scan_timeout, server_log)
         _copy_scan_evidence(kind, data_dir, scan_id, evidence, required=True)
         stage_status = {stage["stage"]: stage["status"] for stage in stages["stages"]}
-        require(all(stage_status.get(name) == "done" for name in ("discovery", "tcp", "service")),
+        tcp_service_status = stage_status.get("tcp_service", stage_status.get("service"))
+        require(stage_status.get("discovery") == "done"
+                and stage_status.get("tcp") == "done"
+                and tcp_service_status == "done",
                 f"{kind} staged engine did not finish all stages: {stage_status}")
+        require(stages.get("source") == "db" and stages.get("executions"),
+                f"{kind} terminal observability was not materialized: "
+                f"source={stages.get('source')!r}, executions={len(stages.get('executions') or [])}")
 
         rows = api.request("GET", f"/api/findings?host={HOST}&state=", token=token)
         matches = [row for row in rows if int(row["port"]) == api_port and row["proto"] == "tcp"]
@@ -332,6 +341,8 @@ def _smoke_artifact(kind: str, app: Path, run_root: Path,
             "scan_id": scan_id,
             "scan_status": stages["status"],
             "stages": stage_status,
+            "observability_source": stages.get("source"),
+            "execution_count": len(stages.get("executions") or []),
             "service": finding.get("service"),
             "product": finding.get("product"),
             "server": server,

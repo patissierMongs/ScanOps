@@ -141,6 +141,36 @@ def test_the_event_feed_host_filter_uses_the_same_exclude_rule(client):
 
 
 # ── 6. 최초 로그인 비밀번호 강제 변경 ──────────────────────────────────────────
+def test_bootstrap_repairs_a_blank_initial_admin_password_file():
+    """계정만 커밋되고 안내 파일이 비면 에어갭 설치가 영구 잠기므로 재발급한다."""
+    from scanops.seed.bootstrap import run_bootstrap
+    from scanops.security import hash_password, verify_password
+
+    cred = scans_api._settings.data_dir / "INITIAL_ADMIN.txt"
+    cred.write_text("ScanOps 최초 관리자 계정\n  아이디: admin\n  비밀번호: \n", encoding="utf-8")
+    db = SessionLocal()
+    try:
+        db.add(User(username="admin", password_hash=hash_password("unrecoverable12"),
+                    role="admin", display_name="관리자", must_change_password=1))
+        db.commit()
+    finally:
+        db.close()
+
+    run_bootstrap()
+    line = next(line for line in cred.read_text(encoding="utf-8").splitlines()
+                if line.strip().startswith("비밀번호:"))
+    password = line.split(":", 1)[1].strip()
+    assert password and len(password) >= 8
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.username == "admin").one()
+        assert verify_password(password, admin.password_hash)
+        assert admin.auth_version == 1
+    finally:
+        db.close()
+    assert not list(cred.parent.glob(f".{cred.name}.*.tmp"))
+
+
 def test_a_borrowed_password_is_flagged_and_its_file_disappears_when_changed(client, tmp_path):
     """INITIAL_ADMIN.txt 의 비밀번호는 평문으로 파일에 남는다.
 
@@ -1285,3 +1315,124 @@ def test_a_self_issued_certificate_is_recorded_but_does_not_raise_the_grade(clie
     assert any(s["kind"] == "self_issued" for s in issued["exposure_json"])
     ref = next(c["ref"] for c in issued["compliance_json"] if c["std"] == "노출관측")
     assert "자체 발급" in ref and "등급은 올리지 않는다" in ref
+
+
+def test_the_history_row_counts_a_range_without_unrolling_it():
+    """이력 표의 대상 칸은 경계와 개수만 쓴다 - 그걸 얻자고 대역을 펼치면 안 된다.
+
+    /16 하나가 65,536 개의 문자열을 만들고 정렬까지 했다. 목록의 **행마다**, 화면을
+    열 때마다다. 이력에 넓은 스캔이 몇 건만 쌓여도 스캔 화면이 수십 초씩 멈춘다.
+
+    그래서 두 가지를 함께 못박는다 - (1) 펼치지 않는다, (2) 펼쳤을 때와 **같은 답**이다.
+    """
+    from scanops.scanning import chunker
+    from scanops.scanning.scan_summary import _describe_targets, _target_bounds
+
+    exploded = []
+    real_expand = chunker.expand_targets
+
+    def loud_expand(tokens, *args, **kwargs):
+        exploded.append(list(tokens))
+        return real_expand(tokens, *args, **kwargs)
+
+    chunker.expand_targets = loud_expand
+    try:
+        assert _describe_targets("10.0.0.0/16", "") == "10.0.0.0 – 10.0.255.255 · 대상 65536대"
+        assert not exploded, f"경계를 얻자고 대역을 펼쳤다: {exploded}"
+
+        # 펼치는 경로와 같은 답인가. 다르면 화면이 스캔 범위를 잘못 말한다.
+        cases = [
+            ("10.0.0.1", ""), ("10.0.0.0/30", ""), ("10.0.0.1-5", ""),
+            ("10.0.0.0/24", "10.0.0.5"), ("10.0.0.0/24", "10.0.0.0/28"),
+            ("10.0.0.1 10.0.0.3 10.0.0.2", ""),
+            ("10.0.0.0/24 10.0.1.0/24", "10.0.0.250-255"),
+            ("example.com", ""), ("10.0.0.1 example.com", ""),
+            ("10.0.0.0/24 example.com", "10.0.0.1"),
+            ("::1", ""), ("10.0.0.1 ::1", ""),
+            ("10.0.0.5-3", ""), ("bad/cidr", ""),
+            ("10.0.0.0/15", ""),     # 확장 경로가 거절하는 크기 - 축약 표기도 같아야 한다
+        ]
+        import scanops.scanning.scan_summary as module
+        for targets, excluded in cases:
+            fast = _describe_targets(targets, excluded)
+            saved = module._target_bounds
+            module._target_bounds = lambda *a, **k: None      # 펼치는 경로 강제
+            try:
+                slow = _describe_targets(targets, excluded)
+            finally:
+                module._target_bounds = saved
+            assert fast == slow, f"{targets!r}/{excluded!r}: {fast!r} != 펼친 결과 {slow!r}"
+    finally:
+        chunker.expand_targets = real_expand
+
+    assert _target_bounds(["10.0.0.0/15"], []) is None, "cap 을 넘겼는데 개수를 지어냈다"
+
+
+def test_a_failed_reissue_leaves_the_installation_recoverable(monkeypatch):
+    """재발급이 커밋에서 실패해도 다음 기동이 다시 시도할 수 있어야 한다.
+
+    복구는 안내 파일이 **있을 때만** 들어간다. 실패 정리가 그 파일을 지워 버리면 다음
+    기동은 복구를 건너뛰고, 비밀번호 변경을 강제당한 admin 은 아무도 모르는 해시를
+    들고 남는다 - 설치가 영구히 잠긴다. 첫 부팅(계정도 함께 롤백)은 반대로 지워야 한다.
+    """
+    from scanops.seed import bootstrap
+    from scanops.seed.bootstrap import run_bootstrap
+    from scanops.security import hash_password, verify_password
+
+    cred = scans_api._settings.data_dir / "INITIAL_ADMIN.txt"
+    cred.write_text("ScanOps 최초 관리자 계정\n  비밀번호: 안맞는비밀번호12\n", encoding="utf-8")
+    db = SessionLocal()
+    try:
+        db.add(User(username="admin", password_hash=hash_password("unrecoverable12"),
+                    role="admin", display_name="관리자", must_change_password=1))
+        db.commit()
+    finally:
+        db.close()
+
+    # **비밀번호 파일을 쓴 뒤의 커밋**만 실패시킨다. 앞쪽 seed_categories 의 커밋을
+    # 때리면 재발급 경로에 들어가 보지도 못하고, 무엇을 되돌려도 통과하는 빈 검사가 된다.
+    wrote: list[str] = []
+    real_write = bootstrap._write_credentials
+    original = bootstrap.SessionLocal
+
+    def _watching_write(path, password):
+        real_write(path, password)
+        wrote.append(password)
+
+    class _FailsAfterWrite:
+        def __init__(self, session):
+            self._session = session
+
+        def __getattr__(self, name):
+            return getattr(self._session, name)
+
+        def commit(self):
+            if wrote:
+                raise RuntimeError("디스크가 잠깐 죽었다")
+            return self._session.commit()
+
+    monkeypatch.setattr(bootstrap, "_write_credentials", _watching_write)
+    monkeypatch.setattr(bootstrap, "SessionLocal", lambda: _FailsAfterWrite(original()))
+    try:
+        run_bootstrap()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("커밋 실패를 재현하지 못했다")
+    assert wrote, "재발급 경로에 들어가지도 못했다 - 이 검사는 아무것도 안 보고 있다"
+
+    assert cred.exists(), "복구 중 실패가 안내 파일을 지워 다음 기동이 복구를 못 한다"
+
+    # 다음 기동 - 이번엔 정상이다. 재발급이 실제로 되는지까지 본다.
+    monkeypatch.undo()
+    run_bootstrap()
+    line = next(line for line in cred.read_text(encoding="utf-8").splitlines()
+                if line.strip().startswith("비밀번호:"))
+    password = line.split(":", 1)[1].strip()
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.username == "admin").one()
+        assert verify_password(password, admin.password_hash), "재발급이 끝내 안 됐다"
+        assert admin.must_change_password == 1
+    finally:
+        db.close()

@@ -365,7 +365,8 @@ def test_chunk_ingest_failure_rolls_back_batch_and_sets_terminal_failure(
 
     monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda _explicit="": "nmap")
     monkeypatch.setattr(scans_api.nmap_runner, "popen", fake_popen)
-    monkeypatch.setattr(scans_api, "_wait_scan_process", lambda _scan_id, _proc: 0)
+    monkeypatch.setattr(scans_api, "_wait_scan_process",
+                        lambda _scan_id, _proc, _watchdog=0, _out_base=None: 0)
     monkeypatch.setattr(
         assets_api, "match_assets",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
@@ -2185,5 +2186,353 @@ def test_a_snapshot_made_before_the_marker_existed_is_still_refused(client, monk
     try:
         assert db.query(Finding).filter(
             Finding.finding_key == "10.9.9.2|443|tcp").one().state == "open"
+    finally:
+        db.close()
+
+
+def test_a_quality_issue_names_the_same_host_while_running_as_after_it_ends(
+    client, monkeypatch, tmp_path,
+):
+    """같은 문제를 실행 중과 완료 후가 **같은 모양**으로 말해야 한다.
+
+    화면의 '단계별 문제' 카드는 `type`/`host`/`proto`/`port_spec` 을 읽는다. 예전에는
+    라이브 응답이 parse_events 원본(`kind`/`host_ip`)을 그대로 흘려서 카드에 호스트가
+    안 찍혔다 - 운영자가 문제를 지켜보는 바로 그 순간에만 어느 장비인지 안 보이고,
+    스캔이 끝나면 나타났다. 반대로 영속 행에는 proto/port_spec 이 없어서, 끝나는 순간
+    '어느 포트가 안 됐는지' 가 사라졌다. 양쪽 다 확인한다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {"targets": ["10.0.0.5"], "out_dir": str(tmp_path)})
+    out_dir = tmp_path / "scans" / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "service"},
+        {"event": "service_degraded", "stage": "service", "proto": "udp",
+         "hosts": ["10.0.0.5"], "failed_ports": [161, 500], "port_spec": "U:161,500",
+         "message": "UDP 서비스 프로브가 일부 완료되지 않았습니다."},
+    ]) + "\n", encoding="utf-8")
+
+    headers = _headers(client)
+    live = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()
+    assert live["source"] == "live_events"
+    issue = next(i for i in live["issues"] if i["type"] == "service_degraded")
+    assert issue["host"] == "10.0.0.5", "실행 중에는 어느 장비인지 안 보인다"
+    assert issue["proto"] == "udp" and issue["port_spec"] == "U:161,500"
+    assert issue["status"] == "unresolved"
+
+    # 이제 같은 스캔을 마감해 DB 투영으로 넘긴다 - 워커가 종료 시 하는 것과 같은 호출.
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scans_api._materialize_engine_terminal(
+            db, scan, out_dir, {"targets": ["10.0.0.5"]},
+            {"authority_missing": [], "authority_broken": []}, [],
+        )
+        scan.status = "done"
+        db.commit()
+    finally:
+        db.close()
+
+    ended = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()
+    assert ended["source"] == "db", "영속 투영으로 넘어가지 않아 비교가 무의미하다"
+    kept = next(i for i in ended["issues"] if i["type"] == "service_degraded")
+    assert kept["host"] == "10.0.0.5"
+    assert (kept["proto"], kept["port_spec"]) == ("udp", "U:161,500"), (
+        "영구 보관되는 쪽이 어느 포트가 실패했는지를 잃었다"
+    )
+    assert {k: kept[k] for k in ("type", "host", "proto", "port_spec")} == \
+           {k: issue[k] for k in ("type", "host", "proto", "port_spec")}
+
+
+def test_the_delay_panel_survives_the_scan_finishing(client, monkeypatch, tmp_path):
+    """지연 추적 패널은 스캔이 **끝난 뒤에** 더 많이 쓰인다.
+
+    완료된 스캔의 /stages 는 이벤트가 아니라 DB 투영으로 그린다. 영속 행이 워치독·시간
+    초과만 담고 proto/hosts/label/ports/phases/수확량을 버리면, 스캔이 종료되는 순간
+    호스트별 소요와 nmap 내부 단계가 통째로 사라지고 '오래 걸린 실행' 표가 전부 '—' 가
+    된다 - 하필 사람이 지연을 들여다보는 시점이 그때다.
+
+    그래서 라이브와 완료의 trace 를 **같은 스캔에서** 비교한다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {"targets": ["10.0.0.7"], "out_dir": str(tmp_path)})
+    out_dir = tmp_path / "scans" / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "service"},
+        {"event": "command_start", "stage": "service", "execution_id": "x1",
+         "argv": ["nmap", "-sS", "-p", "T:22,443", "10.0.0.7"], "artifact": "stage3-10_0_0_7-tcp",
+         "proto": "tcp", "hosts": ["10.0.0.7"], "label": "10.0.0.7", "ports": "T:22,443",
+         "ts": 1000.0},
+        {"event": "command_done", "stage": "service", "execution_id": "x1", "outcome": "done",
+         "seconds": 612.0, "rc": 0, "ts": 1612.0,
+         "phases": {"Service scan": 600.0, "SYN Stealth Scan": 12.0},
+         "hosts_found": 1, "open_ports": 2, "inferred_open": 0, "products": 2, "empty": False},
+        {"event": "job_done", "status": "done"},
+    ]) + "\n", encoding="utf-8")
+
+    headers = _headers(client)
+    live = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()["trace"]
+    assert live["by_host"] and live["by_phase"], "라이브부터 비어 있으면 비교가 무의미하다"
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scans_api._materialize_engine_terminal(
+            db, scan, out_dir, {"targets": ["10.0.0.7"]},
+            {"authority_missing": [], "authority_broken": []}, [],
+        )
+        scan.status = "done"
+        db.commit()
+    finally:
+        db.close()
+
+    ended = client.get(f"/api/scans/{scan_id}/stages", headers=headers)
+    assert ended.json()["source"] == "db", "DB 투영으로 안 넘어가면 비교가 무의미하다"
+    trace = ended.json()["trace"]
+    assert trace["by_host"] == live["by_host"], "끝나는 순간 호스트별 소요가 사라졌다"
+    assert trace["by_phase"] == live["by_phase"], "끝나는 순간 nmap 내부 단계가 사라졌다"
+    slow = trace["slowest"][0]
+    assert (slow["label"], slow["ports"], slow["proto"]) == ("10.0.0.7", "T:22,443", "tcp"), (
+        "오래 걸린 실행 표가 대상·포트 근거를 잃었다"
+    )
+    assert (slow["hosts_found"], slow["open_ports"], slow["products"]) == (1, 2, 2)
+    assert slow["empty"] is False
+
+
+def test_the_finished_retry_queue_still_says_why_each_host_needs_a_rescan(
+    client, monkeypatch, tmp_path,
+):
+    """완료된 스캔의 재스캔 대기열도 '왜' 를 말해야 한다.
+
+    화면(RetryQueue)은 `reasons_by_stage` 를 읽는다 - 라이브 경로(gave_up_detail)가 주는
+    이름이다. 완료 응답이 `reasons` 로 주면 호스트는 대기열에 남는데 '시간 초과'·'재전송
+    상한' 같은 이유 라벨만 사라진다. 무엇 때문에 다시 돌려야 하는지가 안 보이는 대기열이다.
+    """
+    import re
+
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {"targets": ["10.0.0.4"], "out_dir": str(tmp_path)})
+    out_dir = tmp_path / "scans" / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "tcp"},
+        {"event": "command_start", "stage": "tcp", "execution_id": "e1",
+         "argv": ["nmap", "-sS", "10.0.0.4"], "hosts": ["10.0.0.4"], "ts": 1000.0},
+        {"event": "command_done", "stage": "tcp", "execution_id": "e1", "outcome": "done",
+         "seconds": 5.0, "rc": 0, "ts": 1005.0,
+         "timeout_count": 1, "timed_out": ["10.0.0.4"]},
+        {"event": "job_done", "status": "done"},
+    ]) + "\n", encoding="utf-8")
+    # 라이브 경로는 run-state 를 읽고, 완료 경로는 위 이벤트에서 만든 영속 이슈를 읽는다.
+    # 같은 사실이므로 두 쪽이 같은 답을 내야 한다.
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "gave_up": ["10.0.0.4"], "gave_up_by_stage": {"tcp": ["10.0.0.4"]},
+    }), encoding="utf-8")
+
+    headers = _headers(client)
+    live = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()["retry"]
+    assert live["reasons_by_stage"], "라이브부터 비어 있으면 비교가 무의미하다"
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scans_api._materialize_engine_terminal(
+            db, scan, out_dir, {"targets": ["10.0.0.4"]},
+            {"authority_missing": [], "authority_broken": []}, [],
+        )
+        scan.status = "done"
+        db.commit()
+    finally:
+        db.close()
+
+    ended = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()
+    assert ended["source"] == "db", "DB 투영으로 안 넘어가면 비교가 무의미하다"
+    retry = ended["retry"]
+    assert retry["targets"] == ["10.0.0.4"], "대기열에서 호스트까지 사라졌다"
+    reasons = retry.get("reasons_by_stage") or {}
+    assert reasons, "끝나는 순간 재스캔 이유가 사라졌다"
+    assert "host_timeout" in [
+        kind for stage in reasons.values() for kinds in stage.values() for kind in kinds
+    ], f"이유가 라이브와 다르다: {reasons}"
+
+    # 화면이 실제로 이 이름을 읽는가 - 서버만 고치면 대기열은 그대로 빈 채로 남는다.
+    source = (Path(__file__).resolve().parents[2]
+              / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
+    assert re.search(r"retry\?\.reasons_by_stage", source), (
+        "화면이 읽는 이름이 바뀌었다 - 이 검사가 낡았다"
+    )
+
+
+def test_the_finished_scan_offers_a_rescan_only_when_one_would_be_accepted(
+    client, monkeypatch, tmp_path,
+):
+    """재스캔 대기열은 재스캔이 실제로 받아 주는 것만 담아야 한다.
+
+    host 가 없는 artifact_missing·command_error 까지 넣으면 targets 는 빈 채로
+    '1대 재스캔' 이 뜨고, 눌러도 /retry-timeouts 가 그 종류를 거절해 **항상 400** 이다.
+    누를 수 없는 버튼을 띄우는 셈이다. 품질 보고는 다른 축이라 `issues` 에는 남는다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {"targets": ["10.0.0.6"], "out_dir": str(tmp_path)})
+    out_dir = tmp_path / "scans" / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "tcp"},
+        {"event": "command_start", "stage": "tcp", "execution_id": "e1",
+         "argv": ["nmap", "-sS", "10.0.0.6"], "hosts": ["10.0.0.6"], "ts": 1000.0},
+        {"event": "error", "stage": "tcp", "execution_id": "e1", "fatal": True,
+         "message": "nmap 이 시작하지 못했습니다", "ts": 1001.0},
+        {"event": "job_done", "status": "failed"},
+    ]) + "\n", encoding="utf-8")
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scans_api._materialize_engine_terminal(
+            db, scan, out_dir, {"targets": ["10.0.0.6"]},
+            {"authority_missing": [], "authority_broken": []}, [],
+        )
+        scan.status = "failed"
+        db.commit()
+    finally:
+        db.close()
+
+    stages = client.get(f"/api/scans/{scan_id}/stages", headers=_headers(client)).json()
+    assert stages["source"] == "db", "DB 투영으로 안 넘어가면 비교가 무의미하다"
+    assert stages["issues"], "품질 이슈까지 사라졌다 - 이건 남아야 한다"
+    retry = stages["retry"]
+    assert retry["required"] is False, "재스캔할 수 없는 스캔에 재스캔을 제안한다"
+    assert retry["count"] == 0, f"targets 는 비었는데 {retry['count']}대라고 말한다"
+    assert retry["targets"] == []
+
+    # 서버가 실제로 거절하는지 - 제안과 수락이 같은 집합이어야 한다는 것이 요점이다.
+    rejected = client.post(f"/api/scans/{scan_id}/retry-timeouts", headers=_headers(client))
+    assert rejected.status_code == 400, rejected.text
+
+
+def test_one_host_with_two_problems_is_still_one_host_in_the_retry_queue(
+    client, monkeypatch, tmp_path,
+):
+    """같은 호스트가 한 단계에서 두 가지 문제를 받아도 대기열에서는 한 대다.
+
+    이슈는 종류마다 한 행이라, 이슈마다 호스트를 넣으면 같은 대가 두 번 들어간다.
+    화면(RetryQueue)은 `hosts.length` 를 '대수' 로 쓰고 `key={host}` 로 행을 그리므로
+    실제 1대가 'TCP 포트 발견 · 2대' + 중복 행 + React key 충돌이 된다. 라이브
+    gave_up_detail() 은 집합으로 합치므로 완료 전후 답도 어긋난다. 이유만 둘 다 붙는다.
+    """
+    import re
+
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {"targets": ["10.0.0.8"], "out_dir": str(tmp_path)})
+    out_dir = tmp_path / "scans" / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "tcp"},
+        {"event": "command_start", "stage": "tcp", "execution_id": "e1",
+         "argv": ["nmap", "-sS", "10.0.0.8"], "hosts": ["10.0.0.8"], "ts": 1000.0},
+        # 같은 호스트·같은 단계에서 두 가지: 시간 초과 + 재전송 상한.
+        {"event": "command_done", "stage": "tcp", "execution_id": "e1", "outcome": "done",
+         "seconds": 9.0, "rc": 0, "ts": 1009.0,
+         "timeout_count": 1, "timed_out": ["10.0.0.8"],
+         "retransmission_cap_count": 1, "retransmission_cap_hosts": ["10.0.0.8"]},
+        {"event": "job_done", "status": "done"},
+    ]) + "\n", encoding="utf-8")
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "gave_up": ["10.0.0.8"],
+        "gave_up_by_stage": {"tcp": ["10.0.0.8"]},
+        "retransmission_cap_by_stage": {"tcp": ["10.0.0.8"]},
+    }), encoding="utf-8")
+
+    headers = _headers(client)
+    live = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()["retry"]
+    assert live["by_stage"]["tcp"] == ["10.0.0.8"], "라이브부터 중복이면 비교가 무의미하다"
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scans_api._materialize_engine_terminal(
+            db, scan, out_dir, {"targets": ["10.0.0.8"]},
+            {"authority_missing": [], "authority_broken": []}, [],
+        )
+        scan.status = "done"
+        db.commit()
+    finally:
+        db.close()
+
+    ended = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()
+    assert ended["source"] == "db", "DB 투영으로 안 넘어가면 비교가 무의미하다"
+    retry = ended["retry"]
+    assert retry["by_stage"]["tcp"] == ["10.0.0.8"], (
+        f"한 대가 두 번 들어갔다: {retry['by_stage']}"
+    )
+    assert retry["count"] == 1 and retry["targets"] == ["10.0.0.8"]
+    # 이유는 둘 다 남아야 한다 - 중복을 없앤다고 근거를 잃으면 안 된다.
+    reasons = retry["reasons_by_stage"]["tcp"]["10.0.0.8"]
+    assert sorted(reasons) == ["host_timeout", "retransmission_cap"], reasons
+    assert retry["by_stage"] == live["by_stage"], "완료 전후가 다른 답을 낸다"
+
+    # 화면이 이 목록의 길이를 '대수' 로 쓰는가 - 그래서 중복이 곧 오표시다.
+    source = (Path(__file__).resolve().parents[2]
+              / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
+    assert re.search(r"hosts\.length\}대", source), "화면 계약이 바뀌었다 - 이 검사가 낡았다"
+
+
+def test_a_watchdog_cut_batch_keeps_the_hosts_it_already_finished(client, monkeypatch):
+    """워치독이 끊기 전에 끝난 호스트의 관측은 남아야 한다.
+
+    `_wait_scan_process()` 가 끊긴 XML 을 복구하는 이유가 바로 그것인데, 예전에는 이
+    분기가 그 파일을 읽지 않고 실패로 마감하고 나갔다. 이어가기가 같은 -oA base 로
+    다시 돌면서 복구본을 덮어쓰므로, 그 관측은 ScanOps 어디에도 남지 않았다.
+
+    동시에 **닫힘 권한은 없다.** 끊긴 실행은 '못 봤다' 를 말할 자격이 없다.
+    """
+    from scanops.scanning import chunker
+
+    scans_api._settings.ensure_dirs()
+    db = SessionLocal()
+    try:
+        scan = ScanRun(name="watchdog batch", targets="127.0.0.1", status="running")
+        db.add(scan); db.commit()
+        scan_id = scan.id
+        # 이 스캔이 닫아서는 안 되는, 이미 있는 발견.
+        db.add(Finding(finding_key="127.0.0.1|9999|tcp", host_ip="127.0.0.1", port=9999,
+                       proto="tcp", state="open"))
+        db.commit()
+    finally:
+        db.close()
+    base = scans_api._basename(scan_id)
+    chunker.write_state(base, {
+        "batches": [["127.0.0.1"]], "cursor": 0, "stop": False,
+        "workflow": "manual", "preset": "quick", "ports": "18443", "nse": [],
+        "watchdog_seconds": 30,
+    })
+    # 워치독이 끊고 복구한 모양 - 끝난 호스트 하나가 남고 runstats 는 없다.
+    repaired = b"""<?xml version="1.0"?>
+<nmaprun><scaninfo type="syn" protocol="tcp" numservices="1" services="18443"/>
+<host><status state="up"/><address addr="127.0.0.1" addrtype="ipv4"/>
+  <ports><port protocol="tcp" portid="18443"><state state="open"/>
+    <service name="http" product="Uvicorn" version="0.30" method="probed"/></port></ports>
+</host></nmaprun>"""
+
+    def fake_popen(argv, _log_path):
+        Path(f"{Path(argv[argv.index('-oA') + 1])}.xml").write_bytes(repaired)
+        return _Proc(0)
+
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda _explicit="": "nmap")
+    monkeypatch.setattr(scans_api.nmap_runner, "popen", fake_popen)
+    monkeypatch.setattr(scans_api, "_wait_scan_process",
+                        lambda _scan_id, _proc, _watchdog=0, _out_base=None:
+                        scans_api.WATCHDOG_RC)
+
+    scans_api._chunk_worker(scan_id)
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        assert scan.status == "failed" and scan.failure_code == "watchdog_exceeded", (
+            "상한 초과는 그대로 실패여야 한다"
+        )
+        kept = db.query(Finding).filter_by(finding_key="127.0.0.1|18443|tcp").one_or_none()
+        assert kept is not None, "끊기 전에 끝난 호스트의 관측이 사라졌다"
+        assert kept.state == "open"
+        # 닫힘 권한은 없다 - 이 스캔이 보지 못한 포트를 닫아서는 안 된다.
+        untouched = db.query(Finding).filter_by(finding_key="127.0.0.1|9999|tcp").one()
+        assert untouched.state == "open", "끊긴 실행이 못 본 포트를 닫았다"
     finally:
         db.close()

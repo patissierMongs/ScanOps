@@ -11,6 +11,7 @@ import sys
 import textwrap
 import zipfile
 from pathlib import Path
+import pathlib
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scanner" / "scanops_scanner.py"
 GUI_SCRIPT = Path(__file__).resolve().parents[2] / "scanner" / "scanops_scanner_gui.py"
@@ -1112,27 +1113,63 @@ def test_empty_scan_reports_done_with_warning(tmp_path):
     assert str(out / "e.127.0.0.1.tcp_discovery.xml") in manifest["import_xml_files"]
 
 
-def test_host_timeout_off_by_default_and_opt_in_for_all_auto_commands(tmp_path):
-    """고정 timeout은 정상적인 전 포트 결과를 버릴 수 있어 기본 끔, 명시값만 전 단계에 적용."""
+def test_no_auto_command_carries_a_host_timeout_but_scripts_stay_bounded(tmp_path):
+    """뺀 것은 **호스트 상한뿐**이다.
+
+    nmap 은 호스트 상한에 걸린 호스트의 포트 표를 쓰지 않고 실행은 exit="success" 로
+    끝낸다 - 그 조합이 '살아 있는데 열린 포트가 없다'로 읽혀 기존 발견을 전부 닫는다.
+    스크립트 상한은 초과한 스크립트 인스턴스만 죽이고 포트 표는 남기므로 유지한다.
+    """
+    import pytest
+
     scanner = _load_scanner()
-    args = scanner.parser().parse_args(["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
+    args = scanner.parser().parse_args(
+        ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
     plan = scanner.create_plan(args)
     for cmd in (
         scanner.build_command(plan, 0, "tcp_discovery"),
         scanner.build_command(plan, 0, "tcp_identify", [22]),
         scanner.build_command(plan, 0, "udp_identify"),
+        scanner.build_command(plan, 0),
     ):
         assert "--host-timeout" not in cmd
+    assert plan["host_timeout"] == "", "manifest 계약을 위해 자리만 남기고 값은 늘 비어 있다"
+    identify = scanner.build_command(plan, 0, "tcp_identify", [22])
+    assert "--script-timeout" in identify, "스크립트 상한은 관측을 버리지 않으므로 유지한다"
 
-    on = scanner.parser().parse_args(
-        ["--dry-run", "--nmap", "nmap", "--host-timeout", "30m", "--output-dir", str(tmp_path), "127.0.0.1"])
-    plan_on = scanner.create_plan(on)
-    for cmd in (
-        scanner.build_command(plan_on, 0, "tcp_discovery"),
-        scanner.build_command(plan_on, 0, "tcp_identify", [22]),
-        scanner.build_command(plan_on, 0, "udp_identify"),
-    ):
-        assert cmd[cmd.index("--host-timeout") + 1] == "30m"
+    # 켜는 손잡이 자체가 없어졌다 - 남겨 두면 '실측 효과 없는데 관측만 버리는' 설정으로
+    # 다시 돌아갈 길이 열린다.
+    with pytest.raises(SystemExit):
+        scanner.parser().parse_args(
+            ["--dry-run", "--nmap", "nmap", "--host-timeout", "30m",
+             "--output-dir", str(tmp_path), "127.0.0.1"])
+
+
+def test_every_auto_command_carries_the_same_throughput_policy(tmp_path):
+    """처리량 정책은 발견·식별 전 단계가 함께 진다 - 한 단계만 빠지면 그게 꼬리가 된다.
+
+    --defeat-rst-ratelimit 만 예외다. nmap 은 SYN 스캔에서만 이 플래그를 받으므로
+    (-sU 와 함께 주면 fatal) UDP 단계에는 실리지 않는다.
+    """
+    scanner = _load_scanner()
+    args = scanner.parser().parse_args(
+        ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path), "127.0.0.1"])
+    plan = scanner.create_plan(args)
+    stages = {
+        "tcp_discovery": scanner.build_command(plan, 0, "tcp_discovery"),
+        "tcp_identify": scanner.build_command(plan, 0, "tcp_identify", [22]),
+        "udp_identify": scanner.build_command(plan, 0, "udp_identify"),
+    }
+    for stage, cmd in stages.items():
+        assert cmd[cmd.index("--min-hostgroup") + 1] == "64", stage
+        assert cmd[cmd.index("--max-parallelism") + 1] == "100", stage
+    assert "--defeat-rst-ratelimit" in stages["tcp_discovery"]
+    assert "--defeat-rst-ratelimit" in stages["tcp_identify"]
+    assert "--defeat-rst-ratelimit" not in stages["udp_identify"]
+    # UDP 는 ICMP 율제한 때문에 재전송을 더 준다 - 아끼면 '닫힘'이 아니라 '못 봄'이 는다.
+    assert stages["tcp_discovery"][stages["tcp_discovery"].index("--max-retries") + 1] == "2"
+    assert stages["tcp_identify"][stages["tcp_identify"].index("--max-retries") + 1] == "2"
+    assert stages["udp_identify"][stages["udp_identify"].index("--max-retries") + 1] == "4"
 
 
 def test_ipv6_target_rejected(tmp_path):
@@ -1936,8 +1973,8 @@ def test_nonbatch_overlapping_targets_use_nmap_unique_and_keep_closure_authority
     assert manifest["import_contract"]["units"][0]["authoritative"] is True
 
 
-def test_manifest_contract_marks_failed_and_host_timeout_units_observation_only(tmp_path):
-    """실패 partial 및 host-timeout 성공은 rc만 믿고 미관측 닫힘 권한을 얻지 않는다."""
+def test_manifest_contract_marks_failed_units_observation_only(tmp_path):
+    """실패 partial 은 rc 만 믿고 미관측 닫힘 권한을 얻지 않는다."""
     fake_nmap = _fake_nmap(tmp_path)
 
     partial_out = tmp_path / "partial"
@@ -1957,16 +1994,32 @@ def test_manifest_contract_marks_failed_and_host_timeout_units_observation_only(
     assert discovery["authoritative"] is False
     assert discovery["closure_targets"] == []
 
-    timeout_out = tmp_path / "timeout"
-    timeout = _run_scanner([
-        "--nmap", str(fake_nmap), "--output-dir", str(timeout_out), "--name", "timeout",
-        "--workflow", "single", "--host-timeout", "30m", "127.0.0.1",
-    ])
-    assert timeout.returncode == 0, timeout.stderr + timeout.stdout
-    timeout_manifest = json.loads((timeout_out / "timeout.manifest.json").read_text(encoding="utf-8"))
-    unit = timeout_manifest["import_contract"]["units"][0]
-    assert unit["authoritative"] is False
-    assert unit["closure_targets"] == []
+
+def test_a_host_timeout_manifest_still_loses_closure_authority():
+    """구형 결과 폴더의 manifest 는 아직 host_timeout 을 들고 있을 수 있다.
+
+    상한에 걸린 호스트는 포트 표 없이 성공 종료하므로 그 실행은 부재를 말할 자격이 없다.
+    스캐너가 더 이상 상한을 걸지 않는다고 해서 이 판정을 지우면, 예전에 만든 폴더를
+    가져오는 순간 그때의 미탐이 그대로 되살아난다.
+    """
+    scanner = _load_scanner()
+    plan = {
+        "raw_targets": ["127.0.0.1"],
+        "exclude": [],
+        "max_hosts": 1024,
+        "batch_size": 1,
+        "batches": [["127.0.0.1"]],
+        "host_timeout": "30m",
+        "runs": [{
+            "stage_id": "single", "returncode": 0, "batch_index": 0, "clean": True,
+            "scan_targets": ["127.0.0.1"], "scan_targets_complete": True,
+            "xml": "", "skipped": False,
+        }],
+    }
+    contract = scanner.build_import_contract(plan)
+    assert contract is not None
+    assert contract["host_timeout"] == "30m"
+    assert all(unit["authoritative"] is False for unit in contract["units"])
 
 
 def test_import_contract_preserves_large_scan_legacy_compatibility():
@@ -2258,7 +2311,7 @@ def test_interrupted_stage_is_recorded_before_the_stop_propagates(tmp_path, monk
     base = scanner.output_base(plan, 0, "tcp_discovery")
     state_path = tmp_path / "scan.state.json"
 
-    def fake_run(cmd, problems=None):
+    def fake_run(cmd, problems=None, **_watchdog):
         Path(str(base) + ".xml").write_text("<nmaprun/>", encoding="utf-8")
         raise KeyboardInterrupt()
 
@@ -2482,10 +2535,12 @@ def test_gentle_intensity_lowers_load_in_every_auto_stage(tmp_path):
         assert "--defeat-rst-ratelimit" not in command
         assert command[command.index("--max-retries") + 1] == "1"
         assert command[command.index("--max-rate") + 1] == "150"
-        assert command[command.index("--host-timeout") + 1] == "30m"
-    discovery = scanner.build_command(plan, 0, "tcp_discovery")
-    assert discovery[discovery.index("--max-parallelism") + 1] == "10"
-    assert discovery[discovery.index("--min-hostgroup") + 1] == "16"
+        # 저강도는 부하를 낮추지, 관측을 버리지 않는다 - 상한은 어느 강도에도 없다.
+        assert "--host-timeout" not in command
+        # 처리량 상한도 전 단계에서 함께 낮아져야 한다. 식별 단계만 100 으로 남으면
+        # 지키려던 노후 장비가 정확히 그 단계에서 두들겨 맞는다.
+        assert command[command.index("--max-parallelism") + 1] == "10"
+        assert command[command.index("--min-hostgroup") + 1] == "16"
 
 
 def test_gentle_intensity_applies_to_single_profiles():
@@ -2499,48 +2554,6 @@ def test_gentle_intensity_applies_to_single_profiles():
     assert flags[flags.index("--max-rate") + 1] == "150"
     # 포트 계약은 건드리지 않는다(QA-037/QA-048 유지).
     assert flags[flags.index("-p") + 1] == scanner.PRECISION_PORTS
-
-
-def test_gentle_host_timeout_default_is_opt_out_and_normal_stays_off(tmp_path):
-    scanner = _load_scanner()
-    common = ["--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path)]
-
-    normal = scanner.create_plan(scanner.parser().parse_args([*common, "10.0.0.1"]))
-    assert normal["host_timeout"] == ""  # QA-007: 기본 강도는 종전대로 꺼짐
-
-    gentle = scanner.create_plan(scanner.parser().parse_args(
-        [*common, "--intensity", "gentle", "10.0.0.1"]))
-    assert gentle["host_timeout"] == "30m"
-
-    override = scanner.create_plan(scanner.parser().parse_args(
-        [*common, "--intensity", "gentle", "--host-timeout", "5m", "10.0.0.1"]))
-    assert override["host_timeout"] == "5m"
-
-    disabled = scanner.create_plan(scanner.parser().parse_args(
-        [*common, "--intensity", "gentle", "--host-timeout", "0", "10.0.0.1"]))
-    assert disabled["host_timeout"] == ""
-
-    rate = scanner.create_plan(scanner.parser().parse_args(
-        [*common, "--intensity", "gentle", "--max-rate", "80", "10.0.0.1"]))
-    cmd = scanner.build_command(rate, 0, "tcp_discovery")
-    assert cmd[cmd.index("--max-rate") + 1] == "80"
-
-
-def test_gentle_intensity_survives_resume(tmp_path):
-    """저강도는 plan 을 통해 적용되므로 재개해도 같은 강도가 유지돼야 한다."""
-    scanner = _load_scanner()
-    plan = scanner.create_plan(scanner.parser().parse_args([
-        "--dry-run", "--nmap", "nmap", "--output-dir", str(tmp_path),
-        "--intensity", "gentle", "--exclude-ports", "3030", "10.0.0.1",
-    ]))
-    state = tmp_path / "g.state.json"
-    state.write_text(json.dumps(plan), encoding="utf-8")
-    loaded = scanner.load_plan(str(state), "nmap", True, "")
-    assert loaded["intensity"] == "gentle"
-    assert loaded["exclude_ports"] == "3030"
-    command = scanner.build_command(loaded, 0, "tcp_discovery")
-    assert "-T3" in command and "--defeat-rst-ratelimit" not in command
-    assert command[command.index("--exclude-ports") + 1] == "3030"
 
 
 def _resume_with_host_timeout(scanner, tmp_path, intensity: str, mutate):
@@ -2558,41 +2571,19 @@ def _resume_with_host_timeout(scanner, tmp_path, intensity: str, mutate):
             if "--host-timeout" in command else "")
 
 
-def test_saved_host_timeout_null_is_rejected_not_treated_as_off(tmp_path):
-    """state 의 `"host_timeout": null` 이 호스트당 상한을 조용히 풀면 안 된다 (GH-48).
+def test_a_saved_host_timeout_is_dropped_on_resume(tmp_path):
+    """구형 state 가 들고 있던 호스트당 상한은 이어받지 않는다.
 
-    저강도는 노후 장비를 지키려고 호스트당 30분 상한을 기본으로 켠다. 그런데 재개 경로가
-    이 필드를 검증하지 않으면, 손상되거나 미래 버전이 쓴 state 한 줄로 -T3·속도상한은
-    남은 채 상한만 사라진다 — 보호하려던 장비를 무한정 붙잡게 된다. intensity·max_rate 와
-    같은 fail-closed 규칙을 적용한다."""
-    import pytest
+    상한은 실측 소요를 거의 못 줄이면서, 걸린 호스트를 포트 표 없이 성공 종료시켜 그
+    호스트의 기존 발견을 통째로 닫았다. 재개가 그 값을 되살리면 같은 사고가 돌아온다.
+    손상된 값(`null`·숫자·아무 문자열)도 이제 실행을 막지 않는다 - 어차피 안 쓴다.
+    """
     scanner = _load_scanner()
-    with pytest.raises(ValueError, match="host-timeout"):
-        _resume_with_host_timeout(
-            scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", None))
-    # 문자열이 아닌 값도 같은 이유로 거절한다(숫자 30 을 '30초'로 넘겨짚지 않는다).
-    with pytest.raises(ValueError, match="host-timeout"):
-        _resume_with_host_timeout(
-            scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", 30))
-    with pytest.raises(ValueError, match="host-timeout"):
-        _resume_with_host_timeout(
-            scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", "곧"))
-
-
-def test_host_timeout_default_on_resume_follows_the_saved_intensity(tmp_path):
-    """키가 '아예 없는' 구버전 state 만 기본값으로 호환한다 — 그 기본값은 강도를 따른다."""
-    scanner = _load_scanner()
-    assert _resume_with_host_timeout(
-        scanner, tmp_path, "gentle", lambda p: p.pop("host_timeout")) == "30m"
-    assert _resume_with_host_timeout(
-        scanner, tmp_path, "normal", lambda p: p.pop("host_timeout")) == ""
-    # 명시적 opt-out 은 계약대로 유지된다(사람이 골랐다면 존중한다).
-    assert _resume_with_host_timeout(
-        scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", "")) == ""
-    assert _resume_with_host_timeout(
-        scanner, tmp_path, "gentle", lambda p: p.__setitem__("host_timeout", "0")) == ""
-    # 저장된 정상 값은 그대로 살아난다.
-    assert _resume_with_host_timeout(scanner, tmp_path, "gentle", lambda p: None) == "30m"
+    for saved in ("30m", None, 30, "곧", ""):
+        assert _resume_with_host_timeout(
+            scanner, tmp_path, "gentle", lambda p, v=saved: p.__setitem__("host_timeout", v)) == ""
+    assert _resume_with_host_timeout(scanner, tmp_path, "gentle", lambda p: p.pop("host_timeout")) == ""
+    assert _resume_with_host_timeout(scanner, tmp_path, "normal", lambda p: None) == ""
 
 
 # ── GUI 계약 ───────────────────────────────────────────────────────────────────
@@ -3120,11 +3111,14 @@ def test_failed_udp_identify_is_retried_once_with_the_select_nsock_engine(monkey
     base = scanner.output_base(plan, 0, "udp_identify")
     calls = []
 
-    def fake_process(cmd, problems):
+    def fake_process(cmd, problems, **_watchdog):
         calls.append(list(cmd))
         if "--nsock-engine" not in cmd:
             return 1                       # 기본 엔진에서 죽는다 — XML 도 남기지 않는다
-        Path(str(base) + ".xml").write_text(
+        # 실제 nmap 처럼 **-oA 가 가리키는 곳**에 쓴다. 재시도는 임시 base 로 돌므로,
+        # 여기서 원래 base 에 쓰면 첫 실행 산출물을 덮는 그 결함을 테스트가 못 잡는다.
+        out = Path(cmd[cmd.index("-oA") + 1])
+        Path(str(out) + ".xml").write_text(
             '<?xml version="1.0"?><nmaprun><runstats>'
             '<finished exit="success"/><hosts up="1" down="0" total="1"/>'
             "</runstats></nmaprun>", encoding="utf-8")
@@ -3156,7 +3150,7 @@ def test_a_healthy_udp_identify_is_never_retried(monkeypatch, tmp_path):
     base = scanner.output_base(plan, 0, "udp_identify")
     calls = []
 
-    def fake_process(cmd, problems):
+    def fake_process(cmd, problems, **_watchdog):
         calls.append(list(cmd))
         Path(str(base) + ".xml").write_text(
             '<?xml version="1.0"?><nmaprun><runstats>'
@@ -3169,3 +3163,287 @@ def test_a_healthy_udp_identify_is_never_retried(monkeypatch, tmp_path):
 
     assert len(calls) == 1
     assert plan["runs"][-1]["nsock_engine_retry"] == ""
+
+
+def test_a_failed_udp_fallback_does_not_destroy_the_first_run_observations(tmp_path):
+    """재시도가 첫 실행의 산출물을 덮어쓰면 안 된다.
+
+    UDP 식별이 실패하면 다른 nsock 엔진으로 한 번 더 돈다. 그때 같은 ``-oA`` base 를 쓰면
+    nmap 이 **시작하자마자** 첫 실행의 파일을 잘라 버린다. 워치독이 끊은 뒤 복구해 둔 관측이
+    바로 그 순간 사라지고, 재시도까지 실패하면 rc 는 첫 실행 것을 남기면서 파일만 더 나쁜
+    것이 된다 - 코드가 스스로 적어 둔 의도("첫 실행보다 나쁘게 기록할 이유는 없다")와
+    어긋난다.
+    """
+    scanner = _load_scanner()
+
+    base = tmp_path / "b0.udp_identify"
+    # 접두사여야 산출물 이름이 단계로 끝난다 - 단계를 이름 끝으로 판별하는 곳이 여럿이다.
+    retry_base = tmp_path / "retry~b0.udp_identify"
+    assert retry_base.name.endswith(".udp_identify")
+
+    # 1) -oA 인자만 임시 base 로 바뀌고 나머지는 그대로다.
+    cmd = ["nmap", "-sU", "-oA", str(base), "10.0.0.1"]
+    swapped = [scanner.retry_base_arg(a, base, retry_base) for a in cmd]
+    assert swapped == ["nmap", "-sU", "-oA", str(retry_base), "10.0.0.1"]
+
+    # 2) 채택하지 않으면 첫 실행 산출물이 그대로 남고 재시도 파일은 사라진다.
+    for suffix in scanner.NMAP_OUTPUT_SUFFIXES:
+        (tmp_path / f"b0.udp_identify{suffix}").write_text("first", encoding="utf-8")
+        (tmp_path / f"retry~b0.udp_identify{suffix}").write_text("worse", encoding="utf-8")
+    scanner.discard_artifacts(retry_base)
+    for suffix in scanner.NMAP_OUTPUT_SUFFIXES:
+        kept = tmp_path / f"b0.udp_identify{suffix}"
+        assert kept.read_text(encoding="utf-8") == "first", "첫 실행 산출물이 사라졌다"
+        assert not (tmp_path / f"retry~b0.udp_identify{suffix}").exists(), "유령 파일이 남았다"
+
+    # 3) 채택하면 그때 원래 자리로 옮긴다.
+    for suffix in scanner.NMAP_OUTPUT_SUFFIXES:
+        (tmp_path / f"retry~b0.udp_identify{suffix}").write_text("better", encoding="utf-8")
+    scanner.adopt_retry_artifacts(retry_base, base)
+    for suffix in scanner.NMAP_OUTPUT_SUFFIXES:
+        assert (tmp_path / f"b0.udp_identify{suffix}").read_text(encoding="utf-8") == "better"
+        assert not (tmp_path / f"retry~b0.udp_identify{suffix}").exists()
+
+
+def test_a_watchdog_repaired_artifact_is_quarantined_like_an_interrupted_one(tmp_path):
+    """복구했다고 온전한 실행처럼 남기면 안 된다.
+
+    복구하고 나면 XML 이 파싱되므로 `_stage_xml_truncated()` 가 거짓이 된다. 그것만 보면
+    이 산출물이 정상 실행과 **같은 이름**으로 남고 `clean=True` 로 기록된다. manifest 없이
+    그 XML 만 올리면 화면의 중단본 필터도 통과하고 서버 판정은 참고일 뿐이라, 정상 인입
+    경로가 **끊긴 자리 뒤의 발견을 닫는다** - 이 PR 이 내내 막아 온 미탐이다.
+    """
+    scanner = _load_scanner()
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "scanner" / "scanops_scanner.py").read_text(encoding="utf-8")
+
+    # 복구 여부를 실제로 기억하고, 그것을 격리 판정에 쓴다.
+    assert "watchdog_repaired = repair_truncated_xml(" in src, "복구 여부를 안 남긴다"
+    assert "_stage_xml_truncated(base) or watchdog_repaired" in src, (
+        "복구된 산출물이 격리 판정을 빠져나간다"
+    )
+
+    # 격리 대상이면 파일이 interrupted/ 로 옮겨지고 이름에 표식이 붙는다.
+    base = tmp_path / "scan.10_0_0_1.udp_identify"
+    for suffix in (".xml", ".nmap", ".gnmap"):
+        pathlib.Path(str(base) + suffix).write_text("partial", encoding="utf-8")
+    moved = scanner.mark_interrupted_outputs(base)
+    assert moved, "격리가 아무 파일도 옮기지 않았다"
+    for name in moved:
+        assert scanner.is_interrupted_output(name), f"격리 표식이 없다: {name}"
+    # 원래 자리에는 남지 않는다 - 남으면 온전한 결과와 섞인다.
+    assert not pathlib.Path(str(base) + ".xml").exists()
+
+
+def test_an_adopted_retry_is_not_quarantined_as_the_first_attempt(monkeypatch, tmp_path):
+    """표식은 **지금 자리에 있는 산출물**을 설명해야 한다.
+
+    워치독이 첫 UDP 식별을 끊고 복구한 뒤 `select` 재시도가 성공해 그 산출물을 채택하면,
+    남은 파일은 온전한 것이다. 그런데 첫 실행의 복구 사실이 그대로 남아 있으면 멀쩡한
+    대체본이 중단본으로 격리되고 `clean=false` 로 기록되어, 완주한 스캔이 '부분 결과,
+    재개 필요' 로 마감된다.
+    """
+    scanner = _load_scanner()
+    plan = {
+        "tool": "scanops_scanner", "nmap": "nmap", "name": "scan", "output_dir": str(tmp_path),
+        "workflow": "auto", "batches": [["10.0.0.1"]], "cursor": 0, "runs": [],
+        "stats_every": "10s", "host_timeout": "", "exclude": [], "raw_targets": ["10.0.0.1"],
+        "scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "",
+        "batch_size": 0, "max_hosts": 65536, "watchdog_seconds": 30,
+    }
+    complete = ('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                '<address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+                '<port protocol="udp" portid="53"><state state="open"/>'
+                '<service name="domain"/></port></ports></host>'
+                '<runstats><finished exit="success"/>'
+                '<hosts up="1" down="0" total="1"/></runstats></nmaprun>')
+    # **복구 가능한** 잘림이어야 한다 - 완결된 </host> 가 하나도 없으면 복구가 일어나지
+    # 않아 이 경계 자체가 재현되지 않는다(첫 판에서 그렇게 놓쳤다).
+    truncated = ('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                 '<address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+                 '<port protocol="udp" portid="53"><state state="open"/></port>'
+                 '</ports></host><host><status state="up"')
+
+    def fake_process(cmd, problems, **_kw):
+        out = pathlib.Path(cmd[cmd.index("-oA") + 1])
+        if "--nsock-engine" in cmd:
+            # 재시도는 온전한 산출물을 남기고 성공한다.
+            pathlib.Path(str(out) + ".xml").write_text(complete, encoding="utf-8")
+            return 0
+        # 첫 실행은 워치독에 끊겨 잘린 XML 을 남긴다.
+        pathlib.Path(str(out) + ".xml").write_text(truncated, encoding="utf-8")
+        return -15
+
+    monkeypatch.setattr(scanner, "run_nmap_process", fake_process)
+    rc = scanner.run_nmap_stage(plan, 0, tmp_path / "scan.state.json", "udp_identify")
+
+    assert rc == 0, "채택한 재시도가 성공인데 실패로 기록됐다"
+    run = plan["runs"][-1]
+    assert run["clean"] is True, f"멀쩡한 대체본이 부분 결과로 기록됐다: {run.get('problems')}"
+    # 격리 폴더로 옮겨지지 않아야 한다 - 옮기면 인입 대상에서 빠진다.
+    for name in run.get("files", []):
+        assert not scanner.is_interrupted_output(name), f"채택본이 격리됐다: {name}"
+
+
+def test_the_watchdog_does_not_fail_a_scan_that_already_finished(monkeypatch):
+    """상한 직전에 정상 종료한 nmap 을 워치독이 실패로 바꾸면 안 된다.
+
+    본체가 버퍼에 쌓인 stdout 을 마저 읽는 동안 타이머가 돌면, 예전에는 이미 끝난
+    프로세스에도 무조건 fired 를 세웠다. 그러면 성공한 rc 0 이 -1 로 바뀌어 멀쩡히
+    끝난 단독 스캔이 부분/실패로 남고 '이어하기' 대상이 된다 - 아무 문제가 없었는데.
+    """
+    import threading
+    import time as time_module
+
+    scanner = _load_scanner()
+    drained = threading.Event()
+
+    class _AlreadyExited:
+        """nmap 은 이미 끝났고(poll() → 0), 본체는 아직 출력을 읽는 중이다."""
+
+        returncode = 0
+
+        def __init__(self):
+            self.terminated = False
+            self.stdout = self._slow_output()
+
+        def _slow_output(self):
+            yield b"Starting Nmap\n"
+            time_module.sleep(1.4)       # 상한(1초)을 넘겨 워치독이 반드시 돈다
+            drained.set()
+            yield b"Nmap done: 1 IP address\n"
+
+        def poll(self):
+            return 0                      # 이미 끝났다
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+
+    process = _AlreadyExited()
+    monkeypatch.setattr(scanner.subprocess, "Popen", lambda *a, **k: process)
+
+    # 타이머가 실제로 울렸는지 본다 - 안 울리면 무엇을 되돌려도 통과하는 빈 검사가 된다.
+    fired_at: list[float] = []
+    real_timer = scanner.threading.Timer
+
+    def _watching_timer(interval, function):
+        def wrapped():
+            fired_at.append(interval)
+            return function()
+        return real_timer(interval, wrapped)
+
+    monkeypatch.setattr(scanner.threading, "Timer", _watching_timer)
+
+    problems: list[str] = []
+    rc = scanner.run_nmap_process(["nmap", "-sS", "10.0.0.1"], problems,
+                                  watchdog_seconds=1)
+
+    assert drained.is_set(), "출력을 읽는 동안 워치독이 돌지 않았다 - 재현이 안 됐다"
+    assert fired_at, "타이머가 아예 안 울렸다 - 이 검사는 아무것도 안 보고 있다"
+    assert rc == 0, f"정상 종료한 스캔이 워치독 때문에 rc={rc} 로 바뀌었다"
+    assert not process.terminated, "이미 끝난 프로세스를 종료하려 했다"
+    assert not problems, f"없던 문제를 보고했다: {problems}"
+
+
+def test_a_crash_before_the_deadline_is_not_reported_as_exceeding_it(monkeypatch, tmp_path):
+    """상한을 넘긴 것과 그냥 죽은 것은 다른 사실이다.
+
+    워치독이 켜져 있으면 끊긴 XML 을 복구하는데, 예전에는 **복구했다는 사실만으로**
+    '실행 상한을 넘겨 중단했습니다' 라고 적었다. 타이머가 울리지도 않았는데 그렇게
+    적으면 manifest 와 이어하기 진단이 진짜 원인(nmap 이 스스로 죽음)을 가린다.
+
+    동시에, 원인이 무엇이든 끊긴 산출물은 격리돼야 한다 - 그건 이유가 아니라 신뢰의
+    문제다. 라벨만 갈라지고 격리는 그대로여야 한다.
+    """
+    scanner = _load_scanner()
+
+    calls: list[dict] = []
+
+    def fake_run(cmd, problems=None, watchdog_seconds=0, outcome=None):
+        if outcome is not None:
+            outcome["watchdog_fired"] = False      # 타이머는 울리지 않았다
+        calls.append({"cmd": cmd})
+        return -11                                  # nmap 이 스스로 죽었다(SIGSEGV)
+
+    monkeypatch.setattr(scanner, "run_nmap_process", fake_run)
+    monkeypatch.setattr(scanner, "repair_truncated_xml", lambda path: True)  # 끊겨서 복구됨
+    monkeypatch.setattr(scanner, "existing_outputs", lambda base: [])
+    marked: list = []
+    monkeypatch.setattr(scanner, "mark_interrupted_outputs",
+                        lambda base: marked.append(base) or [])
+
+    plan = {
+        "batches": [["10.0.0.1"]], "watchdog_seconds": 60,
+        "out_dir": str(tmp_path), "stages": [], "runs": [],
+    }
+    monkeypatch.setattr(scanner, "build_command", lambda *a, **k: ["nmap", "-sS", "10.0.0.1"])
+    monkeypatch.setattr(scanner, "concrete_scan_targets", lambda *a, **k: (["10.0.0.1"], True))
+    monkeypatch.setattr(scanner, "output_base", lambda *a, **k: tmp_path / "stage")
+    monkeypatch.setattr(scanner, "_stage_xml_truncated", lambda base: False)
+
+    state_path = tmp_path / "state.json"
+    scanner.run_nmap_stage(plan, 0, state_path, stage_id="tcp_identify")
+
+    run = plan["runs"][-1]
+    problems = run.get("nmap_problems") or []
+    assert calls, "실행 자체가 안 됐다 - 이 검사는 아무것도 안 보고 있다"
+    assert not any("실행 상한을 넘겨" in p for p in problems), (
+        f"타이머가 울리지도 않았는데 상한 초과라고 적었다: {problems}"
+    )
+    assert any("끝맺지 못했습니다" in p for p in problems), (
+        f"끊긴 산출물이라는 사실까지 잃었다: {problems}"
+    )
+    assert marked, "원인과 무관하게 격리돼야 하는 산출물이 격리되지 않았다"
+
+
+def test_a_quarantined_stage_does_not_block_the_rest_of_the_bundle(tmp_path):
+    """격리된 산출물은 묶음 목록에 실리지 않아야 한다.
+
+    워치독이 끊고 복구한 XML 은 파싱이 되므로 '호스트가 있는 XML' 검사를 통과한다.
+    그런데 파일은 이미 interrupted/ 로 옮겨져 있고, 그 이름이 manifest 에 실리면
+    **서버가 묶음 전체를 거절한다** - UDP 단계 하나가 끊겼다고 같은 묶음의 멀쩡한 TCP
+    결과까지 못 넣게 된다.
+    """
+    import pathlib
+
+    scanner = _load_scanner()
+
+    good = tmp_path / "scan.tcp_discovery.xml"
+    good.write_text('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                    '<address addr="10.0.0.1" addrtype="ipv4"/></host>'
+                    '<runstats><finished exit="success"/></runstats></nmaprun>',
+                    encoding="utf-8")
+    # 격리 이름은 **생산 코드가 만든 그대로** 쓴다 - 손으로 지어내면 실제와 어긋난 채
+    # 통과하는 검사가 된다(처음에 .xml 뒤에 표식을 붙였다가 그렇게 됐다).
+    raw = tmp_path / "scan.udp_identify.xml"
+    raw.write_text('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                   '<address addr="10.0.0.1" addrtype="ipv4"/></host></nmaprun>',
+                   encoding="utf-8")
+    moved = scanner.mark_interrupted_outputs(tmp_path / "scan.udp_identify")
+    bad = pathlib.Path(next(p for p in moved if p.lower().endswith(".xml")))
+    assert bad.exists() and bad.name.lower().endswith(".xml"), (
+        f"격리본이 .xml 로 끝나지 않는다 - 이 검사는 아무것도 안 막는다: {bad.name}"
+    )
+    assert scanner.xml_has_hosts(bad), "복구본이 파싱되지 않는다 - 재현이 안 됐다"
+    assert scanner.is_interrupted_output(bad), "격리 표식이 없다 - 재현이 안 됐다"
+
+    clean_run = {"files": [str(good)], "returncode": 0, "stage_id": "tcp_discovery",
+                 "index": 0, "batch_index": 0,
+                 "scan_targets": ["10.0.0.1"], "scan_targets_complete": True}
+    broken_run = {"files": [str(bad)], "returncode": -1, "stage_id": "udp_identify",
+                  "index": 0, "batch_index": 0,
+                  "scan_targets": ["10.0.0.1"], "scan_targets_complete": True}
+
+    assert scanner.manifest_xml_files(clean_run) == [str(good)]
+    assert scanner.manifest_xml_files(broken_run) == [], (
+        "격리된 산출물을 묶음에 광고한다 - 서버가 묶음 전체를 거절한다"
+    )
+
+    # 같은 계획에 둘이 함께 있어도 멀쩡한 쪽은 살아야 한다.
+    plan = {"batches": [["10.0.0.1"]], "runs": [clean_run, broken_run]}
+    importable = scanner.importable_xml(plan)
+    assert str(good) in importable, "멀쩡한 단계까지 묶음에서 빠졌다"
+    assert str(bad) not in importable

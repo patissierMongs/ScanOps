@@ -23,16 +23,20 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import SessionLocal, get_db
-from ..models import ACTIVE_FINDING_STATES, Finding, FindingEvent, ScanRun, User
+from ..models import (
+    ACTIVE_FINDING_STATES, EndpointObservation, Finding, FindingEvent, ScanExecution,
+    ScanHostObservation, ScanQualityIssue, ScanRun, User,
+)
 from ..schemas import IngestSummary, KnownResultsIn, RawCommandIn, ScanOut, ScanRunIn
 from ..uploads import read_limited
 from ..scanning import (
-    chunker, engine_runner, nmap_runner, scan_options, scan_summary, scope, taxonomy,
+    chunker, engine_runner, nmap_runner, observability, scan_options, scan_summary, scope, taxonomy,
     xml_verdict,
 )
 from ..scanning.presets import PRESETS
 from ..scanning.ingest import ingest
-from ..scanning.nmap_parse import observed_at, parse_xml, probed_identity, up_hosts
+from ..scanning.nmap_parse import (observed_at, parse_xml, probed_identity, scan_finished,
+                                   scan_start, up_hosts)
 from .audit import record
 from .deps import current_user, require_role
 
@@ -45,6 +49,7 @@ _FAILURE_MESSAGES = {
     "invalid_scan_state": "저장된 스캔 설정을 해석하지 못했습니다.",
     "nmap_unavailable": "서버에서 스캔 도구를 찾을 수 없습니다.",
     "nmap_launch_failed": "스캔 도구를 시작하지 못했습니다.",
+    "watchdog_exceeded": "실행 상한을 넘겨 중단했습니다. 그때까지의 결과는 닫힘 판정에 쓰지 않습니다.",
     "nmap_failed": "스캔 도구가 비정상 종료되었습니다.",
     "result_missing": "스캔 결과 파일이 생성되지 않았습니다.",
     "result_ingest_failed": "스캔 결과를 처리하지 못했습니다.",
@@ -87,9 +92,31 @@ SNAPSHOT_REJECT = (
     "원본 단계 XML(scan_N.<단계>.xml)이나 스캐너 결과 폴더를 가져오세요."
 )
 STAGE_FILE_RE = re.compile(r"^(?P<base>.+)\.(?P<stage>tcp_discovery|tcp_identify|udp_identify)\.xml$", re.I)
+# 단계 엔진(웹 [단계 스캔])이 결과 폴더에 남기는 산출물 이름. 단독 스캐너와 달리 파일명에
+# 실행을 식별할 base 가 없다 - **폴더 하나가 실행 하나**라서 폴더로 묶어야 한다.
+#
+# 이걸 몰랐을 때는 파일마다 STAGE_FILE_RE 에 걸리지 않아 전부 'single' 단위가 됐고,
+# 결과 폴더를 통째로 가져오면 **파일 수만큼 스캔 행**이 생겼다(4개 파일 -> 4줄). 배치가
+# 여럿인 실행은 이력이 아무 말도 하지 않는 줄로 가득 찼다.
+ENGINE_STAGE_RE = re.compile(
+    r"^stage(?:"
+    r"(?P<discovery>0-discovery)"                             # -sn 호스트 발견
+    r"|-(?P<sweep_proto>tcp|udp)-b(?P<sweep_batch>\d+)"       # 포트 스윕
+    r"|3-(?P<svc_proto>tcp|udp)-b(?P<svc_batch>\d+)-g(?P<svc_group>\d+)"  # 서비스 식별
+    # 호스트 격리 재시도. 접미사는 프로토콜(tcp/udp)이거나 포트가 붙은 tag(tcp443·udp161)다.
+    r"|3-(?P<iso_host>\d+_\d+_\d+_\d+)-(?P<iso_proto>[a-z]+[a-z0-9]*)"
+    # 확인(confirm) probe 는 기본 probe 가 아무것도 못 찾았을 때 **추가로** 도는 별개 파일이다
+    # (Pipeline._probe_unit). 소비만 하고 슬롯에 안 넣으면 둘이 같은 자리를 다퉈 하나가 사라진다.
+    r")(?P<confirm>-confirm)?\.xml$", re.I)
+# 누산기가 아는 역할 이름 - 단독 스캐너의 단계 이름과 같은 자리를 쓴다.
+ENGINE_ROLE_DISCOVERY = "engine_discovery"
 # 중단본 표식 — 스캐너(scanops_scanner.INTERRUPTED_*)와 같은 문자열이어야 한다.
 INTERRUPTED_DIR_NAME = "interrupted"
 INTERRUPTED_MARK = ".interrupted"
+# 워치독이 끊었다는 것을 rc 로 실어 나른다. 실제 종료 코드(0~255)나 시그널(-1~-64)과
+# 겹치지 않는 값이어야 한다 - `-1` 은 이미 '프로세스를 못 띄웠다' 는 뜻이라, 겹치면 화면이
+# "스캔 도구를 시작하지 못했습니다" 라는 **거짓 원인**을 말한다.
+WATCHDOG_RC = -1000
 INTERRUPTED_REJECT = (
     "중단된 스캔 결과는 가져올 수 없습니다. 부분 결과라 못 본 포트가 미탐이 되고, "
     "끊긴 자리의 filtered 가 오탐이 됩니다. 스캔을 다시 완주한 뒤 가져오세요."
@@ -152,26 +179,6 @@ def _validate_structured_scan(
     elif uses_manual_preset and not body.options and body.preset not in PRESETS:
         raise ValueError(f"알 수 없는 프리셋: {body.preset}")
     return hosts, excludes
-
-
-def _host_timeouts(body) -> dict:
-    """요청의 두 상한을 단계별 상한으로 편다. 빈 값이면 그 단계는 기본값을 쓴다.
-
-    사용자에게는 프로토콜당 하나씩만 받는다(TCP·UDP). 정상 호스트가 걸리지 않는 상한이
-    프로토콜마다 다르기 때문에 하나로 묶지 않고, 그렇다고 sweep/식별까지 네 개를 물어보면
-    쓰이지 않는 손잡이만 늘어난다. 명시된 값은 그 프로토콜의 두 단계에 함께 적용한다.
-
-    빈 문자열은 '지정 없음'이고 "0" 이 명시적 끄기다. 값 검증은 엔진 spec 이 한다
-    (validate_host_timeout) - 여기서 조용히 정규화하면 잘못된 값이 미적용으로 둔갑한다.
-    """
-    tcp = (getattr(body, "host_timeout", "") or "").strip()
-    udp = (getattr(body, "udp_host_timeout", "") or "").strip()
-    limits = {}
-    if tcp:
-        limits["tcp"] = limits["service"] = tcp
-    if udp:
-        limits["udp"] = limits["service_udp"] = udp
-    return limits
 
 
 def _effective_hosts(hosts: list[str], excludes: list[str]) -> list[str]:
@@ -453,6 +460,50 @@ def _stage_file_info(filename: str | None) -> tuple[str, str] | None:
     if not m:
         return None
     return m.group("base"), m.group("stage").lower()
+
+
+def _engine_stage_info(filename: str | None) -> tuple[str, str, str] | None:
+    """단계 엔진 산출물인가 -> (실행 키, 배치 키, 역할).
+
+    실행 키는 **파일이 든 폴더**다. 엔진은 파일명에 실행 식별자를 넣지 않고 결과 폴더
+    하나를 실행 하나로 쓰므로, 폴더로 묶지 않으면 같은 실행의 단계들이 흩어진다.
+
+    역할은 단독 스캐너의 단계 이름으로 옮긴다 - 누산기가 이미 그 세 자리로 '스윕이 증명한
+    열림'과 '식별이 밝힌 서비스'를 합치고 있어서, 같은 규칙을 두 벌 만들 이유가 없다.
+    호스트 발견은 어느 자리에도 넣지 않는다: `-sn` 산출물에는 `<scaninfo>` 가 아예 없어
+    포트를 하나도 관측하지 않았고(실측), 관측하지 않은 것으로 닫으면 안 되기 때문이다.
+    """
+    normalized = (filename or "").replace("\\", "/")
+    folder, _, name = normalized.rpartition("/")
+    m = ENGINE_STAGE_RE.match(name)
+    if not m:
+        return None
+    run_key = folder or name          # 폴더 없이 올라온 낱개 파일도 자기 이름으로 묶인다
+    # **배치 키는 파일마다 유일해야 한다.** 같은 (배치, 역할) 자리에 두 파일이 들어오면 뒤엣것이
+    # 앞엣것을 조용히 덮어쓴다. 실제로 그랬다: 스윕(stage-udp-b0)과 식별(stage3-udp-b0-g0)이
+    # 같은 자리를 다퉈 스윕 증거가 사라졌고, 아무것도 못 찾은 식별만 남아 열린 발견이 닫혔다
+    # (실측 counts.closed=1). 식별 그룹 g0·g1 과 격리 재시도 tcp/tcp443 도 서로를 덮었다.
+    if m.group("discovery"):
+        # 발견은 배치에 속하지 않는다. b0 에 얹어 두면 배치 수를 부풀리지 않는다.
+        return run_key, "b0", ENGINE_ROLE_DISCOVERY
+    if m.group("sweep_proto"):
+        proto = m.group("sweep_proto").lower()
+        # 스윕은 **열림만 증명**한다. 식별과 다른 역할이어야 stage3 가 아무것도 못 찾았을 때
+        # 스윕 증거가 살아남는다 - 실제 실행 경로(engine_runner.collect_results)도 스윕을
+        # setdefault 로 깔고 stage3 가 보고한 키만 덮어쓴다.
+        role = "tcp_discovery" if proto == "tcp" else "udp_sweep"
+        return run_key, f"b{int(m.group('sweep_batch'))}", role
+    if m.group("svc_proto"):
+        proto = m.group("svc_proto").lower()
+        role = "tcp_identify" if proto == "tcp" else "udp_identify"
+        # 같은 배치 안의 식별 그룹은 슬롯 접미사로 가른다 - 역할은 같지만 다른 파일이다.
+        return run_key, f"b{int(m.group('svc_batch'))}", f"{role}#g{int(m.group('svc_group'))}"
+    # 호스트 격리 재시도 - 공통 실행이 실패한 뒤 그 호스트만 다시 돈 것이라 식별로 본다.
+    # 파일명에 배치가 없으므로 b0 에 얹되, 슬롯으로 서로를 구분한다.
+    suffix = (m.group("iso_proto") or "tcp").lower()
+    role = "udp_identify" if suffix.startswith("udp") else "tcp_identify"
+    confirm = "-confirm" if m.group("confirm") else ""
+    return run_key, "b0", f"{role}#iso-{m.group('iso_host')}-{suffix}{confirm}"
 
 
 def _scaninfo_scope(xml_bytes: bytes, proto: str) -> set[int] | None | set:
@@ -819,27 +870,66 @@ def _ingest_auto_findings(
         db.close()
 
 
-def _wait_scan_process(scan_id: int, proc) -> int:
-    """Register, honor a stop that raced with spawn, then release tree ownership."""
+def _wait_scan_process(scan_id: int, proc, watchdog_seconds: int = 0,
+                      out_base: Path | None = None) -> int:
+    """Register, honor a stop that raced with spawn, then release tree ownership.
+
+    ``watchdog_seconds`` 는 nmap 프로세스당 상한이다(0 = 끔). 호스트 상한을 뺀 자리에
+    두는 제어라 레거시/자동 워크플로에서도 켤 수 있어야 한다 - 한쪽 경로에만 달아 두면
+    사용자는 보호만 잃고 대체는 못 얻는다.
+
+    ``--host-timeout`` 과 달리 프로세스를 밖에서 끝내므로, 그때까지 ``-oA`` 로 쓰인 관측이
+    남는다. 다만 nmap 은 ``</nmaprun>`` 을 못 쓰고 죽어 표준 파서가 그 파일을 통째로
+    거절하므로(실측: 587바이트, ParseError) **여기서 복구까지 해야** 그 말이 성립한다.
+    ``out_base`` 를 주면 워치독이 끊었을 때 그 산출물을 복구한다 - 안 주면 복구하지
+    않으므로, 워치독을 켜는 호출부는 반드시 넘겨야 한다.
+
+    복구본에는 ``runstats`` 가 없어 완결성 검사가 그대로 실패한다. 관측은 살리되 미관측
+    닫힘 권한은 주지 않는다.
+    """
     with _LOCK:
         _PROCS[scan_id] = proc
     if chunker.stop_requested(_basename(scan_id)) and proc.poll() is None:
         proc.terminate()
+    timer = None
+    fired = threading.Event()
+    if watchdog_seconds and watchdog_seconds > 0:
+        def _fire():
+            if proc.poll() is None:
+                logger.warning("scan %s: nmap exceeded %ss watchdog, terminating",
+                               scan_id, watchdog_seconds)
+                fired.set()
+                proc.terminate()
+        timer = threading.Timer(watchdog_seconds, _fire)
+        timer.daemon = True
+        timer.start()
     try:
-        return nmap_runner.wait_owned(proc)
+        rc = nmap_runner.wait_owned(proc)
+        # 워치독이 끊은 실행은 rc 가 0 이어서는 안 된다. 종료 신호를 받은 nmap 이 0 으로
+        # 끝낼 수 있는데, 그대로 두면 호출부가 '정상 완료' 로 읽어 복구된 **부분** XML 에
+        # 미관측 닫힘 권한을 준다 - 훑지도 않은 포트가 '닫힘/정상처리' 가 된다. 워치독을
+        # 둔 이유가 통째로 뒤집힌다. 단계 엔진(nmaprun.run)·단독 스캐너와 같은 규칙이다.
+        return WATCHDOG_RC if fired.is_set() else rc
     finally:
+        if timer is not None:
+            timer.cancel()
+        if fired.is_set() and out_base is not None:
+            if nmap_runner.repair_truncated_xml(nmap_runner.xml_of(out_base)):
+                logger.warning("scan %s: repaired watchdog-truncated XML at %s",
+                               scan_id, nmap_runner.xml_of(out_base))
         with _LOCK:
             if _PROCS.get(scan_id) is proc:
                 _PROCS.pop(scan_id, None)
 
 
-def _run_stage(scan_id: int, argv: list[str], log_path: Path) -> int:
+def _run_stage(scan_id: int, argv: list[str], log_path: Path,
+               watchdog_seconds: int = 0, out_base: Path | None = None) -> int:
     _set_current_log(scan_id, log_path)
     try:
         proc = nmap_runner.popen(argv, log_path)
     except OSError:
         return -1
-    return _wait_scan_process(scan_id, proc)
+    return _wait_scan_process(scan_id, proc, watchdog_seconds, out_base)
 
 
 class _WorkerFailure(RuntimeError):
@@ -848,8 +938,13 @@ class _WorkerFailure(RuntimeError):
         super().__init__(code)
 
 
-def _checked_stage(scan_id: int, argv: list[str], log_path: Path) -> None:
-    rc = _run_stage(scan_id, argv, log_path)
+def _checked_stage(scan_id: int, argv: list[str], log_path: Path,
+                   watchdog_seconds: int = 0, out_base: Path | None = None) -> None:
+    rc = _run_stage(scan_id, argv, log_path, watchdog_seconds, out_base)
+    # 상한 초과는 시작 실패와도, 일반 비정상 종료와도 다른 사실이다. 원인을 뭉치면 운영자가
+    # nmap 설치를 의심하며 시간을 쓴다.
+    if rc == WATCHDOG_RC:
+        raise _WorkerFailure("watchdog_exceeded")
     if rc == -1:
         raise _WorkerFailure("nmap_launch_failed")
     if rc != 0:
@@ -877,6 +972,8 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
     ports = state.get("ports", "")
     nse = state.get("nse") if state.get("nse") is not None else scan_options.NSE_DEFAULT_KEYS
     udp_all_targets = bool(state.get("udp_all_targets"))
+    # nmap 프로세스당 상한(0=끔). state 에서 읽으므로 재개해도 같은 값이 유지된다.
+    watchdog = int(state.get("watchdog_seconds") or 0)
     tcp_port_spec = nmap_runner.auto_tcp_port_spec(ports)
     udp_port_spec = nmap_runner.auto_udp_port_spec(ports)
     tcp_scope = _port_scope(tcp_port_spec, "T") if tcp_port_spec else set()
@@ -900,7 +997,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             state.get("exclude"), state.get("exclude_ports", ""),
         )
         _mark_stage(scan_id, state, "tcp_discovery", len(batch))
-        _checked_stage(scan_id, argv, discovery_log)
+        _checked_stage(scan_id, argv, discovery_log, watchdog, discovery_base)
         discovery_xml = nmap_runner.xml_of(discovery_base)
         if not discovery_xml.exists():
             raise _WorkerFailure("result_missing")
@@ -921,7 +1018,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
                 state.get("exclude"), state.get("exclude_ports", ""),
             )
             _mark_stage(scan_id, state, "tcp_identify", len(discovery_live or batch))
-            _checked_stage(scan_id, argv, identify_log)
+            _checked_stage(scan_id, argv, identify_log, watchdog, identify_base)
             identify_xml = nmap_runner.xml_of(identify_base)
             if not identify_xml.exists():
                 raise _WorkerFailure("result_missing")
@@ -948,7 +1045,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
         )
         _mark_stage(scan_id, state, "udp_identify",
                     len(batch if udp_all_targets else (discovery_live or batch)))
-        _checked_stage(scan_id, argv, udp_log)
+        _checked_stage(scan_id, argv, udp_log, watchdog, udp_base)
         udp_xml = nmap_runner.xml_of(udp_base)
         if not udp_xml.exists():
             raise _WorkerFailure("result_missing")
@@ -1041,13 +1138,29 @@ def _chunk_worker(scan_id: int) -> None:
             logger.exception("failed to launch nmap for scan %s", scan_id)
             _fail(scan_id, "nmap_launch_failed")
             return
-        rc = _wait_scan_process(scan_id, proc)
+        rc = _wait_scan_process(scan_id, proc, int(st.get("watchdog_seconds") or 0), b_base)
 
         # 중지로 종료됐으면 이 배치는 미완 → 커서 유지하고 canceled.
         if chunker.stop_requested(base):
             _mark(scan_id, "canceled")
             return
         xml_path = nmap_runner.xml_of(b_base)
+        if rc == WATCHDOG_RC:
+            # 워치독이 끊기 전에 **끝난 호스트의 관측**은 살아 있다 - `_wait_scan_process`
+            # 가 그 XML 을 복구해 두는 이유가 그것이다. 그대로 실패로 마감하고 나가면
+            # 그 관측이 어디에도 안 남고, 이어가기가 같은 -oA base 로 다시 돌면서
+            # 복구본을 덮어써 영영 사라진다.
+            #
+            # 닫힘 권한은 주지 않는다(no_close=True). 워치독이 끊은 실행은 '못 본 것' 을
+            # 말할 자격이 없다 - 본 것만 가산한다.
+            if xml_path.exists():
+                try:
+                    _ingest_batch(scan_id, xml_path.read_bytes(), no_close=True)
+                except Exception:
+                    logger.exception(
+                        "failed to ingest repaired watchdog result for scan %s", scan_id)
+            _fail(scan_id, "watchdog_exceeded")
+            return
         if rc != 0:
             _fail(scan_id, "nmap_failed")
             return
@@ -1315,6 +1428,160 @@ def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
     return counts
 
 
+def _issue_out(raw: dict) -> dict:
+    """품질 이슈 한 건을 화면 계약으로 맞춘다 - 라이브와 완료가 같은 모양이어야 한다.
+
+    라이브는 `parse_events()` 의 원본(`kind`/`host_ip`)을, 완료는 DB 투영(`kind`/`host_ip`)을
+    준다. 화면은 `type`/`host` 를 읽는다. 두 가지를 각자 손으로 맞추다가 한쪽이 어긋났고,
+    어긋난 쪽이 하필 **실행 중** 이라 문제를 보고 있는 동안에만 호스트가 비었다.
+    번역을 여기 한 곳으로 모아 두 가지가 갈라질 수 없게 한다.
+    """
+    status = raw.get("status")
+    if status not in {"resolved", "retrying", "unresolved"}:
+        status = ("resolved" if raw.get("resolved_by_scan_id") is not None
+                  else "retrying" if raw.get("retry_scan_id") is not None else "unresolved")
+    return {
+        "issue_key": raw.get("issue_key") or "",
+        "type": raw.get("type") or raw.get("kind") or "",
+        "stage": raw.get("stage") or "",
+        "host": raw.get("host") or raw.get("host_ip") or "",
+        "proto": raw.get("proto") or "",
+        "port_spec": raw.get("port_spec") or "",
+        "message": raw.get("message") or raw.get("detail") or "",
+        "status": status,
+        "retry_scan_id": raw.get("retry_scan_id"),
+        "resolved_by_scan_id": raw.get("resolved_by_scan_id"),
+    }
+
+
+def _artifact_issue_inputs(report: dict, problems: list[str]) -> list[dict]:
+    issues: list[dict] = []
+
+    def stage_for(name: str) -> str:
+        lowered = name.lower()
+        proto = "udp" if "udp" in lowered else "tcp" if "tcp" in lowered else ""
+        return f"{proto}_service" if "stage3" in lowered and proto else proto or "service"
+
+    for bucket, kind in (
+        ("authority_missing", "artifact_missing"),
+        ("authority_broken", "artifact_broken"),
+        ("enrichment_missing", "artifact_missing"),
+        ("enrichment_broken", "artifact_broken"),
+    ):
+        for artifact in report.get(bucket) or []:
+            name = str(artifact)
+            issues.append({
+                "issue_key": f"{kind}|{bucket}|{name}", "kind": kind,
+                "stage": stage_for(name), "host_ip": "",
+                "detail": f"{bucket}: {name}",
+            })
+    for index, problem in enumerate(problems):
+        issues.append({
+            "issue_key": f"nse_degraded|{index}|{hashlib.sha256(problem.encode('utf-8')).hexdigest()[:16]}",
+            "kind": "nse_degraded", "stage": "service", "host_ip": "",
+            "detail": problem,
+        })
+    return issues
+
+
+def _resolve_retry_observations(db: Session, retry_scan_id: int, saved_spec: dict,
+                                report: dict | None = None) -> int:
+    """재시도가 원래 관측 구멍을 실제로 메웠는지 판정해 이슈를 해결 처리한다.
+
+    **authority 산출물이 하나라도 어긋나면 아무것도 해결하지 않는다.** 호스트 상태는
+    coverage 항목의 `finished` 플래그에서 나오므로, nmap 이 rc=0 으로 끝났지만 그 뒤
+    authority XML 이 없거나 완결되지 않은 실행에서도 `done` 으로 찍힌다. 그 상태로 이슈를
+    닫으면 `artifact_report` 가 `authority_missing`/`authority_broken` 으로 분류하고 스캔을
+    partial 로 마감한 실행이 **원래 구멍을 메운 것처럼** 기록된다 - 재시도 안내가 사라져
+    아무도 다시 보지 않는다.
+
+    같은 파일의 닫힘 권한 판정이 쓰는 기준과 같다: "authority 가 하나라도 어긋나면 닫으면
+    안 된다". 한 단계만 어긋나도 전부 보류하는 것은 보수적이지만, 틀리는 방향이 반대다 -
+    이슈가 남으면 한 번 더 보게 될 뿐이고, 잘못 닫으면 되돌릴 길이 없다.
+    """
+    if report is not None:
+        unfinished = list(report.get("authority_missing") or []) + \
+            list(report.get("authority_broken") or [])
+        if unfinished:
+            return 0
+    scanops = saved_spec.get("scanops") if isinstance(saved_spec, dict) else None
+    source_id = scanops.get("retry_of") if isinstance(scanops, dict) else None
+    if not isinstance(source_id, int) or source_id <= 0:
+        return 0
+    source_issues = db.query(ScanQualityIssue).filter(
+        ScanQualityIssue.scan_id == source_id,
+        ScanQualityIssue.retry_scan_id == retry_scan_id,
+        ScanQualityIssue.resolved_by_scan_id.is_(None),
+    ).all()
+    if not source_issues:
+        return 0
+    host_rows = {
+        row.host_ip: row for row in db.query(ScanHostObservation).filter_by(
+            scan_id=retry_scan_id
+        ).all()
+    }
+    child_issues = {
+        (issue.kind, engine_runner.canonical_stage(issue.stage), issue.host_ip)
+        for issue in db.query(ScanQualityIssue).filter_by(scan_id=retry_scan_id).all()
+        if issue.resolved_by_scan_id is None
+    }
+    stage_field = {
+        "discovery": "discovery_status", "tcp": "tcp_sweep_status",
+        "tcp_service": "tcp_service_status", "udp": "udp_sweep_status",
+        "udp_service": "udp_service_status",
+    }
+    # 재시도가 '이제 다 닫혔다' 를 권위 있게 확인하면 서비스 프로브는 **돌 이유가 없다** -
+    # 열린 포트가 없으니까. 그런데 서비스 단계 상태는 stage3 산출물이 있어야만 done 이 되어
+    # unknown 으로 남고, 아래 엄격한 done 검사가 그 이슈를 영원히 미해결로 붙잡아 끝없이
+    # 재스캔을 권했다. 재시도가 그 호스트/프로토콜에서 열린 것을 하나도 못 봤다면
+    # (positive 근거 0건) 그것이 곧 답이다.
+    open_after = {
+        (row.host_ip, row.proto) for row in db.query(
+            EndpointObservation.host_ip, EndpointObservation.proto,
+        ).filter(
+            EndpointObservation.scan_id == retry_scan_id,
+            EndpointObservation.evidence_kind == "positive",
+        ).distinct().all()
+    }
+    sweep_field = {"tcp_service": "tcp_sweep_status", "udp_service": "udp_sweep_status"}
+    resolved = []
+    for issue in source_issues:
+        canonical = engine_runner.canonical_stage(issue.stage)
+        field = stage_field.get(canonical)
+        host = host_rows.get(issue.host_ip)
+        if not field or host is None:
+            continue
+        if getattr(host, field) != "done":
+            swept = sweep_field.get(canonical)
+            if not swept or getattr(host, swept) != "done":
+                continue
+            # 훑기는 끝났는데 식별 단계가 비어 있다. 열린 것이 남아 있으면 프로브가 돌았을
+            # 테니, 안 돌았다는 것은 남은 게 없다는 뜻이다. 그 경우에만 해결로 본다.
+            if (issue.host_ip, canonical.split("_", 1)[0]) in open_after:
+                continue
+        if (issue.kind, canonical, issue.host_ip) in child_issues:
+            continue
+        resolved.append(issue.issue_key)
+    return observability.resolve_quality_issues(
+        db, source_id, retry_scan_id, resolved,
+    )
+
+
+def _materialize_engine_terminal(
+    db: Session, scan: ScanRun, out_dir: Path, saved_spec: dict,
+    report: dict, problems: list[str],
+) -> dict:
+    projection = engine_runner.terminal_observability(out_dir, saved_spec)
+    issues = list(projection["issues"])
+    issues.extend(_artifact_issue_inputs(report, problems))
+    counts = observability.materialize_terminal_observability(
+        db, scan.id, executions=projection["executions"], issues=issues,
+        hosts=projection["hosts"],
+    )
+    _resolve_retry_observations(db, scan.id, saved_spec, report)
+    return {**projection, "materialized": counts}
+
+
 def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
     """단계분리 엔진 실행 — spec.json 으로 엔진 spawn → 대기 → 단계요약 영속 + 결과 인입.
 
@@ -1438,6 +1705,9 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
                 closing,                               # 빈 집합 = 닫힘 후보 없음
                 force_scanned_hosts,
                 saved_spec,
+            )
+            _materialize_engine_terminal(
+                db, scan, out_dir, saved_spec, report, problems,
             )
             scan.status = "partial" if unfinished else "done"
             scan.finished_at = datetime.now(timezone.utc)
@@ -1946,6 +2216,9 @@ def _import_single_xml(
     except Exception:
         _fail_import(db, scan.id, artifact_paths)
         raise
+    # 실행 시간은 XML 이 스스로 밝힌 것을 쓴다 - 인입 시각을 쓰면 '가져오기까지 걸린 시간'
+    # 이 소요시간으로 둔갑한다.
+    _apply_xml_runtime(scan, [xml_bytes])
     reviews = [xml_verdict.review(xml_bytes, name, stage)]
     _import_review(scan, reviews)
     db.commit()
@@ -1954,9 +2227,71 @@ def _import_single_xml(
             "files": [name], "reviews": reviews}
 
 
+def _xml_ran_between(payloads: list[bytes]):
+    """가져온 산출물이 **실제로 돈** 구간 (시작, 종료). 못 읽으면 그 자리는 None.
+
+    가져오기는 `started_at` 에 인입 최신성 판단용 시각(observed_at = 종료 시각)을 넣고
+    `finished_at` 에는 업로드를 인입한 시각을 넣었다. 그 둘을 빼면 실행 시간이 아니라
+    '스캔한 뒤 가져오기까지 걸린 시간' 이 나온다 - 한 달 전 XML 을 올리면 한 달짜리 스캔으로
+    보인다.
+
+    그렇다고 소요시간을 **지워 버리면** 어느 단계가 시간을 썼는지 볼 방법이 함께 사라진다.
+    XML 이 두 값을 이미 들고 있으므로(`<nmaprun start=>` · `<runstats><finished time=>`)
+    그것을 읽는다. 없으면 None 을 돌려 호출부가 기존 값을 그대로 쓰게 둔다 - 지어내지 않는다.
+
+    인입의 최신성 판단(`scan_date`)은 건드리지 않는다. 그쪽은 '언제 관측했나' 이고 여기는
+    '얼마나 걸렸나' 라, 같은 값을 쓸 이유가 없다.
+    """
+    starts = [t for t in (scan_start(raw) for raw in payloads) if t is not None]
+    ends = [t for t in (scan_finished(raw) for raw in payloads) if t is not None]
+    return (min(starts) if starts else None), (max(ends) if ends else None)
+
+
+def _apply_xml_runtime(scan, payloads: list[bytes]) -> None:
+    """가져온 스캔의 소요시간을 XML 이 밝힌 실제 구간으로 맞춘다."""
+    started, finished = _xml_ran_between(payloads)
+    if started is not None:
+        scan.started_at = started
+    if finished is not None:
+        scan.finished_at = finished
+
+
+def _xml_finished_at(payloads: list[bytes]):
+    """가져온 산출물이 **실제로 끝난** 시각(<runstats><finished time=>) 중 가장 늦은 것.
+
+    가져오기는 `started_at` 을 XML 안의 과거 스캔 시각으로 두면서 `finished_at` 은 업로드를
+    인입한 시각으로 두었다. 그 둘을 빼면 실행 시간이 아니라 '스캔한 뒤 가져오기까지 걸린
+    시간' 이 나온다 - 한 달 전 XML 을 올리면 한 달짜리 스캔으로 보인다.
+
+    그렇다고 소요시간을 **지워 버리면** 어느 단계가 시간을 썼는지 볼 방법이 함께 사라진다.
+    XML 이 그 값을 이미 들고 있으므로 그것을 읽는다. 없으면(runstats 가 없는 부분 산출물)
+    None 을 돌려 호출부가 인입 시각을 그대로 쓰게 둔다 - 지어내지 않는다.
+    """
+    times = [t for t in (scan_finished(raw) for raw in payloads) if t is not None]
+    return max(times) if times else None
+
+
 def _stage_artifact_name(scan_id: int, stage: str, batch: int, many: bool) -> str:
-    """단계 산출물 파일명. 배치가 여럿이면 배치 번호로 갈라야 서로 덮어쓰지 않는다."""
-    return f"scan_{scan_id}.b{batch}.{stage}.xml" if many else f"scan_{scan_id}.{stage}.xml"
+    """단계 산출물 파일명. 배치가 여럿이면 배치 번호로 갈라야 서로 덮어쓰지 않는다.
+
+    ``stage`` 는 슬롯 이름이라 같은 배치·같은 역할의 다른 파일이면 ``#`` 뒤에 접미사가
+    붙는다(단계 엔진의 ``gN`` 그룹·격리 재시도). 파일명에 ``#`` 을 그대로 쓰지는 않는다.
+    """
+    slot = stage.replace("#", "_")
+    return f"scan_{scan_id}.b{batch}.{slot}.xml" if many else f"scan_{scan_id}.{slot}.xml"
+
+
+# 역할 -> 화면이 이름을 아는 단계(Scans.jsx STAGE_LABEL). 여기 없는 역할은 그리지 않는다 -
+# 이름 없는 칩을 띄우느니 빼는 편이 낫다.
+_TIMELINE_STAGE = {
+    ENGINE_ROLE_DISCOVERY: "discovery",
+    "tcp_discovery": "tcp_discovery",
+    "udp_sweep": "udp",
+    "tcp_identify": "tcp_identify",
+    "udp_identify": "udp_identify",
+}
+# 실제로 도는 순서. dict 순서에 맡기면 배치마다 칩 순서가 달라진다.
+_TIMELINE_ORDER = ("discovery", "tcp_discovery", "udp", "tcp_identify", "udp_identify")
 
 
 def _import_timeline(batches: list[tuple[str, dict]], prepared: list[dict]) -> list[dict]:
@@ -1967,18 +2302,30 @@ def _import_timeline(batches: list[tuple[str, dict]], prepared: list[dict]) -> l
     """
     timeline = []
     for index, (base, stages) in enumerate(batches):
-        for stage in ("tcp_discovery", "tcp_identify", "udp_identify"):
-            values = prepared[index].get(stage)
+        # 한 배치에 같은 역할의 파일이 여럿일 수 있다(엔진의 gN 식별 그룹·격리 재시도).
+        # 역할별로 **합쳐서** 한 줄로 그린다 - 정확한 슬롯 이름만 찾으면 그 산출물들이
+        # 발견으로는 인입되면서 타임라인에서는 통째로 사라진다(실측: 5개 파일 -> 1줄).
+        merged: dict[str, dict] = {}
+        for slot, values in prepared[index].items():
             if values is None:
                 continue
+            stage = _TIMELINE_STAGE.get(slot.split("#", 1)[0])
+            if stage is None:
+                continue
             _date, findings, hosts, _tcp, _udp = values
-            counts = {"live": len(hosts), "open_ports": len(findings)}
+            entry = merged.setdefault(stage, {"live": set(), "open_ports": 0})
+            entry["live"] |= set(hosts)
+            entry["open_ports"] += len(findings)
+        for stage in _TIMELINE_ORDER:
+            entry = merged.get(stage)
+            if entry is None:
+                continue
             timeline.append({
                 "stage": stage,
                 "status": "done",
                 "percent": 100,
                 "seconds": None,
-                "counts": counts,
+                "counts": {"live": len(entry["live"]), "open_ports": entry["open_ports"]},
                 "batch": index,
                 "base": Path(base.replace("\\", "/")).name,
             })
@@ -2004,6 +2351,9 @@ class _ImportAccumulator:
         self._discovery: list[dict] = []
         self._identified: list[dict] = []
         self._udp: list[dict] = []
+        # UDP 스윕은 **열림만 증명**한다. 식별과 같은 통에 담으면 stage3 가 아무것도 못 찾았을 때
+        # 스윕 증거가 남지 않아 이미 열려 있던 발견이 닫힌다(실측 counts.closed=1).
+        self._udp_sweep: list[dict] = []
 
     @staticmethod
     def _widen(current, incoming):
@@ -2012,18 +2362,36 @@ class _ImportAccumulator:
         return set(current) | set(incoming)
 
     def add_batch(self, db: Session, stages: dict[str, dict], prepared: dict) -> None:
-        for stage, bucket, is_udp in (
-            ("tcp_discovery", self._discovery, False),
-            ("tcp_identify", self._identified, False),
-            ("udp_identify", self._udp, True),
-        ):
-            values = prepared.get(stage)
+        # 호스트 발견(-sn)은 **관측 전용**이다. 어느 포트도 보지 않았으므로(산출물에
+        # <scaninfo> 자체가 없다) 살아 있는 호스트만 보태고 닫힘 범위에는 넣지 않는다.
+        # 한 배치에 같은 역할의 파일이 여럿일 수 있다(엔진의 gN 식별 그룹·격리 재시도).
+        # 슬롯 이름은 `역할#접미사` 라 역할만 떼어 쓴다 - 레거시 단계 이름은 접미사가 없다.
+        buckets = {
+            "tcp_discovery": (self._discovery, False),
+            "tcp_identify": (self._identified, False),
+            "udp_sweep": (self._udp_sweep, True),
+            "udp_identify": (self._udp, True),
+        }
+        order = list(buckets) + [ENGINE_ROLE_DISCOVERY]
+        for slot in sorted(stages, key=lambda s: (order.index(s.split("#", 1)[0])
+                                                  if s.split("#", 1)[0] in order else len(order),
+                                                  s)):
+            role = slot.split("#", 1)[0]
+            values = prepared.get(slot)
             if values is None:
                 continue
+            if role == ENGINE_ROLE_DISCOVERY:
+                # 호스트 발견(-sn)은 **관측 전용**이다. 어느 포트도 보지 않았으므로(산출물에
+                # <scaninfo> 자체가 없다) 살아 있는 호스트만 보태고 닫힘 범위에는 넣지 않는다.
+                self.scanned_hosts |= values[2]
+                continue
+            if role not in buckets:
+                continue
+            bucket, is_udp = buckets[role]
             stage_date, findings, hosts, stage_tcp_scope, stage_udp_scope = values
             self.scanned_hosts |= hosts
             bucket.extend(findings)
-            item = stages[stage]
+            item = stages[slot]
             covered = hosts if item.get("closure_hosts") is None else item["closure_hosts"]
             for key, when in _absence_from_xml(item["bytes"], covered, stage_date).items():
                 current = self.absence_at.get(key)
@@ -2046,12 +2414,22 @@ class _ImportAccumulator:
             )
 
     def findings(self) -> list[dict]:
-        # 식별 결과가 있으면 그것을, 없으면 sweep 이 증명한 열림을 남긴다.
-        return [*_prefer_identified(self._identified, self._discovery), *self._udp]
+        """식별 결과가 있으면 그것을, 없으면 sweep 이 증명한 열림을 남긴다.
+
+        **두 프로토콜 모두 같은 규칙**이다. 한때 UDP 만 한 통에 담았는데, 그러면 식별이
+        아무것도 못 찾았을 때 스윕이 증명한 열림까지 함께 사라져 이미 열려 있던 발견이
+        닫혔다. 실제 실행 경로(``engine_runner.collect_results``)도 스윕을 fallback 으로
+        깔고 stage3 가 **보고한 키만** 덮어쓴다 - 여기가 그 규칙과 갈리면 같은 산출물이
+        돌린 경로냐 가져온 경로냐에 따라 다른 결론을 낸다. 단독 스캐너에는 UDP 스윕 단계가
+        없어 그쪽은 비어 있고, 그때는 식별이 그대로 통과한다.
+        """
+        return [*_prefer_identified(self._identified, self._discovery),
+                *_prefer_identified(self._udp, self._udp_sweep)]
 
 
 def _import_stage_bundle(db: Session, user: User, display: str,
-                         batches: list[tuple[str, dict[str, dict]]]) -> dict:
+                         batches: list[tuple[str, dict[str, dict]]],
+                         engine: bool = False) -> dict:
     """단독 스캐너 실행 하나 = 스캔 이력 한 줄.
 
     예전에는 배치마다, 심지어 단계 하나만 남은 배치마다 별도 ScanRun 이 생겼다. /24 스캔은
@@ -2070,7 +2448,8 @@ def _import_stage_bundle(db: Session, user: User, display: str,
              if values[0] is not None]
     sdate = min(dates) if dates else None
     all_items = [item for _base, stages in batches for item in stages.values()]
-    scan = ScanRun(name=f"가져오기: {display} 자동 스캔 묶음", status="running", created_by=user.id,
+    kind_label = "단계 스캔 묶음" if engine else "자동 스캔 묶음"
+    scan = ScanRun(name=f"가져오기: {display} {kind_label}", status="running", created_by=user.id,
                    source_fingerprint=result_fingerprint([item["bytes"] for item in all_items]))
     # 묶음의 범위는 구성 XML 이 스스로 밝힌 것을 합친 것이다(단계마다 프로토콜이 다르다).
     bundle_tcp, bundle_udp = set(), set()
@@ -2081,8 +2460,11 @@ def _import_stage_bundle(db: Session, user: User, display: str,
         if udp:
             bundle_udp.add(udp)
     batch_note = f" · {len(batches)}배치" if len(batches) > 1 else ""
+    flow = ("호스트 발견 → 포트 스윕 → 서비스 식별" if engine
+            else "TCP 발견 → TCP 식별 → UDP 식별")
+    label = "단계 스캔 XML 묶음" if engine else "자동 스캔 XML 묶음"
     scan.command = (
-        f"자동 스캔 XML 묶음 · TCP 발견 → TCP 식별 → UDP 식별{batch_note}  ·  "
+        f"{label} · {flow}{batch_note}  ·  "
         + scan_summary.scope_note(",".join(sorted(bundle_tcp)), ",".join(sorted(bundle_udp)))
     )
     db.add(scan)
@@ -2129,6 +2511,8 @@ def _import_stage_bundle(db: Session, user: User, display: str,
         _fail_import(db, scan.id, artifact_paths)
         raise
     files = [item["name"] for _base, stages in batches for item in stages.values()]
+    # 묶음은 산출물이 여럿이다. 실행 구간은 가장 이른 시작부터 가장 늦은 종료까지다.
+    _apply_xml_runtime(scan, [item["bytes"] for item in all_items])
     reviews = [xml_verdict.review(item["bytes"], item["name"], stage)
                for _base, stages in batches for stage, item in sorted(stages.items())]
     _import_review(scan, reviews)
@@ -2140,15 +2524,336 @@ def _import_stage_bundle(db: Session, user: User, display: str,
             "files": sorted(files), "reviews": reviews}
 
 
+def _scan_history_summary(scan: ScanRun) -> dict:
+    """현재 명령과 저장된 실행 사양을 합쳐 오래된 단계 스캔의 제외값까지 복원한다."""
+    command = scan.command or ""
+    saved = _read_engine_spec(_settings.scans_dir / f"scan_{scan.id}")
+    if saved is None:
+        saved = chunker.read_state(_basename(scan.id)) or {}
+    excluded_ports = str(saved.get("exclude_ports") or "").strip()
+    excluded_hosts = [str(host) for host in (saved.get("exclude") or []) if str(host).strip()]
+    if excluded_ports and "--exclude-ports" not in command:
+        command += f"  ·  --exclude-ports {excluded_ports}"
+    has_excluded_hosts = bool(re.search(r"(?:^|\s)--exclude(?:\s|=)", command))
+    if excluded_hosts and not has_excluded_hosts:
+        command += f"  ·  --exclude {','.join(excluded_hosts)}"
+    return scan_summary.summarize_command(command, scan.targets)
+
+
+# 재스캔으로 메울 수 있는 이슈 - 호스트가 붙어 있고 그 호스트를 다시 훑으면 해결되는 것들.
+# `artifact_missing`/`artifact_broken`/`command_error` 는 호스트가 없거나 다시 훑는다고
+# 해결되지 않으므로 여기 없다. **이력이 제안하는 것과 실행이 받아들이는 것이 같은 집합을
+# 써야 한다** - 갈리면 화면이 "N대 재스캔" 을 띄우는데 누르면 항상 400 이 난다.
+RETRYABLE_ISSUE_KINDS = frozenset({"host_timeout", "retransmission_cap", "service_degraded"})
+
+
+def _retryable_issues(issues) -> list:
+    return [row for row in issues
+            if row.host_ip and row.kind in RETRYABLE_ISSUE_KINDS]
+
+
+def _durable_retry_detail(db: Session, scan_id: int) -> dict | None:
+    rows = db.query(ScanQualityIssue).filter(
+        ScanQualityIssue.scan_id == scan_id,
+        ScanQualityIssue.resolved_by_scan_id.is_(None),
+    ).order_by(ScanQualityIssue.id).all()
+    if not rows:
+        return None
+    retryable = _retryable_issues(rows)
+    by_stage: dict[str, list[str]] = {}
+    reasons: dict[str, list[str]] = {}
+    for row in retryable:
+        stage = engine_runner.canonical_stage(row.stage)
+        by_stage.setdefault(stage, []).append(row.host_ip)
+        reasons.setdefault(row.host_ip, []).append(row.kind)
+    for stage, hosts in by_stage.items():
+        by_stage[stage] = list(dict.fromkeys(hosts))
+    targets = sorted(set(reasons), key=engine_runner._retry_ip_key)
+    return {
+        "required": bool(targets), "count": len(targets), "targets": targets,
+        "by_stage": by_stage, "reasons": reasons,
+        "issues": [row.issue_key for row in retryable],
+    }
+
+
+def _find_retry_child(db: Session, source_id: int) -> ScanRun | None:
+    """`source_id` 의 재스캔으로 만들어진 스캔. 없으면 None.
+
+    재스캔은 원본보다 **나중에** 만들어지므로 id 가 큰 것만 본다. 영속 이슈 행이 없는
+    레거시 스캔에서만 쓰이는 경로다(새 스캔은 이슈 행이 답을 갖고 있다).
+    """
+    for scan in db.query(ScanRun).filter(ScanRun.id > source_id).order_by(ScanRun.id).all():
+        saved = _read_engine_spec(_settings.scans_dir / f"scan_{scan.id}")
+        scanops = saved.get("scanops") if isinstance(saved, dict) else None
+        if isinstance(scanops, dict) and scanops.get("retry_of") == source_id:
+            return scan
+    return None
+
+
+def _retry_history(rows: list[ScanRun], db: Session) -> dict[int, dict]:
+    """Return retry state from durable exact issues, with sidecars only for legacy scans."""
+    raw = {}
+    children: dict[int, ScanRun] = {}
+    for scan in rows:
+        out_dir = _settings.scans_dir / f"scan_{scan.id}"
+        raw[scan.id] = engine_runner.gave_up_detail(out_dir)
+        saved = _read_engine_spec(out_dir)
+        scanops = saved.get("scanops") if isinstance(saved, dict) else None
+        source = scanops.get("retry_of") if isinstance(scanops, dict) else None
+        if isinstance(source, int) and source > 0 and source not in children:
+            children[source] = scan
+
+    scan_ids = [scan.id for scan in rows]
+    issue_rows = db.query(ScanQualityIssue).filter(
+        ScanQualityIssue.scan_id.in_(scan_ids)
+    ).all() if scan_ids else []
+    issues_by_scan: dict[int, list[ScanQualityIssue]] = {}
+    for issue in issue_rows:
+        issues_by_scan.setdefault(issue.scan_id, []).append(issue)
+
+    result = {}
+    for scan in rows:
+        durable = issues_by_scan.get(scan.id, [])
+        if durable:
+            unresolved = [issue for issue in durable if issue.resolved_by_scan_id is None]
+            retry_ids = [
+                issue.retry_scan_id for issue in durable if issue.retry_scan_id is not None
+            ]
+            retry_scan_id = max(retry_ids) if retry_ids else None
+            retry_scan = next((row for row in rows if row.id == retry_scan_id), None)
+            if retry_scan is None and retry_scan_id is not None:
+                retry_scan = db.get(ScanRun, retry_scan_id)
+            # 재스캔 제안은 **재시도로 메울 수 있는 이슈**에서만 나와야 한다. 품질 표시는
+            # 그것과 다른 축이라 unresolved 전체를 그대로 본다 - 호스트 없는 오류도
+            # '확인 필요' 로는 남아야 하고, 다만 재스캔 버튼을 띄우면 안 된다.
+            retryable = _retryable_issues(unresolved)
+            # `retry_status` 도 같은 집합에서 나와야 한다. 화면은 이 값을 **먼저** 읽어
+            # 재스캔 배지를 그리고(`RetryBadge`), 같은 값이 `required` 면 품질 배지를
+            # 가린다(`QualityBadge`). unresolved 전체로 세우면 '재스캔 필요 · 0대' 라는
+            # 없는 안내가 뜨면서 진짜 '품질 오류 · N건' 은 숨는다 - 두 번 틀린다.
+            if retryable:
+                retry_status = (
+                    "running" if retry_scan and retry_scan.status in {"running", "canceling"}
+                    else "required"
+                )
+            elif unresolved:
+                # 재시도로 메울 수 없는 이슈만 남았다. 재스캔은 제안하지 않되, 품질 배지가
+                # 보이도록 `required` 는 아니어야 한다.
+                retry_status = "none"
+            else:
+                retry_status = "resolved" if any(
+                    issue.resolved_by_scan_id is not None for issue in durable
+                ) else "none"
+            hosts = {issue.host_ip for issue in retryable}
+            stages = list(dict.fromkeys(issue.stage for issue in retryable if issue.stage))
+            severe = any(
+                issue.kind in {"command_error", "artifact_missing", "artifact_broken"}
+                for issue in unresolved
+            )
+            result[scan.id] = {
+                "retry_required": bool(retryable) and retry_status != "running",
+                "retry_count": len(hosts),
+                "retry_stages": stages,
+                "retry_status": retry_status,
+                "retry_scan_id": retry_scan_id,
+                "quality_status": "error" if severe else "warning" if unresolved else "ok",
+                "unresolved_issue_count": len(unresolved),
+                # 재시도로 **못** 메우는 나머지. 화면은 재스캔 배지가 떠 있을 때 이 수만
+                # 따로 말한다 - 예전에는 재스캔 배지가 뜨면 품질 배지를 통째로 감춰서,
+                # 재스캔해도 사라지지 않는 artifact_missing/command_error 가 '재스캔 필요'
+                # 뒤에 묻혔다. severe 로 세는 세 종류는 모두 RETRYABLE_ISSUE_KINDS 밖이라
+                # 언제나 이쪽에 들어온다.
+                "unresolved_other_count": len(unresolved) - len(retryable),
+                "unresolved_host_count": len(hosts),
+            }
+            continue
+        detail = raw[scan.id]
+        update = {
+            "retry_required": detail["required"], "retry_count": detail["count"],
+            "retry_stages": list(detail["by_stage"]),
+            "retry_status": "required" if detail["required"] else "none",
+            "retry_scan_id": None,
+        }
+        child = children.get(scan.id)
+        if child is None and detail["required"] and len(rows) == 1:
+            # 한 건만 그리는 호출(스캔 상세·재스캔 응답)은 rows 에 그 스캔뿐이라 자식이
+            # 안 잡힌다. 예전에는 이 때문에 호출부가 **모든 스캔**을 읽어 넘겼고, 그
+            # 대가로 상세 요청 한 번이 전체 이력만큼의 DB 조회와 파일 탐색을 했다.
+            # 자식이 실제로 필요한 레거시 경로에서만 찾는다.
+            child = _find_retry_child(db, scan.id)
+        if child is not None and detail["required"]:
+            update["retry_scan_id"] = child.id
+            child_detail = raw.get(child.id) or {}
+            if child.status in {"running", "canceling"}:
+                update["retry_status"] = "running"
+                update["retry_required"] = False
+            elif child.status == "done" and not child_detail.get("required"):
+                # New scans use exact issue rows above. This branch is strictly the legacy
+                # sidecar contract, retained for scans created before durable quality rows.
+                update.update({"retry_status": "resolved", "retry_required": False,
+                               "retry_count": 0, "retry_stages": []})
+            elif child_detail.get("required"):
+                update.update({
+                    "retry_status": "required", "retry_required": True,
+                    "retry_count": child_detail.get("count", detail["count"]),
+                    "retry_stages": list((child_detail.get("by_stage") or {}).keys()),
+                })
+            else:
+                update["retry_status"] = "failed"
+        update.update({
+            "quality_status": "warning" if detail["required"] else "ok",
+            "unresolved_issue_count": detail["count"],
+            # 레거시 사이드카는 재시도 대상 호스트만 세므로 나머지가 없다.
+            "unresolved_other_count": 0,
+            "unresolved_host_count": detail["count"],
+        })
+        result[scan.id] = update
+    return result
+
+
+def _scan_out(scan: ScanRun, db: Session, retry: dict | None = None) -> ScanOut:
+    creator = db.get(User, scan.created_by) if scan.created_by is not None else None
+    if retry is None:
+        # 이 스캔 하나만 본다. 예전에는 상세 요청 한 번이 보관된 **모든** 스캔을 읽고
+        # 각 스캔 폴더의 사이드카·spec 까지 뒤졌다 - 이력이 쌓일수록 그대로 느려졌다.
+        retry = _retry_history([scan], db).get(scan.id, {})
+    return ScanOut.model_validate(scan).model_copy(update={
+        "summary": _scan_history_summary(scan),
+        "created_by_name": (creator.display_name or creator.username) if creator else "",
+        **retry,
+    })
+
+
 @router.get("", response_model=list[ScanOut])
 def list_scans(_: User = Depends(current_user), db: Session = Depends(get_db)):
     rows = db.query(ScanRun).order_by(ScanRun.id.desc()).all()
+    retry = _retry_history(rows, db)
+    user_ids = {row.created_by for row in rows if row.created_by is not None}
+    user_names = {
+        user.id: user.display_name or user.username
+        for user in db.query(User).filter(User.id.in_(user_ids)).all()
+    } if user_ids else {}
     return [
         ScanOut.model_validate(row).model_copy(update={
-            "summary": scan_summary.summarize_command(row.command, row.targets),
+            "summary": _scan_history_summary(row),
+            "created_by_name": user_names.get(row.created_by, ""),
+            **retry[row.id],
         })
         for row in rows
     ]
+
+
+def _findings_possibly_seen_by_legacy_scans(
+    db: Session, finding_ids: list[int], deleting_scan_id: int,
+) -> dict[int, dict[int, datetime]]:
+    """관측 원장이 없던 시절의 스캔이 아직 뒷받침할 수 있는 발견들.
+
+    `EndpointObservation` 이 생기기 전 DB 에서는, 값이 그대로인 재관측이 **아무 흔적도**
+    남기지 않는다 - 인입은 새로 열림/닫힘/재개방/식별 변경에만 이벤트를 쓰고 나머지는
+    `unchanged` 로 세고 지나간다. 그래서 A·B·C 에서 관측된 발견이 있어도 B 가 그런
+    재관측이면 이벤트도 원장 행도 없다. C 와 A 를 지우면 '뒷받침하는 스캔이 없다' 로
+    보이고, B 의 XML 이 멀쩡히 남아 있는데도 발견과 사람이 달아 둔 상태·담당자·메모가
+    사라진다.
+
+    증명할 수 없으면 지우지 않는다. **관측 원장이 아예 없는** 스캔(= 그 스캔이 무엇을
+    봤는지 열거할 방법이 없는 스캔) 중 발견의 관측 구간에 걸치는 것을 근거로 삼는다.
+    틀려도 방향이 안전하다 - 남는 쪽이지 사라지는 쪽이 아니다.
+    """
+    if not finding_ids:
+        return {}
+    ledgered = {
+        row.scan_id for row in db.query(EndpointObservation.scan_id).distinct().all()
+    }
+    candidates = [
+        scan for scan in db.query(ScanRun).all()
+        if scan.id != deleting_scan_id and scan.id not in ledgered
+    ]
+    if not candidates:
+        return {}
+    out: dict[int, dict[int, datetime]] = {}
+    for start in range(0, len(finding_ids), 500):
+        chunk = finding_ids[start:start + 500]
+        for finding_id, first_seen, last_seen in db.query(
+            Finding.id, Finding.first_seen, Finding.last_seen,
+        ).filter(Finding.id.in_(chunk)).all():
+            for scan in candidates:
+                when = scan.started_at
+                if isinstance(when, datetime) and isinstance(first_seen, datetime) \
+                        and isinstance(last_seen, datetime):
+                    # 관측 구간 밖에서 돈 스캔은 이 발견을 봤을 수 없다.
+                    if when < first_seen or when > last_seen:
+                        continue
+                # 시각을 모르면 배제하지 못한다 - 그때는 발견의 첫 관측 시각으로 둔다.
+                out.setdefault(finding_id, {})[scan.id] = (
+                    when if isinstance(when, datetime) else first_seen
+                )
+    return out
+
+
+def _findings_backed_by_other_scans(
+    db: Session, finding_ids: list[int], deleting_scan_id: int,
+) -> dict[int, dict[int, datetime]]:
+    """{발견 id: {아직 뒷받침하는 다른 스캔 id: 그 스캔이 관측한 시각}}.
+
+    근거는 두 가지다 - 그 발견에 달린 이력 이벤트가 가리키는 스캔, 그리고 같은
+    finding_key 를 관측한 endpoint 스냅샷. 둘 다 지워지는 스캔의 것은 제외한다
+    (스냅샷은 스캔 삭제 시 CASCADE 로 함께 사라진다).
+
+    **시각을 함께 돌려주는 이유**: 참조를 복구할 때 스캔 id 순서를 쓰면 안 된다. 과거
+    XML 을 나중에 가져오면 늦게 만들어진 스캔이 first_scan_id 가 되는 것이 정상이고
+    (ingest 가 명시적으로 그렇게 한다), id 로 최소/최대를 고르면 새 관측이 '첫 관측'
+    자리에 앉는다 - 발견 상세의 이력이 first_seen/last_seen 과 어긋난 채로 남는다.
+    """
+    if not finding_ids:
+        return {}
+    backing: dict[int, dict[int, datetime]] = {}
+
+    def note(finding_id: int, scan_id: int, when) -> None:
+        if not isinstance(when, datetime):
+            return
+        seen = backing.setdefault(finding_id, {})
+        current = seen.get(scan_id)
+        if current is None or when < current:   # 그 스캔의 가장 이른 관측 시각
+            seen[scan_id] = when
+
+    keys: dict[str, list[int]] = {}
+    for start in range(0, len(finding_ids), 500):
+        chunk = finding_ids[start:start + 500]
+        for finding_id, key in db.query(Finding.id, Finding.finding_key).filter(
+            Finding.id.in_(chunk)
+        ).all():
+            keys.setdefault(key, []).append(finding_id)
+        for finding_id, other, when in db.query(
+            FindingEvent.finding_id, FindingEvent.scan_id, FindingEvent.created_at,
+        ).filter(
+            FindingEvent.finding_id.in_(chunk),
+            FindingEvent.scan_id.isnot(None),
+            FindingEvent.scan_id != deleting_scan_id,
+        ).all():
+            note(finding_id, other, when)
+    key_list = list(keys)
+    for start in range(0, len(key_list), 500):
+        chunk = key_list[start:start + 500]
+        for key, other, when in db.query(
+            EndpointObservation.finding_key, EndpointObservation.scan_id,
+            EndpointObservation.observed_at,
+        ).filter(
+            EndpointObservation.finding_key.in_(chunk),
+            EndpointObservation.scan_id != deleting_scan_id,
+        ).all():
+            for finding_id in keys.get(key, ()):
+                note(finding_id, other, when)
+    # 이미 사라진 스캔을 가리키는 흔적은 근거가 아니다.
+    referenced = {sid for seen in backing.values() for sid in seen}
+    alive = {
+        row.id for row in db.query(ScanRun.id).filter(ScanRun.id.in_(list(referenced))).all()
+    } if referenced else set()
+    result = {}
+    for finding_id, seen in backing.items():
+        kept = {sid: when for sid, when in seen.items() if sid in alive}
+        if kept:
+            result[finding_id] = kept
+    return result
 
 
 @router.delete("/{scan_id}")
@@ -2200,6 +2905,30 @@ def delete_scan(
         ).all()
     ]
     owned_ids = list(dict.fromkeys(owned_ids + stranded_ids))
+    # 참조가 끊겼다고 근거가 없는 것은 아니다. 세 번 이상 관측된 발견에서 **마지막** 스캔을
+    # 먼저 지우면 last 가 NULL 이 되고, 이어서 **첫** 스캔을 지우면 위 두 조건이 모두 참이
+    # 된다 - 가운데 스캔과 그 관측이 멀쩡히 살아 있는데도 발견과 이력, 사람이 달아 둔
+    # 상태·담당자·메모까지 지워진다. 그래서 지우기 전에 '살아 있는 다른 스캔이 이 발견을
+    # 여전히 뒷받침하는가' 를 실제 관측으로 되묻고, 뒷받침하면 지우는 대신 참조를 고친다.
+    supported = _findings_backed_by_other_scans(db, owned_ids, scan_id)
+    # 원장·이벤트 어느 쪽에도 안 잡힌 것들. 원장이 생기기 전 스캔이 아직 뒷받침할 수
+    # 있으므로, '흔적이 없다' 를 '근거가 없다' 로 읽지 않는다.
+    unproven = [fid for fid in owned_ids if fid not in supported]
+    for finding_id, seen in _findings_possibly_seen_by_legacy_scans(
+        db, unproven, scan_id,
+    ).items():
+        supported.setdefault(finding_id, {}).update(seen)
+    if supported:
+        owned_ids = [fid for fid in owned_ids if fid not in supported]
+        for finding_id, observed in supported.items():
+            # **관측 시각**으로 고른다. 스캔 id 순서가 아니다 - 과거 결과를 나중에 가져오면
+            # 늦게 만들어진 스캔이 첫 관측일 수 있고, id 로 고르면 새 관측이 '첫 관측'
+            # 자리에 앉아 first_seen 과 어긋난 이력이 남는다. 같은 시각이면 id 로 가른다.
+            ordered = sorted(observed, key=lambda sid: (observed[sid], sid))
+            db.query(Finding).filter(Finding.id == finding_id).update(
+                {Finding.first_scan_id: ordered[0], Finding.last_scan_id: ordered[-1]},
+                synchronize_session=False,
+            )
     for start in range(0, len(owned_ids), 500):
         chunk = owned_ids[start:start + 500]
         db.query(FindingEvent).filter(FindingEvent.finding_id.in_(chunk)).delete(
@@ -2232,7 +2961,21 @@ def _scan_artifact_paths(scan: ScanRun) -> list[Path]:
     속성을 더 읽을 수 없기 때문이다(만료된 인스턴스)."""
     paths = [Path(v) for v in (scan.raw_xml_path, scan.log_path) if v]
     paths.append(_settings.scans_dir / f"scan_{scan.id}")
-    return paths
+    # 레거시/자동(청크) 스캔은 base 옆에 형제 파일을 흩뿌린다 - 배치별 산출물
+    # scan_N.b0.tcp_discovery.{xml,nmap,gnmap}, 그 로그, 재개 상태 scan_N.chunks.json.
+    # 예전에는 raw_xml_path 와 log_path 에 적힌 딱 두 개만 지워서, 이력을 지운 스캔의
+    # XML 증거와 재개 상태가 디스크에 계속 남았다.
+    #
+    # glob 의 '.' 은 리터럴이라 scan_1.* 은 scan_12.xml 을 잡지 않는다 - 접두사 매칭으로
+    # 옆 스캔을 지우는 사고가 나지 않는 이유다. 스캔 디렉터리(확장자 없는 scan_N)도
+    # 이 패턴에 걸리지 않으므로 위에서 따로 넣는다.
+    paths.extend(sorted(_settings.scans_dir.glob(f"scan_{scan.id}.*")))
+    seen, unique = set(), []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
 
 
 def _remove_paths(paths: list[Path]) -> None:
@@ -2266,7 +3009,7 @@ def get_scan(scan_id: int, _: User = Depends(current_user), db: Session = Depend
     scan = db.get(ScanRun, scan_id)
     if scan is None:
         raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
-    return scan
+    return _scan_out(scan, db)
 
 
 @router.post("/known-results")
@@ -2372,14 +3115,29 @@ async def import_xml_bundle(
             item["closure_hosts"] = authorities[basename]
 
     grouped: dict[str, dict[str, dict]] = {}
+    # 단계 엔진 산출물은 **폴더 하나가 실행 하나**다: {폴더: {배치: {역할: item}}}.
+    # 파일명 base 로 묶는 STAGE_FILE_RE 규칙이 통하지 않아, 예전에는 파일마다 별도 스캔
+    # 행이 생겼다(결과 폴더 4개 파일 -> 이력 4줄).
+    engine: dict[str, dict[str, dict[str, dict]]] = {}
     units: list[dict] = []
     for item in payloads:
+        engine_info = _engine_stage_info(item["name"])
+        if engine_info:
+            run_key, batch_key, role = engine_info
+            engine.setdefault(run_key, {}).setdefault(batch_key, {})[role] = item
+            continue
         info = _stage_file_info(item["name"])
         if not info:
             units.append({"kind": "single", "sort": item["name"], "item": item})
             continue
         base, stage = info
         grouped.setdefault(base, {})[stage] = item
+    for run_key, batches in sorted(engine.items(), key=lambda kv: kv[0].lower()):
+        units.append({
+            "kind": "bundle", "sort": run_key, "base": run_key, "engine": True,
+            # 실제 배치 순서대로. 문자열 정렬이면 b10 이 b2 앞에 온다.
+            "batches": sorted(batches.items(), key=lambda kv: int(kv[0][1:])),
+        })
     if grouped:
         if manifests:
             # manifest 하나 = 단독 스캐너 실행 하나. 배치가 몇 개든 이력에는 한 줄이어야
@@ -2422,7 +3180,8 @@ async def import_xml_bundle(
         try:
             if unit["kind"] == "bundle":
                 result = _import_stage_bundle(
-                    db, user, Path(unit["base"].replace("\\", "/")).name, unit["batches"])
+                    db, user, Path(unit["base"].replace("\\", "/")).name, unit["batches"],
+                    engine=bool(unit.get("engine")))
             else:
                 item = unit["item"]
                 if "closure_hosts" in item:
@@ -2517,6 +3276,9 @@ def run_scan(
             "exclude": excludes,
             "exclude_ports": exclude_ports,
             "udp_all_targets": body.udp_all_targets,
+            # nmap 프로세스당 상한(초, 0=끔). 호스트 상한을 뺀 자리에 두는 제어라
+            # 레거시/자동 워크플로에서도 켤 수 있어야 한다.
+            "watchdog_seconds": int(body.watchdog_seconds or 0),
         })
         # 명령 표기는 대표(타겟·-oA 제외) — 호스트 수/배치 수를 덧붙여 가독.
         if body.workflow == "auto":
@@ -2536,6 +3298,10 @@ def run_scan(
                 f"자동 스캔 · {' → '.join(stages)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
                 f"  ·  {scan_summary.scope_note(tcp_spec, udp_spec)}"
             )
+            if exclude_ports:
+                scan.command += f"  ·  --exclude-ports {exclude_ports}"
+            if excludes:
+                scan.command += f"  ·  --exclude {','.join(excludes)}"
         else:
             parts, skip = [], False
             for t in argv0:
@@ -2549,7 +3315,7 @@ def run_scan(
                     continue
                 parts.append(t)
             scan.command = f"{' '.join(parts)}  ·  {len(hosts)}호스트 / {len(batches)}배치"
-        if excludes:
+        if excludes and body.workflow != "auto":
             scan.command += f"  ·  제외 {', '.join(excludes)}"
         # 배치 구성은 실행이 끝나면 sidecar 와 함께 사라진다. 이력이 나중에도 '어떻게
         # 돌았는지'를 말할 수 있게 스캔 행에 남긴다.
@@ -2647,7 +3413,7 @@ def run_staged(
             excludes, body.options, body.ports,
             body.nse, out_dir, body.batch_size, discovery=body.discovery,
             exclude_ports=body.exclude_ports,
-            host_timeouts=_host_timeouts(body),
+            watchdog_seconds=body.watchdog_seconds,
         )
         tcp_scope = _port_scope(nmap_runner.auto_tcp_port_spec(body.ports), "T")
         udp_scope = (_port_scope(nmap_runner.auto_udp_port_spec(body.ports), "U")
@@ -2663,8 +3429,11 @@ def run_staged(
         }
         (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
         scan.command = f"{engine_runner.describe(spec)}  ·  {len(hosts)}호스트"
+        exclude_ports = scan_options.validate_ports(body.exclude_ports or "")
+        if exclude_ports:
+            scan.command += f"  ·  --exclude-ports {exclude_ports}"
         if excludes:
-            scan.command += f"  ·  제외 {', '.join(excludes)}"
+            scan.command += f"  ·  --exclude {','.join(excludes)}"
         # 엔진도 같은 대역을 배치로 나눠 sweep 한다(stage-tcp-b0.xml …). 청킹 스캔과 같은
         # 자리에 같은 뜻으로 남겨야 이력에서 둘을 나란히 읽을 수 있다.
         scan.batch_size = int(spec.get("batch_size") or 0)
@@ -2862,6 +3631,168 @@ def resume_scan(
     return scan
 
 
+_RETRY_CLAIMS: dict[int, threading.Lock] = {}
+
+
+def _retry_claim(source_id: int) -> threading.Lock:
+    """원본 스캔별 재스캔 생성 잠금 - '확인하고 만든다' 사이에 남이 끼어들지 못하게.
+
+    서버는 단일 프로세스(uvicorn, workers 지정 없음)로 돌고, 이 모듈은 이미 실행 중인
+    프로세스 표를 같은 방식으로 지킨다(`_LOCK`/`_PROCS`).
+    """
+    with _LOCK:
+        return _RETRY_CLAIMS.setdefault(source_id, threading.Lock())
+
+
+@router.post("/{scan_id}/retry-timeouts", response_model=ScanOut)
+def retry_timed_out_hosts(
+    scan_id: int,
+    user: User = Depends(require_role("auditor")),
+    db: Session = Depends(get_db),
+):
+    """Start a new staged scan containing only hosts retained in the retry queue."""
+    source = db.get(ScanRun, scan_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
+    if source.status in {"running", "canceling"}:
+        raise HTTPException(status_code=400, detail="원본 스캔이 끝난 뒤 재스캔할 수 있습니다.")
+    source_dir = _settings.scans_dir / f"scan_{source.id}"
+    if not engine_runner.is_engine_scan(source_dir):
+        raise HTTPException(status_code=400, detail="단계 엔진 스캔만 확인 필요 대상을 재스캔할 수 있습니다.")
+
+    # 검사와 생성을 한 덩어리로 묶는다. 두 사람이 동시에 누르면 둘 다 '진행 중 아님' 을
+    # 보고 **같은 스캔을 두 번** 띄운다 - 대상 장비가 같은 부하를 두 배로 받고, 이슈에
+    # 남는 자식 id 는 하나뿐이라 나머지 하나가 끝나도 아무것도 해결되지 않는다.
+    # 두 번째 요청은 잠깐 기다렸다가 첫 번째가 만든 '진행 중' 을 보고 정상적으로 거절된다.
+    with _retry_claim(source.id):
+        history = _retry_history([source], db).get(source.id) or {}
+        if history.get("retry_status") == "running":
+            raise HTTPException(status_code=400, detail="확인 필요 대상 재스캔이 이미 진행 중입니다.")
+        if history.get("retry_status") == "resolved":
+            raise HTTPException(status_code=400, detail="확인 필요 대상 재스캔이 이미 완료되었습니다.")
+        retry = _durable_retry_detail(db, source.id)
+        if retry is None:
+            retry_evidence_dir = source_dir
+            child_id = history.get("retry_scan_id")
+            if history.get("retry_required") and isinstance(child_id, int):
+                child_dir = _settings.scans_dir / f"scan_{child_id}"
+                if engine_runner.gave_up_detail(child_dir)["required"]:
+                    retry_evidence_dir = child_dir
+            retry = engine_runner.gave_up_detail(retry_evidence_dir)
+        if not retry["required"]:
+            raise HTTPException(status_code=400, detail="재스캔이 필요한 확인 대상이 없습니다.")
+
+        try:
+            saved = _load_engine_spec(source_dir / "spec.json")
+            targets = list(retry["targets"])
+            nmap_runner.validate_targets(targets)
+            scope.check_scope(targets)
+            engine_runner.ensure_available()
+        except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if not nmap_runner.find_nmap(_settings.nmap_path):
+            raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
+
+        scan = ScanRun(
+            name=f"확인 필요 재스캔 #{source.id} · {len(targets)}대",
+            targets=" ".join(targets), status="running", created_by=user.id,
+        )
+        db.add(scan)
+        db.flush()
+        retry_stage_set = {
+            engine_runner.canonical_stage(stage)
+            for stage in retry["by_stage"] if isinstance(stage, str)
+        }
+        selected_issue_keys = [
+            issue.issue_key
+            for issue in db.query(ScanQualityIssue).filter(
+                ScanQualityIssue.scan_id == source.id,
+                ScanQualityIssue.resolved_by_scan_id.is_(None),
+            ).all()
+            if issue.host_ip in set(targets)
+            and engine_runner.canonical_stage(issue.stage) in retry_stage_set
+        ]
+        observability.set_quality_retry(
+            db, source.id, scan.id, issue_keys=selected_issue_keys,
+        )
+        db.commit()
+        db.refresh(scan)
+    out_dir = _settings.scans_dir / f"scan_{scan.id}"
+    launch_paths = [out_dir / "spec.json", out_dir / "run-state.json", out_dir / "stop-requested"]
+    try:
+        spec = json.loads(json.dumps(saved))
+        spec.update({
+            "job_id": f"scan_{scan.id}", "targets": targets, "exclude": [],
+            "out_dir": str(out_dir), "targets_ports": None, "rescan_units": None,
+        })
+        stages = spec.setdefault("stages", {})
+        stages.setdefault("discovery", {}).update({"enabled": True, "mode": "pn"})
+        retry_stages = set(retry["by_stage"])
+        if retry_stages and "discovery" not in retry_stages:
+            for proto in ("tcp", "udp"):
+                needed = proto in retry_stages or f"service:{proto}" in retry_stages
+                needed = needed or f"{proto}_service" in retry_stages
+                stage_spec = stages.get(proto)
+                if isinstance(stage_spec, dict):
+                    stage_spec["enabled"] = bool(stage_spec.get("enabled")) and needed
+        for stage_name in ("tcp", "udp", "service"):
+            stage_spec = stages.get(stage_name)
+            if isinstance(stage_spec, dict):
+                stage_spec["max_retries"] = 4
+        scanops = spec.setdefault("scanops", {})
+        original_keys = scanops.get("scope_keys") or []
+        target_set = set(targets)
+        enabled_protocols = {
+            proto for proto in ("tcp", "udp")
+            if isinstance(stages.get(proto), dict) and stages[proto].get("enabled")
+        }
+        kept = [
+            key for key in original_keys
+            if (isinstance(key, str) and key.split("|", 1)[0] in target_set
+                and key.rsplit("|", 1)[-1] in enabled_protocols)
+        ]
+        # 원본이 **처음 찾아낸** endpoint 는 원본의 실행 전 scope_keys 에 있을 수 없다.
+        # 그 키를 안 넣으면 재스캔이 그것을 닫을 권한이 없어, 재시도가 '이제 닫혔다' 를
+        # 증명해도 발견은 열린 채로 남는다 - 게다가 품질 이슈는 해결 처리되므로 재스캔
+        # 안내마저 사라져, 손댈 방법이 없는 낡은 열린 포트가 된다.
+        #
+        # **원본이 실제로 열린 것으로 관측한 것만** 더한다. 그래야 이 재스캔이 실제로
+        # 훑는 포트 범위 안에 있다(재스캔은 원본 spec 의 포트를 그대로 쓴다). 다른
+        # 스캔이 더 넓은 범위에서 찾은 발견까지 넣으면, 훑지도 않을 포트에 닫힘 권한을
+        # 주게 된다 - 방향이 정반대로 위험하다.
+        discovered = {
+            row.finding_key for row in db.query(EndpointObservation.finding_key).filter(
+                EndpointObservation.scan_id == source.id,
+                EndpointObservation.evidence_kind == "positive",
+                EndpointObservation.host_ip.in_(list(target_set)),
+                EndpointObservation.proto.in_(list(enabled_protocols)),
+            ).all()
+        } if target_set and enabled_protocols else set()
+        scanops["scope_keys"] = kept + sorted(discovered.difference(kept))
+        scanops.update({
+            "retry_of": source.id, "retry_stages": list(retry["by_stage"]),
+            "retry_targets": targets,
+        })
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        scan.command = (
+            f"{engine_runner.describe(spec)}  ·  {len(targets)}호스트"
+            f"  ·  확인 필요 재스캔 #{source.id} · --max-retries 4"
+        )
+        scan.batch_size = int(spec.get("batch_size") or 0)
+        scan.batch_total = -(-len(targets) // scan.batch_size) if scan.batch_size else 0
+        db.commit()
+        db.refresh(scan)
+        threading.Thread(target=_engine_worker, args=(scan.id,), daemon=True).start()
+    except Exception:
+        _fail_launch_setup(db, scan.id, user, scan.targets, launch_paths, artifact_dirs=[out_dir])
+    record(
+        db, user, "SCAN_RETRY_TIMEOUTS", target=scan.targets,
+        detail=f"#{source.id} → #{scan.id} · {len(targets)}대 · {','.join(retry['by_stage'])}",
+    )
+    return _scan_out(scan, db)
+
+
 @router.get("/{scan_id}/progress")
 def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = Depends(get_db)):
     """실시간 진행률 — 배치 진행(완료/전체) + 현재 배치 nmap percent/ETC/경과 → 전체 percent."""
@@ -2931,7 +3862,9 @@ def scan_progress(scan_id: int, _: User = Depends(current_user), db: Session = D
         ),
         # 호스트당 상한을 넘겨 포기당한 호스트. 이 실행에서는 부재를 말할 자격이 없고
         # 나중에 따로 다시 스캔할 대상이라, 진행 상황과 함께 꺼내 볼 수 있어야 한다.
-        "gave_up": engine_runner.gave_up_hosts(_settings.scans_dir / _basename(scan.id)),
+        "gave_up": engine_runner.gave_up_detail(
+            _settings.scans_dir / _basename(scan.id)
+        )["targets"],
     })
     return prog
 
@@ -2944,23 +3877,131 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
         raise HTTPException(status_code=404, detail="스캔을 찾을 수 없습니다.")
     out_dir = _settings.scans_dir / f"scan_{scan_id}"
     derived = engine_runner.parse_events(out_dir)
-    stages = derived["stages"] or (scan.stages_json or [])
+    durable_executions = db.query(ScanExecution).filter_by(scan_id=scan_id).order_by(
+        ScanExecution.id
+    ).all()
+    durable_issues = db.query(ScanQualityIssue).filter_by(scan_id=scan_id).order_by(
+        ScanQualityIssue.id
+    ).all()
+    durable_hosts = db.query(ScanHostObservation).filter_by(scan_id=scan_id).order_by(
+        ScanHostObservation.host_ip
+    ).all()
+    terminal = scan.status not in {"running", "canceling"}
+    use_db = terminal and bool(durable_executions or durable_issues or durable_hosts)
+    stages = (scan.stages_json or []) if use_db else derived["stages"] or (scan.stages_json or [])
     overall = dict(derived["overall"])
+    retry = engine_runner.gave_up_detail(out_dir)
+    if use_db:
+        executions = [{
+            "id": row.execution_key, "stage": row.stage, "group": row.group_kind,
+            "role": row.role, "reason": row.reason, "artifact": row.artifact,
+            "argv": row.argv_json or [], "status": row.status,
+            "started_at": row.started_at, "finished_at": row.finished_at,
+            "seconds": row.seconds, "rc": row.return_code,
+            # 라이브 뷰와 **같은 모양**이어야 한다. 빠뜨리면 완료된 스캔에서 상한·시간 초과
+            # 정보가 사라져 화면이 'undefined대' 를 그린다.
+            "watchdog_seconds": 0, "timeout_count": 0, "timed_out": [],
+            "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
+            # 지연 추적이 읽는 자리도 라이브와 같은 모양으로 비워 둔다. 수확량
+            # (hosts_found…)은 일부러 넣지 않는다 - 화면이 그 부재로 '기록 없음' 을
+            # 가리므로, 0 을 채워 넣으면 이 기능 이전의 옛 행이 '아무것도 못 찾음' 으로
+            # 보인다. 안 찾은 것과 기록이 없는 것은 다르다.
+            "proto": "", "hosts": [], "label": "", "ports": "", "phases": {},
+            "empty": False,   # 저장은 True 일 때만 한다(위 _diagnostics) - 자리만 맞춘다.
+            **(row.diagnostics_json or {}),
+        } for row in durable_executions]
+        issues = [_issue_out({
+            "issue_key": row.issue_key, "kind": row.kind, "stage": row.stage,
+            "host_ip": row.host_ip, "proto": row.proto, "port_spec": row.port_spec,
+            "message": row.detail, "retry_scan_id": row.retry_scan_id,
+            "resolved_by_scan_id": row.resolved_by_scan_id,
+        }) for row in durable_issues]
+        hosts = [{
+            "host_ip": row.host_ip, "discovery_status": row.discovery_status,
+            "tcp_sweep_status": row.tcp_sweep_status,
+            "tcp_service_status": row.tcp_service_status,
+            "udp_sweep_status": row.udp_sweep_status,
+            "udp_service_status": row.udp_service_status,
+        } for row in durable_hosts]
+        unresolved = [issue for issue in issues if issue["status"] != "resolved"]
+        # 재스캔 대기열은 **재스캔이 실제로 받아 주는 것**만 담는다. host 없는
+        # artifact_missing·command_error 까지 넣으면 targets 는 빈 채로 '1대 재스캔' 이
+        # 뜨고, 눌러도 /retry-timeouts 가 그 종류를 거절해 항상 400 이다. 없는 안내다.
+        # 품질 보고는 다른 축이라 `issues` 에는 전부 그대로 남긴다.
+        retryable = [
+            issue for issue in unresolved
+            if issue["host"] and issue["type"] in RETRYABLE_ISSUE_KINDS
+        ]
+        retry = {
+            "required": bool(retryable),
+            "count": len({issue["host"] for issue in retryable}),
+            "targets": sorted({issue["host"] for issue in retryable}),
+            # 화면(RetryQueue)이 읽는 이름은 `reasons_by_stage` 다 - 라이브 경로
+            # (`gave_up_detail`)가 주는 그 이름. 여기서 `reasons` 로 두면 스캔이 끝나는
+            # 순간 호스트는 대기열에 남는데 '시간 초과'·'재전송 상한' 같은 **이유 라벨만**
+            # 사라진다. 무엇 때문에 다시 돌려야 하는지가 안 보이는 대기열이 된다.
+            "by_stage": {}, "reasons_by_stage": {}, "issues": unresolved,
+        }
+        for issue in retryable:
+            # **stage+host 로 한 번만** 넣는다. 같은 호스트가 같은 단계에서 host_timeout 과
+            # retransmission_cap 을 함께 받으면 이슈가 두 행이라, 이슈마다 append 하면
+            # 한 대가 두 번 들어간다. 화면(RetryQueue)은 hosts.length 를 '대수' 로 쓰고
+            # key={host} 로 행을 그리므로 '1대'가 'TCP 포트 발견 · 2대' + 중복 행 +
+            # React key 충돌이 된다. 라이브 gave_up_detail() 은 집합으로 합치므로,
+            # 그대로 두면 완료 전후가 다른 답을 낸다. 이유만 둘 다 붙는다.
+            stage_hosts = retry["by_stage"].setdefault(issue["stage"], [])
+            if issue["host"] not in stage_hosts:
+                stage_hosts.append(issue["host"])
+            if issue["host"]:
+                stage_reasons = retry["reasons_by_stage"].setdefault(issue["stage"], {})
+                host_reasons = stage_reasons.setdefault(issue["host"], [])
+                if issue["type"] not in host_reasons:
+                    host_reasons.append(issue["type"])
+    else:
+        executions = derived.get("executions") or []
+        # 라이브도 **같은 모양**으로 내보낸다. 예전에는 이 가지만 parse_events 의 원본
+        # (host_ip) 을 그대로 흘려서, 화면이 읽는 `host` 가 비었다 - 운영자가 문제를
+        # 지켜보는 바로 그 순간에만 어느 장비인지 안 보이고, 스캔이 끝나면 나타났다.
+        issues = [_issue_out(raw) for raw in (derived.get("quality_issues") or [])
+                  if isinstance(raw, dict)]
+        hosts = []
     # The database lifecycle is authoritative. An empty/truncated event stream must not make a
     # terminal scan look like it is still running after a restart or worker failure.
     overall["status"] = scan.status
+    # 같은 이유가 실행 기록에도 적용된다. 엔진이 command_start 를 남기고 command_done 을
+    # 못 남긴 채 죽으면(프로세스 강제 종료, 머신 손실) 그 실행은 계속 '실행 중' 이고,
+    # 경과시간이 폴링할 때마다 늘어난다 - 스캔이 이미 실패로 마감된 뒤에도 그렇다.
+    # 생산자 쪽은 예외 경로에서 닫도록 고쳤지만(pipeline._nmap), 그쪽이 손쓸 수 없는
+    # 종료도 있으므로 여기서 한 번 더 막는다.
+    if scan.status not in ("running", "canceling"):
+        for execution in executions:
+            if execution.get("status") == "running":
+                execution["status"] = "error"
+                execution["interrupted"] = True
     return {
         "scan_id": scan_id,
         "status": scan.status,
-        "kind": "staged" if engine_runner.is_engine_scan(out_dir) else "legacy_or_import",
+        "kind": "staged" if use_db or engine_runner.is_engine_scan(out_dir) else "legacy_or_import",
+        "source": "db" if use_db else "live_events" if not terminal else "legacy_events",
         "timeline_available": bool(stages),
         "stages": stages,
         "overall": overall,
+        "current": derived.get("current") or {},
+        "executions": executions,
+        # 지연 진단 - 실행 기록을 '어디서 시간을 쓰는가' 로 접은 것. 완료된 스캔은 DB
+        # 투영을 쓰므로 그쪽 실행 기록으로 다시 접는다. 이벤트가 사라져도 같은 답이 나온다.
+        "trace": engine_runner.fold_trace(executions),
+        "issues": issues,
+        "recoveries": derived.get("recoveries") or [],
+        "hosts": hosts,
         "failure_code": scan.failure_code,
         "failure_message": scan.failure_message,
         "host_count": scan.host_count,
         "port_count": scan.port_count,
         "finished_at": scan.finished_at,
+        # 완료 후에도 다시 스캔할 타겟을 복사할 수 있도록 상세 응답에 남긴다.
+        "gave_up": retry["targets"],
+        "retry": retry,
     }
 
 

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+from .scanning import scan_options
 
 
 # ---- auth / user ----
@@ -70,12 +72,21 @@ class ScanRunIn(BaseModel):
     staged: bool = False           # estimate가 단계 엔진의 프로토콜 조합을 검증할 때만 사용
     discovery: str = "sn"          # 단계 엔진 발견 모드: sn(핑 스윕) / pn(발견 생략, ICMP 차단망)
     udp_all_targets: bool = False  # auto: UDP 식별을 discovery live host 가 아닌 원본 타깃 전체로(-Pn)
-    # 호스트당 상한(nmap --host-timeout). TCP 와 UDP 를 **따로** 받는다 — 정상 호스트가
-    # 걸리지 않는 상한이 프로토콜마다 다르기 때문이다(TCP 는 포트 수, UDP 는 ICMP 율제한이
-    # 소요를 지배한다). 빈 값이면 단계별 기본값(scan_options.HOST_TIMEOUT_DEFAULTS).
-    # "0" 은 명시적 끄기다. None 은 받지 않는다 - 안전 제어가 조용히 풀리면 안 된다(#48).
-    host_timeout: str = ""
-    udp_host_timeout: str = ""
+    # nmap 프로세스당 상한(초). 0 = 끔(기본).
+    #
+    # --host-timeout 을 되살리는 것이 아니다 - 그쪽은 상한에 걸린 호스트의 포트 표를 통째로
+    # 버리면서 실행은 성공으로 끝내서, '살아 있는데 열린 포트가 없다'로 읽히는 미탐을 만들었다.
+    # 워치독은 프로세스를 밖에서 끝내므로 그때까지 -oA 로 쓰인 XML 은 남고, 실행이 비정상
+    # 종료라 미관측 닫힘 권한을 얻지 못한다.
+    #
+    # 범위를 여기서 못박는다. 제약 없는 int 면 -1 · 86401 · 10**100 이 전부 통과하고,
+    # 레거시 경로가 그 값을 threading.Timer 에 그대로 넘긴다. TIMEOUT_MAX 를 넘는 값은
+    # 타이머 스레드가 OverflowError 로 즉시 죽어서, 요청은 수락됐는데 상한만 조용히
+    # 사라진다. 잘못된 값은 작업을 만들기 **전에** 422 로 거절하는 것이 맞다.
+    watchdog_seconds: int = Field(
+        default=scan_options.WATCHDOG_SECONDS_DEFAULT,
+        ge=0, le=scan_options.WATCHDOG_SECONDS_MAX,
+    )
 
 
 class KnownResultsIn(BaseModel):
@@ -131,6 +142,17 @@ class ScanOut(BaseModel):
     stages_json: list | None = None
     failure_code: str = ""
     failure_message: str = ""
+    created_by: int | None = None
+    created_by_name: str = ""
+    quality_status: str = "ok"
+    unresolved_issue_count: int = 0
+    unresolved_other_count: int = 0
+    unresolved_host_count: int = 0
+    retry_required: bool = False
+    retry_count: int = 0
+    retry_stages: list[str] = []
+    retry_status: str = "none"
+    retry_scan_id: int | None = None
     # 이력 표가 명령줄 대신 보여주는 요약(어디를·어떤 포트를·TCP/UDP). 서버가 실행된 argv 에서
     # 뽑으므로 표와 상세가 같은 근거를 본다. 원문 명령은 command 로 상세에서만 펼친다.
     summary: dict | None = None
@@ -167,6 +189,7 @@ class FindingOut(BaseModel):
     proto: str
     state: str
     reason: str = ""              # nmap --reason 원문(syn-ack/no-response…)
+    current_reason: str = ""
     state_evidence: str = ""      # 그 근거의 해석 — 응답 확인 / 무응답 추정 / 미관측
     needs_confirmation: bool = False
     service: str
@@ -201,6 +224,8 @@ class FindingOut(BaseModel):
     manual_note: str
     first_seen: datetime
     last_seen: datetime
+    first_scan_id: int | None = None
+    last_scan_id: int | None = None
 
 
 class FindingPatch(BaseModel):
@@ -217,7 +242,9 @@ class EventOut(BaseModel):
     type: str
     detail: str
     actor_user_id: int | None
+    actor_name: str = ""
     scan_id: int | None
+    scan_name: str = ""
     created_at: datetime
 
 
@@ -233,7 +260,9 @@ class EventFeedItem(BaseModel):
     server: str
     service: str
     actor_user_id: int | None
+    actor_name: str = ""
     scan_id: int | None
+    scan_name: str = ""
     created_at: datetime
 
 
@@ -320,7 +349,11 @@ class NotifyOut(BaseModel):
     id: int
     dept: str
     body: str
+    finding_ids: list[int] = []
+    finding_count: int = 0
     channel: str
+    sent_by: int | None = None
+    sent_by_name: str = ""
     sent_at: datetime
 
 

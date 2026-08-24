@@ -9,6 +9,11 @@ argv 를 근거로 삼아야 이력이 실행과 어긋나지 않는다.
 """
 from __future__ import annotations
 
+import ipaddress
+import re
+
+from . import chunker, scope
+
 FULL_TCP = "1-65535"
 # 값을 뒤 토큰으로 받는 옵션 — 그 값을 타겟으로 오인하지 않기 위해 건너뛴다.
 _VALUE_OPTIONS = frozenset({
@@ -153,15 +158,152 @@ def _looks_like_nmap_argv(tokens: list[str]) -> bool:
     return head.startswith("nmap")
 
 
+# 이력 표가 대상 칸에 쓰는 것은 **경계와 개수**뿐이다. 그걸 얻자고 대역을 통째로
+# 펼치면 /16 하나가 65,536 개의 문자열을 만들고 정렬까지 한다 - 목록의 **행마다**,
+# 화면을 열 때마다. CIDR 자체가 이미 그 답을 갖고 있으므로 정수 구간으로 센다.
+# 읽을 수 없는 토큰이 하나라도 있으면 손대지 않고 원래 경로로 넘긴다(같은 답, 같은 오류).
+_HOST_CAP = 65536
+# 확장 경로(chunker._RANGE_RE)와 같은 모양이어야 한다 - 여기서만 받아주는 표기가 있으면
+# 두 경로가 다른 답을 낸다.
+_LAST_OCTET_RANGE_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})-(\d{1,3})$")
+
+
+def _token_interval(token: str) -> tuple[int, int, int] | None:
+    """토큰 하나 → (주소 버전, 시작, 끝). 정수 구간으로 못 읽으면 None."""
+    if "/" in token:
+        try:
+            net = ipaddress.ip_network(token, strict=False)
+        except ValueError:
+            return None
+        # 확장 규칙과 같다 - 네트워크/브로드캐스트까지 전수.
+        return (net.version, int(net.network_address), int(net.broadcast_address))
+    if match := _LAST_OCTET_RANGE_RE.match(token):
+        base, lo, hi = match.group(1), int(match.group(2)), int(match.group(3))
+        octets = [int(part) for part in base.split(".")]
+        if any(part > 255 for part in octets) or lo > hi or hi > 255:
+            return None
+        try:
+            start = ipaddress.ip_address(f"{base}.{lo}")
+            end = ipaddress.ip_address(f"{base}.{hi}")
+        except ValueError:
+            return None
+        return (start.version, int(start), int(end))
+    try:
+        address = ipaddress.ip_address(token)
+    except ValueError:
+        return None
+    return (address.version, int(address), int(address))
+
+
+def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _subtract(spans: list[tuple[int, int]], cuts: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    out = list(spans)
+    for cut_start, cut_end in cuts:
+        nxt: list[tuple[int, int]] = []
+        for start, end in out:
+            if cut_end < start or cut_start > end:
+                nxt.append((start, end))
+                continue
+            if start < cut_start:
+                nxt.append((start, cut_start - 1))
+            if cut_end < end:
+                nxt.append((cut_end + 1, end))
+        out = nxt
+    return out
+
+
+def _target_bounds(tokens: list[str], excluded: list[str]) -> tuple[int, str, str] | None:
+    """(호스트 수, 첫 대상, 마지막 대상). 펼치지 않고 센다. 못 세면 None."""
+    spans: dict[int, list[tuple[int, int]]] = {}
+    names: set[str] = set()
+    for token in tokens:
+        interval = _token_interval(token)
+        if interval is None:
+            if "/" in token or _LAST_OCTET_RANGE_RE.match(token) \
+                    or chunker.is_unsupported_composite_ipv4_range(token):
+                return None            # 확장 경로가 오류로 처리할 토큰 - 그쪽에 맡긴다.
+            names.add(token)           # 호스트명은 그대로 한 대다.
+            continue
+        version, start, end = interval
+        spans.setdefault(version, []).append((start, end))
+    cuts: list[tuple[int, int]] = []
+    for token in excluded:
+        interval = _token_interval(token)
+        if interval is None or interval[0] != 4:
+            return None                # 제외 규칙을 못 읽으면 개수를 말하지 않는다.
+        cuts.append((interval[1], interval[2]))
+    for version in list(spans):
+        merged = _merge(spans[version])
+        spans[version] = _subtract(merged, cuts) if version == 4 and cuts else merged
+
+    total = sum(end - start + 1 for version_spans in spans.values()
+                for start, end in version_spans) + len(names)
+    if total == 0:
+        return (0, "", "")
+    if total > _HOST_CAP:
+        return None                    # 확장 경로가 거절하는 크기 - 표기도 그때와 같아야 한다.
+
+    def render(version: int, value: int) -> str:
+        return str(ipaddress.ip_address(value) if version == 4
+                   else ipaddress.IPv6Address(value))
+
+    ordered_versions = sorted(v for v, rows in spans.items() if rows)
+    first = last = ""
+    if ordered_versions:
+        low = ordered_versions[0]
+        high = ordered_versions[-1]
+        first = render(low, min(start for start, _ in spans[low]))
+        last = render(high, max(end for _, end in spans[high]))
+    if names:
+        # 호스트명은 IP 뒤에 온다(_describe_targets 의 정렬 규칙과 같다).
+        last = sorted(names, key=str.casefold)[-1]
+        if not first:
+            first = sorted(names, key=str.casefold)[0]
+    return (total, first, last)
+
+
 def _describe_targets(targets: str, excluded_hosts: str) -> str:
     tokens = [t for t in (targets or "").replace(",", " ").split() if t]
     if not tokens:
-        head = "—"
-    elif len(tokens) == 1:
-        head = tokens[0]
-    else:
-        head = f"{tokens[0]} 외 {len(tokens) - 1}건"
-    return f"{head} (일부 제외)" if excluded_hosts else head
+        return "—"
+    excluded_tokens = [t for t in excluded_hosts.replace(",", " ").split() if t]
+    bounds = _target_bounds(tokens, excluded_tokens)
+    if bounds is not None:
+        count, first, last = bounds
+        if not count:
+            return "대상 0대"
+        return f"{first if first == last else f'{first} – {last}'} · 대상 {count}대"
+    try:
+        hosts = chunker.expand_targets(tokens)
+        excluded = [t for t in excluded_hosts.replace(",", " ").split() if t]
+        hosts = scope.apply_excludes(hosts, excluded)
+    except ValueError:
+        # 오래된 직접 명령에는 Nmap 전용 복합 범위가 남아 있을 수 있다. 실제 호스트 수를
+        # 확정할 수 없는 이력은 그럴듯한 숫자를 만들지 않고 기존 축약 표기로 되돌린다.
+        head = tokens[0] if len(tokens) == 1 else f"{tokens[0]} 외 {len(tokens) - 1}건"
+        return f"{head} (일부 제외)" if excluded_hosts else head
+
+    def order(host: str) -> tuple:
+        try:
+            address = ipaddress.ip_address(host)
+            return (0, address.version, int(address))
+        except ValueError:
+            return (1, 0, host.casefold())
+
+    ordered = sorted(hosts, key=order)
+    if not ordered:
+        return "대상 0대"
+    bounds = ordered[0] if len(ordered) == 1 else f"{ordered[0]} – {ordered[-1]}"
+    return f"{bounds} · 대상 {len(ordered)}대"
 
 
 def summarize_command(command, targets: str = "") -> dict:

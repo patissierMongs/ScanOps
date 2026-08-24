@@ -89,7 +89,7 @@
 - 단독 스캐너는 원본 Nmap XML을 증거로 보존하고, versioned manifest에서 XML basename·크기·SHA-256과
   실제 실행 target을 결박한다. 서버는 target cap/scope/exclude/count/fingerprint, Nmap runstats와
   scaninfo를 첫 DB/파일 부작용 전에 다시 검증한다. 성공한 single/TCP discovery와 실제 UDP 대상만
-  미관측 닫힘 권한을 가지며 TCP identify·실패·중지·host-timeout unit은 관측 전용이다. manifest가 없는
+  미관측 닫힘 권한을 가지며 TCP identify·실패·중지·host-timeout unit(구형 산출물)은 관측 전용이다. manifest가 없는
   기존 XML은 하위 호환을 위해 관측 host 범위만 사용한다.
 
 ## 4. 모듈 (백엔드)

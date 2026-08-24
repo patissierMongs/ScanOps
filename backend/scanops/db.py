@@ -61,6 +61,22 @@ def _migrate() -> None:
             conn.exec_driver_sql("ALTER TABLE risk_rules ADD COLUMN product VARCHAR(128) DEFAULT ''")
         if rule_cols and "cpe" not in rule_cols:
             conn.exec_driver_sql("ALTER TABLE risk_rules ADD COLUMN cpe VARCHAR(128) DEFAULT ''")
+        exec_cols = {r[1] for r in
+                     conn.exec_driver_sql("PRAGMA table_info(scan_executions)").fetchall()}
+        if exec_cols and "diagnostics_json" not in exec_cols:
+            # 소급 backfill 은 하지 않는다 - 옛 행에는 그 값이 애초에 없었다. None 이면
+            # 화면이 기본값으로 그리고, 다음 스캔부터 채워진다.
+            conn.exec_driver_sql("ALTER TABLE scan_executions ADD COLUMN diagnostics_json JSON")
+        issue_cols = {r[1] for r in
+                      conn.exec_driver_sql("PRAGMA table_info(scan_quality_issues)").fetchall()}
+        for column, ddl in (("proto", "VARCHAR(8) DEFAULT ''"),
+                            ("port_spec", "VARCHAR(256) DEFAULT ''")):
+            # 서비스 저하가 어느 프로토콜·어느 포트에서 났는지. 옛 행은 그 값이 애초에
+            # 없었으므로 소급하지 않는다 - 빈 문자열이면 화면이 그 줄을 그리지 않는다.
+            if issue_cols and column not in issue_cols:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE scan_quality_issues ADD COLUMN {column} {ddl}"
+                )
         cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(findings)").fetchall()}
         if "owner" not in cols:  # 자산대장 담당자명 전파용 컬럼
             conn.exec_driver_sql("ALTER TABLE findings ADD COLUMN owner VARCHAR(128) DEFAULT ''")

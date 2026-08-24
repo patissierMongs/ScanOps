@@ -49,6 +49,30 @@ class _Sink:
         self.events.append({"event": event, **data})
 
 
+def test_run_state_retries_a_transient_windows_replace_lock(monkeypatch, tmp_path):
+    from scanops_engine import state as state_module
+
+    path = tmp_path / "run-state.json"
+    state = RunState(path)
+    state.set("live", ["127.0.0.1"])
+    real_replace = state_module.os.replace
+    calls = 0
+
+    def flaky_replace(source, target):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise PermissionError(5, "transient sharing violation")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(state_module.os, "replace", flaky_replace)
+    state.save()
+
+    assert calls == 3
+    assert json.loads(path.read_text(encoding="utf-8"))["live"] == ["127.0.0.1"]
+    assert list(tmp_path.glob(".run-state.json.*.tmp")) == []
+
+
 def test_engine_stop_sentinel_survives_stale_progress_save_until_resume(tmp_path):
     state_path = tmp_path / "run-state.json"
     initial = RunState(state_path)
@@ -151,6 +175,31 @@ def test_nmap_normal_progress_still_streams(monkeypatch, tmp_path):
     assert "About 42.50% done" in (tmp_path / "progress.stdout.log").read_text(
         encoding="utf-8",
     )
+
+
+def test_nmap_collects_hosts_that_hit_the_retransmission_cap(monkeypatch, tmp_path):
+    class WarningProcess:
+        pid = 23457
+        stdout = io.StringIO(
+            "Warning: 10.0.0.8 giving up on port because retransmission cap hit (2).\n"
+            "Warning: 10.0.0.7 giving up on port because retransmission cap hit (2).\n"
+            "Warning: 10.0.0.8 giving up on port because retransmission cap hit (2).\n"
+        )
+
+        @staticmethod
+        def poll():
+            return 0
+
+        @staticmethod
+        def wait(timeout=None):
+            return 0
+
+    monkeypatch.setattr(nmaprun, "popen_owned", lambda *args, **kwargs: WarningProcess())
+    monkeypatch.setattr(nmaprun, "close_kill_job", lambda proc: False)
+
+    result = nmaprun.run("nmap", [], tmp_path / "cap-hit")
+
+    assert result["retransmission_cap_hosts"] == ["10.0.0.7", "10.0.0.8"]
 
 
 @pytest.mark.parametrize("stopped_rc", [0, -15])
@@ -769,12 +818,14 @@ def test_default_discovery_and_tcp_sweep_argv_match_standalone_policy(
     assert counts["errors"] == 0
     assert calls == [
         ["-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4", "--reason",
-         "--min-hostgroup", "64", "--max-retries", "2",
-         "--max-parallelism", "100",
+         # 발견은 -sn 이라 두 가지가 함께 빠진다 - SYN 스캔이 아니므로
+         # --defeat-rst-ratelimit 을 얹으면 nmap 이 fatal 로 끝나고, nmap 문서상
+         # --min-hostgroup 은 호스트 발견 단계에 아무 효과가 없다.
+         "--max-retries", "2", "--max-parallelism", "100",
          "--exclude", ",".join(excluded), target],
         ["-sS", "-Pn", "-n", "--open", "-T4", "--reason",
-         "--max-retries", "2", "--min-hostgroup", "64",
-         "--defeat-rst-ratelimit", "--max-parallelism", "100",
+         "--max-retries", "2", "--min-hostgroup", "64", "--max-parallelism", "100",
+         "--defeat-rst-ratelimit",
          "-p", "1-65535", "--exclude", ",".join(excluded), target],
     ]
     assert all(args.count("--exclude") == 1 for args in calls)
@@ -829,7 +880,8 @@ def test_pn_udp_sweep_argv_keeps_exclude_and_standalone_defaults(monkeypatch, tm
     assert counts["errors"] == 0
     assert calls == [[
         "-sU", "-Pn", "-n", "--open", "-T4", "--reason",
-        "--max-retries", "2", "-p",
+        # UDP 는 ICMP 율제한 때문에 TCP 보다 재전송을 넉넉히 준다.
+        "--max-retries", "4", "--min-hostgroup", "64", "--max-parallelism", "100", "-p",
         "7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,"
         "514,520,623,1900,2049,4500,5060,5353,5355,11211",
         "--exclude", excluded, target,
@@ -926,10 +978,12 @@ def test_tcp_scan_type_controls_sweep_and_service_golden_argv(
     assert counts["errors"] == 0
     assert calls == [
         [scan_flag, "-Pn", "-n", "--open", "-T4", "--reason",
-         "--max-retries", "2", "--min-hostgroup", "64",
-         *defeat_rst, "--max-parallelism", "100", "-p", "80", ip],
+         "--max-retries", "2", "--min-hostgroup", "64", "--max-parallelism", "100",
+         *defeat_rst, "-p", "80", ip],
         [scan_flag, "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
-         "--max-retries", "2", "-p", "T:80", ip],
+         # 처리량 정책은 식별 단계에도 실린다 - 한 단계만 빠지면 그 단계가 꼬리가 된다.
+         "--max-retries", "2", "-p", "T:80",
+         "--min-hostgroup", "64", "--max-parallelism", "100", *defeat_rst, ip],
     ]
 
 
@@ -1009,7 +1063,7 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
         "stages": {
             "tcp": {"enabled": False},
             "udp": {"enabled": False},
-            "service": {"nse": ["banner"]},
+            "service": {"nse": ["banner"], "udp_nse": ["dns-nsid"]},
         },
     })
     calls = []
@@ -1039,7 +1093,7 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
     assert counts["errors"] == 0 and counts["services"] == 3
     assert [call["proto"] for call in calls] == ["tcp", "udp"]
     tcp, udp = calls
-    assert tcp["base"].name == "stage3-127_0_0_1-tcp"
+    assert tcp["base"].name == "stage3-tcp-b0-g0"
     # 정상 경로는 프로토콜당 한 프로세스다. 포트별로 쪼개는 것은 그 묶음이 죽었을 때뿐이다.
     assert udp["base"].name == "stage3-127_0_0_1-udp"
     assert tcp["args"][tcp["args"].index("-p") + 1] == "T:54842,54844"
@@ -1049,14 +1103,16 @@ def test_full_service_probe_splits_tcp_and_udp_commands(monkeypatch, tmp_path):
     assert "--version-all" in tcp["args"] and "--version-all" not in udp["args"]
     assert tcp["args"] == [
         "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason", "-T4",
-        "--max-retries", "2", "-p", "T:54842,54844", "--script", "banner",
-        "--script-timeout", "10s", "--exclude", excluded, ip,
+        "--max-retries", "2", "-p", "T:54842,54844",
+        "--min-hostgroup", "64", "--max-parallelism", "100", "--defeat-rst-ratelimit",
+        "--script", "banner", "--script-timeout", "2m", "--exclude", excluded, ip,
     ]
-    # UDP probe 에는 NSE 를 붙이지 않는다: 발견에 반영되는 스크립트가 전부 TCP 인데, 출발지 포트를
-    # bind 하는 UDP 스크립트는 스캔 호스트의 서비스와 충돌해 NSE 정리 실패로 실행을 못 믿게 만든다.
+    # UDP도 웹에서 선택한 UDP/both 스크립트만 열린 UDP 포트 식별에 붙인다.
     assert udp["args"] == [
         "-sU", "-Pn", "-n", "-sV", "--open", "--reason", "-T4",
-        "--max-retries", "2", "-p", "U:63848", "--exclude", excluded, ip,
+        "--max-retries", "4", "-p", "U:63848",
+        "--min-hostgroup", "64", "--max-parallelism", "100",
+        "--script", "dns-nsid", "--script-timeout", "3m", "--exclude", excluded, ip,
     ]
     state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
     assert ip in state["service_done"] and "job" in state["stages_done"]
@@ -1278,6 +1334,37 @@ def test_allinone_copy_and_embedded_python_path_include_engine(tmp_path):
     assert "..\\..\\backend" in pth and "..\\..\\engine" in pth
 
 
+def test_allinone_start_creates_and_prints_initial_admin_credentials(tmp_path):
+    module = _load_allinone()
+    app = tmp_path / "app"
+    app.mkdir()
+    module.write_launcher(app)
+
+    start = (app / "START.bat").read_text(encoding="ascii")
+    assert "run_bootstrap" in start and "INITIAL_ADMIN.txt" in start
+    assert "read_text(encoding='utf-8')" in start
+    assert "Username: admin" in start and "Password: '+pw" in start
+    assert start.index("run_bootstrap") < start.index("-m uvicorn")
+    assert "chcp 65001" in start
+    assert "<this-server-ip>" not in start
+
+
+def test_runtime_browser_failed_stage_fixture_matches_current_scan_schema(client):
+    """The browser fixture uses raw SQL, so new non-null scan columns must be supplied."""
+    from scanops.config import get_settings
+
+    seeded = runtime_e2e._seed_failed_stage_scan(get_settings().data_dir)
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, seeded["id"])
+        assert scan is not None
+        assert scan.batch_total == 0 and scan.batch_size == 0
+        assert scan.source_fingerprint == ""
+    finally:
+        db.close()
+
+
 def test_offline_wheelhouse_resolves_only_for_documented_windows_pythons(tmp_path):
     """wheelhouse 는 문서화된 런타임(all-in-one 의 3.12/3.13)에서만 오프라인 해석돼야 한다.
 
@@ -1311,6 +1398,7 @@ def test_offline_wheelhouse_resolves_only_for_documented_windows_pythons(tmp_pat
         assert f'"{version}"' in installer
     # all-in-one 은 두 런타임을 모두 담을 수 있으므로 그 사실도 문서에 있어야 한다.
     assert "--python 3.12" in readme
+    assert "--arch x86" in readme
 
 
 def test_non_ascii_windows_powershell_installer_has_utf8_bom():
@@ -1422,6 +1510,7 @@ def test_allinone_default_keeps_the_established_output_contract():
     옮겼다 — smoke/CI 가 ScanOps_allinone.zip 을 이름으로 집어가기 때문."""
     module = _load_allinone()
     assert module.PYTHON == "3.13" and module.ABI == "cp313"
+    assert module.ARCH == "x64" and module.PLATFORM == "win_amd64"
     assert module.OUT.name == "ScanOps_allinone.zip"
     assert module.STAGE.name == "_allinone_stage"
 
@@ -1448,6 +1537,22 @@ def test_allinone_configure_binds_runtime_abi_and_output_per_version():
         module.configure("3.11")
 
 
+def test_allinone_configure_binds_x86_runtime_without_changing_x64_defaults():
+    module = _load_allinone()
+
+    module.configure("3.13", arch="x86")
+    assert module.ARCH == "x86" and module.PLATFORM == "win32"
+    assert "embed-win32" in module.EMBED_URL
+    assert module.OUT.name == "ScanOps_allinone_x86.zip"
+    assert module.STAGE.name == "_allinone_stage_x86"
+
+    with pytest.raises(SystemExit, match="x86"):
+        module.configure("3.12", arch="x86")
+
+    module.configure("3.13")
+    assert module.ARCH == "x64" and module.OUT.name == "ScanOps_allinone.zip"
+
+
 def test_allinone_wheelhouse_covers_every_supported_python():
     """각 지원 버전의 win_amd64 바이너리 휠이 wheelhouse 에 있어야 완전 오프라인 빌드가 된다."""
     module = _load_allinone()
@@ -1457,6 +1562,10 @@ def test_allinone_wheelhouse_covers_every_supported_python():
         for dist in ("SQLAlchemy", "greenlet", "pydantic_core"):
             assert any(w.startswith(dist) and f"{abi}-{abi}-win_amd64" in w for w in wheels), (
                 f"{dist} 의 {abi} win_amd64 휠이 wheelhouse 에 없습니다")
+
+    for dist in ("SQLAlchemy", "pydantic_core"):
+        assert any(w.startswith(dist) and "cp313-cp313-win32" in w for w in wheels), (
+            f"{dist} 의 cp313 win32 휠이 wheelhouse 에 없습니다")
 
 
 def test_allinone_ships_windows_conditional_dependencies():
@@ -1479,6 +1588,20 @@ def test_allinone_verify_site_rejects_mismatched_abi(tmp_path):
     (site / "pydantic_core" / "_pydantic_core.cp312-win_amd64.pyd").write_bytes(b"x")
 
     with pytest.raises(SystemExit, match="cp313"):
+        module.verify_site(site)
+
+
+def test_allinone_verify_site_rejects_mismatched_architecture(tmp_path):
+    module = _load_allinone()
+    module.configure("3.13", arch="x86")
+    site = tmp_path / "site"
+    for pkg in ("fastapi", "uvicorn", "sqlalchemy", "pydantic", "pydantic_core",
+                "pydantic_settings", "starlette", "openpyxl", "multipart",
+                "click", "colorama"):
+        (site / pkg).mkdir(parents=True)
+    (site / "pydantic_core" / "_pydantic_core.cp313-win_amd64.pyd").write_bytes(b"x")
+
+    with pytest.raises(SystemExit, match="win32"):
         module.verify_site(site)
 
 
@@ -1652,7 +1775,7 @@ def test_a_missing_service_probe_artifact_is_recorded_as_degraded(tmp_path, monk
     spec = _run_pipeline(tmp_path, monkeypatch, omit={"stage3-"})
     report = engine_runner.artifact_report(tmp_path, spec, force_scanned_hosts=False)
     assert not (report["authority_missing"] + report["authority_broken"]), report
-    assert report["enrichment_missing"] == ["stage3-127_0_0_1-tcp.xml"], report
+    assert report["enrichment_missing"] == ["stage3-tcp-b0-g0.xml"], report
 
 
 def test_one_dead_udp_probe_no_longer_abandons_the_rest_of_the_identify_stage(
@@ -1682,20 +1805,24 @@ def test_one_dead_udp_probe_no_longer_abandons_the_rest_of_the_identify_stage(
     seen = []
 
     def fake_run(nmap, args, out_base, **_kwargs):
-        target = args[-1]
+        targets = tuple(ip for ip in (dead, alive) if ip in args)
         pspec = args[args.index("-p") + 1].split(":")[1]
         ports = [int(x) for x in pspec.split(",")]
-        seen.append((target, tuple(ports), "--nsock-engine" in args))
+        seen.append((targets, tuple(ports), "--nsock-engine" in args))
         # 500 을 물고 있는 실행만 죽는다 — 묶음도, 쪼갠 뒤의 500 도.
-        if target == dead and 500 in ports:
+        if dead in targets and 500 in ports:
             return {"rc": 7, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
         rows = "".join(
             f'<port protocol="udp" portid="{p}"><state state="open" reason="udp-response"/>'
             '<service name="test" method="probed"/></port>' for p in ports)
+        xml_hosts = "".join(
+            '<host><status state="up"/>'
+            f'<address addr="{target}" addrtype="ipv4"/><ports>{rows}</ports></host>'
+            for target in targets
+        )
         Path(str(out_base) + ".xml").write_text(
-            '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
-            f'<address addr="{target}" addrtype="ipv4"/><ports>{rows}</ports>'
-            '</host><runstats><finished exit="success"/></runstats></nmaprun>',
+            '<?xml version="1.0"?><nmaprun>' + xml_hosts
+            + '<runstats><finished exit="success"/></runstats></nmaprun>',
             encoding="utf-8",
         )
         return {"rc": 0, "seconds": 0.01, "cmd": [nmap, *args], "stopped": False}
@@ -1704,11 +1831,11 @@ def test_one_dead_udp_probe_no_longer_abandons_the_rest_of_the_identify_stage(
     sink = _Sink()
     counts = Pipeline(spec, sink, "nmap").run()
 
-    # 정상 호스트는 묶음 한 번으로 끝난다 — 포트마다 프로세스를 만들지 않는다.
-    assert [call for call in seen if call[0] == alive] == [(alive, (123,), False)]
+    # 공유 호스트 집합이 없으므로 정상 호스트는 자기 포트 묶음 한 번으로 끝난다.
+    assert [call for call in seen if call[0] == (alive,)] == [((alive,), (123,), False)]
     # 죽은 호스트는 묶음 → select 재시도 → 그때서야 포트별 분할.
-    assert (dead, (161, 500), False) in seen and (dead, (161, 500), True) in seen
-    assert (dead, (161,), False) in seen, "묶음이 죽은 뒤에야 포트별로 쪼갠다"
+    assert ((dead,), (161, 500), False) in seen and ((dead,), (161, 500), True) in seen
+    assert ((dead,), (161,), False) in seen, "묶음이 죽은 뒤에야 포트별로 쪼갠다"
     assert (tmp_path / f"stage3-{dead.replace('.', '_')}-udp161.xml").exists()
     # 뒤따르는 호스트가 살아남는다 — stage 가 중단되지 않았다는 뜻.
     assert (tmp_path / f"stage3-{alive.replace('.', '_')}-udp.xml").exists()
@@ -2301,3 +2428,187 @@ def test_closure_audit_bounds_a_legacy_scan_by_the_ports_it_actually_scanned(tmp
                           "tcp": {"enabled": True, "ports": ""}},
                "targets": ["10.0.0.1"]}
     assert audit_closures._covers(unknown, state, "10.0.0.1", 443, "tcp") is None
+
+
+def test_a_fully_recovered_group_does_not_report_its_superseded_artifact(tmp_path):
+    """묶음이 죽고 호스트별 대체가 **전부** 살아났으면 증거 손실이 아니다.
+
+    실패한 묶음 coverage 항목을 기대 집합에서 통째로 빼면, 그 파일이 어느 기대치에도 안
+    들어가고 '기대 밖 산출물' 을 훑는 마지막 단계가 그것을 손상으로 다시 센다. 결과는
+    완전히 복구된 스캔에 `nse_degraded` 와 호스트 없는 `artifact_broken` 이 붙는 것 -
+    운영자는 있지도 않은 증거 손실을 쫓게 된다.
+    """
+    spec = {
+        "job_id": 1, "targets": ["10.0.0.1"],
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": False, "ports": ""},
+                   "udp": {"enabled": True, "ports": "53,161"},
+                   "service": {"enabled": True, "nse": [], "confirm": False}},
+    }
+    # 묶음 하나가 죽었고(finished=false), 그 자리를 호스트별 실행이 대신했다.
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "open_map": {"10.0.0.1": {"udp": [53, 161]}},
+        "coverage": [{"role": "enrichment", "artifact": "stage3-udp-b0-g0.xml",
+                      "proto": "udp", "finished": False,
+                      "hosts": ["10.0.0.1"], "ports": "U:53,161"}],
+    }), encoding="utf-8")
+    (tmp_path / "stage3-udp-b0-g0.xml").write_text(_TRUNCATED_XML, encoding="utf-8")
+    # 대체 실행: 포트별로 쪼개 전부 완결됐다.
+    for port in (53, 161):
+        (tmp_path / f"stage3-10_0_0_1-udp{port}.xml").write_text(_FINISHED_XML, encoding="utf-8")
+
+    report = engine_runner.artifact_report(tmp_path, spec, force_scanned_hosts=False)
+    assert report["enrichment_broken"] == [], (
+        f"완전 복구인데 증거 손실로 보고했다: {report['enrichment_broken']}"
+    )
+    assert report["enrichment_missing"] == []
+
+
+def test_a_partially_recovered_group_still_reports_what_was_lost(tmp_path):
+    """반대 경계 — 대체가 일부만 살아났으면 그 손실은 그대로 남아야 한다.
+
+    대체된 산출물을 '기대 밖' 에서 빼는 것이 손실을 통째로 감추는 쪽으로 넘어가면 안 된다.
+    """
+    spec = {
+        "job_id": 1, "targets": ["10.0.0.1"],
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": False, "ports": ""},
+                   "udp": {"enabled": True, "ports": "53,161"},
+                   "service": {"enabled": True, "nse": [], "confirm": False}},
+    }
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "open_map": {"10.0.0.1": {"udp": [53, 161]}},
+        "coverage": [{"role": "enrichment", "artifact": "stage3-udp-b0-g0.xml",
+                      "proto": "udp", "finished": False,
+                      "hosts": ["10.0.0.1"], "ports": "U:53,161"}],
+    }), encoding="utf-8")
+    (tmp_path / "stage3-udp-b0-g0.xml").write_text(_TRUNCATED_XML, encoding="utf-8")
+    (tmp_path / "stage3-10_0_0_1-udp53.xml").write_text(_FINISHED_XML, encoding="utf-8")
+    # 161 은 되찾지 못했다.
+    (tmp_path / "stage3-10_0_0_1-udp161.xml").write_text(_TRUNCATED_XML, encoding="utf-8")
+
+    report = engine_runner.artifact_report(tmp_path, spec, force_scanned_hosts=False)
+    lost = set(report["enrichment_broken"]) | set(report["enrichment_missing"])
+    assert lost, "부분 복구인데 손실을 하나도 보고하지 않았다"
+    assert any("udp161" in name for name in lost), lost
+
+
+def test_a_failed_group_never_overwrites_the_host_probe_that_replaced_it(tmp_path):
+    """대체된 묶음의 **부분** 결과가 성공한 호스트별 probe 를 덮으면 안 된다.
+
+    묶음이 죽어도 파싱 가능한 부분 XML 은 남는다. `collect_results()` 는 stage3 를 파일명
+    순으로 읽고 뒤에 읽은 것이 이기는데(확인 패스가 기본을 이겨야 하므로), 정렬상
+    `stage3-10_0_0_1-...` 이 `stage3-udp-b0-g0` 보다 **먼저** 온다. 그래서 실패한 묶음이
+    나중에 읽히며 서비스·NSE 식별을 지운다.
+    """
+    out = tmp_path
+    (out / "run-state.json").write_text(json.dumps({
+        "open_map": {"10.0.0.1": {"udp": [53]}},
+        "coverage": [{"role": "enrichment", "artifact": "stage3-udp-b0-g0.xml",
+                      "proto": "udp", "finished": False,
+                      "hosts": ["10.0.0.1"], "ports": "U:53"}],
+    }), encoding="utf-8")
+    # 실패한 묶음 - 포트는 봤지만 정체를 못 밝혔다.
+    (out / "stage3-udp-b0-g0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+        '<port protocol="udp" portid="53"><state state="open"/>'
+        '<service name="unknown"/></port></ports></host></nmaprun>', encoding="utf-8")
+    # 대체 실행 - 같은 포트를 domain 으로 밝혔다.
+    (out / "stage3-10_0_0_1-udp53.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+        '<port protocol="udp" portid="53"><state state="open"/>'
+        '<service name="domain" product="BIND" method="probed"/></port>'
+        '</ports></host><runstats><finished exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
+
+    findings, _hosts = engine_runner.collect_results(out)
+    by_port = {(f["proto"], f["port"]): f for f in findings}
+    assert by_port[("udp", 53)]["service"] == "domain", (
+        f"실패한 묶음이 대체 실행의 식별을 덮었다: {by_port[('udp', 53)]['service']}"
+    )
+
+
+def test_a_group_whose_fallback_did_not_recover_keeps_its_partial_evidence(tmp_path):
+    """대체가 **실패한** 묶음의 부분 관측은 버리면 안 된다.
+
+    실패한 묶음을 인입에서 빼는 것은 호스트별 대체가 그 자리를 채웠을 때만 옳다. 대체가
+    없거나 그것도 실패했으면 묶음의 부분 XML 이 그 호스트에 대한 **유일한** 증거다 -
+    워치독이 끊었어도 끝난 호스트의 서비스·NSE 는 그 안에 들어 있다. 버리면 식별이
+    스윕의 '정체 불명' 으로 되돌아간다.
+    """
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "open_map": {"10.0.0.1": {"udp": [53]}},
+        "coverage": [{"role": "enrichment", "artifact": "stage3-udp-b0-g0.xml",
+                      "proto": "udp", "finished": False,
+                      "hosts": ["10.0.0.1"], "ports": "U:53"}],
+    }), encoding="utf-8")
+    # 묶음은 죽었지만 정체를 밝힌 관측이 들어 있다.
+    (tmp_path / "stage3-udp-b0-g0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+        '<port protocol="udp" portid="53"><state state="open"/>'
+        '<service name="domain" product="BIND" method="probed"/></port>'
+        '</ports></host></nmaprun>', encoding="utf-8")
+    # 대체 실행이 **없다** - 되찾지 못했다.
+
+    findings, _hosts = engine_runner.collect_results(tmp_path)
+    by_port = {(f["proto"], f["port"]): f for f in findings}
+    assert ("udp", 53) in by_port, "복구 안 된 호스트의 관측이 통째로 사라졌다"
+    assert by_port[("udp", 53)]["service"] == "domain", (
+        "부분 관측이 밝힌 식별을 버렸다 - 스윕의 정체 불명으로 되돌아간다"
+    )
+
+
+def test_only_a_service_probe_calls_an_empty_result_a_failure(tmp_path):
+    """빈손이 곧 실패인 것은 서비스 probe 뿐이다.
+
+    그쪽은 스윕이 이미 '열렸다' 고 증명한 포트만 다시 보므로 빈손이 그 자체로 실패다.
+    발견(`-sn`)은 포트를 아예 안 보고, 스윕은 훑었는데 열린 게 없을 수 있다. 셋을 같은
+    기준으로 재면 정상 실행이 추적 패널에서 '산출물 없음' 으로 뜨고, 도구가 거짓 경보를
+    내기 시작한다 - 실측으로 `-sn` 과 빈 스윕이 모두 empty=True 였다.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import nmaprun
+
+    discovery = tmp_path / "stage0-discovery.xml"
+    discovery.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/></host></nmaprun>', encoding="utf-8")
+    swept = tmp_path / "stage-tcp-b0.xml"
+    swept.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.2" addrtype="ipv4"/><ports>'
+        '<port protocol="tcp" portid="22"><state state="closed"/></port>'
+        '</ports></host></nmaprun>', encoding="utf-8")
+
+    assert nmaprun.artifact_yield(discovery)["empty"] is False, "정상 발견을 실패로 부른다"
+    assert nmaprun.artifact_yield(swept)["empty"] is False, "정상 빈 스윕을 실패로 부른다"
+    # 서비스 probe 가 빈손이면 그건 실제 실패다.
+    assert nmaprun.artifact_yield(swept, expects_services=True)["empty"] is True
+
+    # 생산자가 단계로 갈라 넘기는지 - 여기가 어긋나면 위 구분이 화면에 닿지 않는다.
+    src = (Path(__file__).resolve().parents[2]
+           / "engine" / "scanops_engine" / "pipeline.py").read_text(encoding="utf-8")
+    assert 'expects_services=meta["stage"].endswith("service")' in src, (
+        "빈손 판정이 단계와 무관하게 붙는다"
+    )
+
+
+def test_both_udp_retry_paths_use_a_temporary_output_base(tmp_path):
+    """묶음 경로만 고치면 호스트별 경로에서 같은 손실이 남는다.
+
+    재시도가 같은 `-oA` 를 쓰면 nmap 이 시작하자마자 첫 실행의 산출물을 자른다. 워치독이
+    끊은 뒤 복구해 둔 관측이 그때 사라지고, 재시도까지 실패하면 되찾은 것만 잃는다.
+    """
+    src = (Path(__file__).resolve().parents[2]
+           / "engine" / "scanops_engine" / "pipeline.py").read_text(encoding="utf-8")
+    retries = [block for block in src.split("_UDP_RETRY_ENGINE] + args")[1:]]
+    assert len(retries) == 2, f"UDP 재시도 경로가 둘이 아니다: {len(retries)}"
+    for index, block in enumerate(retries):
+        head = block.split("self.sink.emit")[0]
+        assert "alt_base" in head, f"{index + 1}번째 재시도가 첫 실행과 같은 base 를 쓴다"
+        assert "adopt_artifacts" in head and "discard_artifacts" in head, (
+            f"{index + 1}번째 재시도가 채택·폐기를 안 가른다"
+        )

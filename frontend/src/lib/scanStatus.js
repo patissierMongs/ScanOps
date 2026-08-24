@@ -52,3 +52,21 @@ export function shouldLoadStages(scan = {}) {
   if (scan.stages_json?.length) return false;
   return active || scanKind(scan).key === "staged";
 }
+
+// 이력 표의 '품질' 배지 — 몇 건을 어떤 말로 띄울지.
+//
+// 재스캔 배지(`재스캔 필요 · N대`)와 같은 줄에 선다. 재스캔은 host_timeout·재전송 상한·
+// 서비스 저하처럼 **다시 돌리면 메워지는** 이슈만 대상으로 하는데, 예전에는 그 배지가
+// 뜨면 품질 배지를 통째로 감췄다. 그래서 artifact_missing·command_error 처럼 재시도로
+// 사라지지 않는 이슈가 섞여 있으면 화면에는 '재스캔 필요' 만 남아, 재스캔 한 번이면
+// 전부 해결된다는 거짓 안내가 됐다. 이제 그 경우 **재시도로 못 메우는 나머지**만 센다.
+// (severe 로 세는 세 종류는 모두 재시도 대상 밖이라 언제나 이 나머지에 들어온다.)
+export function qualityBadge(scan = {}) {
+  const total = scan.unresolved_issue_count || 0;
+  if (!total) return null;
+  const count = scan.retry_status === "required"
+    ? (scan.unresolved_other_count || 0)
+    : total;
+  if (!count) return null;
+  return { count, label: scan.quality_status === "error" ? "품질 오류" : "확인 필요" };
+}

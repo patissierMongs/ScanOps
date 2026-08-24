@@ -52,7 +52,9 @@ def main(pw):
     except urllib.error.HTTPError as e:
         print("규칙 skip:", e.read().decode("utf-8"))
 
-    findings = req("GET", "/api/findings", tok)
+    # 확정되지 않은 관측(open|filtered · tcpwrapped)은 발견 목록 **화면**의 기본이 접힘이다.
+    # 여기서는 집계·검증 값을 내므로 전부 펼쳐서 받는다 - 조용히 줄면 덜 검증하게 된다.
+    findings = req("GET", "/api/findings?hide_unconfirmed=false&hide_tcpwrapped=false", tok)
     from collections import Counter
     by_dept = Counter(f["dept"] or "(미지정)" for f in findings)
     by_risk = Counter(f["risk_level"] for f in findings)

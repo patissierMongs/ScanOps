@@ -37,7 +37,9 @@ def main(pw):
     except urllib.error.HTTPError as e:
         print("asset skip:", e.read().decode("utf-8"))
 
-    findings = req("GET", "/api/findings", tok)
+    # 확정되지 않은 관측(open|filtered · tcpwrapped)은 발견 목록 **화면**의 기본이 접힘이다.
+    # 여기서는 집계·검증 값을 내므로 전부 펼쳐서 받는다 - 조용히 줄면 덜 검증하게 된다.
+    findings = req("GET", "/api/findings?hide_unconfirmed=false&hide_tcpwrapped=false", tok)
     by_port = {f["port"]: f for f in findings}
 
     # telnet(23): 처리중 + 마감 (라이프사이클 시연)
@@ -69,7 +71,9 @@ def main(pw):
         })
 
     print("\n=== 최종 발견 ===")
-    for f in sorted(req("GET", "/api/findings", tok), key=lambda x: x["port"]):
+    # 바로 아래에 대시보드 '열린 N' 을 함께 찍는다 - 이 목록만 접히면 두 줄이 어긋난다.
+    listing = req("GET", "/api/findings?hide_unconfirmed=false&hide_tcpwrapped=false", tok)
+    for f in sorted(listing, key=lambda x: x["port"]):
         print(f"  {f['host_ip']}:{f['port']:>5}/{f['proto']} {f['service']:11} "
               f"위험={f['risk_level']:6} 상태={f['status']:5} 부서={f['dept'] or '(미지정)'}")
     d = req("GET", "/api/dashboard", tok)

@@ -95,9 +95,26 @@ function commandText(parts) {
 // 발견 단계 host-discovery probe — 백엔드 nmap_runner.DISCOVERY_PS/PA 와 동일하게 유지(미리보기 정확도).
 const DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080";
 const DISCOVERY_PA = "-PA80,443,3389";
+// 처리량 정책 — 백엔드 nmap_runner.THROUGHPUT_FLAGS / 엔진 Pipeline._throughput_args 와 같은 값.
+// 미리보기가 실제 명령과 어긋나면 사용자가 보고 판단하는 근거가 사라진다.
+// 가속 옵션이 아니라 부하 상한이다(--max-parallelism 은 동시 프로브 상한).
+const THROUGHPUT = ["--min-hostgroup", "64", "--max-parallelism", "100"];
+// 호스트 발견(-sn)에는 --min-hostgroup 이 실리지 않는다. nmap 문서상 그 단계에는 효과가
+// 없어 엔진이 빼기 때문이다(Pipeline._throughput_args(groups_hosts=False)). 미리보기가
+// 실제 argv 와 어긋나면, 사용자는 돌지도 않는 옵션을 보고 판단하게 된다.
+const THROUGHPUT_DISCOVERY = ["--max-parallelism", "100"];
+// NSE 스크립트 인스턴스 상한(프로토콜별). --host-timeout 과 달리 초과한 스크립트만 죽고
+// 포트 표는 남으므로 유지한다.
+const TCP_SCRIPT_TIMEOUT = "2m";
+const UDP_SCRIPT_TIMEOUT = "3m";
+// --defeat-rst-ratelimit 는 SYN 스캔 전용이다(nmap 이 -sT/-sU/-sn 과 함께 주면 fatal 종료).
+const DEFEAT_RST = "--defeat-rst-ratelimit";
+const MAX_RETRIES = "2";
+// UDP 는 ICMP 율제한 때문에 응답이 늦게·드물게 온다 — 재전송을 아끼면 '못 봤다'가 늘어난다.
+const UDP_MAX_RETRIES = "4";
 
 export default function ScanOptions({
-  targets = [], excludes = [], portsAuto = "", staged = false, discovery = "sn", fixedTargetPorts = false, onState,
+  targets = [], excludes = [], excludePorts = "", portsAuto = "", staged = false, discovery = "sn", fixedTargetPorts = false, onState,
 }) {
   const [workflow, setWorkflow] = useState("auto");
   const [registry, setRegistry] = useState([]);
@@ -176,10 +193,12 @@ export default function ScanOptions({
     [nseReg, nseSel]
   );
   // Nmap 7.99는 반복 --exclude를 누적하지 않으므로 항상 단일 comma-list로 표시한다.
-  const excludeArgs = useMemo(
-    () => excludes.length ? ["--exclude", excludes.join(",")] : [],
-    [excludes]
-  );
+  const excludeArgs = useMemo(() => {
+    const args = excludes.length ? ["--exclude", excludes.join(",")] : [];
+    const excludedPortSpec = excludePorts.trim();
+    if (excludedPortSpec) args.push("--exclude-ports", excludedPortSpec);
+    return args;
+  }, [excludes, excludePorts]);
 
   // 단계 분리(staged) 또는 자동 스캔이면 한 번에 안 돌고 단계별로 나눠 순차 실행된다.
   const stepped = staged || workflow === "auto";
@@ -194,7 +213,6 @@ export default function ScanOptions({
       .join(",");
     const tcpScripts = scriptsFor("tcp");
     const udpScripts = scriptsFor("udp");
-    const stagedScripts = selectedScripts.join(",");
     const out = [];
 
     if (staged) {
@@ -211,7 +229,7 @@ export default function ScanOptions({
           title: "호스트 발견",
           desc: "포트 스캔 전에 ICMP Echo와 TCP SYN/ACK probe로 응답 호스트만 추립니다.",
           cmd: commandText(["nmap", "--stats-every", "5s", "-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n",
-            timing, "--reason", "--max-retries", "2", "--min-hostgroup", "64", "--max-parallelism", "100",
+            timing, "--reason", "--max-retries", MAX_RETRIES, ...THROUGHPUT_DISCOVERY,
             ...excludeArgs, "-oA", "scan_<id>.discovery", ...targets]),
         });
       }
@@ -220,17 +238,25 @@ export default function ScanOptions({
           title: "TCP 포트 탐색",
           desc: "발견된 호스트를 배치로 나눠 열린 TCP 포트를 찾습니다.",
           cmd: commandText(["nmap", "--stats-every", "5s", scanFlag, "-Pn", "-n", "--open", timing,
-            "--reason", "--max-retries", "2", "--min-hostgroup", "64", defeatRst,
-            "--max-parallelism", "100", "-p", tcp, ...excludeArgs,
+            "--reason", "--max-retries", MAX_RETRIES, ...THROUGHPUT, defeatRst,
+            "-p", tcp, ...excludeArgs,
             "-oA", "scan_<id>.tcp_<batch>", ...sweepTargets]),
         });
         out.push({
           title: "TCP 서비스 식별",
-          desc: "호스트별 열린 TCP에만 서비스·제품·버전·NSE 단서를 확인합니다.",
+          // 엔진은 배치의 열린 포트 **합집합**을 한 프로세스로 돈다(Pipeline._service_batch).
+          // 호스트 1대짜리 명령으로 보여 주면 실제 대상 규모와 프로세스 수를 낮춰 말하게 되고,
+          // 운영자는 승인할 부하를 잘못 본다.
+          desc: "배치의 열린 TCP 합집합을 한 프로세스로 확인합니다(서비스·제품·버전·NSE).",
           cmd: commandText(["nmap", "--stats-every", "5s", scanFlag, "-Pn", "-sV", versionFlag, "--open",
-            "--reason", timing, "--max-retries", "2", "-p", "T:<TCP 탐색에서 열린 포트>",
-            stagedScripts && "--script", stagedScripts, stagedScripts && "--script-timeout", stagedScripts && "10s", ...excludeArgs,
-            "-oA", "scan_<id>.tcp_service_<host>", "<호스트 1대>"]),
+            "--reason", timing, "--max-retries", MAX_RETRIES,
+            "-p", "T:<배치에서 열린 TCP 합집합>",
+            ...THROUGHPUT, defeatRst,
+            // 선택한 NSE 는 백엔드가 프로토콜별로 나눠 싣는다(filter_nse_proto). 나누지 않으면
+            // 돌지도 않을 TCP 전용 스크립트가 UDP 명령에, 그 반대도 그대로 보인다.
+            tcpScripts && "--script", tcpScripts,
+            tcpScripts && "--script-timeout", tcpScripts && TCP_SCRIPT_TIMEOUT, ...excludeArgs,
+            "-oA", "scan_<id>.stage3-tcp-b<배치>-g0", ...sweepTargets]),
         });
       }
       if (sel.has("udp") && udp) {
@@ -238,17 +264,22 @@ export default function ScanOptions({
           title: "UDP 포트 탐색",
           desc: "발견된 호스트의 주요/지정 UDP 포트에서 응답 후보를 찾습니다.",
           cmd: commandText(["nmap", "--stats-every", "5s", "-sU", "-Pn", "-n", "--open", timing,
-            "--reason", "--max-retries", "2", "-p", udp, ...excludeArgs,
+            "--reason", "--max-retries", UDP_MAX_RETRIES, ...THROUGHPUT, "-p", udp, ...excludeArgs,
             "-oA", "scan_<id>.udp_<batch>", ...sweepTargets]),
         });
         out.push({
           title: "UDP 서비스 식별",
-          desc: "호스트별 열린 UDP에 -sV와 UDP용 NSE 단서를 적용합니다(--version-all 제외).",
+          // UDP 는 **같은 포트가 열린 호스트끼리** 묶어 돈다(합집합을 다 던지면 응답 없는
+          // 프로브만 늘어난다). 그래서 묶음 수만큼 프로세스가 생긴다.
+          desc: "같은 포트가 열린 호스트끼리 묶어 -sV와 UDP용 NSE 를 적용합니다(--version-all 제외).",
           cmd: commandText(["nmap", "--stats-every", "5s", "-sU", "-Pn", "-n", "-sV",
-            versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing, "--max-retries", "2",
-            "-p", "U:<UDP 탐색에서 열린 포트>", stagedScripts && "--script", stagedScripts,
-            stagedScripts && "--script-timeout", stagedScripts && "10s", ...excludeArgs,
-            "-oA", "scan_<id>.udp_service_<host>", "<호스트 1대>"]),
+            versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing,
+            "--max-retries", UDP_MAX_RETRIES, ...THROUGHPUT,
+            "-p", "U:<함께 열린 UDP 포트>",
+            udpScripts && "--script", udpScripts,
+            udpScripts && "--script-timeout", udpScripts && UDP_SCRIPT_TIMEOUT,
+            ...excludeArgs,
+            "-oA", "scan_<id>.stage3-udp-b<배치>-g0", "<그 포트가 열린 호스트들>"]),
         });
       }
       return out;
@@ -259,15 +290,16 @@ export default function ScanOptions({
         title: "TCP 발견",
         desc: "전체/지정 TCP에서 지금 열려 있는 포트만 먼저 추려냅니다.",
         cmd: commandText(["nmap", "--stats-every", "10s", "-sS", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n", "-T4",
-          "--reason", "--min-hostgroup", "64", "--max-retries", "2", "--defeat-rst-ratelimit",
-          "--max-parallelism", "100", "-p", tcp, ...excludeArgs,
+          "--reason", "--max-retries", MAX_RETRIES, DEFEAT_RST, ...THROUGHPUT,
+          "-p", tcp, ...excludeArgs,
           "-oA", "scan_<id>.tcp_discovery", ...targets]),
       });
       out.push({
         title: "TCP 식별",
         desc: "앞 단계에서 살아있던 호스트의 열린 TCP에만 서비스·제품·버전·NSE 단서를 확인합니다.",
         cmd: commandText(["nmap", "--stats-every", "10s", "-sS", "-Pn", "-sV", "--version-all", "--open", "--reason",
-          "-T4", "--max-retries", "2", tcpScripts && "--script", tcpScripts, "--script-timeout", "10s",
+          "-T4", "--max-retries", MAX_RETRIES, DEFEAT_RST, ...THROUGHPUT,
+          tcpScripts && "--script", tcpScripts, "--script-timeout", TCP_SCRIPT_TIMEOUT,
           "-p", "T:<1단계에서 발견된 TCP 포트>", ...excludeArgs,
           "-oA", "scan_<id>.tcp_identify", ...targets]),
       });
@@ -277,7 +309,8 @@ export default function ScanOptions({
         title: "UDP 식별",
         desc: "주요/지정 UDP에서 DNS·SNMP·NTP 같은 용도 단서를 확인합니다(강도 7 -sV — UDP는 version-all 미적용).",
         cmd: commandText(["nmap", "--stats-every", "10s", "-sU", "-Pn", "-n", "-sV", "--open",
-          "--reason", "-T4", "--max-retries", "2", udpScripts && "--script", udpScripts, "--script-timeout", "10s",
+          "--reason", "-T4", "--max-retries", UDP_MAX_RETRIES, ...THROUGHPUT,
+          udpScripts && "--script", udpScripts, "--script-timeout", UDP_SCRIPT_TIMEOUT,
           "-p", udp, ...excludeArgs, "-oA", "scan_<id>.udp_identify", ...targets]),
       });
     }

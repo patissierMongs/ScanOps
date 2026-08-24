@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Finding, FindingEvent, User
+from ..models import Finding, FindingEvent, ScanRun, User
 from ..schemas import EventFeed, EventFeedItem
 from .deps import current_user
 from .findings import parse_needle
@@ -54,12 +54,24 @@ def event_feed(
         q.order_by(FindingEvent.created_at.desc(), FindingEvent.id.desc())
         .offset(offset).limit(limit).all()
     )
+    actor_ids = {ev.actor_user_id for ev, _finding in rows if ev.actor_user_id is not None}
+    scan_ids = {ev.scan_id for ev, _finding in rows if ev.scan_id is not None}
+    actors = {
+        user.id: (user.display_name or user.username)
+        for user in db.query(User).filter(User.id.in_(actor_ids)).all()
+    } if actor_ids else {}
+    scans = {
+        scan.id: (scan.name or f"스캔 #{scan.id}")
+        for scan in db.query(ScanRun).filter(ScanRun.id.in_(scan_ids)).all()
+    } if scan_ids else {}
     items = [
         EventFeedItem(
             id=ev.id, finding_id=ev.finding_id, type=ev.type, detail=ev.detail,
             host_ip=f.host_ip, port=f.port, server=f.server,
             display_identity=f.display_identity, service=f.service,
-            actor_user_id=ev.actor_user_id, scan_id=ev.scan_id, created_at=ev.created_at,
+            actor_user_id=ev.actor_user_id, actor_name=actors.get(ev.actor_user_id, ""),
+            scan_id=ev.scan_id, scan_name=scans.get(ev.scan_id, ""),
+            created_at=ev.created_at,
         )
         for ev, f in rows
     ]

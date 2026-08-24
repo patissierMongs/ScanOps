@@ -17,16 +17,39 @@ _EXCLUDE_RANGE_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})-(\d{1,3
 _PORT_BODY_RE = re.compile(r"^(\d{1,5}-\d{1,5}|\d{1,5}-|-\d{1,5}|\d{1,5})$")
 _NSE_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 _TIMINGS = {"-T0", "-T1", "-T2", "-T3", "-T4", "-T5"}
-# 호스트당 상한(nmap --host-timeout). 단독 스캐너 validate_host_timeout 과 같은 문법이며
-# 세 경로가 어긋나지 않는지는 백엔드 계약 테스트가 검사한다.
-_HOST_TIMEOUT_RE = re.compile(r"^\d+[smh]?$")
 
 # standalone auto 스캔과 공유하는 기본 발견/동시성 정책.
 DISCOVERY_PS = "-PS21,22,23,25,80,110,135,139,143,443,445,993,1433,1521,3306,3389,5432,8080"
 DISCOVERY_PA = "-PA80,443,3389"
 DEFAULT_MIN_HOSTGROUP = 64
 DEFAULT_MAX_PARALLELISM = 100
-DEFAULT_NSE_SCRIPT_TIMEOUT = "10s"
+# NSE 스크립트 인스턴스 하나의 상한. --host-timeout 과 **성질이 다르다** - nmap 문서:
+# "Any script instance which exceeds that time will be terminated and no output will be
+# shown." 즉 초과한 스크립트만 죽고 포트 표는 그대로 남는다(실측 A/B 로도 확인됐다:
+# 상한이 걸려도 rc=0 · 완결 XML · port=open, 스크립트 출력만 생략).
+# 그래서 호스트 상한을 뺀 것과 달리 이쪽은 유지한다 - 느린 NSE 꼬리를 관측 손실 없이 자른다.
+DEFAULT_TCP_NSE_SCRIPT_TIMEOUT = "2m"
+DEFAULT_UDP_NSE_SCRIPT_TIMEOUT = "3m"
+# TCP 프로브 재전송 상한.
+DEFAULT_MAX_RETRIES = 2
+# UDP 재전송 상한. 닫힌 UDP 포트의 ICMP port-unreachable 을 대상 **OS 스택 자체가**
+# 율제한한다(흔히 초당 1회). TCP 와 같은 값을 쓰면 그 백오프를 못 기다려 실제로 닫힌 포트가
+# open|filtered 로 남는다 - '닫혔다'가 아니라 '못 봤다'가 쌓인다.
+DEFAULT_UDP_MAX_RETRIES = 4
+# nmap 프로세스 하나가 붙잡을 수 있는 최대 시간(초). 0 = 끔(기본).
+#
+# --host-timeout 을 되살리는 것이 아니다. 상한에 걸린 호스트의 포트 표를 통째로 버리면서
+# 실행은 성공으로 끝내는 그 동작이 문제였다(그 조합이 '살아 있는데 열린 포트가 없다'로
+# 읽혀 기존 발견을 전부 닫는다). 워치독은 밖에서 프로세스를 끝내므로 그때까지 -oA 로
+# 쓰인 XML 은 남고, 실행은 비정상 종료라 닫힘 권한을 얻지 못한다.
+#
+# 기본이 0 인 이유: 정상적인 전 포트 스캔이 몇 시간 걸리는 망이 실제로 있고, 여기에
+# 섣부른 값을 박으면 '느린 망'을 '실패'로 바꾼다. 켤 때는 그 망에서 관측한 값보다
+# 넉넉히 잡는다.
+_MAX_WATCHDOG_SECONDS = 24 * 60 * 60
+# 재전송 상한의 상한. 손상됐거나 미래 버전이 쓴 spec 의 터무니없는 값이 그대로 argv 에
+# 실려 실행이 끝나지 않는 것을 막는다.
+_MAX_RETRIES_CAP = 10
 # 식별 단계 동시 실행 상한. 프로세스가 늘면 스캔 서버의 소켓·CPU 를 그만큼 쓰므로,
 # '느려서 못 쓰는' 문제를 '서버가 죽는' 문제로 바꾸지 않도록 위쪽을 막아 둔다.
 _MAX_SERVICE_WORKERS = 32
@@ -45,8 +68,8 @@ DEFAULT_UDP_PORTS = ("7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,5
 # 검사한다(tests/test_layer_contracts.py). 엔진은 백엔드를 import 하지 않는 독립 패키지라
 # 파생시킬 수 없어서, 사본을 두되 드리프트를 테스트로 막는 방식이다.
 #
-# UDP 식별 단계는 NSE 를 붙이지 않으므로(_probe_protocol 이 tcp 일 때만 --script 를 싣는다)
-# 이 목록은 TCP 식별에만 쓰인다.
+# 웹 경로는 선택한 목록을 proto 에 따라 nse/udp_nse 로 나눠서 전달한다. 이 목록은 구형 spec 이
+# nse 만 보낼 때의 TCP 폴백이며, UDP 는 명시적인 udp_nse 가 있을 때만 스크립트를 실행한다.
 DEFAULT_NSE = ["banner", "dns-nsid", "fingerprint-strings", "ftp-anon", "ftp-syst",
                "http-headers", "http-server-header", "http-title", "rdp-ntlm-info",
                "rpcinfo", "sip-methods", "smb-os-discovery", "smb-protocols",
@@ -58,8 +81,7 @@ class DiscoveryStage:
     enabled: bool = True
     mode: str = "sn"          # sn=핑 스윕 / pn=발견 생략(타겟 전체 live 취급)
     timing: str = "-T4"
-    max_retries: int = 2
-    host_timeout: str = ""    # "" = 미적용
+    max_retries: int = DEFAULT_MAX_RETRIES
 
 
 @dataclass
@@ -69,8 +91,7 @@ class TcpStage:
     ports: str = "1-65535"
     timing: str = "-T4"
     min_rate: int = 0         # 0=강제 하한 없음; 명시된 경우에만 --min-rate 적용
-    max_retries: int = 2
-    host_timeout: str = ""    # "" = 미적용
+    max_retries: int = DEFAULT_MAX_RETRIES
 
 
 @dataclass
@@ -78,9 +99,9 @@ class UdpStage:
     enabled: bool = False
     ports: str = DEFAULT_UDP_PORTS
     timing: str = "-T4"
-    max_retries: int = 2
-    host_timeout: str = ""    # "" = 미적용. TCP 와 별개 값이다 — 같이 묶으면 UDP 의
-                              # ICMP 율제한 지연 특성에 맞춰 TCP 까지 늘어난다.
+    # TCP 와 **별개 값**이다. UDP 는 무응답을 open|filtered 로 보고하므로, 재전송을 아끼면
+    # 그만큼 '못 본 것'이 '열려 있을지도 모르는 것'으로 쌓인다.
+    max_retries: int = DEFAULT_UDP_MAX_RETRIES
 
 
 @dataclass
@@ -90,14 +111,17 @@ class ServiceStage:
     version_all: bool = True
     version_light: bool = False
     nse: list = field(default_factory=lambda: list(DEFAULT_NSE))
-    max_retries: int = 2
+    # 열린 UDP 포트 식별에만 붙일 UDP/both 스크립트. 구형 spec 은 이 필드가 없으므로 빈 목록이
+    # 안전한 하위호환이고, 웹 build_job_spec 은 사용자가 고른 목록을 proto 별로 나눠 채운다.
+    udp_nse: list = field(default_factory=list)
+    max_retries: int = DEFAULT_MAX_RETRIES
+    # UDP probe 전용 재전송 상한(TCP 와 별개). sweep 과 같은 이유로 더 넉넉하다.
+    udp_max_retries: int = DEFAULT_UDP_MAX_RETRIES
     confirm: bool = False      # 2-pass — 1차에 안 잡히면 retries↑ 재확인(재스캔용)
-    host_timeout: str = ""     # "" = 미적용
-    udp_host_timeout: str = "" # UDP probe 전용 상한(비면 host_timeout 을 따른다)
-    # 식별 단계에서 동시에 돌릴 호스트 수. 이 단계는 프로세스마다 타깃이 1개라 nmap 자신의
-    # 호스트 병렬성(--min-hostgroup)을 못 쓴다 - 직렬로 두면 호스트 수에 소요가 그대로 비례한다.
+    # UDP의 정확 host×port 묶음과 공통 실행 실패 후 호스트별 격리를 동시에 돌릴 상한.
+    # 정상 TCP 전체 스캔은 배치 합집합 한 프로세스에서 Nmap 자체 호스트 병렬화를 사용한다.
     # 재스캔(닫힘 권한이 걸린 경로)은 1 로 강제해 실패 시 즉시 중단하는 의미를 지킨다.
-    workers: int = 8
+    workers: int = 16
 
 
 _STAGE_CLASSES = {"discovery": DiscoveryStage, "tcp": TcpStage, "udp": UdpStage, "service": ServiceStage}
@@ -125,25 +149,6 @@ def _validate_exclude(value) -> None:
         raise ValueError(f"잘못된 제외 대상 IPv4/CIDR입니다: {value!r}") from exc
     if network.version != 4:
         raise ValueError(f"IPv6 제외 대상은 아직 지원하지 않습니다: {value!r}")
-
-
-def validate_host_timeout(value: object, label: str = "host_timeout") -> str:
-    """호스트당 상한. 빈 값/0 이면 미적용. 그 외는 nmap 시간 형식(15m 등).
-
-    ``None`` 은 '끄기'가 아니라 **거절**이다 — 단독 스캐너 validate_host_timeout 과 같은
-    이유다(#48). 이 값은 한 호스트가 실행 전체를 붙잡는 것을 막는 안전 제어라, 손상됐거나
-    미래 버전이 쓴 spec 의 ``"host_timeout": null`` 을 조용히 ""(미적용)으로 바꾸면 막으려던
-    지연이 그대로 돌아온다. 끄고 싶으면 ""/0 을 명시해야 한다.
-    """
-    if not isinstance(value, str):
-        raise ValueError(
-            f"{label} 값이 문자열이 아닙니다: {value!r}. 끄려면 0 또는 빈 값을 명시하세요.")
-    value = value.strip()
-    if value in ("", "0"):
-        return ""
-    if not _HOST_TIMEOUT_RE.fullmatch(value):
-        raise ValueError(f"{label} 값은 30s, 15m 같은 nmap 시간 형식이어야 합니다(끄려면 0): {value!r}")
-    return value
 
 
 def _validate_ports(value: str, label: str) -> None:
@@ -177,6 +182,8 @@ def _build(cls, d):
 @dataclass
 class JobSpec:
     job_id: str = "job"
+    # nmap 프로세스당 상한(초). 0 = 끔. 단계가 아니라 실행 단위라 job 수준에 둔다.
+    watchdog_seconds: int = 0
     targets: list = field(default_factory=list)
     exclude: list = field(default_factory=list)
     # 모든 단계에서 뺄 포트(nmap --exclude-ports). 프린터처럼 스캔에 반응해 문제를
@@ -205,6 +212,7 @@ class JobSpec:
             out_dir=d.get("out_dir", "."),
             batch_size=int(d.get("batch_size", 256)),
             sudo=d.get("sudo", "auto"),
+            watchdog_seconds=d.get("watchdog_seconds", 0),
             targets_ports=d.get("targets_ports"),
             rescan_units=d.get("rescan_units"),
         )
@@ -218,6 +226,7 @@ class JobSpec:
             "job_id": self.job_id, "targets": self.targets, "exclude": self.exclude,
             "exclude_ports": self.exclude_ports,
             "out_dir": self.out_dir, "batch_size": self.batch_size, "sudo": self.sudo,
+            "watchdog_seconds": self.watchdog_seconds,
             "targets_ports": self.targets_ports,
             "rescan_units": self.rescan_units,
             "stages": {
@@ -248,14 +257,21 @@ class JobSpec:
                 raise ValueError(f"허용되지 않는 {label} 타이밍: {tm!r}")
         # 상한은 단계마다 별개 값이다. 여기서 정규화까지 해 두면 pipeline 은 문자열이
         # 비었는지만 보면 된다.
-        self.discovery.host_timeout = validate_host_timeout(
-            self.discovery.host_timeout, "discovery.host_timeout")
-        self.tcp.host_timeout = validate_host_timeout(self.tcp.host_timeout, "tcp.host_timeout")
-        self.udp.host_timeout = validate_host_timeout(self.udp.host_timeout, "udp.host_timeout")
-        self.service.host_timeout = validate_host_timeout(
-            self.service.host_timeout, "service.host_timeout")
-        self.service.udp_host_timeout = validate_host_timeout(
-            self.service.udp_host_timeout, "service.udp_host_timeout")
+        for label, stage, field_name in (
+                ("discovery", self.discovery, "max_retries"),
+                ("tcp", self.tcp, "max_retries"),
+                ("udp", self.udp, "max_retries"),
+                ("service", self.service, "max_retries"),
+                ("service", self.service, "udp_max_retries")):
+            value = getattr(stage, field_name)
+            try:
+                value = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{label}.{field_name} 는 정수여야 합니다: {value!r}") from exc
+            if not 0 <= value <= _MAX_RETRIES_CAP:
+                raise ValueError(
+                    f"{label}.{field_name} 는 0-{_MAX_RETRIES_CAP} 여야 합니다: {value}")
+            setattr(stage, field_name, value)
         try:
             self.service.workers = int(self.service.workers)
         except (TypeError, ValueError) as exc:
@@ -263,9 +279,22 @@ class JobSpec:
         if not 1 <= self.service.workers <= _MAX_SERVICE_WORKERS:
             raise ValueError(
                 f"service.workers 는 1-{_MAX_SERVICE_WORKERS} 여야 합니다: {self.service.workers}")
-        for n in self.service.nse:
-            if not _NSE_RE.match(n):
-                raise ValueError(f"허용되지 않는 NSE 스크립트명: {n!r}")
+        for label, scripts in (("service.nse", self.service.nse),
+                               ("service.udp_nse", self.service.udp_nse)):
+            if not isinstance(scripts, list):
+                raise ValueError(f"{label} 는 스크립트명 배열이어야 합니다: {scripts!r}")
+            for n in scripts:
+                if not isinstance(n, str) or not _NSE_RE.fullmatch(n):
+                    raise ValueError(f"허용되지 않는 NSE 스크립트명: {n!r}")
+        try:
+            self.watchdog_seconds = int(self.watchdog_seconds or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"watchdog_seconds 는 정수여야 합니다: {self.watchdog_seconds!r}") from exc
+        if not 0 <= self.watchdog_seconds <= _MAX_WATCHDOG_SECONDS:
+            raise ValueError(
+                f"watchdog_seconds 는 0-{_MAX_WATCHDOG_SECONDS} 여야 합니다: "
+                f"{self.watchdog_seconds}")
         if self.sudo not in ("auto", "always", "never"):
             raise ValueError(f"sudo 는 auto/always/never: {self.sudo!r}")
         if self.discovery.mode not in ("sn", "pn"):

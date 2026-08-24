@@ -97,6 +97,69 @@ def test_dept_notification(client):
     assert len(client.get("/api/notifications", headers=h).json()) == 1
 
 
+def test_notification_history_keeps_exact_snapshot_targets_and_actor(client):
+    h = _auth(client)
+    db = SessionLocal()
+    try:
+        confirmed = Finding(
+            finding_key="10.1.0.1|443|tcp", host_ip="10.1.0.1", port=443, proto="tcp",
+            state="open", reason="syn-ack", service="https", risk_level="high",
+            status="미조치", dept="운영팀",
+        )
+        inferred = Finding(
+            finding_key="10.1.0.2|161|udp", host_ip="10.1.0.2", port=161, proto="udp",
+            state="open|filtered", reason="no-response", service="snmp", risk_level="medium",
+            status="처리중", dept="운영팀",
+        )
+        allowed = Finding(
+            finding_key="10.1.0.3|22|tcp", host_ip="10.1.0.3", port=22, proto="tcp",
+            state="open", reason="syn-ack", service="ssh", risk_level="info",
+            status="미조치", dept="운영팀", allowed=1,
+        )
+        db.add_all([confirmed, inferred, allowed])
+        db.commit()
+        confirmed_id, inferred_id, allowed_id = confirmed.id, inferred.id, allowed.id
+    finally:
+        db.close()
+
+    preview = client.get(
+        "/api/notifications/preview", headers=h, params={"dept": "운영팀"},
+    ).json()
+    assert preview["finding_count"] == 2
+    assert "[상]" in preview["body"]
+    assert "재확인 필요" in preview["body"]
+
+    body = "운영팀 불변 통보 snapshot"
+    created = client.post("/api/notifications", headers=h, json={
+        "dept": "운영팀", "body": body,
+        "finding_ids": [inferred_id, confirmed_id],
+    })
+    assert created.status_code == 201, created.text
+    payload = created.json()
+    assert payload["body"] == body
+    assert payload["finding_ids"] == [inferred_id, confirmed_id]
+    assert payload["finding_count"] == 2
+    assert payload["sent_by_name"] == "op"
+
+    db = SessionLocal()
+    try:
+        db.get(Finding, confirmed_id).dept = "변경팀"
+        db.get(Finding, inferred_id).status = "정상처리"
+        db.commit()
+    finally:
+        db.close()
+
+    history = client.get("/api/notifications", headers=h).json()
+    assert history[0]["body"] == body
+    assert history[0]["finding_ids"] == [inferred_id, confirmed_id]
+    assert history[0]["sent_by_name"] == "op"
+
+    rejected = client.post("/api/notifications", headers=h, json={
+        "dept": "운영팀", "body": "invalid", "finding_ids": [allowed_id],
+    })
+    assert rejected.status_code == 400
+
+
 def test_omitted_asset_fields_preserve_asset_and_finding_attribution(client):
     h = _auth(client)
     created = client.post("/api/assets", headers=h, json={
@@ -324,3 +387,128 @@ def test_asset_xlsx_sparse_dimension_bomb_is_rejected(client):
     )
 
     assert response.status_code == 413
+
+
+# ── 부서 통보는 발견 목록의 표시 정책을 물려받으면 안 된다 ──
+
+def _dept_findings(dept="영업부"):
+    """같은 부서에 확정 열림 · open|filtered · tcpwrapped 를 하나씩."""
+    base = dict(proto="tcp", status="미조치", risk_level="medium", dept=dept,
+                product="", version="", server="", hostname="")
+    db = SessionLocal()
+    try:
+        db.add(Finding(finding_key="n-a", host_ip="10.9.0.1", port=443, state="open",
+                       reason="syn-ack", service="https", **base))
+        db.add(Finding(finding_key="n-b", host_ip="10.9.0.2", port=161,
+                       state="open|filtered", reason="no-response", service="snmp",
+                       **{**base, "proto": "udp"}))
+        db.add(Finding(finding_key="n-c", host_ip="10.9.0.3", port=8443, state="open",
+                       reason="syn-ack", service="tcpwrapped",
+                       identification="tcpwrapped", **base))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _notification_query(dept: str) -> str:
+    """화면이 실제로 보내는 질의를 **소스에서 뽑는다.**
+
+    통보 화면이 무엇을 받는지는 그 화면이 만든 URL 이 정한다. 서버만 따로 검사하면 프런트가
+    다른 질의를 보내도 통과한다 - 이 결함이 정확히 그렇게 통과했다(발견 화면 테스트와 서버
+    preview 테스트가 각각 있었지만 둘을 잇는 이 경로를 아무도 안 봤다).
+    """
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "frontend" / "src" / "views" / "Notifications.jsx").read_text(encoding="utf-8")
+    # 주석을 먼저 걷어낸다. 왜 이 질의를 쓰는지 적어 둔 설명에도 백틱과 따옴표가 나와,
+    # 그대로 두면 설명 조각이 질의에 섞인다(이 세션에서 같은 실수를 네 번 했다).
+    src = re.sub(r"//[^\n]*", "", src)
+    call = src.split("if (!dept) { setFindings([]); return; }")[1].split(".then(")[0]
+    # `/findings?...${encodeURIComponent(dept)}` + "..." 형태를 실제 질의로 되살린다.
+    pieces = re.findall(r"[`\"]([^`\"]*)[`\"]", call)
+    query = "".join(pieces).replace("${encodeURIComponent(dept)}", dept)
+    assert query.startswith("/findings?"), f"통보 화면의 질의를 못 읽었다: {query!r}"
+    return query
+
+
+def test_the_department_notice_covers_every_finding_the_server_preview_counts(client):
+    """화면이 세는 건수와 서버 preview 가 세는 건수는 같아야 한다.
+
+    발견 목록은 확정되지 않은 관측을 평소 접지만, 그건 **그 화면의 표시 정책**이다. 통보는
+    다른 일이라 서버(`_open_findings_for_dept`)는 계속 포함한다. 통보 화면이 /findings 의
+    기본값을 물려받으면 둘이 어긋나고, 화면은 '부서 발견 1건' 으로 보이면서 통보 이력에도
+    ID 가 하나만 남는다. 특히 tcpwrapped 는 **포트 열림이 확인된** 건이라 조치 통보에서
+    빠지면 거짓 음성이다.
+    """
+    h = _auth(client)
+    _dept_findings()
+
+    preview = client.get("/api/notifications/preview?dept=영업부", headers=h).json()
+    assert preview["finding_count"] == 3
+
+    rows = client.get("/api/" + _notification_query("영업부").lstrip("/"), headers=h).json()
+    assert len(rows) == preview["finding_count"], (
+        "통보 화면이 받는 건수가 서버 preview 와 다르다 - 한쪽이 조용히 빠뜨리고 있다"
+    )
+    seen = {f"{r['host_ip']}:{r['port']}" for r in rows}
+    assert seen == {"10.9.0.1:443", "10.9.0.2:161", "10.9.0.3:8443"}
+
+
+def test_the_notice_audit_trail_records_the_findings_it_actually_sent(client):
+    """통보 이력의 finding_ids 는 본문이 다룬 발견 전부여야 한다.
+
+    화면은 받은 목록을 그대로 POST 한다(`filtered.map(f => f.id)`). 받는 단계에서 이미
+    빠졌다면 감사 스냅샷에도 그만큼만 남고, 나중에 '그때 무엇을 통보했나' 를 되짚을 수 없다.
+    """
+    h = _auth(client, role="admin")
+    _dept_findings()
+
+    rows = client.get("/api/" + _notification_query("영업부").lstrip("/"), headers=h).json()
+    ids = [r["id"] for r in rows]
+    body = client.get("/api/notifications/preview?dept=영업부", headers=h).json()["body"]
+    sent = client.post("/api/notifications", headers=h,
+                       json={"dept": "영업부", "body": body, "finding_ids": ids})
+    assert sent.status_code == 201, sent.text
+
+    history = client.get("/api/notifications", headers=h).json()
+    recorded = set(history[0]["finding_ids"])
+    assert recorded == set(ids)
+    assert len(recorded) == 3, "통보 이력이 접힌 발견을 빠뜨렸다"
+
+
+def test_the_notice_screen_never_offers_a_status_the_server_rejects(client):
+    """화면이 고를 수 있는 상태와 서버가 받아들이는 상태가 같아야 한다.
+
+    `_open_findings_for_dept()` 는 `정상처리` 를 통보 대상에서 뺀다. 화면이 그것을 고를 수
+    있게 두면, 고르는 순간 preview 와 [기록] 이 그 ID 를 싣고 제출은 **항상 400** 이 난다.
+    통보는 남은 조치를 알리는 것이라 서버 쪽이 맞고, 화면을 거기에 맞춘다.
+    """
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "frontend" / "src" / "views" / "Notifications.jsx").read_text(encoding="utf-8")
+    shown = re.sub(r"//[^\n]*", "", src)
+    statuses = shown.split("const STATUSES = [")[1].split("]")[0]
+    assert "정상처리" not in statuses, "서버가 거절하는 상태를 화면이 고를 수 있게 둔다"
+    assert "미조치" in statuses and "처리중" in statuses
+
+    # 화면이 받는 집합도 서버 자격과 같아야 한다 - 정상처리·허용은 빼고 미확정은 포함.
+    h = _auth(client)
+    _dept_findings()
+    db = SessionLocal()
+    try:
+        row = db.query(Finding).filter(Finding.finding_key == "n-a").first()
+        row.status = "정상처리"
+        db.commit()
+    finally:
+        db.close()
+
+    preview = client.get("/api/notifications/preview?dept=영업부", headers=h).json()
+    rows = client.get("/api/" + _notification_query("영업부").lstrip("/"), headers=h).json()
+    assert len(rows) == preview["finding_count"], (
+        "정상처리를 뺀 뒤에도 화면 건수가 서버 preview 와 다르다"
+    )
+    assert all(f["status"] != "정상처리" for f in rows)

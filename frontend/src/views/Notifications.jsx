@@ -2,10 +2,12 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 import { downloadText } from "../lib/download.js";
 import { useToast } from "../ui/Toast.jsx";
-import { asDate, dday, today } from "../lib/format.js";
+import { asDate, dday, RISK_LABEL, today } from "../lib/format.js";
 import { primaryServiceIdentity } from "../lib/columns.js";
 
-const STATUSES = ["미조치", "처리중", "정상처리"];
+// 통보는 **남은 조치**를 알리는 것이다. 서버(`_open_findings_for_dept`)가 `정상처리` 를
+// 통보 대상에서 빼므로, 화면에서 고를 수 있게 두면 고르는 순간 제출이 항상 400 이 난다.
+const STATUSES = ["미조치", "처리중"];
 const TPL_KEY = "scanops_notify_templates";
 const loadTpls = () => { try { return JSON.parse(localStorage.getItem(TPL_KEY)) || []; } catch { return []; } };
 
@@ -30,7 +32,11 @@ export function renderNotification(tpl, dept, findings) {
     const who = f.owner ? ` (${f.owner})` : "";
     const identity = primaryServiceIdentity(f);
     const service = f.service && f.service !== identity ? ` (서비스: ${f.service})` : "";
-    return `- ${f.host_ip}:${f.port}/${f.proto} ${identity}${service}${who} ${f.status}${dl}`;
+    const risk = RISK_LABEL[f.risk_level] || f.risk_level || "정보";
+    const confirmation = f.needs_confirmation ? " · 재확인 필요" : "";
+    const exposure = (f.exposure_json || []).map((item) => item.detail || item.kind).filter(Boolean).join(" · ");
+    const exposureText = exposure ? ` · ${exposure}` : "";
+    return `- ${f.host_ip}:${f.port}/${f.proto} ${identity}${service}${who} [${risk}] ${f.status}${confirmation}${exposureText}${dl}`;
   }).join("\n");
   return tpl
     .replaceAll("{dept}", dept || "")
@@ -65,7 +71,15 @@ export default function Notifications({ user }) {
   useEffect(() => {
     if (!dept) { setFindings([]); return; }
     let live = true;
-    api(`/findings?state=open&dept=${encodeURIComponent(dept)}`)
+    // 두 축을 **명시적으로 펼친다.** /findings 의 기본값은 발견 목록 화면의 표시 정책이고,
+    // 통보는 다른 일이다 - 서버의 /notifications/preview 는 _open_findings_for_dept 로
+    // 이 둘을 계속 포함하므로, 여기서 기본값을 물려받으면 화면이 서버 preview 와 어긋난다.
+    // 특히 tcpwrapped 는 포트 열림이 확인된 건이라, 조치 통보에서 빠지면 거짓 음성이다.
+    // 서버의 통보 대상과 **같은 집합**을 받는다. `_open_findings_for_dept` 는 정상처리와
+    // 허용을 빼고 미확정·tcpwrapped 는 포함하므로, 화면도 그대로 맞춘다 - 어긋나면 건수가
+    // 서버 preview 와 달라지거나 제출이 거절된다.
+    api(`/findings?state=open&dept=${encodeURIComponent(dept)}`
+        + "&hide_normal=true&hide_unconfirmed=false&hide_tcpwrapped=false")
       .then((r) => { if (live) setFindings(r); })
       .catch((e) => toast(e.message, { type: "err" }));
     return () => { live = false; };
@@ -168,21 +182,33 @@ export default function Notifications({ user }) {
         <div className="row" style={{ marginTop: 12 }}>
           <button onClick={copyBody} disabled={!dept}>복사</button>
           <button onClick={saveBody} disabled={!dept}>.txt 저장(BOM)</button>
-          {canSend && <button className="primary" onClick={record} disabled={!dept}>통보 기록</button>}
+          {canSend && <button className="primary" onClick={record} disabled={!dept || !filtered.length}>통보 기록</button>}
         </div>
       </div>
 
       <div className="panel">
         <h3>통보 이력</h3>
         <table className="tbl">
-          <thead><tr><th>부서</th><th>채널</th><th>시각</th></tr></thead>
+          <thead><tr><th>부서</th><th>기록자</th><th>대상</th><th>채널</th><th>시각</th><th>기록 내용</th></tr></thead>
           <tbody>
             {history.length === 0 ? (
-              <tr><td className="empty" colSpan={3}>이력 없음</td></tr>
+              <tr><td className="empty" colSpan={6}>이력 없음</td></tr>
             ) : history.map((h) => (
               <tr key={h.id}>
-                <td>{h.dept}</td><td>{h.channel}</td>
+                <td>{h.dept}</td>
+                <td>{h.sent_by_name || (h.sent_by ? `사용자 #${h.sent_by}` : "—")}</td>
+                <td className="mono">{h.finding_count ?? h.finding_ids?.length ?? 0}건</td>
+                <td>{h.channel}</td>
                 <td className="mono">{String(h.sent_at).slice(0, 16).replace("T", " ")}</td>
+                <td>
+                  <details className="notification-history-detail">
+                    <summary>본문 보기</summary>
+                    <div className="pre">{h.body || "(저장된 본문 없음)"}</div>
+                    {!!h.finding_ids?.length && (
+                      <div className="muted mono">발견 ID · {h.finding_ids.join(", ")}</div>
+                    )}
+                  </details>
+                </td>
               </tr>
             ))}
           </tbody>

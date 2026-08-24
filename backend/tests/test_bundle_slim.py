@@ -121,9 +121,10 @@ print("SLIM-OK")
 """
 
 
-def _split_fixture(tmp_path, payload: bytes, limit_mb: float):
+def _split_fixture(tmp_path, payload: bytes, limit_mb: float,
+                   name: str = "ScanOps_allinone.zip"):
     build = _builder()
-    archive = tmp_path / "ScanOps_allinone.zip"
+    archive = tmp_path / name
     archive.write_bytes(payload)
     parts = build.split_archive(archive, limit_mb)
     return build, archive, parts
@@ -159,12 +160,32 @@ def test_join_script_lists_every_part_in_order_and_checks_the_hash(tmp_path):
 
     payload = b"z" * (3 * 1024 * 1024)
     _, _, parts = _split_fixture(tmp_path, payload, limit_mb=1)
-    script = (tmp_path / "JOIN.bat").read_text(encoding="ascii")
+    script = (tmp_path / "JOIN_ScanOps_allinone.bat").read_text(encoding="ascii")
 
     joined = "+".join(f'"{p.name}"' for p in parts)
     assert joined in script                      # 순서가 어긋나면 zip 이 깨진다
     assert hashlib.sha256(payload).hexdigest() in script
     assert "Get-FileHash" in script and "copy /b" in script
+
+
+def test_two_bundles_in_one_folder_keep_their_own_join_scripts(tmp_path):
+    """x64 와 x86 을 같은 폴더에 내면 조립 스크립트가 서로를 덮으면 안 된다.
+
+    고정 이름(JOIN.bat)이었을 때 뒤에 만든 번들이 앞의 것을 덮어써서, 먼저 만든 쪽은
+    조립 스크립트 없이 나갔다. 도구가 없는 서버를 위한 최후 수단이 바로 그 서버에서만
+    사라지는 셈이라, 받는 사람은 .001 을 열 방법이 아예 없다.
+    """
+    payload = b"z" * (3 * 1024 * 1024)
+    _split_fixture(tmp_path, payload, limit_mb=1)
+    _split_fixture(tmp_path, payload, limit_mb=1, name="ScanOps_allinone_x86.zip")
+
+    scripts = sorted(s.name for s in tmp_path.glob("JOIN_*.bat"))
+    assert scripts == ["JOIN_ScanOps_allinone.bat", "JOIN_ScanOps_allinone_x86.bat"]
+    # 각 스크립트는 자기 번들만 조립한다 - 남의 조각을 붙이면 zip 이 깨진다.
+    x64 = (tmp_path / "JOIN_ScanOps_allinone.bat").read_text(encoding="ascii")
+    x86 = (tmp_path / "JOIN_ScanOps_allinone_x86.bat").read_text(encoding="ascii")
+    assert "ScanOps_allinone.zip.001" in x64 and "_x86" not in x64
+    assert "ScanOps_allinone_x86.zip.001" in x86
 
 
 def test_split_rejects_a_nonpositive_limit(tmp_path):

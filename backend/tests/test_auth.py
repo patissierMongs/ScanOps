@@ -222,3 +222,88 @@ def test_self_password_change_revocation_is_audited(client):
     }
     logs = client.get("/api/audit?action=PASSWORD_CHANGE", headers=new_headers).json()
     assert any(log["target"] == "self-admin" for log in logs)
+
+
+# ── 최초 비밀번호 복구가 정상적인 재설정을 망가뜨리면 안 된다 ──
+
+def test_a_password_reset_survives_the_next_startup(client, monkeypatch):
+    """`must_change_password` 는 최초 설치 전용 표식이 **아니다.**
+
+    admin 이 다른 관리자의 비밀번호를 재설정하면(`/users/{uid}/reset-password`) 그 플래그가
+    똑같이 켜지는데, 그쪽은 INITIAL_ADMIN.txt 를 만들지 않는다. 파일 부재까지 '손상' 으로
+    읽으면 다음 기동이 관리자가 정해 준 비밀번호를 **조용히 갈아치운다** - 그 비밀번호를
+    전달받은 원격 관리자는 로그인할 수 없고, 새 비밀번호는 서버에 직접 접근해야 읽을 수
+    있는 파일에만 남는다.
+    """
+    from scanops.db import SessionLocal
+    from scanops.models import User
+    from scanops.seed.bootstrap import get_settings, run_bootstrap
+    from scanops.security import hash_password, verify_password
+
+    cred = get_settings().data_dir / "INITIAL_ADMIN.txt"
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.username == "admin").first()
+        if admin is None:
+            admin = User(username="admin", role="admin", display_name="관리자",
+                         password_hash=hash_password("bootstrap-pw"), must_change_password=1)
+            db.add(admin)
+        # 관리자가 정해 준 비밀번호 - reset_password 가 하는 그대로.
+        admin.password_hash = hash_password("Chosen-By-Admin-1234")
+        admin.auth_version = (admin.auth_version or 0) + 1
+        admin.must_change_password = 1
+        db.commit()
+    finally:
+        db.close()
+    cred.unlink(missing_ok=True)          # 재설정은 안내 파일을 만들지 않는다
+
+    run_bootstrap()
+
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.username == "admin").first()
+        assert verify_password("Chosen-By-Admin-1234", admin.password_hash), (
+            "재기동이 관리자가 정해 준 비밀번호를 갈아치웠다"
+        )
+    finally:
+        db.close()
+    assert not cred.exists(), "재설정한 계정에 최초 안내 파일이 새로 생겼다"
+
+
+def test_a_corrupt_credential_file_still_reissues_the_bootstrap_password(client):
+    """반대 경계 - 원래 의도는 그대로 지켜야 한다.
+
+    최초 비밀번호를 쓰는 중인데 안내 파일이 손상되면 기존 해시를 역산할 수 없다. 그때는
+    재발급해야 설치가 영구 잠기지 않는다.
+    """
+    from scanops.db import SessionLocal
+    from scanops.models import User
+    from scanops.seed.bootstrap import get_settings, run_bootstrap
+    from scanops.security import hash_password, verify_password
+
+    cred = get_settings().data_dir / "INITIAL_ADMIN.txt"
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.username == "admin").first()
+        if admin is None:
+            admin = User(username="admin", role="admin", display_name="관리자",
+                         password_hash=hash_password("x"), must_change_password=1)
+            db.add(admin)
+        admin.password_hash = hash_password("bootstrap-pw")
+        admin.must_change_password = 1
+        db.commit()
+    finally:
+        db.close()
+    cred.write_text("garbage", encoding="ascii")
+
+    run_bootstrap()
+
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.username == "admin").first()
+        assert not verify_password("bootstrap-pw", admin.password_hash), (
+            "안내 파일이 손상됐는데 재발급하지 않았다 - 설치가 영구 잠긴다"
+        )
+    finally:
+        db.close()
+    assert cred.exists() and "garbage" not in cred.read_text(encoding="utf-8")

@@ -32,6 +32,7 @@ const STALE_EVIDENCE = new Set(["부재로 판정", "미관측"]);
 
 /** 현재 상태를 뒷받침하는 근거 원문만. 아니면 빈 문자열(서버 observation.current_reason 과 같은 규칙). */
 export function currentReason(finding) {
+  if (finding?.current_reason != null) return finding.current_reason;
   if (STALE_EVIDENCE.has(finding?.state_evidence || "")) return "";
   return finding?.reason || "";
 }
@@ -97,13 +98,13 @@ export const ALL_COLUMNS = [
   { key: "proto", label: "프로토콜", get: (f) => f.proto },
   { key: "state", label: "상태", get: (f) => f.state },
   { key: "state_evidence", label: "상태 근거", get: (f) => f.state_evidence || "" },
-  { key: "reason", label: "근거 원문", get: (f) => f.reason || "", mono: true },
+  { key: "reason", label: "근거 원문", get: (f) => f.current_reason ?? currentReason(f), mono: true },
   { key: "display_identity", label: "주 식별", get: (f) => primaryServiceIdentity(f) },
   { key: "server", label: "Server", get: (f) => f.server },
   { key: "service", label: "서비스", get: (f) => f.service },
   { key: "product", label: "제품", get: (f) => f.product },
   { key: "version", label: "버전", get: (f) => f.version },
-  { key: "banner", label: "배너", get: (f) => f.banner, mono: true },
+  { key: "banner", label: "서비스 상세", get: (f) => f.banner, mono: true },
   { key: "cpe", label: "CPE", get: (f) => f.cpe, mono: true },
   { key: "fingerprint", label: "핑거프린트", get: (f) => prettyFingerprint(f.fingerprint), mono: true, pre: true },
   { key: "rtt", label: "RTT", get: (f) => f.rtt, mono: true },

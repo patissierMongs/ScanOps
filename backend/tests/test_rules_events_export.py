@@ -119,10 +119,12 @@ def test_event_feed(client):
     assert feed["total"] >= 1
     item = feed["items"][0]
     assert {"host_ip", "port", "service", "type", "detail"} <= set(item)
+    assert item["actor_name"] == "op"
 
     only_new = client.get("/api/events", headers=h, params={"type": "NEW_OPEN"}).json()
     assert only_new["total"] >= 1
     assert all(i["type"] == "NEW_OPEN" for i in only_new["items"])
+    assert all(i["scan_id"] is not None and i["scan_name"] for i in only_new["items"])
 
 
 # ---- 선택 컬럼 내보내기 ----
@@ -159,12 +161,20 @@ def test_export_preserves_udp_open_filtered_state(client):
     )
     assert imported.status_code == 200, imported.text
 
+    # 미확정 관측은 평소 접혀 있다 - 여기서 확인할 것은 '상태가 보존되는가' 이므로 펼쳐서 본다.
     exported = client.get(
         "/api/findings/export", headers=h,
-        params={"cols": "port,proto,state", "fmt": "csv"},
+        params={"cols": "port,proto,state", "fmt": "csv", "hide_unconfirmed": "false"},
     )
     assert exported.status_code == 200
     assert "5353,udp,open|filtered" in exported.content.decode("utf-8-sig")
+
+    # 접힌 상태에서는 파일에도 없어야 한다 - 표와 내보내기가 갈리면 두 증빙이 어긋난다.
+    folded = client.get(
+        "/api/findings/export", headers=h,
+        params={"cols": "port,proto,state", "fmt": "csv"},
+    )
+    assert "open|filtered" not in folded.content.decode("utf-8-sig")
 
 
 def test_export_fingerprint_and_owner_columns(client):

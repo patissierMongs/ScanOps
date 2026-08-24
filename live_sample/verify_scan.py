@@ -26,7 +26,9 @@ def main(pw):
               {"name": "옵션 스캔", "options": ["version", "noping"],
                "ports": "21,23,80,5432,6379", "targets": ["127.0.0.1"]})
     scan = req("GET", f"/api/scans/{run['scan_id']}", tok)
-    findings = req("GET", "/api/findings", tok)
+    # 확정되지 않은 관측(open|filtered · tcpwrapped)은 발견 목록 **화면**의 기본이 접힘이다.
+    # 여기서는 집계·검증 값을 내므로 전부 펼쳐서 받는다 - 조용히 줄면 덜 검증하게 된다.
+    findings = req("GET", "/api/findings?hide_unconfirmed=false&hide_tcpwrapped=false", tok)
     by_port = {f["port"]: f for f in findings}
     # 금지 규칙: telnet
     req("POST", "/api/rules", tok, {"kind": "banned_service", "service": "telnet", "risk_level": "banned",
