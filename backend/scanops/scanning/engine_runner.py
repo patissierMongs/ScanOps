@@ -1315,6 +1315,26 @@ def parse_events(out_dir) -> dict:
     }
 
 
+def _superseded_grouped(state: dict) -> set[str]:
+    """실패해서 호스트별 대체 실행에 자리를 넘긴 묶음 산출물 이름.
+
+    묶음이 죽어도 파싱 가능한 **부분** XML 은 남는다. 그 파일을 그대로 읽으면 나중에
+    성공한 호스트별 probe 의 서비스·NSE 식별을 덮어쓴다 - 파일명 정렬상 호스트별
+    산출물(`stage3-10_0_0_1-...`)이 묶음(`stage3-udp-b0-g0`)보다 **먼저** 읽히고,
+    stage3 는 뒤에 읽은 것이 이기기 때문이다(확인 패스가 기본을 이겨야 하므로).
+
+    그래서 대체된 묶음은 인입에서 빼야 한다. 성공한 묶음은 그대로 읽는다.
+    """
+    superseded = set()
+    for entry in state.get("coverage") or []:
+        if not isinstance(entry, dict) or entry.get("role") != "enrichment":
+            continue
+        artifact = entry.get("artifact")
+        if isinstance(artifact, str) and not entry.get("finished"):
+            superseded.add(artifact)
+    return superseded
+
+
 def fold_trace(executions: list[dict], now: float | None = None) -> dict:
     """실행 기록을 '어디서 지연이 생기는가' 에 답하는 네 갈래로 접는다.
 
@@ -1512,7 +1532,11 @@ def collect_results(out_dir, scope_keys: set | None = None,
                     # therefore must not erase an existing identity when stage3 misses a key.
                     f["identity_observed"] = False
                     by_key.setdefault((f["host_ip"], f["port"], f["proto"]), f)
+    # 대체된 묶음은 읽지 않는다 - 읽으면 부분 결과가 성공한 호스트별 probe 를 덮는다.
+    superseded = _superseded_grouped(state)
     for x in sorted(out.glob("stage3-*.xml")):
+        if x.name in superseded:
+            continue
         try:
             raw = x.read_bytes()
             fnd = parse_xml(raw)

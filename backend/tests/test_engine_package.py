@@ -2491,3 +2491,40 @@ def test_a_partially_recovered_group_still_reports_what_was_lost(tmp_path):
     lost = set(report["enrichment_broken"]) | set(report["enrichment_missing"])
     assert lost, "부분 복구인데 손실을 하나도 보고하지 않았다"
     assert any("udp161" in name for name in lost), lost
+
+
+def test_a_failed_group_never_overwrites_the_host_probe_that_replaced_it(tmp_path):
+    """대체된 묶음의 **부분** 결과가 성공한 호스트별 probe 를 덮으면 안 된다.
+
+    묶음이 죽어도 파싱 가능한 부분 XML 은 남는다. `collect_results()` 는 stage3 를 파일명
+    순으로 읽고 뒤에 읽은 것이 이기는데(확인 패스가 기본을 이겨야 하므로), 정렬상
+    `stage3-10_0_0_1-...` 이 `stage3-udp-b0-g0` 보다 **먼저** 온다. 그래서 실패한 묶음이
+    나중에 읽히며 서비스·NSE 식별을 지운다.
+    """
+    out = tmp_path
+    (out / "run-state.json").write_text(json.dumps({
+        "open_map": {"10.0.0.1": {"udp": [53]}},
+        "coverage": [{"role": "enrichment", "artifact": "stage3-udp-b0-g0.xml",
+                      "proto": "udp", "finished": False,
+                      "hosts": ["10.0.0.1"], "ports": "U:53"}],
+    }), encoding="utf-8")
+    # 실패한 묶음 - 포트는 봤지만 정체를 못 밝혔다.
+    (out / "stage3-udp-b0-g0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+        '<port protocol="udp" portid="53"><state state="open"/>'
+        '<service name="unknown"/></port></ports></host></nmaprun>', encoding="utf-8")
+    # 대체 실행 - 같은 포트를 domain 으로 밝혔다.
+    (out / "stage3-10_0_0_1-udp53.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+        '<port protocol="udp" portid="53"><state state="open"/>'
+        '<service name="domain" product="BIND" method="probed"/></port>'
+        '</ports></host><runstats><finished exit="success"/>'
+        '<hosts up="1" down="0" total="1"/></runstats></nmaprun>', encoding="utf-8")
+
+    findings, _hosts = engine_runner.collect_results(out)
+    by_port = {(f["proto"], f["port"]): f for f in findings}
+    assert by_port[("udp", 53)]["service"] == "domain", (
+        f"실패한 묶음이 대체 실행의 식별을 덮었다: {by_port[('udp', 53)]['service']}"
+    )
