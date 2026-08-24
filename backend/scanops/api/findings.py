@@ -305,20 +305,28 @@ def _view_rows(db: Session, *, status=None, risk=None, host=None, q=None, state=
     # 접은 것' 이 맞는다. 먼저 접으면 위험도·검색어로 어차피 빠졌을 행까지 세게 된다.
     # 토글을 하나로 묶지 않는 이유는 hide_allowed 와 같다 - 열림 자체가 불확실한 것과,
     # 열린 것은 확실한데 뒤에 뭐가 있는지 모르는 것은 다음에 할 일이 다르다.
-    unconfirmed = [f for f in rows if f.needs_confirmation]
-    # open|filtered 와 '무응답 추정' 열림. 재확인해야 열림 여부를 말할 수 있는 건이다
-    # (observation.needs_confirmation). open|filtered 만 접으면 근거가 똑같이 없는
-    # `open` + `no-response` 가 옆에 남아, 같은 불확실성이 두 모양으로 보인다.
-    # tcpwrapped 는 핸드셰이크가 된 건이라 포트는 확실히 열려 있다 - 정체만 모른다.
-    # 두 축이 겹치는 행은 '미확정' 으로만 세어 같은 건을 두 번 세지 않는다.
-    wrapped = [f for f in rows if f.identification == "tcpwrapped" and not f.needs_confirmation]
-    if hidden_counts is not None:
-        hidden_counts["unconfirmed"] = len(unconfirmed) if hide_unconfirmed else 0
-        hidden_counts["tcpwrapped"] = len(wrapped) if hide_tcpwrapped else 0
-    if hide_unconfirmed:
-        rows = [f for f in rows if not f.needs_confirmation]
-    if hide_tcpwrapped:
-        rows = [f for f in rows if f.identification != "tcpwrapped"]
+    #
+    # **세는 것과 접는 것을 같은 분기에서 한다.** 따로 두면 두 축이 겹치는 행(open|filtered
+    # 이면서 tcpwrapped)에서 어긋난다 - 접히기는 하는데 어느 건수에도 안 잡혀, 열린 포트가
+    # 조용히 사라지는 바로 그 모양이 된다(실측: 1건이 보임 0 · 접힘 0 으로 증발했다).
+    if hide_unconfirmed or hide_tcpwrapped:
+        kept: list = []
+        folded = {"unconfirmed": 0, "tcpwrapped": 0}
+        for finding in rows:
+            # open|filtered 와 '무응답 추정' 열림 - 재확인해야 열림 여부를 말할 수 있다
+            # (observation.needs_confirmation). open|filtered 만 접으면 근거가 똑같이 없는
+            # `open` + `no-response` 가 옆에 남아 같은 불확실성이 두 모양으로 보인다.
+            if hide_unconfirmed and finding.needs_confirmation:
+                folded["unconfirmed"] += 1
+                continue
+            # tcpwrapped 는 핸드셰이크가 된 건이라 포트는 확실히 열려 있다 - 정체만 모른다.
+            if hide_tcpwrapped and finding.identification == "tcpwrapped":
+                folded["tcpwrapped"] += 1
+                continue
+            kept.append(finding)
+        rows = kept
+        if hidden_counts is not None:
+            hidden_counts.update(folded)
     if sort:
         if sort not in _COL_MAP:
             raise HTTPException(status_code=400, detail=f"알 수 없는 정렬 컬럼: {sort}")

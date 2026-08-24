@@ -101,7 +101,8 @@ ENGINE_STAGE_RE = re.compile(
     r"(?P<discovery>0-discovery)"                             # -sn 호스트 발견
     r"|-(?P<sweep_proto>tcp|udp)-b(?P<sweep_batch>\d+)"       # 포트 스윕
     r"|3-(?P<svc_proto>tcp|udp)-b(?P<svc_batch>\d+)-g\d+"     # 서비스 식별
-    r"|3-(?P<iso_host>\d+_\d+_\d+_\d+)-(?P<iso_proto>[a-z]+)"  # 호스트 격리 재시도
+    # 호스트 격리 재시도. 접미사는 프로토콜(tcp/udp)이거나 포트가 붙은 tag(tcp443·udp161)다.
+    r"|3-(?P<iso_host>\d+_\d+_\d+_\d+)-(?P<iso_proto>[a-z]+[a-z0-9]*)"
     r")(?:-confirm)?\.xml$", re.I)
 # 누산기가 아는 역할 이름 - 단독 스캐너의 단계 이름과 같은 자리를 쓴다.
 ENGINE_ROLE_DISCOVERY = "engine_discovery"

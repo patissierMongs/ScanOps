@@ -2825,6 +2825,38 @@ def _upload(client, h, files):
     )
 
 
+def test_every_artifact_the_engine_writes_is_recognised_as_part_of_its_run(client):
+    """엔진이 남기는 이름을 하나라도 못 알아보면 그 파일만 낱개 행으로 떨어진다.
+
+    호스트 격리 재시도의 접미사는 프로토콜(`tcp`)일 때도 있고 포트가 붙은 tag(`tcp443`,
+    `udp161`)일 때도 있다 - 후자를 놓치면 공통 실행이 실패해 격리로 넘어간 호스트의 결과가
+    이력에 따로 흩어진다. 마침 그런 실행이 가장 봐야 할 실행이다.
+    """
+    from scanops.api.scans import _engine_stage_info
+
+    for name, expected_role in (
+        ("scan_7/stage0-discovery.xml", "engine_discovery"),
+        ("scan_7/stage-tcp-b0.xml", "tcp_discovery"),
+        ("scan_7/stage-udp-b3.xml", "udp_identify"),
+        ("scan_7/stage3-tcp-b0-g2.xml", "tcp_identify"),
+        ("scan_7/stage3-udp-b1-g0.xml", "udp_identify"),
+        ("scan_7/stage3-10_0_0_5-tcp.xml", "tcp_identify"),
+        ("scan_7/stage3-10_0_0_5-udp-confirm.xml", "udp_identify"),
+        ("scan_7/stage3-10_0_0_5-tcp443.xml", "tcp_identify"),
+        ("scan_7/stage3-10_0_0_5-udp161-confirm.xml", "udp_identify"),
+    ):
+        info = _engine_stage_info(name)
+        assert info is not None, f"엔진 산출물을 못 알아본다: {name}"
+        run_key, _batch, role = info
+        assert run_key == "scan_7"
+        assert role == expected_role, name
+
+    # 남의 것을 가져가면 안 된다 - 단독 스캐너 모양과 직접 돌린 nmap XML 은 각자 경로가 있다.
+    for name in ("scan_3.b0.tcp_discovery.xml", "my_own_nmap.xml", "scan_5.xml",
+                 "stage_notes.xml", "stage3.xml"):
+        assert _engine_stage_info(name) is None, f"엔진 것이 아닌데 가져갔다: {name}"
+
+
 def test_a_staged_result_folder_imports_as_one_scan_not_one_row_per_file(client):
     """결과 폴더 하나 = 이력 한 줄.
 

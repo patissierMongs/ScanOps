@@ -389,3 +389,29 @@ def test_the_export_folds_exactly_what_the_table_folded(client):
         "&hide_unconfirmed=false&hide_tcpwrapped=false", headers=auth).text
     hosts = sorted(r[0] for r in list(csv.reader(io.StringIO(opened)))[1:] if r)
     assert hosts == ["10.0.1.1", "10.0.1.2", "10.0.1.3"]
+
+
+def test_a_row_that_hits_both_axes_is_still_counted_by_whichever_folded_it(client):
+    """두 축이 겹치는 행에서도 '보이는 것 + 접은 것' 이 맞아야 한다.
+
+    `open|filtered` 이면서 `tcpwrapped` 인 건이 있다. 세는 것과 접는 것을 따로 두면 이 행이
+    어긋난다 - [미확정 제외]를 끄면 tcpwrapped 축이 접는데 그 건수에는 안 잡혀, 행이 **보임
+    0 · 접힘 0** 으로 증발했다. 열린 포트가 조용히 사라지는 바로 그 모양이라, 접은 분기가
+    직접 세도록 했다.
+    """
+    auth = _auth(client)
+    _add(host_ip="10.9.9.9", port=8443, state="open|filtered", reason="no-response",
+         service="tcpwrapped", identification="tcpwrapped")
+
+    for query in ("", "hide_unconfirmed=false", "hide_tcpwrapped=false",
+                  "hide_unconfirmed=false&hide_tcpwrapped=false"):
+        res = client.get("/api/findings?" + query, headers=auth)
+        shown = int(res.headers["X-Total-Count"])
+        folded = (int(res.headers["X-Hidden-Unconfirmed"])
+                  + int(res.headers["X-Hidden-Tcpwrapped"]))
+        assert shown + folded == 1, f"{query!r}: 보임 {shown} + 접힘 {folded} != 1건"
+
+    # 어느 축이 접었는지도 맞아야 한다 - 겹치는 행은 실제로 접은 쪽으로 센다.
+    only_wrapped = client.get("/api/findings?hide_unconfirmed=false", headers=auth)
+    assert only_wrapped.headers["X-Hidden-Tcpwrapped"] == "1"
+    assert only_wrapped.headers["X-Hidden-Unconfirmed"] == "0"
