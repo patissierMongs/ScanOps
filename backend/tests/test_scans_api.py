@@ -2787,3 +2787,132 @@ def test_windows_ansi_error_text_does_not_hide_the_marker():
             b"NSOCK ERROR mksock_bind_addr(): Bind to 0.0.0.0:500 failed "
             + "액세스 권한에 의해 금지된 방법".encode("cp949") + b" (10013)\n")
         assert engine_runner.log_problems(log)
+
+
+# ── 단계 스캔 결과 폴더 가져오기 ──
+
+_ENGINE_SN = (
+    '<?xml version="1.0"?><nmaprun start="1782050000">'
+    '<host><status state="up" reason="echo-reply"/>'
+    '<address addr="127.0.0.1" addrtype="ipv4"/></host>'
+    '<runstats><finished time="1782050000" exit="success"/>'
+    '<hosts up="1" down="0" total="1"/></runstats></nmaprun>'
+).encode()
+
+
+def _engine_files(run="scan_7"):
+    """단계 엔진이 결과 폴더에 실제로 남기는 이름들."""
+    tcp = '<scaninfo type="syn" protocol="tcp" numservices="2" services="22,80"/>'
+    udp = '<scaninfo type="udp" protocol="udp" numservices="1" services="161"/>'
+    return [
+        (f"{run}/stage0-discovery.xml", _ENGINE_SN),
+        (f"{run}/stage-tcp-b0.xml", _scan_xml(1782050001, tcp,
+                                              _port("tcp", 22) + _port("tcp", 80))),
+        (f"{run}/stage-udp-b0.xml", _scan_xml(1782050002, udp,
+                                              _port("udp", 161, service="svc"))),
+        (f"{run}/stage3-tcp-b0-g0.xml", _scan_xml(1782050003, tcp,
+                                                  _port("tcp", 22, service="ssh")
+                                                  + _port("tcp", 80, service="http"))),
+        (f"{run}/stage3-udp-b0-g0.xml", _scan_xml(1782050004, udp,
+                                                  _port("udp", 161, service="snmp"))),
+    ]
+
+
+def _upload(client, h, files):
+    return client.post(
+        "/api/scans/import-bundle", headers=h,
+        files=[("files", (n, b, "application/octet-stream")) for n, b in files],
+    )
+
+
+def test_a_staged_result_folder_imports_as_one_scan_not_one_row_per_file(client):
+    """결과 폴더 하나 = 이력 한 줄.
+
+    단계 엔진은 파일명에 실행 식별자를 넣지 않고 **폴더 하나를 실행 하나**로 쓴다. 파일명
+    base 로 묶는 규칙(STAGE_FILE_RE)이 이 이름들에 하나도 맞지 않아, 예전에는 파일마다 별도
+    스캔 행이 생겼다 - 결과 폴더를 통째로 가져오면 이력이 아무 말도 하지 않는 줄로 찼다.
+    """
+    h = _auth(client)
+    files = _engine_files()
+    r = _upload(client, h, files)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["file_count"] == len(files)
+    assert body["imported"] == 1, f"파일마다 행이 생겼다: {body['scans']}"
+    assert body["failed"] == 0
+    assert "단계 스캔 묶음" in body["scans"][0]["name"]
+
+
+def test_the_staged_folder_keeps_identification_over_the_sweep_for_both_protocols(client):
+    """스윕은 열림을 증명하고 식별은 정체를 밝힌다 - 남는 것은 식별 쪽이어야 한다.
+
+    TCP 는 원래 그랬지만 UDP 는 두 단계 결과가 한 통에 들어가 같은 포트가 두 번 담겼고,
+    어느 쪽이 남는지가 파일명 정렬에 좌우됐다.
+    """
+    h = _auth(client)
+    assert _upload(client, h, _engine_files()).status_code == 200
+    rows = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=h).json()
+    by_port = {(f["proto"], f["port"]): f for f in rows}
+    assert len(rows) == 3, rows
+    assert by_port[("tcp", 22)]["service"] == "ssh"
+    assert by_port[("tcp", 80)]["service"] == "http"
+    assert by_port[("udp", 161)]["service"] == "snmp", "UDP 는 스윕 결과가 식별을 덮었다"
+
+
+def test_host_discovery_never_closes_a_port_it_did_not_look_at(client):
+    """`-sn` 산출물은 포트를 하나도 보지 않는다(<scaninfo> 가 아예 없다).
+
+    관측하지 않은 것으로 닫으면 열린 포트가 '정상처리' 로 사라진다 - 이 저장소가 내내
+    막아 온 미탐이다. 발견 단계는 살아 있는 호스트만 보태고 닫힘 범위에는 들어가지 않는다.
+    """
+    h = _auth(client)
+    tcp = '<scaninfo type="syn" protocol="tcp" numservices="2" services="22,80"/>'
+    # 스윕이 22·80 을 열린 것으로 봤고, 같은 폴더의 발견 파일에는 포트가 없다.
+    files = [
+        ("scan_8/stage-tcp-b0.xml", _scan_xml(1782050001, tcp,
+                                              _port("tcp", 22) + _port("tcp", 80))),
+        ("scan_8/stage0-discovery.xml", _ENGINE_SN),
+    ]
+    assert _upload(client, h, files).status_code == 200
+    rows = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=h).json()
+    assert {f["port"]: f["state"] for f in rows} == {22: "open", 80: "open"}
+    assert all(f["status"] != "정상처리" for f in rows)
+
+
+def test_a_whole_scans_folder_splits_into_one_row_per_actual_run(client):
+    """`data/scans/` 를 통째로 올려도 실행별로 갈려야 한다.
+
+    폴더에는 세 가지가 섞여 있다: 단계 스캔 폴더, 레거시가 흩어 놓은 파일, 사람이 직접 돌린
+    nmap XML. 여기에 XML 이 아닌 부산물(run-state.json, -oA 가 남긴 .nmap)도 딸려 온다.
+    """
+    h = _auth(client)
+    tcp = '<scaninfo type="syn" protocol="tcp" numservices="2" services="22,80"/>'
+    files = [
+        *[(f"scans/{n}", b) for n, b in _engine_files("scan_7")],
+        ("scans/scan_9/stage0-discovery.xml", _ENGINE_SN),
+        ("scans/scan_9/stage-tcp-b0.xml",
+         _scan_xml(1782050005, tcp, _port("tcp", 22), host="10.2.0.1")),
+        ("scans/scan_3.b0.tcp_discovery.xml",
+         _scan_xml(1782050006, tcp, _port("tcp", 22), host="10.3.0.1")),
+        ("scans/scan_3.b0.tcp_identify.xml",
+         _scan_xml(1782050007, tcp, _port("tcp", 22, service="ssh"), host="10.3.0.1")),
+        ("scans/my_own_nmap.xml",
+         _scan_xml(1782050008, tcp, _port("tcp", 80), host="10.4.0.1")),
+        ("scans/scan_7/run-state.json", b"{}"),
+        ("scans/scan_7/stage-tcp-b0.nmap", b"# nmap text output"),
+    ]
+    r = _upload(client, h, files)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # XML 이 아닌 두 개는 세지도 않는다.
+    assert body["file_count"] == len(files) - 2
+    # 단계 폴더 2개 + 레거시 묶음 1개 + 직접 돌린 nmap 1개.
+    assert body["imported"] == 4, [s["name"] for s in body["scans"]]
+    assert body["failed"] == 0
+    names = " ".join(s["name"] for s in body["scans"])
+    assert "scan_7 단계 스캔 묶음" in names
+    assert "scan_9 단계 스캔 묶음" in names
+    assert "scan_3.b0 자동 스캔 묶음" in names, "레거시 묶음 규칙이 깨졌다"
+    assert "my_own_nmap.xml" in names, "직접 돌린 nmap XML 을 못 받는다"

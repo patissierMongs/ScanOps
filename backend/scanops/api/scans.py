@@ -90,6 +90,21 @@ SNAPSHOT_REJECT = (
     "원본 단계 XML(scan_N.<단계>.xml)이나 스캐너 결과 폴더를 가져오세요."
 )
 STAGE_FILE_RE = re.compile(r"^(?P<base>.+)\.(?P<stage>tcp_discovery|tcp_identify|udp_identify)\.xml$", re.I)
+# 단계 엔진(웹 [단계 스캔])이 결과 폴더에 남기는 산출물 이름. 단독 스캐너와 달리 파일명에
+# 실행을 식별할 base 가 없다 - **폴더 하나가 실행 하나**라서 폴더로 묶어야 한다.
+#
+# 이걸 몰랐을 때는 파일마다 STAGE_FILE_RE 에 걸리지 않아 전부 'single' 단위가 됐고,
+# 결과 폴더를 통째로 가져오면 **파일 수만큼 스캔 행**이 생겼다(4개 파일 -> 4줄). 배치가
+# 여럿인 실행은 이력이 아무 말도 하지 않는 줄로 가득 찼다.
+ENGINE_STAGE_RE = re.compile(
+    r"^stage(?:"
+    r"(?P<discovery>0-discovery)"                             # -sn 호스트 발견
+    r"|-(?P<sweep_proto>tcp|udp)-b(?P<sweep_batch>\d+)"       # 포트 스윕
+    r"|3-(?P<svc_proto>tcp|udp)-b(?P<svc_batch>\d+)-g\d+"     # 서비스 식별
+    r"|3-(?P<iso_host>\d+_\d+_\d+_\d+)-(?P<iso_proto>[a-z]+)"  # 호스트 격리 재시도
+    r")(?:-confirm)?\.xml$", re.I)
+# 누산기가 아는 역할 이름 - 단독 스캐너의 단계 이름과 같은 자리를 쓴다.
+ENGINE_ROLE_DISCOVERY = "engine_discovery"
 # 중단본 표식 — 스캐너(scanops_scanner.INTERRUPTED_*)와 같은 문자열이어야 한다.
 INTERRUPTED_DIR_NAME = "interrupted"
 INTERRUPTED_MARK = ".interrupted"
@@ -436,6 +451,41 @@ def _stage_file_info(filename: str | None) -> tuple[str, str] | None:
     if not m:
         return None
     return m.group("base"), m.group("stage").lower()
+
+
+def _engine_stage_info(filename: str | None) -> tuple[str, str, str] | None:
+    """단계 엔진 산출물인가 -> (실행 키, 배치 키, 역할).
+
+    실행 키는 **파일이 든 폴더**다. 엔진은 파일명에 실행 식별자를 넣지 않고 결과 폴더
+    하나를 실행 하나로 쓰므로, 폴더로 묶지 않으면 같은 실행의 단계들이 흩어진다.
+
+    역할은 단독 스캐너의 단계 이름으로 옮긴다 - 누산기가 이미 그 세 자리로 '스윕이 증명한
+    열림'과 '식별이 밝힌 서비스'를 합치고 있어서, 같은 규칙을 두 벌 만들 이유가 없다.
+    호스트 발견은 어느 자리에도 넣지 않는다: `-sn` 산출물에는 `<scaninfo>` 가 아예 없어
+    포트를 하나도 관측하지 않았고(실측), 관측하지 않은 것으로 닫으면 안 되기 때문이다.
+    """
+    normalized = (filename or "").replace("\\", "/")
+    folder, _, name = normalized.rpartition("/")
+    m = ENGINE_STAGE_RE.match(name)
+    if not m:
+        return None
+    run_key = folder or name          # 폴더 없이 올라온 낱개 파일도 자기 이름으로 묶인다
+    if m.group("discovery"):
+        return run_key, "b0", ENGINE_ROLE_DISCOVERY
+    if m.group("sweep_proto"):
+        proto = m.group("sweep_proto").lower()
+        # 스윕이 닫힘 권한을 가진 단계다(요청한 포트 범위를 전부 훑는다).
+        # UDP 스윕도 식별과 같은 자리에 담는다 - findings() 주석 참고.
+        role = "tcp_discovery" if proto == "tcp" else "udp_identify"
+        return run_key, f"b{int(m.group('sweep_batch'))}", role
+    if m.group("svc_proto"):
+        proto = m.group("svc_proto").lower()
+        role = "tcp_identify" if proto == "tcp" else "udp_identify"
+        return run_key, f"b{int(m.group('svc_batch'))}", role
+    # 호스트 격리 재시도 - 공통 실행이 실패한 뒤 그 호스트만 다시 돈 것이라 식별로 본다.
+    proto = (m.group("iso_proto") or "tcp").lower()
+    role = "udp_identify" if proto.startswith("udp") else "tcp_identify"
+    return run_key, f"iso-{m.group('iso_host')}", role
 
 
 def _scaninfo_scope(xml_bytes: bytes, proto: str) -> set[int] | None | set:
@@ -2109,6 +2159,11 @@ class _ImportAccumulator:
         return set(current) | set(incoming)
 
     def add_batch(self, db: Session, stages: dict[str, dict], prepared: dict) -> None:
+        # 호스트 발견(-sn)은 **관측 전용**이다. 어느 포트도 보지 않았으므로(산출물에
+        # <scaninfo> 자체가 없다) 살아 있는 호스트만 보태고 닫힘 범위에는 넣지 않는다.
+        discovery = prepared.get(ENGINE_ROLE_DISCOVERY)
+        if discovery is not None:
+            self.scanned_hosts |= discovery[2]
         for stage, bucket, is_udp in (
             ("tcp_discovery", self._discovery, False),
             ("tcp_identify", self._identified, False),
@@ -2144,11 +2199,17 @@ class _ImportAccumulator:
 
     def findings(self) -> list[dict]:
         # 식별 결과가 있으면 그것을, 없으면 sweep 이 증명한 열림을 남긴다.
+        #
+        # UDP 는 따로 가르지 않는다. 단계 엔진은 UDP 도 '스윕 -> 식별' 두 단계라 같은 포트가
+        # 두 번 담기지만, ingest() 가 같은 finding_key 를 합칠 때 이미 식별 쪽을 지킨다
+        # (실측: 두 순서 모두 식별 서비스명이 남는다). TCP 처럼 버킷을 하나 더 두어도
+        # 결과가 같아, 검사할 수 없는 층을 만들지 않는다.
         return [*_prefer_identified(self._identified, self._discovery), *self._udp]
 
 
 def _import_stage_bundle(db: Session, user: User, display: str,
-                         batches: list[tuple[str, dict[str, dict]]]) -> dict:
+                         batches: list[tuple[str, dict[str, dict]]],
+                         engine: bool = False) -> dict:
     """단독 스캐너 실행 하나 = 스캔 이력 한 줄.
 
     예전에는 배치마다, 심지어 단계 하나만 남은 배치마다 별도 ScanRun 이 생겼다. /24 스캔은
@@ -2167,7 +2228,8 @@ def _import_stage_bundle(db: Session, user: User, display: str,
              if values[0] is not None]
     sdate = min(dates) if dates else None
     all_items = [item for _base, stages in batches for item in stages.values()]
-    scan = ScanRun(name=f"가져오기: {display} 자동 스캔 묶음", status="running", created_by=user.id,
+    kind_label = "단계 스캔 묶음" if engine else "자동 스캔 묶음"
+    scan = ScanRun(name=f"가져오기: {display} {kind_label}", status="running", created_by=user.id,
                    source_fingerprint=result_fingerprint([item["bytes"] for item in all_items]))
     # 묶음의 범위는 구성 XML 이 스스로 밝힌 것을 합친 것이다(단계마다 프로토콜이 다르다).
     bundle_tcp, bundle_udp = set(), set()
@@ -2178,8 +2240,11 @@ def _import_stage_bundle(db: Session, user: User, display: str,
         if udp:
             bundle_udp.add(udp)
     batch_note = f" · {len(batches)}배치" if len(batches) > 1 else ""
+    flow = ("호스트 발견 → 포트 스윕 → 서비스 식별" if engine
+            else "TCP 발견 → TCP 식별 → UDP 식별")
+    label = "단계 스캔 XML 묶음" if engine else "자동 스캔 XML 묶음"
     scan.command = (
-        f"자동 스캔 XML 묶음 · TCP 발견 → TCP 식별 → UDP 식별{batch_note}  ·  "
+        f"{label} · {flow}{batch_note}  ·  "
         + scan_summary.scope_note(",".join(sorted(bundle_tcp)), ",".join(sorted(bundle_udp)))
     )
     db.add(scan)
@@ -2630,14 +2695,28 @@ async def import_xml_bundle(
             item["closure_hosts"] = authorities[basename]
 
     grouped: dict[str, dict[str, dict]] = {}
+    # 단계 엔진 산출물은 **폴더 하나가 실행 하나**다: {폴더: {배치: {역할: item}}}.
+    # 파일명 base 로 묶는 STAGE_FILE_RE 규칙이 통하지 않아, 예전에는 파일마다 별도 스캔
+    # 행이 생겼다(결과 폴더 4개 파일 -> 이력 4줄).
+    engine: dict[str, dict[str, dict[str, dict]]] = {}
     units: list[dict] = []
     for item in payloads:
+        engine_info = _engine_stage_info(item["name"])
+        if engine_info:
+            run_key, batch_key, role = engine_info
+            engine.setdefault(run_key, {}).setdefault(batch_key, {})[role] = item
+            continue
         info = _stage_file_info(item["name"])
         if not info:
             units.append({"kind": "single", "sort": item["name"], "item": item})
             continue
         base, stage = info
         grouped.setdefault(base, {})[stage] = item
+    for run_key, batches in sorted(engine.items(), key=lambda kv: kv[0].lower()):
+        units.append({
+            "kind": "bundle", "sort": run_key, "base": run_key, "engine": True,
+            "batches": sorted(batches.items(), key=lambda kv: kv[0].lower()),
+        })
     if grouped:
         if manifests:
             # manifest 하나 = 단독 스캐너 실행 하나. 배치가 몇 개든 이력에는 한 줄이어야
@@ -2680,7 +2759,8 @@ async def import_xml_bundle(
         try:
             if unit["kind"] == "bundle":
                 result = _import_stage_bundle(
-                    db, user, Path(unit["base"].replace("\\", "/")).name, unit["batches"])
+                    db, user, Path(unit["base"].replace("\\", "/")).name, unit["batches"],
+                    engine=bool(unit.get("engine")))
             else:
                 item = unit["item"]
                 if "closure_hosts" in item:
