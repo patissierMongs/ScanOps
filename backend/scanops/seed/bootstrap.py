@@ -62,9 +62,20 @@ def run_bootstrap() -> None:
         cred = settings.data_dir / "INITIAL_ADMIN.txt"
         admin = db.query(User).filter(User.username == "admin").first()
         if admin is not None:
-            # 최초 비밀번호 변경 전인데 안내 파일이 비었거나 손상된 경우, 기존 해시는
+            # 최초 비밀번호 변경 전인데 안내 파일이 **비었거나 손상된** 경우, 기존 해시는
             # 역산할 수 없다. 새 임시 비밀번호로 재발급해야 설치가 영구 잠기지 않는다.
-            if admin.must_change_password:
+            #
+            # **파일이 있을 때만** 한다. `must_change_password` 는 최초 설치 전용 표식이
+            # 아니라 '남이 정해 준 비밀번호' 라는 일반 표식이고, admin 이 다른 관리자의
+            # 비밀번호를 재설정할 때도(`/users/{uid}/reset-password`) 켜진다. 그쪽은 안내
+            # 파일을 만들지 않으므로, 파일 부재까지 '손상' 으로 읽으면 다음 기동이 관리자가
+            # 정해 준 비밀번호를 **조용히 갈아치운다** - 그 비밀번호를 전달받은 원격 관리자는
+            # 로그인할 수 없고, 새 비밀번호는 서버에 직접 접근해야 읽을 수 있는 파일에만
+            # 남는다(실측으로 재현).
+            #
+            # 대신 '최초 비밀번호를 쓰는 중인데 파일을 지운' 설치는 자동 복구를 잃는다.
+            # 그건 의도적인 삭제이고, 정상적인 재설정을 망가뜨리는 쪽이 훨씬 나쁘다.
+            if admin.must_change_password and cred.exists():
                 recorded = _credential_password(cred)
                 if not recorded or not verify_password(recorded, admin.password_hash):
                     pw = secrets.token_urlsafe(12)

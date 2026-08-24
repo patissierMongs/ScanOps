@@ -1427,7 +1427,26 @@ def _artifact_issue_inputs(report: dict, problems: list[str]) -> list[dict]:
     return issues
 
 
-def _resolve_retry_observations(db: Session, retry_scan_id: int, saved_spec: dict) -> int:
+def _resolve_retry_observations(db: Session, retry_scan_id: int, saved_spec: dict,
+                                report: dict | None = None) -> int:
+    """재시도가 원래 관측 구멍을 실제로 메웠는지 판정해 이슈를 해결 처리한다.
+
+    **authority 산출물이 하나라도 어긋나면 아무것도 해결하지 않는다.** 호스트 상태는
+    coverage 항목의 `finished` 플래그에서 나오므로, nmap 이 rc=0 으로 끝났지만 그 뒤
+    authority XML 이 없거나 완결되지 않은 실행에서도 `done` 으로 찍힌다. 그 상태로 이슈를
+    닫으면 `artifact_report` 가 `authority_missing`/`authority_broken` 으로 분류하고 스캔을
+    partial 로 마감한 실행이 **원래 구멍을 메운 것처럼** 기록된다 - 재시도 안내가 사라져
+    아무도 다시 보지 않는다.
+
+    같은 파일의 닫힘 권한 판정이 쓰는 기준과 같다: "authority 가 하나라도 어긋나면 닫으면
+    안 된다". 한 단계만 어긋나도 전부 보류하는 것은 보수적이지만, 틀리는 방향이 반대다 -
+    이슈가 남으면 한 번 더 보게 될 뿐이고, 잘못 닫으면 되돌릴 길이 없다.
+    """
+    if report is not None:
+        unfinished = list(report.get("authority_missing") or []) + \
+            list(report.get("authority_broken") or [])
+        if unfinished:
+            return 0
     scanops = saved_spec.get("scanops") if isinstance(saved_spec, dict) else None
     source_id = scanops.get("retry_of") if isinstance(scanops, dict) else None
     if not isinstance(source_id, int) or source_id <= 0:
@@ -1480,7 +1499,7 @@ def _materialize_engine_terminal(
         db, scan.id, executions=projection["executions"], issues=issues,
         hosts=projection["hosts"],
     )
-    _resolve_retry_observations(db, scan.id, saved_spec)
+    _resolve_retry_observations(db, scan.id, saved_spec, report)
     return {**projection, "materialized": counts}
 
 

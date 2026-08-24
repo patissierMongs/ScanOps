@@ -256,3 +256,58 @@ def test_endpoint_observation_failure_rolls_back_finding_and_event(monkeypatch):
         assert db.query(EndpointObservation).count() == 0
     finally:
         db.close()
+
+
+def test_a_retry_with_broken_authority_resolves_nothing(monkeypatch):
+    """재시도가 authority 산출물을 제대로 못 남겼으면 원래 이슈를 닫으면 안 된다.
+
+    호스트 상태는 coverage 항목의 `finished` 플래그에서 나오므로, nmap 이 rc=0 으로 끝났지만
+    그 뒤 authority XML 이 없거나 완결되지 않은 실행에서도 `done` 으로 찍힌다. 그 상태로
+    이슈를 닫으면 `artifact_report` 가 `authority_missing`/`authority_broken` 으로 분류하고
+    스캔을 partial 로 마감한 실행이 **원래 구멍을 메운 것처럼** 기록된다 - 재시도 안내가
+    사라져 아무도 다시 보지 않는다.
+    """
+    from scanops.api import scans as scans_api
+
+    called: list[str] = []
+    monkeypatch.setattr(scans_api.observability, "resolve_quality_issues",
+                        lambda *a, **k: called.append("resolved") or 0)
+
+    spec = {"scanops": {"retry_of": 1}}
+    broken = {"authority_missing": [], "authority_broken": ["stage-tcp-b0.xml"]}
+    assert scans_api._resolve_retry_observations(None, 2, spec, broken) == 0
+    assert called == [], "손상된 authority 로 이슈를 해결 처리했다"
+
+    missing = {"authority_missing": ["stage0-discovery.xml"], "authority_broken": []}
+    assert scans_api._resolve_retry_observations(None, 2, spec, missing) == 0
+    assert called == [], "빠진 authority 로 이슈를 해결 처리했다"
+
+
+def test_a_clean_retry_still_reaches_the_resolution_path(monkeypatch):
+    """반대 경계 - authority 가 온전하면 판정 자체는 그대로 진행해야 한다.
+
+    보수적으로 막는 것과 아예 못 닫게 하는 것은 다르다. 온전한 재시도까지 막으면 이슈가
+    영영 남아 재시도 안내가 사라지지 않는다.
+    """
+    from scanops.api import scans as scans_api
+
+    reached: list[str] = []
+
+    class _Q:
+        def filter(self, *_a, **_k):
+            return self
+
+        def filter_by(self, **_k):
+            return self
+
+        def all(self):
+            reached.append("queried")
+            return []
+
+    class _DB:
+        def query(self, *_a, **_k):
+            return _Q()
+
+    clean = {"authority_missing": [], "authority_broken": []}
+    scans_api._resolve_retry_observations(_DB(), 2, {"scanops": {"retry_of": 1}}, clean)
+    assert reached, "authority 가 온전한데 판정 경로에 들어가지도 않았다"
