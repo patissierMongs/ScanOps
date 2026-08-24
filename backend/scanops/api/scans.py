@@ -3930,7 +3930,15 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
             "by_stage": {}, "reasons_by_stage": {}, "issues": unresolved,
         }
         for issue in retryable:
-            retry["by_stage"].setdefault(issue["stage"], []).append(issue["host"])
+            # **stage+host 로 한 번만** 넣는다. 같은 호스트가 같은 단계에서 host_timeout 과
+            # retransmission_cap 을 함께 받으면 이슈가 두 행이라, 이슈마다 append 하면
+            # 한 대가 두 번 들어간다. 화면(RetryQueue)은 hosts.length 를 '대수' 로 쓰고
+            # key={host} 로 행을 그리므로 '1대'가 'TCP 포트 발견 · 2대' + 중복 행 +
+            # React key 충돌이 된다. 라이브 gave_up_detail() 은 집합으로 합치므로,
+            # 그대로 두면 완료 전후가 다른 답을 낸다. 이유만 둘 다 붙는다.
+            stage_hosts = retry["by_stage"].setdefault(issue["stage"], [])
+            if issue["host"] not in stage_hosts:
+                stage_hosts.append(issue["host"])
             if issue["host"]:
                 stage_reasons = retry["reasons_by_stage"].setdefault(issue["stage"], {})
                 host_reasons = stage_reasons.setdefault(issue["host"], [])

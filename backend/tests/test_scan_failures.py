@@ -2405,3 +2405,69 @@ def test_the_finished_scan_offers_a_rescan_only_when_one_would_be_accepted(
     # 서버가 실제로 거절하는지 - 제안과 수락이 같은 집합이어야 한다는 것이 요점이다.
     rejected = client.post(f"/api/scans/{scan_id}/retry-timeouts", headers=_headers(client))
     assert rejected.status_code == 400, rejected.text
+
+
+def test_one_host_with_two_problems_is_still_one_host_in_the_retry_queue(
+    client, monkeypatch, tmp_path,
+):
+    """같은 호스트가 한 단계에서 두 가지 문제를 받아도 대기열에서는 한 대다.
+
+    이슈는 종류마다 한 행이라, 이슈마다 호스트를 넣으면 같은 대가 두 번 들어간다.
+    화면(RetryQueue)은 `hosts.length` 를 '대수' 로 쓰고 `key={host}` 로 행을 그리므로
+    실제 1대가 'TCP 포트 발견 · 2대' + 중복 행 + React key 충돌이 된다. 라이브
+    gave_up_detail() 은 집합으로 합치므로 완료 전후 답도 어긋난다. 이유만 둘 다 붙는다.
+    """
+    import re
+
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {"targets": ["10.0.0.8"], "out_dir": str(tmp_path)})
+    out_dir = tmp_path / "scans" / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "tcp"},
+        {"event": "command_start", "stage": "tcp", "execution_id": "e1",
+         "argv": ["nmap", "-sS", "10.0.0.8"], "hosts": ["10.0.0.8"], "ts": 1000.0},
+        # 같은 호스트·같은 단계에서 두 가지: 시간 초과 + 재전송 상한.
+        {"event": "command_done", "stage": "tcp", "execution_id": "e1", "outcome": "done",
+         "seconds": 9.0, "rc": 0, "ts": 1009.0,
+         "timeout_count": 1, "timed_out": ["10.0.0.8"],
+         "retransmission_cap_count": 1, "retransmission_cap_hosts": ["10.0.0.8"]},
+        {"event": "job_done", "status": "done"},
+    ]) + "\n", encoding="utf-8")
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "gave_up": ["10.0.0.8"],
+        "gave_up_by_stage": {"tcp": ["10.0.0.8"]},
+        "retransmission_cap_by_stage": {"tcp": ["10.0.0.8"]},
+    }), encoding="utf-8")
+
+    headers = _headers(client)
+    live = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()["retry"]
+    assert live["by_stage"]["tcp"] == ["10.0.0.8"], "라이브부터 중복이면 비교가 무의미하다"
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scans_api._materialize_engine_terminal(
+            db, scan, out_dir, {"targets": ["10.0.0.8"]},
+            {"authority_missing": [], "authority_broken": []}, [],
+        )
+        scan.status = "done"
+        db.commit()
+    finally:
+        db.close()
+
+    ended = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()
+    assert ended["source"] == "db", "DB 투영으로 안 넘어가면 비교가 무의미하다"
+    retry = ended["retry"]
+    assert retry["by_stage"]["tcp"] == ["10.0.0.8"], (
+        f"한 대가 두 번 들어갔다: {retry['by_stage']}"
+    )
+    assert retry["count"] == 1 and retry["targets"] == ["10.0.0.8"]
+    # 이유는 둘 다 남아야 한다 - 중복을 없앤다고 근거를 잃으면 안 된다.
+    reasons = retry["reasons_by_stage"]["tcp"]["10.0.0.8"]
+    assert sorted(reasons) == ["host_timeout", "retransmission_cap"], reasons
+    assert retry["by_stage"] == live["by_stage"], "완료 전후가 다른 답을 낸다"
+
+    # 화면이 이 목록의 길이를 '대수' 로 쓰는가 - 그래서 중복이 곧 오표시다.
+    source = (Path(__file__).resolve().parents[2]
+              / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
+    assert re.search(r"hosts\.length\}대", source), "화면 계약이 바뀌었다 - 이 검사가 낡았다"
