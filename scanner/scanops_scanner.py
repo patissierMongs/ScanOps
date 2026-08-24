@@ -2705,8 +2705,8 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
             retry_problems: list[str] = []
             retry_rc = run_nmap_process(retry_cmd, retry_problems,
                                         watchdog_seconds=watchdog)
-            if watchdog:
-                repair_truncated_xml(Path(str(retry_base) + ".xml"))
+            retry_repaired = bool(watchdog) and repair_truncated_xml(
+                Path(str(retry_base) + ".xml"))
             # 재시도가 더 나으면 그 결과를 채택한다. 아니면 원래 실패를 그대로 남긴다 —
             # 재시도가 실패했다고 첫 실행보다 나쁘게 기록할 이유는 없고, 첫 실행이 남긴
             # 관측을 더 나쁜 것으로 바꿀 이유는 더더욱 없다.
@@ -2716,6 +2716,10 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
                 adopt_retry_artifacts(retry_base, base)
                 rc, problems = retry_rc, retry_problems
                 retried_engine = UDP_RETRY_ENGINE
+                # 표식은 **지금 자리에 있는 산출물**을 설명해야 한다. 채택했는데 첫 실행의
+                # 복구 사실이 남아 있으면, 멀쩡한 대체본이 중단본으로 격리되고 clean=false
+                # 로 기록되어 완주한 스캔이 '부분 결과, 재개 필요' 로 마감된다.
+                watchdog_repaired = retry_repaired
             else:
                 discard_artifacts(retry_base)
     except KeyboardInterrupt:

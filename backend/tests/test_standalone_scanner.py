@@ -3233,3 +3233,53 @@ def test_a_watchdog_repaired_artifact_is_quarantined_like_an_interrupted_one(tmp
         assert scanner.is_interrupted_output(name), f"격리 표식이 없다: {name}"
     # 원래 자리에는 남지 않는다 - 남으면 온전한 결과와 섞인다.
     assert not pathlib.Path(str(base) + ".xml").exists()
+
+
+def test_an_adopted_retry_is_not_quarantined_as_the_first_attempt(monkeypatch, tmp_path):
+    """표식은 **지금 자리에 있는 산출물**을 설명해야 한다.
+
+    워치독이 첫 UDP 식별을 끊고 복구한 뒤 `select` 재시도가 성공해 그 산출물을 채택하면,
+    남은 파일은 온전한 것이다. 그런데 첫 실행의 복구 사실이 그대로 남아 있으면 멀쩡한
+    대체본이 중단본으로 격리되고 `clean=false` 로 기록되어, 완주한 스캔이 '부분 결과,
+    재개 필요' 로 마감된다.
+    """
+    scanner = _load_scanner()
+    plan = {
+        "tool": "scanops_scanner", "nmap": "nmap", "name": "scan", "output_dir": str(tmp_path),
+        "workflow": "auto", "batches": [["10.0.0.1"]], "cursor": 0, "runs": [],
+        "stats_every": "10s", "host_timeout": "", "exclude": [], "raw_targets": ["10.0.0.1"],
+        "scan_type": "", "ports_override": "", "all_ports": False, "scripts": "", "timing": "",
+        "batch_size": 0, "max_hosts": 65536, "watchdog_seconds": 30,
+    }
+    complete = ('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                '<address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+                '<port protocol="udp" portid="53"><state state="open"/>'
+                '<service name="domain"/></port></ports></host>'
+                '<runstats><finished exit="success"/>'
+                '<hosts up="1" down="0" total="1"/></runstats></nmaprun>')
+    # **복구 가능한** 잘림이어야 한다 - 완결된 </host> 가 하나도 없으면 복구가 일어나지
+    # 않아 이 경계 자체가 재현되지 않는다(첫 판에서 그렇게 놓쳤다).
+    truncated = ('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                 '<address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+                 '<port protocol="udp" portid="53"><state state="open"/></port>'
+                 '</ports></host><host><status state="up"')
+
+    def fake_process(cmd, problems, **_kw):
+        out = pathlib.Path(cmd[cmd.index("-oA") + 1])
+        if "--nsock-engine" in cmd:
+            # 재시도는 온전한 산출물을 남기고 성공한다.
+            pathlib.Path(str(out) + ".xml").write_text(complete, encoding="utf-8")
+            return 0
+        # 첫 실행은 워치독에 끊겨 잘린 XML 을 남긴다.
+        pathlib.Path(str(out) + ".xml").write_text(truncated, encoding="utf-8")
+        return -15
+
+    monkeypatch.setattr(scanner, "run_nmap_process", fake_process)
+    rc = scanner.run_nmap_stage(plan, 0, tmp_path / "scan.state.json", "udp_identify")
+
+    assert rc == 0, "채택한 재시도가 성공인데 실패로 기록됐다"
+    run = plan["runs"][-1]
+    assert run["clean"] is True, f"멀쩡한 대체본이 부분 결과로 기록됐다: {run.get('problems')}"
+    # 격리 폴더로 옮겨지지 않아야 한다 - 옮기면 인입 대상에서 빠진다.
+    for name in run.get("files", []):
+        assert not scanner.is_interrupted_output(name), f"채택본이 격리됐다: {name}"
