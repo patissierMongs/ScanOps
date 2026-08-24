@@ -1335,45 +1335,66 @@ def _superseded_grouped(state: dict) -> set[str]:
     return superseded
 
 
+_TRACE_MAX_HOSTS = 12
+_TRACE_MAX_SLOWEST = 8
+
+
 def fold_trace(executions: list[dict], now: float | None = None) -> dict:
-    """실행 기록을 '어디서 지연이 생기는가' 에 답하는 네 갈래로 접는다.
+    """실행 기록을 '어디서 지연이 생기는가' 에 답하는 갈래로 접는다.
 
     진행률 하나로는 몇 시간짜리 스캔에서 무엇이 시간을 쓰는지 알 수 없고, 단계 요약도
     합계만 말한다. 지연의 실제 단위는 **nmap 프로세스 하나**다.
 
     * ``running`` — 지금 도는 실행. 오래 걸리는 중인 것을 먼저 보여 준다.
-    * ``by_stage`` — 단계별 합계. 어느 단계가 전체를 끌고 있는지.
+    * ``by_stage`` — 단계별 합계와 실행 횟수.
     * ``by_phase`` — nmap **내부** 단계별 합계. 같은 10분이라도 포트스캔에 쓴 10분과
       서비스 식별에 쓴 10분은 원인도 대책도 다르다.
+    * ``by_host`` — 호스트별 합계. **호스트당 프로세스를 세우는 식별 단계만** 센다.
+      배치 스윕은 여러 대를 한 프로세스로 돌아 한 대에 귀속시킬 수 없다.
     * ``slowest`` — 가장 오래 걸린 실행. 수확량을 함께 보여 주므로 '107초 돌고 빈 산출물'
       이 정상 완료와 구분된다.
+
+    키 이름은 화면(`ScanTrace.jsx`)이 읽는 그대로다. 한쪽만 바꾸면 패널이 조용히 빈 채로
+    남는다 - 실제로 그렇게 되살렸다가 아무것도 안 그려진 적이 있다.
     """
     now = time.time() if now is None else now
-    by_stage: dict[str, float] = {}
+    by_stage: dict[tuple, dict] = {}
     by_phase: dict[str, float] = {}
+    by_host: dict[str, dict] = {}
     running, finished = [], []
     for run in executions:
-        stage = run.get("stage") or "?"
+        stage, proto = run.get("stage") or "?", run.get("proto") or ""
+        seconds = run.get("seconds")
+        spent = seconds if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else 0.0
         if run.get("status") == "running":
-            started = run.get("started_at")
-            elapsed = run.get("seconds")
-            running.append({**run, "elapsed": elapsed})
-            spent = elapsed if isinstance(elapsed, (int, float)) else 0.0
+            running.append({**run, "elapsed_seconds": spent})
         else:
-            spent = run.get("seconds") or 0.0
-            finished.append(run)
-        by_stage[stage] = round(by_stage.get(stage, 0.0) + (spent or 0.0), 1)
+            finished.append({**run, "seconds": spent})
+        slot = by_stage.setdefault((stage, proto),
+                                   {"stage": stage, "proto": proto, "runs": 0, "seconds": 0.0})
+        slot["runs"] += 1
+        slot["seconds"] = round(slot["seconds"] + spent, 1)
         for phase, value in (run.get("phases") or {}).items():
             by_phase[phase] = round(by_phase.get(phase, 0.0) + value, 1)
-    total = round(sum(by_stage.values()), 1)
+        # 호스트별은 한 대만 상대한 실행에서만 셀 수 있다.
+        hosts = [h for h in (run.get("hosts") or []) if isinstance(h, str)]
+        if len(hosts) == 1:
+            row = by_host.setdefault(hosts[0], {"host": hosts[0], "runs": 0, "seconds": 0.0})
+            row["runs"] += 1
+            row["seconds"] = round(row["seconds"] + spent, 1)
+    host_rows = sorted(by_host.values(), key=lambda r: -r["seconds"])
+    slow_rows = sorted(finished, key=lambda r: -(r["seconds"] or 0.0))
     return {
-        "total_seconds": total,
+        "runs_total": len(executions),
+        "seconds_total": round(sum(row["seconds"] for row in by_stage.values()), 1),
         "running": running,
-        "by_stage": sorted(({"stage": k, "seconds": v} for k, v in by_stage.items()),
-                           key=lambda row: -row["seconds"]),
+        "by_stage": sorted(by_stage.values(), key=lambda r: -r["seconds"]),
         "by_phase": sorted(({"phase": k, "seconds": v} for k, v in by_phase.items()),
-                           key=lambda row: -row["seconds"]),
-        "slowest": sorted(finished, key=lambda run: -(run.get("seconds") or 0.0))[:8],
+                           key=lambda r: -r["seconds"]),
+        "by_host": host_rows[:_TRACE_MAX_HOSTS],
+        "by_host_truncated": len(host_rows) > _TRACE_MAX_HOSTS,
+        "slowest": slow_rows[:_TRACE_MAX_SLOWEST],
+        "slowest_truncated": len(slow_rows) > _TRACE_MAX_SLOWEST,
     }
 
 

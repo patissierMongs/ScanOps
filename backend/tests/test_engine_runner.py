@@ -1079,7 +1079,8 @@ def test_the_trace_answers_where_the_time_went(tmp_path):
     ]), encoding="utf-8")
 
     trace = engine_runner.parse_events(out)["trace"]
-    assert trace["total_seconds"] == 227.0
+    assert trace["seconds_total"] == 227.0
+    assert trace["runs_total"] == 2
     # 어느 **단계**가 끌었나.
     assert [(r["stage"], r["seconds"]) for r in trace["by_stage"]] == [
         ("tcp", 120.0), ("tcp_service", 107.0)]
@@ -1101,5 +1102,6 @@ def test_the_trace_survives_when_the_event_stream_says_nothing(tmp_path):
     out.mkdir()
     (out / "events.ndjson").write_text("", encoding="utf-8")
     trace = engine_runner.parse_events(out)["trace"]
-    assert trace["total_seconds"] == 0
+    assert trace["seconds_total"] == 0 and trace["runs_total"] == 0
     assert trace["by_stage"] == [] and trace["by_phase"] == [] and trace["slowest"] == []
+    assert trace["by_host"] == [] and trace["running"] == []

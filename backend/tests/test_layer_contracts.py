@@ -1967,3 +1967,47 @@ def test_a_failed_retry_never_destroys_the_first_attempts_artifacts(tmp_path):
     fallback = pipeline_src.split('_UDP_RETRY_ENGINE] + args')[1].split("self.sink.emit")[0]
     assert "alt_base" in fallback, "그룹 UDP 재시도가 첫 실행과 같은 base 를 쓴다"
     assert "adopt_artifacts" in fallback and "discard_artifacts" in fallback
+
+
+def test_the_trace_panel_reads_the_fields_the_backend_actually_sends(tmp_path):
+    """서버가 내는 이름과 화면이 읽는 이름이 같아야 한다.
+
+    되살린 패널이 옛 스키마(`runs_total`·`seconds_total`·`elapsed_seconds`)를 읽는데
+    서버가 새 이름을 내보내면, 첫 가드에서 걸려 **아무것도 안 그려진다.** 오류도 안 나고
+    빈 화면도 아니고 그냥 없다 - 실제로 그렇게 되살렸다가 놓쳤다.
+
+    그래서 문자열 존재가 아니라 **실제 fold_trace 출력의 키**로 검사한다.
+    """
+    import re
+    import sys
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops.scanning import engine_runner
+
+    trace = engine_runner.fold_trace([
+        {"stage": "tcp_service", "proto": "tcp", "status": "done", "seconds": 12.0,
+         "hosts": ["10.0.0.1"], "phases": {"Service scan": 10.0},
+         "hosts_found": 1, "open_ports": 2, "inferred_open": 0, "products": 1,
+         "empty": False, "label": "10.0.0.1", "ports": "T:22,443"},
+        {"stage": "tcp", "proto": "tcp", "status": "running", "seconds": 5.0,
+         "hosts": ["10.0.0.1", "10.0.0.2"], "phases": {}, "label": "2대", "ports": "T:1-65535"},
+    ])
+
+    panel = (pathlib_Path(__file__).resolve().parents[2]
+             / "frontend" / "src" / "ui" / "ScanTrace.jsx").read_text(encoding="utf-8")
+    # 패널이 trace 에서 직접 읽는 이름들.
+    read = set(re.findall(r"trace[?]?\.(\w+)", panel))
+    missing = sorted(name for name in read if name not in trace)
+    assert not missing, f"화면이 읽는데 서버가 안 보내는 필드: {missing}"
+
+    # 행 안에서 읽는 이름도 맞아야 한다 - 여기가 어긋나면 표가 비거나 '—' 로 찬다.
+    assert "elapsed_seconds" in trace["running"][0], "진행 중 실행의 경과시간 키가 다르다"
+    for key in ("stage", "proto", "runs", "seconds"):
+        assert key in trace["by_stage"][0], f"단계별 행에 {key} 가 없다"
+    for key in ("host", "runs", "seconds"):
+        assert key in trace["by_host"][0], f"호스트별 행에 {key} 가 없다"
+    for key in ("stage", "seconds", "phases", "empty", "hosts_found", "open_ports", "products"):
+        assert key in trace["slowest"][0], f"오래 걸린 실행 행에 {key} 가 없다"
+
+    # 패널을 여는 첫 가드가 실제로 통과해야 한다 - 통과 못 하면 패널 자체가 안 그려진다.
+    assert trace["runs_total"] > 0
