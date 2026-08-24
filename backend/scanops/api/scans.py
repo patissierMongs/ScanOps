@@ -898,7 +898,12 @@ def _wait_scan_process(scan_id: int, proc, watchdog_seconds: int = 0,
         timer.daemon = True
         timer.start()
     try:
-        return nmap_runner.wait_owned(proc)
+        rc = nmap_runner.wait_owned(proc)
+        # 워치독이 끊은 실행은 rc 가 0 이어서는 안 된다. 종료 신호를 받은 nmap 이 0 으로
+        # 끝낼 수 있는데, 그대로 두면 호출부가 '정상 완료' 로 읽어 복구된 **부분** XML 에
+        # 미관측 닫힘 권한을 준다 - 훑지도 않은 포트가 '닫힘/정상처리' 가 된다. 워치독을
+        # 둔 이유가 통째로 뒤집힌다. 단계 엔진(nmaprun.run)·단독 스캐너와 같은 규칙이다.
+        return rc or -1 if fired.is_set() else rc
     finally:
         if timer is not None:
             timer.cancel()

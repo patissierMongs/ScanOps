@@ -1749,6 +1749,53 @@ def test_the_three_paths_repair_a_truncated_xml_the_same_way(tmp_path):
         assert repair(headless) is False, f"{name}: 살릴 호스트가 없는데 손댔다"
 
 
+def test_a_fired_watchdog_never_reports_success_on_any_path(tmp_path, monkeypatch):
+    """상한에 걸린 실행은 **세 경로 모두** 실패로 끝나야 한다.
+
+    종료 신호를 받은 nmap 이 0 으로 끝낼 수 있다. 그 rc 를 그대로 돌려주면 호출부가 '정상
+    완료' 로 읽어 복구된 **부분** XML 에 미관측 닫힘 권한을 준다 - 훑지도 않은 포트가
+    '닫힘/정상처리' 가 되고, 워치독을 둔 이유가 통째로 뒤집힌다.
+
+    단계 엔진과 단독 스캐너는 이미 못박고 있었는데 레거시/자동 경로만 빠져 있었다.
+    """
+    import threading
+
+    from scanops.api import scans as scans_api
+    from scanops.scanning import nmap_runner
+
+    base = tmp_path / "b0"
+    nmap_runner.xml_of(base).write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/></host><host><status state="up"',
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            fired.set()
+
+    fired = threading.Event()
+    proc = _Proc()
+    monkeypatch.setattr(scans_api.chunker, "stop_requested", lambda _base: False)
+    # 상한에 걸렸는데도 nmap 이 0 으로 끝나는 경우.
+    monkeypatch.setattr(nmap_runner, "wait_owned", lambda _p: 0 if fired.wait(5) else 0)
+
+    rc = scans_api._wait_scan_process(1, proc, watchdog_seconds=0.05, out_base=base)
+    assert rc != 0, "워치독이 끊었는데 성공으로 보고했다 - 부분 XML 이 닫힘 권한을 얻는다"
+
+    # 세 구현이 같은 규칙을 쓰는지 소스에서 확인한다. 한쪽만 고치면 같은 산출물이 경로에
+    # 따라 다르게 판정된다.
+    engine_src = (pathlib_Path(__file__).resolve().parents[2]
+                  / "engine" / "scanops_engine" / "nmaprun.py").read_text(encoding="utf-8")
+    scanner_src = (pathlib_Path(__file__).resolve().parents[2]
+                   / "scanner" / "scanops_scanner.py").read_text(encoding="utf-8")
+    assert "if watchdog_fired and rc == 0:" in engine_src
+    assert "rc = rc or -1" in scanner_src
+
+
 def test_the_legacy_watchdog_repairs_the_artifact_it_cut(tmp_path, monkeypatch):
     """워치독이 끊은 산출물을 **레거시 경로도** 복구해야 한다.
 
