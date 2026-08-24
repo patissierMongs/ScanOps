@@ -993,3 +993,47 @@ def test_a_batch_restart_inside_one_attempt_never_erases_the_failure(tmp_path):
     tcp = next(s for s in parsed["stages"] if s["stage"] == "tcp")
     assert tcp["status"] == "error", "같은 시도의 배치 재시작이 실패를 지웠다"
     assert [i for i in parsed.get("quality_issues", []) if i.get("kind") == "command_error"]
+
+
+def test_a_resumed_service_stage_clears_the_normalized_error_slot(tmp_path):
+    """실패 이벤트는 proto 에 따라 정규화되어 `stage_start` 와 슬롯 이름이 갈린다.
+
+    `targets_ports`/`rescan_units` 생산자는 `stage_start(stage="service")` 를 내지만, 실패는
+    `proto="tcp"` 때문에 `tcp_service` 슬롯으로 들어간다. 원시 이름만 보면 회차 비교가
+    실행되지 않아 재개해서 성공해도 `tcp_service=error` 와 그 품질 이슈가 남는다.
+    """
+    from scanops.scanning import engine_runner
+
+    failed = [
+        {"event": "job_start"},
+        {"event": "stage_plan", "stages": ["service"]},
+        {"event": "stage_start", "stage": "service"},
+        {"event": "error", "stage": "service", "proto": "tcp",
+         "execution_id": "e1", "fatal": True},
+        {"event": "job_done", "status": "failed", "seconds": 1, "counts": {"errors": 1}},
+    ]
+    resumed = failed + [
+        {"event": "job_start"},
+        {"event": "stage_start", "stage": "service"},
+        {"event": "stage_done", "stage": "service", "seconds": 1, "counts": {"services": 2}},
+        {"event": "job_done", "status": "done", "seconds": 1, "counts": {}},
+    ]
+    parsed = engine_runner.parse_events(_events(tmp_path, resumed))
+    by_stage = {s["stage"]: s["status"] for s in parsed["stages"]}
+    assert parsed["overall"]["status"] == "done"
+    assert by_stage.get("tcp_service") != "error", "정규화된 슬롯의 옛 실패가 남았다"
+    # 정규화 슬롯은 이번 시도의 stage_done 을 못 받는다 - running 으로 두면 끝난 스캔에
+    # 영원히 도는 단계가 남는다.
+    assert by_stage.get("tcp_service") != "running", "대체된 슬롯이 계속 도는 것으로 남았다"
+    assert not [i for i in parsed.get("quality_issues", [])
+                if i.get("kind") == "command_error"]
+
+    # 같은 시도 안의 재시작은 여전히 실패를 지켜야 한다.
+    same_attempt = failed[:4] + [
+        {"event": "stage_start", "stage": "service"},
+        {"event": "stage_done", "stage": "service", "seconds": 1, "counts": {}},
+        {"event": "job_done", "status": "failed", "seconds": 1, "counts": {"errors": 1}},
+    ]
+    kept = engine_runner.parse_events(_events(tmp_path, same_attempt))
+    assert {s["stage"]: s["status"] for s in kept["stages"]}.get("tcp_service") == "error"
+    assert [i for i in kept.get("quality_issues", []) if i.get("kind") == "command_error"]

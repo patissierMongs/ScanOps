@@ -353,10 +353,18 @@ def test_the_retry_offer_matches_what_the_retry_endpoint_accepts(client):
         assert offered["unresolved_issue_count"] == 2
         assert (scans_api._durable_retry_detail(db, hostless.id) or {}).get("required") is not True
 
+        # `retry_status` 도 같은 집합에서 나와야 한다. 화면은 이 값을 **먼저** 읽어
+        # 재스캔 배지를 그리고, 같은 값이 `required` 면 품질 배지를 가린다 - unresolved
+        # 전체로 세우면 '재스캔 필요 · 0대' 가 뜨면서 진짜 '품질 오류 · 2건' 이 숨는다.
+        assert offered["retry_status"] != "required", (
+            "재스캔할 수 없는데 배지를 띄우고 품질 오류를 가린다"
+        )
+
         both = history[mixed.id]
         assert both["retry_required"] is True, "재시도 가능한 이슈가 있는데 제안하지 않는다"
         assert both["retry_count"] == 1, "재시도 대상 호스트만 세야 한다"
         assert scans_api._durable_retry_detail(db, mixed.id)["required"] is True
+        assert both["retry_status"] == "required"
         assert both["quality_status"] == "error"      # 섞인 오류도 그대로 보인다
     finally:
         db.close()

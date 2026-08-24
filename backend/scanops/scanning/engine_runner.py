@@ -933,25 +933,42 @@ def parse_events(out_dir) -> dict:
                     if isinstance(name, str) and name:
                         slot(name)
         elif e == "stage_start":
-            s = slot(st)
             # 재개해서 같은 단계를 다시 도는 경우, 이전 시도의 실패는 이번 시도가 대신한다.
             # 안 걷어내면 stage_done 이 그 error 를 그대로 보존하고 옛 command_error 가
             # 미해결 품질 이슈로 남아, 스캔은 done 인데 타임라인·품질은 실패로 보고한다.
             #
-            # **같은 시도 안의 재시작은 건드리지 않는다.** 배치마다 stage_start 가 다시
-            # 나오므로(_scan_batches), 회차를 안 보고 지우면 배치 0 의 실패가 배치 1 시작에
-            # 조용히 사라진다.
-            if s.get("status") == "error" and s.get("_error_attempt", attempt) < attempt:
-                superseded.add((st, s.get("_error_attempt")))
-                s["issues"] = [issue for issue in s.get("issues", [])
-                               if issue.get("type") != "command_error"]
-                s["status"] = "running"
-                s["percent"] = s.get("percent") or 0
-                s.pop("error", None)
-                s.pop("_error_attempt", None)
-            elif s.get("status") not in {"done", "stopped", "error"}:
-                s["status"] = "running"
-                s["percent"] = s.get("percent") or 0
+            # **원시 이름만 보면 안 된다.** 실패 이벤트는 proto 에 따라 정규화되므로
+            # (`service` + proto=tcp -> `tcp_service`), 재스캔 생산자가 내는
+            # `stage_start(stage="service")` 는 오류가 든 슬롯과 이름이 다르다. 이미 있는
+            # 정규화 슬롯까지 함께 본다 - 없는 슬롯을 새로 만들지는 않는다.
+            for name in (st, *(("tcp_service", "udp_service") if st == "service" else ())):
+                if name != st and name not in stages:
+                    continue
+                target = slot(name)
+                # **같은 시도 안의 재시작은 건드리지 않는다.** 배치마다 stage_start 가 다시
+                # 나오므로(_scan_batches), 회차를 안 보고 지우면 배치 0 의 실패가 배치 1
+                # 시작에 조용히 사라진다.
+                if (target.get("status") == "error"
+                        and target.get("_error_attempt", attempt) < attempt):
+                    superseded.add((name, target.get("_error_attempt")))
+                    target["issues"] = [issue for issue in target.get("issues", [])
+                                        if issue.get("type") != "command_error"]
+                    # 정규화로 생긴 슬롯은 이번 시도의 `stage_done` 을 받지 못한다 - 그쪽은
+                    # 원시 이름(`service`)으로 오기 때문이다. `running` 으로 두면 끝난
+                    # 스캔에 영원히 도는 단계가 남으므로, 같은 일을 다시 해서 끝난 것으로
+                    # 닫는다. 원시 슬롯은 뒤따르는 stage_done 이 제 상태를 채운다.
+                    if name != st:
+                        target["status"] = "done"
+                        target["percent"] = 100
+                    else:
+                        target["status"] = "running"
+                        target["percent"] = target.get("percent") or 0
+                    target.pop("error", None)
+                    target.pop("_error_attempt", None)
+                elif (name == st
+                      and target.get("status") not in {"done", "stopped", "error"}):
+                    target["status"] = "running"
+                    target["percent"] = target.get("percent") or 0
         elif e == "stage_activity":
             s = slot(st)
             progress = ev.get("percent")

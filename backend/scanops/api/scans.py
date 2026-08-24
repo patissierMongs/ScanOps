@@ -48,6 +48,7 @@ _FAILURE_MESSAGES = {
     "invalid_scan_state": "저장된 스캔 설정을 해석하지 못했습니다.",
     "nmap_unavailable": "서버에서 스캔 도구를 찾을 수 없습니다.",
     "nmap_launch_failed": "스캔 도구를 시작하지 못했습니다.",
+    "watchdog_exceeded": "실행 상한을 넘겨 중단했습니다. 그때까지의 결과는 닫힘 판정에 쓰지 않습니다.",
     "nmap_failed": "스캔 도구가 비정상 종료되었습니다.",
     "result_missing": "스캔 결과 파일이 생성되지 않았습니다.",
     "result_ingest_failed": "스캔 결과를 처리하지 못했습니다.",
@@ -111,6 +112,10 @@ ENGINE_ROLE_DISCOVERY = "engine_discovery"
 # 중단본 표식 — 스캐너(scanops_scanner.INTERRUPTED_*)와 같은 문자열이어야 한다.
 INTERRUPTED_DIR_NAME = "interrupted"
 INTERRUPTED_MARK = ".interrupted"
+# 워치독이 끊었다는 것을 rc 로 실어 나른다. 실제 종료 코드(0~255)나 시그널(-1~-64)과
+# 겹치지 않는 값이어야 한다 - `-1` 은 이미 '프로세스를 못 띄웠다' 는 뜻이라, 겹치면 화면이
+# "스캔 도구를 시작하지 못했습니다" 라는 **거짓 원인**을 말한다.
+WATCHDOG_RC = -1000
 INTERRUPTED_REJECT = (
     "중단된 스캔 결과는 가져올 수 없습니다. 부분 결과라 못 본 포트가 미탐이 되고, "
     "끊긴 자리의 filtered 가 오탐이 됩니다. 스캔을 다시 완주한 뒤 가져오세요."
@@ -903,7 +908,7 @@ def _wait_scan_process(scan_id: int, proc, watchdog_seconds: int = 0,
         # 끝낼 수 있는데, 그대로 두면 호출부가 '정상 완료' 로 읽어 복구된 **부분** XML 에
         # 미관측 닫힘 권한을 준다 - 훑지도 않은 포트가 '닫힘/정상처리' 가 된다. 워치독을
         # 둔 이유가 통째로 뒤집힌다. 단계 엔진(nmaprun.run)·단독 스캐너와 같은 규칙이다.
-        return rc or -1 if fired.is_set() else rc
+        return WATCHDOG_RC if fired.is_set() else rc
     finally:
         if timer is not None:
             timer.cancel()
@@ -935,6 +940,10 @@ class _WorkerFailure(RuntimeError):
 def _checked_stage(scan_id: int, argv: list[str], log_path: Path,
                    watchdog_seconds: int = 0, out_base: Path | None = None) -> None:
     rc = _run_stage(scan_id, argv, log_path, watchdog_seconds, out_base)
+    # 상한 초과는 시작 실패와도, 일반 비정상 종료와도 다른 사실이다. 원인을 뭉치면 운영자가
+    # nmap 설치를 의심하며 시간을 쓴다.
+    if rc == WATCHDOG_RC:
+        raise _WorkerFailure("watchdog_exceeded")
     if rc == -1:
         raise _WorkerFailure("nmap_launch_failed")
     if rc != 0:
@@ -1135,6 +1144,9 @@ def _chunk_worker(scan_id: int) -> None:
             _mark(scan_id, "canceled")
             return
         xml_path = nmap_runner.xml_of(b_base)
+        if rc == WATCHDOG_RC:
+            _fail(scan_id, "watchdog_exceeded")
+            return
         if rc != 0:
             _fail(scan_id, "nmap_failed")
             return
@@ -2486,19 +2498,27 @@ def _retry_history(rows: list[ScanRun], db: Session) -> dict[int, dict]:
             retry_scan = next((row for row in rows if row.id == retry_scan_id), None)
             if retry_scan is None and retry_scan_id is not None:
                 retry_scan = db.get(ScanRun, retry_scan_id)
-            if unresolved:
-                retry_status = (
-                    "running" if retry_scan and retry_scan.status in {"running", "canceling"}
-                    else "required"
-                )
-            else:
-                retry_status = "resolved" if any(
-                    issue.resolved_by_scan_id is not None for issue in durable
-                ) else "none"
             # 재스캔 제안은 **재시도로 메울 수 있는 이슈**에서만 나와야 한다. 품질 표시는
             # 그것과 다른 축이라 unresolved 전체를 그대로 본다 - 호스트 없는 오류도
             # '확인 필요' 로는 남아야 하고, 다만 재스캔 버튼을 띄우면 안 된다.
             retryable = _retryable_issues(unresolved)
+            # `retry_status` 도 같은 집합에서 나와야 한다. 화면은 이 값을 **먼저** 읽어
+            # 재스캔 배지를 그리고(`RetryBadge`), 같은 값이 `required` 면 품질 배지를
+            # 가린다(`QualityBadge`). unresolved 전체로 세우면 '재스캔 필요 · 0대' 라는
+            # 없는 안내가 뜨면서 진짜 '품질 오류 · N건' 은 숨는다 - 두 번 틀린다.
+            if retryable:
+                retry_status = (
+                    "running" if retry_scan and retry_scan.status in {"running", "canceling"}
+                    else "required"
+                )
+            elif unresolved:
+                # 재시도로 메울 수 없는 이슈만 남았다. 재스캔은 제안하지 않되, 품질 배지가
+                # 보이도록 `required` 는 아니어야 한다.
+                retry_status = "none"
+            else:
+                retry_status = "resolved" if any(
+                    issue.resolved_by_scan_id is not None for issue in durable
+                ) else "none"
             hosts = {issue.host_ip for issue in retryable}
             stages = list(dict.fromkeys(issue.stage for issue in retryable if issue.stage))
             severe = any(

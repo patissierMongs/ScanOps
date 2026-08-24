@@ -1838,10 +1838,62 @@ def test_the_legacy_watchdog_repairs_the_artifact_it_cut(tmp_path, monkeypatch):
                         lambda _p: -15 if fired.wait(5) else 0)
 
     rc = scans_api._wait_scan_process(1, proc, watchdog_seconds=0.05, out_base=base)
-    assert rc == -15
+    # 상한 초과는 전용 코드로 돌려준다 - 시작 실패(-1)와 겹치면 화면이 거짓 원인을 말한다.
+    assert rc == scans_api.WATCHDOG_RC
     assert getattr(proc, "terminated", False), "워치독이 프로세스를 끝내지 않았다"
 
     import xml.etree.ElementTree as ET
     root = ET.fromstring(nmap_runner.xml_of(base).read_bytes())
     assert [h.find("address").get("addr") for h in root.findall("host")] == ["10.0.0.1"]
     assert root.find("runstats") is None, "복구본이 닫힘 권한을 얻었다"
+
+
+def test_a_watchdog_stop_is_not_reported_as_a_launch_failure(tmp_path, monkeypatch):
+    """상한 초과는 '프로세스를 못 띄웠다' 와 다른 사실이다.
+
+    둘 다 `-1` 로 돌려주면 `_checked_stage` 가 `nmap_launch_failed` 로 바꾸고, 화면에는
+    "스캔 도구를 시작하지 못했습니다" 라는 거짓 원인이 남는다. 운영자는 nmap 설치를
+    의심하며 시간을 쓴다.
+    """
+    import threading
+
+    from scanops.api import scans as scans_api
+    from scanops.scanning import nmap_runner
+
+    base = tmp_path / "b0"
+    nmap_runner.xml_of(base).write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/></host><host><status state="up"',
+        encoding="utf-8",
+    )
+
+    fired = threading.Event()
+
+    class _Proc:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            fired.set()
+
+    monkeypatch.setattr(scans_api.chunker, "stop_requested", lambda _base: False)
+    monkeypatch.setattr(nmap_runner, "wait_owned", lambda _p: 0 if fired.wait(5) else 0)
+    monkeypatch.setattr(nmap_runner, "popen", lambda *_a, **_k: _Proc())
+    monkeypatch.setattr(scans_api, "_set_current_log", lambda *_a, **_k: None)
+
+    try:
+        scans_api._checked_stage(1, ["nmap"], tmp_path / "l.log", 0.05, base)
+        raise AssertionError("상한을 넘겼는데 실패로 처리되지 않았다")
+    except scans_api._WorkerFailure as exc:
+        assert exc.code != "nmap_launch_failed", "상한 초과를 시작 실패로 보고한다"
+        assert exc.code == "watchdog_exceeded"
+    # 화면에 보일 문구가 있어야 한다 - 코드만 있고 문구가 없으면 원인이 비어 보인다.
+    assert scans_api._FAILURE_MESSAGES.get("watchdog_exceeded")
+    # 시작 실패는 그대로 시작 실패여야 한다.
+    monkeypatch.setattr(nmap_runner, "popen",
+                        lambda *_a, **_k: (_ for _ in ()).throw(OSError("no nmap")))
+    try:
+        scans_api._checked_stage(1, ["nmap"], tmp_path / "l.log", 0, base)
+        raise AssertionError("띄우지도 못했는데 실패로 처리되지 않았다")
+    except scans_api._WorkerFailure as exc:
+        assert exc.code == "nmap_launch_failed"
