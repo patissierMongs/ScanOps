@@ -1415,6 +1415,32 @@ def _commit_engine_ingest(db: Session, scan: ScanRun, out_dir: Path,
     return counts
 
 
+def _issue_out(raw: dict) -> dict:
+    """품질 이슈 한 건을 화면 계약으로 맞춘다 - 라이브와 완료가 같은 모양이어야 한다.
+
+    라이브는 `parse_events()` 의 원본(`kind`/`host_ip`)을, 완료는 DB 투영(`kind`/`host_ip`)을
+    준다. 화면은 `type`/`host` 를 읽는다. 두 가지를 각자 손으로 맞추다가 한쪽이 어긋났고,
+    어긋난 쪽이 하필 **실행 중** 이라 문제를 보고 있는 동안에만 호스트가 비었다.
+    번역을 여기 한 곳으로 모아 두 가지가 갈라질 수 없게 한다.
+    """
+    status = raw.get("status")
+    if status not in {"resolved", "retrying", "unresolved"}:
+        status = ("resolved" if raw.get("resolved_by_scan_id") is not None
+                  else "retrying" if raw.get("retry_scan_id") is not None else "unresolved")
+    return {
+        "issue_key": raw.get("issue_key") or "",
+        "type": raw.get("type") or raw.get("kind") or "",
+        "stage": raw.get("stage") or "",
+        "host": raw.get("host") or raw.get("host_ip") or "",
+        "proto": raw.get("proto") or "",
+        "port_spec": raw.get("port_spec") or "",
+        "message": raw.get("message") or raw.get("detail") or "",
+        "status": status,
+        "retry_scan_id": raw.get("retry_scan_id"),
+        "resolved_by_scan_id": raw.get("resolved_by_scan_id"),
+    }
+
+
 def _artifact_issue_inputs(report: dict, problems: list[str]) -> list[dict]:
     issues: list[dict] = []
 
@@ -2743,7 +2769,21 @@ def _scan_artifact_paths(scan: ScanRun) -> list[Path]:
     속성을 더 읽을 수 없기 때문이다(만료된 인스턴스)."""
     paths = [Path(v) for v in (scan.raw_xml_path, scan.log_path) if v]
     paths.append(_settings.scans_dir / f"scan_{scan.id}")
-    return paths
+    # 레거시/자동(청크) 스캔은 base 옆에 형제 파일을 흩뿌린다 - 배치별 산출물
+    # scan_N.b0.tcp_discovery.{xml,nmap,gnmap}, 그 로그, 재개 상태 scan_N.chunks.json.
+    # 예전에는 raw_xml_path 와 log_path 에 적힌 딱 두 개만 지워서, 이력을 지운 스캔의
+    # XML 증거와 재개 상태가 디스크에 계속 남았다.
+    #
+    # glob 의 '.' 은 리터럴이라 scan_1.* 은 scan_12.xml 을 잡지 않는다 - 접두사 매칭으로
+    # 옆 스캔을 지우는 사고가 나지 않는 이유다. 스캔 디렉터리(확장자 없는 scan_N)도
+    # 이 패턴에 걸리지 않으므로 위에서 따로 넣는다.
+    paths.extend(sorted(_settings.scans_dir.glob(f"scan_{scan.id}.*")))
+    seen, unique = set(), []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
 
 
 def _remove_paths(paths: list[Path]) -> None:
@@ -3637,13 +3677,12 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
             "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
             **(row.diagnostics_json or {}),
         } for row in durable_executions]
-        issues = [{
-            "issue_key": row.issue_key, "type": row.kind, "stage": row.stage,
-            "host": row.host_ip, "status": "resolved" if row.resolved_by_scan_id is not None
-            else "retrying" if row.retry_scan_id is not None else "unresolved",
+        issues = [_issue_out({
+            "issue_key": row.issue_key, "kind": row.kind, "stage": row.stage,
+            "host_ip": row.host_ip, "proto": row.proto, "port_spec": row.port_spec,
             "message": row.detail, "retry_scan_id": row.retry_scan_id,
             "resolved_by_scan_id": row.resolved_by_scan_id,
-        } for row in durable_issues]
+        }) for row in durable_issues]
         hosts = [{
             "host_ip": row.host_ip, "discovery_status": row.discovery_status,
             "tcp_sweep_status": row.tcp_sweep_status,
@@ -3663,7 +3702,11 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
             retry["by_stage"].setdefault(issue["stage"], []).append(issue["host"])
     else:
         executions = derived.get("executions") or []
-        issues = derived.get("quality_issues") or []
+        # 라이브도 **같은 모양**으로 내보낸다. 예전에는 이 가지만 parse_events 의 원본
+        # (host_ip) 을 그대로 흘려서, 화면이 읽는 `host` 가 비었다 - 운영자가 문제를
+        # 지켜보는 바로 그 순간에만 어느 장비인지 안 보이고, 스캔이 끝나면 나타났다.
+        issues = [_issue_out(raw) for raw in (derived.get("quality_issues") or [])
+                  if isinstance(raw, dict)]
         hosts = []
     # The database lifecycle is authoritative. An empty/truncated event stream must not make a
     # terminal scan look like it is still running after a restart or worker failure.

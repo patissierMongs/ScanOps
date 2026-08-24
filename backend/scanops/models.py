@@ -157,6 +157,11 @@ class ScanQualityIssue(Base):
     kind: Mapped[str] = mapped_column(String(32))
     stage: Mapped[str] = mapped_column(String(32), default="")
     host_ip: Mapped[str] = mapped_column(String(64), default="")
+    # 어느 포트가 안 됐는지. 화면(단계별 문제 카드)이 그리도록 만들어 둔 근거인데,
+    # 예전에는 라이브 이벤트에만 있고 영속 행에는 안 남아서, 스캔이 끝나 DB 투영으로
+    # 바뀌는 순간 '무엇이 실패했는지' 가 사라졌다 - 영구 보관되는 쪽이 더 빈약했다.
+    proto: Mapped[str] = mapped_column(String(8), default="")
+    port_spec: Mapped[str] = mapped_column(String(256), default="")
     detail: Mapped[str] = mapped_column(Text, default="")
     retry_scan_id: Mapped[int | None] = mapped_column(
         ForeignKey("scan_runs.id", ondelete="SET NULL"), nullable=True

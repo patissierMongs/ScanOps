@@ -701,9 +701,15 @@ class Pipeline:
         base = self.out / f"stage3-{proto}-b{bi}-g{group}"
         r = self._nmap("service", args, base, fatal=not isolate, targets=list(targets))
         ok = not r.get("stopped") and r["rc"] == 0
+        first_seconds = 0.0   # 재시도가 있었을 때만 채워진다(아래).
         if not ok and not r.get("stopped") and proto == "udp" and not self.state.stopped():
             retry_started = time.time()
             failed_execution_id = r.get("execution_id")
+            # 실패한 첫 시도의 시간도 이 단계가 쓴 시간이다. 아래에서 r 이 재시도 결과로
+            # 덮여 쓰이므로 여기서 붙잡아 둔다 - 안 그러면 대부분을 첫 시도에서 쓴 실행이
+            # 짧은 재시도 시간만으로 끝난 것처럼 남는다(_service_batch 가 이 값으로 단계
+            # 소요를 만든다). 지연을 추적하려고 보는 값이 정확히 그 지연을 감춘다.
+            first_seconds = r.get("seconds") or 0
             # **임시 base 로 돌린다.** 같은 -oA 를 쓰면 nmap 이 시작하자마자 첫 실행의
             # 산출물을 잘라 버린다. 워치독이 끊은 뒤 복구해 둔 관측이 바로 그때 사라지고,
             # 재시도까지 실패하면 첫 실행이 남긴 부분 관측만 더 나쁜 것으로 바뀐다 -
@@ -741,7 +747,7 @@ class Pipeline:
         for row in rows:
             self.sink.emit("service", stage="service", confirm=False,
                            **{k: row[k] for k in ("ip", "port", "proto", "service", "product", "version")})
-        return r["seconds"], rows, ok
+        return first_seconds + r["seconds"], rows, ok
 
 
     def _probe_protocol(self, ip, proto, ports, sp, confirm, retries=None, tag="",
@@ -759,6 +765,7 @@ class Pipeline:
         base = self.out / f"stage3-{ip.replace('.', '_')}-{suffix}{'-confirm' if confirm else ''}"
         r = self._nmap("service", args, base, fatal=not isolate, targets=[ip])
         ok = not r.get("stopped") and r["rc"] == 0
+        first_seconds = 0.0   # 재시도가 있었을 때만 채워진다(아래).
         # UDP 식별이 죽었을 때 한 번만 다른 nsock 엔진으로 다시 시도한다.
         # nsock 은 epoll → kqueue → poll → iocp → select 순으로 고르므로(nsock_engines.c)
         # Windows 기본은 poll 이다. nmap#3138 의 poll 결함은 7.98 에서 고쳐졌지만, 같은
@@ -767,6 +774,7 @@ class Pipeline:
         if not ok and not r.get("stopped") and proto == "udp" and not self.state.stopped():
             retry_started = time.time()
             failed_execution_id = r.get("execution_id")
+            first_seconds = r.get("seconds") or 0   # 묶음 경로와 같은 이유(단계 소요 합산)
             # 묶음 경로와 **같은 규칙**이다 - 같은 -oA 를 쓰면 nmap 이 시작하자마자 첫
             # 실행의 산출물을 잘라 버린다. 워치독이 끊은 뒤 복구해 둔 관측이 그때 사라지고,
             # 재시도까지 실패하면 되찾은 것만 잃는다. 한 곳만 고치면 경로에 따라 결과가
@@ -807,7 +815,7 @@ class Pipeline:
         for row in rows:
             self.sink.emit("service", stage="service", confirm=confirm,
                            **{k: row[k] for k in ("ip", "port", "proto", "service", "product", "version")})
-        return r["seconds"], rows, ok
+        return first_seconds + r["seconds"], rows, ok
 
     def _split_units(self, proto, ports, tag):
         """**실패한 뒤에만** 쪼갤 단위. 정상 경로는 묶어서 한 프로세스로 돌린다.

@@ -2188,3 +2188,56 @@ def test_a_snapshot_made_before_the_marker_existed_is_still_refused(client, monk
             Finding.finding_key == "10.9.9.2|443|tcp").one().state == "open"
     finally:
         db.close()
+
+
+def test_a_quality_issue_names_the_same_host_while_running_as_after_it_ends(
+    client, monkeypatch, tmp_path,
+):
+    """같은 문제를 실행 중과 완료 후가 **같은 모양**으로 말해야 한다.
+
+    화면의 '단계별 문제' 카드는 `type`/`host`/`proto`/`port_spec` 을 읽는다. 예전에는
+    라이브 응답이 parse_events 원본(`kind`/`host_ip`)을 그대로 흘려서 카드에 호스트가
+    안 찍혔다 - 운영자가 문제를 지켜보는 바로 그 순간에만 어느 장비인지 안 보이고,
+    스캔이 끝나면 나타났다. 반대로 영속 행에는 proto/port_spec 이 없어서, 끝나는 순간
+    '어느 포트가 안 됐는지' 가 사라졌다. 양쪽 다 확인한다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {"targets": ["10.0.0.5"], "out_dir": str(tmp_path)})
+    out_dir = tmp_path / "scans" / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "service"},
+        {"event": "service_degraded", "stage": "service", "proto": "udp",
+         "hosts": ["10.0.0.5"], "failed_ports": [161, 500], "port_spec": "U:161,500",
+         "message": "UDP 서비스 프로브가 일부 완료되지 않았습니다."},
+    ]) + "\n", encoding="utf-8")
+
+    headers = _headers(client)
+    live = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()
+    assert live["source"] == "live_events"
+    issue = next(i for i in live["issues"] if i["type"] == "service_degraded")
+    assert issue["host"] == "10.0.0.5", "실행 중에는 어느 장비인지 안 보인다"
+    assert issue["proto"] == "udp" and issue["port_spec"] == "U:161,500"
+    assert issue["status"] == "unresolved"
+
+    # 이제 같은 스캔을 마감해 DB 투영으로 넘긴다 - 워커가 종료 시 하는 것과 같은 호출.
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scans_api._materialize_engine_terminal(
+            db, scan, out_dir, {"targets": ["10.0.0.5"]},
+            {"authority_missing": [], "authority_broken": []}, [],
+        )
+        scan.status = "done"
+        db.commit()
+    finally:
+        db.close()
+
+    ended = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()
+    assert ended["source"] == "db", "영속 투영으로 넘어가지 않아 비교가 무의미하다"
+    kept = next(i for i in ended["issues"] if i["type"] == "service_degraded")
+    assert kept["host"] == "10.0.0.5"
+    assert (kept["proto"], kept["port_spec"]) == ("udp", "U:161,500"), (
+        "영구 보관되는 쪽이 어느 포트가 실패했는지를 잃었다"
+    )
+    assert {k: kept[k] for k in ("type", "host", "proto", "port_spec")} == \
+           {k: issue[k] for k in ("type", "host", "proto", "port_spec")}

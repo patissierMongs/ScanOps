@@ -207,6 +207,10 @@ def materialize_terminal_observability(
         row.kind = _issue_kind(raw)
         row.stage = _text(raw.get("stage"), 32)
         row.host_ip = _text(raw.get("host_ip"), 64)
+        # 어느 포트가 안 됐는지도 같이 남긴다. 이 값이 없으면 스캔이 끝나는 순간
+        # 화면이 근거 줄을 못 그린다(라이브에는 있었는데 영구 보관본에는 없다).
+        row.proto = _text(raw.get("proto"), 8)
+        row.port_spec = _text(raw.get("port_spec"), 256)
         row.detail = _text(raw.get("detail"))
 
     host_input = {

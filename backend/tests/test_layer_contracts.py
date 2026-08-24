@@ -2073,3 +2073,50 @@ def test_execution_metadata_records_only_the_real_targets(tmp_path):
     # 호출부가 안 알려 주면 지어내지 않는다 - 빈 목록이 정직하다.
     unknown = pipe._execution_meta("tcp", args, tmp_path / "stage-tcp-b0")
     assert unknown["hosts"] == []
+
+
+def test_a_failed_udp_attempt_still_counts_toward_the_stage_time(tmp_path):
+    """재시도한 UDP 식별의 단계 소요는 **두 시도의 합**이어야 한다.
+
+    묶음/호스트별 두 경로 모두, 재시도 결과가 `r` 을 덮어쓴다. 반환값을 그대로 쓰면
+    첫 시도에서 12분을 쓰고 재시도에서 3초 만에 끝난 실행이 '3초 걸린 단계' 로 남는다 -
+    `_service_batch()` 가 이 값으로 영속 단계 소요를 만들기 때문에, 지연을 추적하려고
+    보는 바로 그 숫자가 지연을 감춘다.
+    """
+    import sys
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import nmaprun
+
+    for path, kind in ((tmp_path / "grouped", "grouped"), (tmp_path / "perhost", "perhost")):
+        pipe, spec = _pipeline(path, {
+            "job_id": kind, "targets": ["10.0.0.3"], "out_dir": str(path),
+            "stages": {"service": {"nse": [], "udp_nse": []}},
+        })
+        calls = []
+
+        def flaky(stage, args, base, fatal=True, targets=None):
+            calls.append(str(base))
+            first = len(calls) == 1
+            if not first:
+                # 재시도는 짧고, 읽을 수 있는 산출물을 남긴다(채택 조건).
+                pathlib_Path(str(base) + ".xml").write_text(
+                    "<nmaprun><runstats><finished exit=\"success\"/></runstats></nmaprun>",
+                    encoding="utf-8")
+            return {"rc": 1 if first else 0, "seconds": 720.0 if first else 3.0,
+                    "cmd": args, "stopped": False}
+
+        pipe._nmap = flaky
+        if kind == "grouped":
+            elapsed, _rows, ok = pipe._probe_batch_protocol(
+                ["10.0.0.3"], "udp", [161], spec.service, 0, 0)
+        else:
+            elapsed, _rows, ok = pipe._probe_protocol(
+                "10.0.0.3", "udp", [161], spec.service, confirm=False)
+
+        assert ok, f"{kind}: 재시도가 채택되지 않아 시간 비교가 무의미하다"
+        assert len(calls) == 2, f"{kind}: 재시도가 일어나지 않았다"
+        assert calls[1] != calls[0], f"{kind}: 재시도가 첫 실행과 같은 base 를 썼다"
+        assert elapsed == 723.0, (
+            f"{kind}: 단계 소요가 {elapsed} 초 - 실패한 첫 시도(720초)가 사라졌다"
+        )
+        assert nmaprun.retry_base(pathlib_Path(calls[0])).name == pathlib_Path(calls[1]).name

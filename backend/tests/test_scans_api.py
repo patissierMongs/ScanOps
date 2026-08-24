@@ -3225,3 +3225,50 @@ def test_an_import_without_runstats_keeps_its_ingest_timestamps(client):
     assert scan["started_at"] and scan["finished_at"]
     assert (datetime.fromisoformat(scan["finished_at"])
             - datetime.fromisoformat(scan["started_at"])).total_seconds() >= 0
+
+
+def test_deleting_a_chunked_scan_takes_its_sibling_artifacts_with_it(client):
+    """삭제한 스캔의 증거 파일이 디스크에 남으면 안 된다.
+
+    레거시/자동(청크) 스캔은 base 옆에 형제 파일을 흩뿌린다 - 배치별 XML, 그 로그,
+    재개 상태 scan_N.chunks.json. 예전에는 raw_xml_path 와 log_path 에 적힌 두 개만
+    지워서, 이력만 사라지고 XML 증거와 재개 상태는 영원히 남았다.
+
+    동시에, 접두사로 지워서 옆 스캔을 말려 죽이면 안 된다 - scan_1 을 지울 때
+    scan_12 는 그대로여야 한다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import ScanRun
+
+    make_user("chunkboss", "boss-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'chunkboss', 'boss-pass-1234')}"}
+
+    db = SessionLocal()
+    target = ScanRun(name="chunked", status="done")
+    db.add(target); db.commit()
+    scan_id = target.id
+    scans_dir = scans_api._settings.scans_dir
+    scans_dir.mkdir(parents=True, exist_ok=True)
+    siblings = [
+        scans_dir / f"scan_{scan_id}.xml",
+        scans_dir / f"scan_{scan_id}.b0.tcp_discovery.xml",
+        scans_dir / f"scan_{scan_id}.b0.tcp_discovery.log",
+        scans_dir / f"scan_{scan_id}.b1.udp_identify.gnmap",
+        scans_dir / f"scan_{scan_id}.chunks.json",
+    ]
+    for path in siblings:
+        path.write_text("evidence", encoding="utf-8")
+    target.raw_xml_path = str(siblings[0])
+    target.log_path = str(siblings[2])
+    # 접두사가 겹치는 이웃. 이 스캔은 지우지 않았으니 파일도 그대로여야 한다.
+    neighbour = scans_dir / f"scan_{scan_id}0.xml"
+    neighbour.write_text("남의 증거", encoding="utf-8")
+    db.commit(); db.close()
+
+    assert client.delete(f"/api/scans/{scan_id}", headers=admin).status_code == 200
+
+    left = [p.name for p in siblings if p.exists()]
+    assert not left, f"삭제한 스캔의 증거가 디스크에 남았다: {left}"
+    assert neighbour.exists(), "접두사가 겹치는 다른 스캔의 파일을 지웠다"
+    neighbour.unlink()
