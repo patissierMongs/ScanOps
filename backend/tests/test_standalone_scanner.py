@@ -3114,7 +3114,10 @@ def test_failed_udp_identify_is_retried_once_with_the_select_nsock_engine(monkey
         calls.append(list(cmd))
         if "--nsock-engine" not in cmd:
             return 1                       # 기본 엔진에서 죽는다 — XML 도 남기지 않는다
-        Path(str(base) + ".xml").write_text(
+        # 실제 nmap 처럼 **-oA 가 가리키는 곳**에 쓴다. 재시도는 임시 base 로 돌므로,
+        # 여기서 원래 base 에 쓰면 첫 실행 산출물을 덮는 그 결함을 테스트가 못 잡는다.
+        out = Path(cmd[cmd.index("-oA") + 1])
+        Path(str(out) + ".xml").write_text(
             '<?xml version="1.0"?><nmaprun><runstats>'
             '<finished exit="success"/><hosts up="1" down="0" total="1"/>'
             "</runstats></nmaprun>", encoding="utf-8")
@@ -3159,3 +3162,43 @@ def test_a_healthy_udp_identify_is_never_retried(monkeypatch, tmp_path):
 
     assert len(calls) == 1
     assert plan["runs"][-1]["nsock_engine_retry"] == ""
+
+
+def test_a_failed_udp_fallback_does_not_destroy_the_first_run_observations(tmp_path):
+    """재시도가 첫 실행의 산출물을 덮어쓰면 안 된다.
+
+    UDP 식별이 실패하면 다른 nsock 엔진으로 한 번 더 돈다. 그때 같은 ``-oA`` base 를 쓰면
+    nmap 이 **시작하자마자** 첫 실행의 파일을 잘라 버린다. 워치독이 끊은 뒤 복구해 둔 관측이
+    바로 그 순간 사라지고, 재시도까지 실패하면 rc 는 첫 실행 것을 남기면서 파일만 더 나쁜
+    것이 된다 - 코드가 스스로 적어 둔 의도("첫 실행보다 나쁘게 기록할 이유는 없다")와
+    어긋난다.
+    """
+    scanner = _load_scanner()
+
+    base = tmp_path / "b0.udp_identify"
+    # 접두사여야 산출물 이름이 단계로 끝난다 - 단계를 이름 끝으로 판별하는 곳이 여럿이다.
+    retry_base = tmp_path / "retry~b0.udp_identify"
+    assert retry_base.name.endswith(".udp_identify")
+
+    # 1) -oA 인자만 임시 base 로 바뀌고 나머지는 그대로다.
+    cmd = ["nmap", "-sU", "-oA", str(base), "10.0.0.1"]
+    swapped = [scanner.retry_base_arg(a, base, retry_base) for a in cmd]
+    assert swapped == ["nmap", "-sU", "-oA", str(retry_base), "10.0.0.1"]
+
+    # 2) 채택하지 않으면 첫 실행 산출물이 그대로 남고 재시도 파일은 사라진다.
+    for suffix in scanner.NMAP_OUTPUT_SUFFIXES:
+        (tmp_path / f"b0.udp_identify{suffix}").write_text("first", encoding="utf-8")
+        (tmp_path / f"retry~b0.udp_identify{suffix}").write_text("worse", encoding="utf-8")
+    scanner.discard_artifacts(retry_base)
+    for suffix in scanner.NMAP_OUTPUT_SUFFIXES:
+        kept = tmp_path / f"b0.udp_identify{suffix}"
+        assert kept.read_text(encoding="utf-8") == "first", "첫 실행 산출물이 사라졌다"
+        assert not (tmp_path / f"retry~b0.udp_identify{suffix}").exists(), "유령 파일이 남았다"
+
+    # 3) 채택하면 그때 원래 자리로 옮긴다.
+    for suffix in scanner.NMAP_OUTPUT_SUFFIXES:
+        (tmp_path / f"retry~b0.udp_identify{suffix}").write_text("better", encoding="utf-8")
+    scanner.adopt_retry_artifacts(retry_base, base)
+    for suffix in scanner.NMAP_OUTPUT_SUFFIXES:
+        assert (tmp_path / f"b0.udp_identify{suffix}").read_text(encoding="utf-8") == "better"
+        assert not (tmp_path / f"retry~b0.udp_identify{suffix}").exists()

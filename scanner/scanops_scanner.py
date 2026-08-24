@@ -2625,6 +2625,43 @@ def _stage_xml_truncated(base: Path) -> bool:
     return xml.exists() and not xml_parse_ok(xml)
 
 
+def _stage_xml_usable(base: Path) -> bool:
+    """읽을 수 있는 산출물이 실제로 있는가.
+
+    ``not _stage_xml_truncated()`` 로는 부족하다 - 그 함수는 파일이 **없을 때도** False 라,
+    아무것도 남기지 못한 실행을 '멀쩡하다' 로 읽는다. 재시도를 채택할지 정하는 자리에서는
+    그 차이가 '부분 결과'와 '완주'를 가른다.
+    """
+    xml = Path(str(base) + ".xml")
+    return xml.exists() and xml_parse_ok(xml)
+
+
+# nmap 이 -oA 로 함께 쓰는 확장자. 재시도를 채택·폐기할 때 셋을 같이 다뤄야 한다.
+NMAP_OUTPUT_SUFFIXES = (".xml", ".nmap", ".gnmap")
+
+
+def retry_base_arg(arg: str, base: Path, retry_base: Path) -> str:
+    """``-oA`` 인자만 임시 base 로 바꾼다. 나머지 인자는 그대로 둔다."""
+    return str(retry_base) if arg == str(base) else arg
+
+
+def adopt_retry_artifacts(retry_base: Path, base: Path) -> None:
+    """재시도 산출물을 원래 자리로 옮긴다 - 채택했을 때만 부른다."""
+    for suffix in NMAP_OUTPUT_SUFFIXES:
+        src = Path(str(retry_base) + suffix)
+        if src.exists():
+            src.replace(Path(str(base) + suffix))
+
+
+def discard_artifacts(retry_base: Path) -> None:
+    """채택하지 않은 재시도 산출물을 지운다 - 결과 폴더에 유령 파일을 남기지 않는다."""
+    for suffix in NMAP_OUTPUT_SUFFIXES:
+        try:
+            Path(str(retry_base) + suffix).unlink()
+        except OSError:
+            pass
+
+
 def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", tcp_ports: list[int] | None = None,
                    targets: list[str] | None = None) -> int:
     cmd = build_command(plan, idx, stage_id, tcp_ports, targets)
@@ -2648,7 +2685,13 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
         # 실패가 또 나면 그 수정이 불완전하거나 다른 경로라는 뜻이라 유지관리자가 제시한
         # 우회책(select)을 그대로 쓴다. poll 을 명시하는 것은 기본값 재지정이라 무의미하다.
         if stage_id == "udp_identify" and (rc != 0 or _stage_xml_truncated(base)):
-            retry_cmd = list(cmd)
+            # **임시 base 로 돌린다.** 같은 -oA 를 쓰면 nmap 이 시작하자마자 첫 실행의
+            # 산출물을 잘라 버린다. 워치독이 끊은 뒤 복구해 둔 관측이 바로 그때 사라지고,
+            # 재시도까지 실패하면 rc 는 첫 실행 것을 남기면서 파일만 더 나쁜 것이 된다.
+            # 접미사가 아니라 **접두사**로 만든다. 산출물 이름은 `...<단계>` 로 끝나고
+            # 단계를 그 끝으로 판별하는 곳이 여럿이라, 뒤에 붙이면 재시도만 단계를 잃는다.
+            retry_base = base.with_name(f"retry~{base.name}")
+            retry_cmd = [retry_base_arg(a, base, retry_base) for a in cmd]
             retry_cmd[1:1] = ["--nsock-engine", UDP_RETRY_ENGINE]
             print(f"    UDP 식별이 실패했습니다(rc={rc}) — {UDP_RETRY_ENGINE} 엔진으로 "
                   f"한 번 다시 시도합니다.", flush=True)
@@ -2657,12 +2700,18 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
             retry_rc = run_nmap_process(retry_cmd, retry_problems,
                                         watchdog_seconds=watchdog)
             if watchdog:
-                repair_truncated_xml(Path(str(base) + ".xml"))
+                repair_truncated_xml(Path(str(retry_base) + ".xml"))
             # 재시도가 더 나으면 그 결과를 채택한다. 아니면 원래 실패를 그대로 남긴다 —
-            # 재시도가 실패했다고 첫 실행보다 나쁘게 기록할 이유는 없다.
-            if retry_rc == 0 and not _stage_xml_truncated(base):
+            # 재시도가 실패했다고 첫 실행보다 나쁘게 기록할 이유는 없고, 첫 실행이 남긴
+            # 관측을 더 나쁜 것으로 바꿀 이유는 더더욱 없다.
+            # 재시도가 **읽을 수 있는 산출물을 실제로 남겼을 때만** 채택한다.
+            accepted = retry_rc == 0 and _stage_xml_usable(retry_base)
+            if accepted:
+                adopt_retry_artifacts(retry_base, base)
                 rc, problems = retry_rc, retry_problems
                 retried_engine = UDP_RETRY_ENGINE
+            else:
+                discard_artifacts(retry_base)
     except KeyboardInterrupt:
         # 중단도 '일어난 일'이라 기록한다. 기록하지 않으면 중간까지 스캔한 부분 결과가
         # state 에 없는 유령 파일로 남고, 재개 후 온전한 결과에 덮어써진다.

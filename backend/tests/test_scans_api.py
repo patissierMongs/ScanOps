@@ -2831,38 +2831,62 @@ def test_every_artifact_the_engine_writes_is_recognised_as_part_of_its_run(clien
     호스트 격리 재시도의 접미사는 프로토콜(`tcp`)일 때도 있고 포트가 붙은 tag(`tcp443`,
     `udp161`)일 때도 있다 - 후자를 놓치면 공통 실행이 실패해 격리로 넘어간 호스트의 결과가
     이력에 따로 흩어진다. 마침 그런 실행이 가장 봐야 할 실행이다.
+
+    묶음은 **실제 배치**(`bN`)로 하고, 같은 배치·같은 역할의 다른 파일은 슬롯 접미사로
+    가른다. 파일마다 배치를 하나씩 만들면 배치 하나짜리 스캔이 이력에 '4배치' 로 적히고
+    스윕과 식별이 서로 무관한 단계처럼 보인다.
     """
     from scanops.api.scans import _engine_stage_info
 
-    # 스윕은 열림만 증명하므로 식별과 **다른 역할**이어야 한다 - 같으면 빈 식별이 스윕을 덮는다.
     slots: dict[tuple, str] = {}
-    for name, expected_role in (
-        ("scan_7/stage0-discovery.xml", "engine_discovery"),
-        ("scan_7/stage-tcp-b0.xml", "tcp_discovery"),
-        ("scan_7/stage-udp-b3.xml", "udp_sweep"),
-        ("scan_7/stage3-tcp-b0-g0.xml", "tcp_identify"),
-        ("scan_7/stage3-tcp-b0-g2.xml", "tcp_identify"),
-        ("scan_7/stage3-udp-b1-g0.xml", "udp_identify"),
-        ("scan_7/stage3-10_0_0_5-tcp.xml", "tcp_identify"),
-        ("scan_7/stage3-10_0_0_5-udp-confirm.xml", "udp_identify"),
-        ("scan_7/stage3-10_0_0_5-tcp443.xml", "tcp_identify"),
-        ("scan_7/stage3-10_0_0_5-udp161-confirm.xml", "udp_identify"),
+    for name, expected_batch, expected_role in (
+        ("scan_7/stage0-discovery.xml", "b0", "engine_discovery"),
+        ("scan_7/stage-tcp-b0.xml", "b0", "tcp_discovery"),
+        ("scan_7/stage-udp-b0.xml", "b0", "udp_sweep"),
+        ("scan_7/stage-tcp-b3.xml", "b3", "tcp_discovery"),
+        ("scan_7/stage3-tcp-b0-g0.xml", "b0", "tcp_identify"),
+        ("scan_7/stage3-tcp-b0-g2.xml", "b0", "tcp_identify"),
+        ("scan_7/stage3-udp-b1-g0.xml", "b1", "udp_identify"),
+        ("scan_7/stage3-10_0_0_5-tcp.xml", "b0", "tcp_identify"),
+        ("scan_7/stage3-10_0_0_5-udp-confirm.xml", "b0", "udp_identify"),
+        ("scan_7/stage3-10_0_0_5-tcp443.xml", "b0", "tcp_identify"),
+        ("scan_7/stage3-10_0_0_5-udp161-confirm.xml", "b0", "udp_identify"),
     ):
         info = _engine_stage_info(name)
         assert info is not None, f"엔진 산출물을 못 알아본다: {name}"
-        run_key, batch, role = info
+        run_key, batch, slot = info
         assert run_key == "scan_7"
-        assert role == expected_role, name
+        assert batch == expected_batch, f"{name}: 배치 {batch}"
+        # 스윕은 열림만 증명하므로 식별과 **다른 역할**이어야 한다 - 같으면 빈 식별이 스윕을 덮는다.
+        assert slot.split("#", 1)[0] == expected_role, f"{name}: 역할 {slot}"
         # 자리가 겹치면 뒤에 온 파일이 앞엣것을 조용히 덮어쓴다.
-        assert (batch, role) not in slots, (
-            f"{name} 이 {slots.get((batch, role))} 와 같은 자리({batch}/{role})를 쓴다"
+        assert (batch, slot) not in slots, (
+            f"{name} 이 {slots.get((batch, slot))} 와 같은 자리({batch}/{slot})를 쓴다"
         )
-        slots[(batch, role)] = name
+        slots[(batch, slot)] = name
+
+    # 실제 배치는 넷(b0·b1·b3)이 아니라 셋이다 - 파일 수만큼 배치가 생기면 안 된다.
+    assert {batch for batch, _slot in slots} == {"b0", "b1", "b3"}
 
     # 남의 것을 가져가면 안 된다 - 단독 스캐너 모양과 직접 돌린 nmap XML 은 각자 경로가 있다.
     for name in ("scan_3.b0.tcp_discovery.xml", "my_own_nmap.xml", "scan_5.xml",
                  "stage_notes.xml", "stage3.xml"):
         assert _engine_stage_info(name) is None, f"엔진 것이 아닌데 가져갔다: {name}"
+
+
+def test_a_single_batch_folder_is_recorded_as_one_batch(client):
+    """배치 하나짜리 스캔이 이력에 여러 배치로 적히면 안 된다.
+
+    파일마다 합성 배치 키를 주면 `len(batches)` 가 파일 수가 되어 '· 3배치' 처럼 적히고,
+    단계 산출물도 배치 번호가 제각각 붙는다. 배치는 스캔이 대상을 나눈 단위이지 산출물
+    개수가 아니다.
+    """
+    h = _auth(client)
+    r = _upload(client, h, _engine_files())        # stage0 + 스윕 2 + 식별 2 = 파일 5개, 배치 1개
+    assert r.status_code == 200, r.text
+    scan_id = r.json()["scans"][0]["scan_id"]
+    command = client.get(f"/api/scans/{scan_id}", headers=h).json()["command"]
+    assert "배치" not in command, f"배치 하나인데 배치 수가 적혔다: {command}"
 
 
 def test_a_staged_result_folder_imports_as_one_scan_not_one_row_per_file(client):

@@ -476,22 +476,25 @@ def _engine_stage_info(filename: str | None) -> tuple[str, str, str] | None:
     # 같은 자리를 다퉈 스윕 증거가 사라졌고, 아무것도 못 찾은 식별만 남아 열린 발견이 닫혔다
     # (실측 counts.closed=1). 식별 그룹 g0·g1 과 격리 재시도 tcp/tcp443 도 서로를 덮었다.
     if m.group("discovery"):
-        return run_key, "discovery", ENGINE_ROLE_DISCOVERY
+        # 발견은 배치에 속하지 않는다. b0 에 얹어 두면 배치 수를 부풀리지 않는다.
+        return run_key, "b0", ENGINE_ROLE_DISCOVERY
     if m.group("sweep_proto"):
         proto = m.group("sweep_proto").lower()
         # 스윕은 **열림만 증명**한다. 식별과 다른 역할이어야 stage3 가 아무것도 못 찾았을 때
         # 스윕 증거가 살아남는다 - 실제 실행 경로(engine_runner.collect_results)도 스윕을
         # setdefault 로 깔고 stage3 가 보고한 키만 덮어쓴다.
         role = "tcp_discovery" if proto == "tcp" else "udp_sweep"
-        return run_key, f"sweep-b{int(m.group('sweep_batch'))}", role
+        return run_key, f"b{int(m.group('sweep_batch'))}", role
     if m.group("svc_proto"):
         proto = m.group("svc_proto").lower()
         role = "tcp_identify" if proto == "tcp" else "udp_identify"
-        return run_key, f"svc-b{int(m.group('svc_batch'))}-g{int(m.group('svc_group'))}", role
+        # 같은 배치 안의 식별 그룹은 슬롯 접미사로 가른다 - 역할은 같지만 다른 파일이다.
+        return run_key, f"b{int(m.group('svc_batch'))}", f"{role}#g{int(m.group('svc_group'))}"
     # 호스트 격리 재시도 - 공통 실행이 실패한 뒤 그 호스트만 다시 돈 것이라 식별로 본다.
+    # 파일명에 배치가 없으므로 b0 에 얹되, 슬롯으로 서로를 구분한다.
     suffix = (m.group("iso_proto") or "tcp").lower()
     role = "udp_identify" if suffix.startswith("udp") else "tcp_identify"
-    return run_key, f"iso-{m.group('iso_host')}-{suffix}", role
+    return run_key, "b0", f"{role}#iso-{m.group('iso_host')}-{suffix}"
 
 
 def _scaninfo_scope(xml_bytes: bytes, proto: str) -> set[int] | None | set:
@@ -2121,8 +2124,13 @@ def _import_single_xml(
 
 
 def _stage_artifact_name(scan_id: int, stage: str, batch: int, many: bool) -> str:
-    """단계 산출물 파일명. 배치가 여럿이면 배치 번호로 갈라야 서로 덮어쓰지 않는다."""
-    return f"scan_{scan_id}.b{batch}.{stage}.xml" if many else f"scan_{scan_id}.{stage}.xml"
+    """단계 산출물 파일명. 배치가 여럿이면 배치 번호로 갈라야 서로 덮어쓰지 않는다.
+
+    ``stage`` 는 슬롯 이름이라 같은 배치·같은 역할의 다른 파일이면 ``#`` 뒤에 접미사가
+    붙는다(단계 엔진의 ``gN`` 그룹·격리 재시도). 파일명에 ``#`` 을 그대로 쓰지는 않는다.
+    """
+    slot = stage.replace("#", "_")
+    return f"scan_{scan_id}.b{batch}.{slot}.xml" if many else f"scan_{scan_id}.{slot}.xml"
 
 
 def _import_timeline(batches: list[tuple[str, dict]], prepared: list[dict]) -> list[dict]:
@@ -2183,22 +2191,34 @@ class _ImportAccumulator:
     def add_batch(self, db: Session, stages: dict[str, dict], prepared: dict) -> None:
         # 호스트 발견(-sn)은 **관측 전용**이다. 어느 포트도 보지 않았으므로(산출물에
         # <scaninfo> 자체가 없다) 살아 있는 호스트만 보태고 닫힘 범위에는 넣지 않는다.
-        discovery = prepared.get(ENGINE_ROLE_DISCOVERY)
-        if discovery is not None:
-            self.scanned_hosts |= discovery[2]
-        for stage, bucket, is_udp in (
-            ("tcp_discovery", self._discovery, False),
-            ("tcp_identify", self._identified, False),
-            ("udp_sweep", self._udp_sweep, True),
-            ("udp_identify", self._udp, True),
-        ):
-            values = prepared.get(stage)
+        # 한 배치에 같은 역할의 파일이 여럿일 수 있다(엔진의 gN 식별 그룹·격리 재시도).
+        # 슬롯 이름은 `역할#접미사` 라 역할만 떼어 쓴다 - 레거시 단계 이름은 접미사가 없다.
+        buckets = {
+            "tcp_discovery": (self._discovery, False),
+            "tcp_identify": (self._identified, False),
+            "udp_sweep": (self._udp_sweep, True),
+            "udp_identify": (self._udp, True),
+        }
+        order = list(buckets) + [ENGINE_ROLE_DISCOVERY]
+        for slot in sorted(stages, key=lambda s: (order.index(s.split("#", 1)[0])
+                                                  if s.split("#", 1)[0] in order else len(order),
+                                                  s)):
+            role = slot.split("#", 1)[0]
+            values = prepared.get(slot)
             if values is None:
                 continue
+            if role == ENGINE_ROLE_DISCOVERY:
+                # 호스트 발견(-sn)은 **관측 전용**이다. 어느 포트도 보지 않았으므로(산출물에
+                # <scaninfo> 자체가 없다) 살아 있는 호스트만 보태고 닫힘 범위에는 넣지 않는다.
+                self.scanned_hosts |= values[2]
+                continue
+            if role not in buckets:
+                continue
+            bucket, is_udp = buckets[role]
             stage_date, findings, hosts, stage_tcp_scope, stage_udp_scope = values
             self.scanned_hosts |= hosts
             bucket.extend(findings)
-            item = stages[stage]
+            item = stages[slot]
             covered = hosts if item.get("closure_hosts") is None else item["closure_hosts"]
             for key, when in _absence_from_xml(item["bytes"], covered, stage_date).items():
                 current = self.absence_at.get(key)
@@ -2742,7 +2762,8 @@ async def import_xml_bundle(
     for run_key, batches in sorted(engine.items(), key=lambda kv: kv[0].lower()):
         units.append({
             "kind": "bundle", "sort": run_key, "base": run_key, "engine": True,
-            "batches": sorted(batches.items(), key=lambda kv: kv[0].lower()),
+            # 실제 배치 순서대로. 문자열 정렬이면 b10 이 b2 앞에 온다.
+            "batches": sorted(batches.items(), key=lambda kv: int(kv[0][1:])),
         })
     if grouped:
         if manifests:
