@@ -1315,3 +1315,54 @@ def test_a_self_issued_certificate_is_recorded_but_does_not_raise_the_grade(clie
     assert any(s["kind"] == "self_issued" for s in issued["exposure_json"])
     ref = next(c["ref"] for c in issued["compliance_json"] if c["std"] == "노출관측")
     assert "자체 발급" in ref and "등급은 올리지 않는다" in ref
+
+
+def test_the_history_row_counts_a_range_without_unrolling_it():
+    """이력 표의 대상 칸은 경계와 개수만 쓴다 - 그걸 얻자고 대역을 펼치면 안 된다.
+
+    /16 하나가 65,536 개의 문자열을 만들고 정렬까지 했다. 목록의 **행마다**, 화면을
+    열 때마다다. 이력에 넓은 스캔이 몇 건만 쌓여도 스캔 화면이 수십 초씩 멈춘다.
+
+    그래서 두 가지를 함께 못박는다 - (1) 펼치지 않는다, (2) 펼쳤을 때와 **같은 답**이다.
+    """
+    from scanops.scanning import chunker
+    from scanops.scanning.scan_summary import _describe_targets, _target_bounds
+
+    exploded = []
+    real_expand = chunker.expand_targets
+
+    def loud_expand(tokens, *args, **kwargs):
+        exploded.append(list(tokens))
+        return real_expand(tokens, *args, **kwargs)
+
+    chunker.expand_targets = loud_expand
+    try:
+        assert _describe_targets("10.0.0.0/16", "") == "10.0.0.0 – 10.0.255.255 · 대상 65536대"
+        assert not exploded, f"경계를 얻자고 대역을 펼쳤다: {exploded}"
+
+        # 펼치는 경로와 같은 답인가. 다르면 화면이 스캔 범위를 잘못 말한다.
+        cases = [
+            ("10.0.0.1", ""), ("10.0.0.0/30", ""), ("10.0.0.1-5", ""),
+            ("10.0.0.0/24", "10.0.0.5"), ("10.0.0.0/24", "10.0.0.0/28"),
+            ("10.0.0.1 10.0.0.3 10.0.0.2", ""),
+            ("10.0.0.0/24 10.0.1.0/24", "10.0.0.250-255"),
+            ("example.com", ""), ("10.0.0.1 example.com", ""),
+            ("10.0.0.0/24 example.com", "10.0.0.1"),
+            ("::1", ""), ("10.0.0.1 ::1", ""),
+            ("10.0.0.5-3", ""), ("bad/cidr", ""),
+            ("10.0.0.0/15", ""),     # 확장 경로가 거절하는 크기 - 축약 표기도 같아야 한다
+        ]
+        import scanops.scanning.scan_summary as module
+        for targets, excluded in cases:
+            fast = _describe_targets(targets, excluded)
+            saved = module._target_bounds
+            module._target_bounds = lambda *a, **k: None      # 펼치는 경로 강제
+            try:
+                slow = _describe_targets(targets, excluded)
+            finally:
+                module._target_bounds = saved
+            assert fast == slow, f"{targets!r}/{excluded!r}: {fast!r} != 펼친 결과 {slow!r}"
+    finally:
+        chunker.expand_targets = real_expand
+
+    assert _target_bounds(["10.0.0.0/15"], []) is None, "cap 을 넘겼는데 개수를 지어냈다"

@@ -3341,3 +3341,60 @@ def test_a_finding_survives_while_any_scan_still_observed_it(client):
         assert db.get(Finding, finding_id) is None
     finally:
         db.close()
+
+
+def test_repaired_provenance_follows_observation_time_not_scan_id(client):
+    """참조를 복구할 때 첫/마지막은 **관측 시각**으로 고른다.
+
+    과거 XML 을 나중에 가져오면 늦게 만들어진 스캔이 first_scan_id 가 되는 것이 정상이다
+    (ingest 가 명시적으로 그렇게 한다). 그런데 복구를 스캔 id 최소/최대로 하면 새로 만든
+    스캔이 '첫 관측' 자리에 앉아, 발견 상세의 이력이 first_seen/last_seen 과 어긋난다.
+    """
+    from scanops.db import SessionLocal
+    from scanops.models import Finding, FindingEvent, ScanRun
+    from datetime import datetime, timedelta, timezone
+
+    make_user("provboss", "boss-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'provboss', 'boss-pass-1234')}"}
+
+    db = SessionLocal()
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc).replace(tzinfo=None)
+    # id 순서와 관측 시각 순서가 **반대**다 - 나중에 만든 스캔이 더 오래된 결과를 담았다.
+    edge = ScanRun(name="경계", status="done")
+    newer_scan_older_data = ScanRun(name="나중에 가져온 옛 결과", status="done")
+    older_scan_newer_data = ScanRun(name="먼저 만든 최신 결과", status="done")
+    db.add_all([edge, older_scan_newer_data, newer_scan_older_data]); db.commit()
+    finding = Finding(finding_key="10.5.5.5|443|tcp", host_ip="10.5.5.5", port=443,
+                      proto="tcp", state="open",
+                      first_seen=base, last_seen=base + timedelta(days=30),
+                      first_scan_id=edge.id, last_scan_id=edge.id)
+    db.add(finding); db.commit()
+    db.add_all([
+        FindingEvent(finding_id=finding.id, scan_id=edge.id, type="NEW_OPEN",
+                     created_at=base + timedelta(days=15)),
+        # id 는 더 큰데 관측은 더 이르다.
+        FindingEvent(finding_id=finding.id, scan_id=newer_scan_older_data.id,
+                     type="NEW_OPEN", created_at=base),
+        FindingEvent(finding_id=finding.id, scan_id=older_scan_newer_data.id,
+                     type="VERSION_CHANGED", created_at=base + timedelta(days=30)),
+    ])
+    db.commit()
+    ids = (edge.id, finding.id, newer_scan_older_data.id, older_scan_newer_data.id)
+    db.close()
+    edge_id, finding_id, oldest_observation, newest_observation = ids
+    assert oldest_observation > newest_observation, "id 와 시각이 반대인 상황을 못 만들었다"
+
+    assert client.delete(f"/api/scans/{edge_id}", headers=admin).status_code == 200
+
+    db = SessionLocal()
+    try:
+        kept = db.get(Finding, finding_id)
+        assert kept is not None
+        assert kept.first_scan_id == oldest_observation, (
+            "가장 이른 관측이 아니라 가장 작은 스캔 id 를 첫 관측으로 삼았다"
+        )
+        assert kept.last_scan_id == newest_observation, (
+            "가장 늦은 관측이 아니라 가장 큰 스캔 id 를 마지막 관측으로 삼았다"
+        )
+    finally:
+        db.close()

@@ -168,16 +168,26 @@ def _observation_rows(db: Session, scan_id: int) -> list[dict]:
 
 
 def _snapshots(db: Session) -> tuple[list[dict], list[dict]]:
+    # partial 도 읽는다. 미완결 스캔은 '못 봤다' 를 증거로 쓸 수 없어서 partial 이지만,
+    # **실제로 본 것**(positive)은 진짜 관측이고 인입도 이미 끝나 발견 목록에 올라 있다.
+    # 여기서 통째로 빼면 그 포트가 발견에는 열려 있는데 히트맵에는 없거나 옛 닫힘 상태로
+    # 남는다 - 같은 서버를 두 화면이 다르게 말한다.
     scans = (
         db.query(ScanRun)
-        .filter(ScanRun.status == "done")
+        .filter(ScanRun.status.in_(("done", "partial")))
         .order_by(ScanRun.started_at, ScanRun.id)
         .all()
     )
     out: list[dict] = []
     warnings: list[dict] = []
     for scan in scans:
+        partial = scan.status == "partial"
         observed_rows = _observation_rows(db, scan.id)
+        if partial:
+            # 부재/닫힘 근거는 버린다. 남는 것은 열린 관측뿐이라 scope_keys 와 open_keys 가
+            # 같아지고(_compute_states), 이 열은 무엇도 닫을 수 없다 - 더할 수만 있다.
+            observed_rows = [row for row in observed_rows
+                             if row["evidence_kind"] == "positive"]
         if observed_rows:
             rows_by_key = {row["key"]: row for row in observed_rows}
             scope_keys = set(rows_by_key)
@@ -194,6 +204,10 @@ def _snapshots(db: Session) -> tuple[list[dict], list[dict]]:
                                   default=scan.started_at),
                 "source": "observation",
             })
+            continue
+        if partial:
+            # 관측이 하나도 없는 미완결 스캔은 XML 폴백도 쓰지 않는다 - 그 XML 이
+            # 끝맺지 못해서 partial 이다. 경고도 남기지 않는다(예상된 상태다).
             continue
         paths = _scan_xml_paths(scan)
         if not paths:

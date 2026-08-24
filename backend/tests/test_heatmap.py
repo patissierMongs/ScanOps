@@ -319,3 +319,65 @@ def test_heatmap_carries_forward_last_authoritative_identity(client):
     assert row["service"] == "http"
     assert row["product"] == "Apache httpd"
     assert row["version"] == "2.4"
+
+
+def test_a_partial_scan_shows_what_it_did_see_but_cannot_close_anything(client):
+    """미완결 스캔의 '본 것' 은 히트맵에도 있어야 한다 - '못 본 것' 은 근거가 아니다.
+
+    엔진은 XML 을 끝맺지 못한 스캔도 인입은 끝낸 뒤 partial 로 마감한다. 그래서 그때
+    발견된 열린 포트는 발견 목록에 올라 있는데, 히트맵은 done 만 읽어서 그 포트를
+    아예 못 보거나 예전 닫힘 상태로 남겼다 - 같은 서버를 두 화면이 다르게 말했다.
+
+    동시에, partial 이 무언가를 **닫아서는** 안 된다. 끝맺지 못한 관측으로 닫힘을
+    선언하는 것이 애초에 partial 로 마감한 이유다.
+    """
+    headers = _auth(client)
+    db = SessionLocal()
+    try:
+        done = ScanRun(name="완료", status="done", started_at=scan_start_dt(1))
+        partial = ScanRun(name="미완결", status="partial", started_at=scan_start_dt(2))
+        db.add_all([done, partial]); db.commit()
+        # 1차: 8080 열림, 9090 닫힘(권위 있는 부재).
+        db.add_all([
+            EndpointObservation(scan_id=done.id, finding_key="10.1.1.1|8080|tcp",
+                                host_ip="10.1.1.1", port=8080, proto="tcp",
+                                state="open", evidence_kind="positive",
+                                observed_at=scan_start_dt(1)),
+            EndpointObservation(scan_id=done.id, finding_key="10.1.1.1|9090|tcp",
+                                host_ip="10.1.1.1", port=9090, proto="tcp",
+                                state="closed", evidence_kind="absence",
+                                observed_at=scan_start_dt(1)),
+        ])
+        # 2차(미완결): 9090 이 열린 것을 실제로 봤고, 8080 은 끝맺지 못해 '부재' 로 남았다.
+        db.add_all([
+            EndpointObservation(scan_id=partial.id, finding_key="10.1.1.1|9090|tcp",
+                                host_ip="10.1.1.1", port=9090, proto="tcp",
+                                state="open", evidence_kind="positive",
+                                observed_at=scan_start_dt(2)),
+            EndpointObservation(scan_id=partial.id, finding_key="10.1.1.1|8080|tcp",
+                                host_ip="10.1.1.1", port=8080, proto="tcp",
+                                state="closed", evidence_kind="absence",
+                                observed_at=scan_start_dt(2)),
+        ])
+        db.commit()
+    finally:
+        db.close()
+
+    data = client.get("/api/heatmap", headers=headers).json()
+    rows = {(r["host_ip"], r["port"]): r for r in data["rows"]}
+    assert data["summary"]["scan_count"] == 2, "미완결 스캔이 히트맵에서 통째로 빠졌다"
+
+    opened_by_partial = rows[("10.1.1.1", 9090)]
+    assert opened_by_partial["current_state"].endswith("열림"), (
+        "미완결 스캔이 실제로 본 열린 포트가 히트맵에 안 나타난다"
+    )
+    # 8080 은 1차에서 열려 있었고 2차는 그것을 닫을 권위가 없다.
+    still_open = rows[("10.1.1.1", 8080)]
+    assert still_open["current_state"].endswith("열림"), (
+        "끝맺지 못한 관측으로 포트를 닫았다"
+    )
+
+
+def scan_start_dt(day: int):
+    from datetime import datetime
+    return datetime(2026, 3, day)

@@ -2563,6 +2563,20 @@ def _durable_retry_detail(db: Session, scan_id: int) -> dict | None:
     }
 
 
+def _find_retry_child(db: Session, source_id: int) -> ScanRun | None:
+    """`source_id` 의 재스캔으로 만들어진 스캔. 없으면 None.
+
+    재스캔은 원본보다 **나중에** 만들어지므로 id 가 큰 것만 본다. 영속 이슈 행이 없는
+    레거시 스캔에서만 쓰이는 경로다(새 스캔은 이슈 행이 답을 갖고 있다).
+    """
+    for scan in db.query(ScanRun).filter(ScanRun.id > source_id).order_by(ScanRun.id).all():
+        saved = _read_engine_spec(_settings.scans_dir / f"scan_{scan.id}")
+        scanops = saved.get("scanops") if isinstance(saved, dict) else None
+        if isinstance(scanops, dict) and scanops.get("retry_of") == source_id:
+            return scan
+    return None
+
+
 def _retry_history(rows: list[ScanRun], db: Session) -> dict[int, dict]:
     """Return retry state from durable exact issues, with sidecars only for legacy scans."""
     raw = {}
@@ -2648,6 +2662,12 @@ def _retry_history(rows: list[ScanRun], db: Session) -> dict[int, dict]:
             "retry_scan_id": None,
         }
         child = children.get(scan.id)
+        if child is None and detail["required"] and len(rows) == 1:
+            # 한 건만 그리는 호출(스캔 상세·재스캔 응답)은 rows 에 그 스캔뿐이라 자식이
+            # 안 잡힌다. 예전에는 이 때문에 호출부가 **모든 스캔**을 읽어 넘겼고, 그
+            # 대가로 상세 요청 한 번이 전체 이력만큼의 DB 조회와 파일 탐색을 했다.
+            # 자식이 실제로 필요한 레거시 경로에서만 찾는다.
+            child = _find_retry_child(db, scan.id)
         if child is not None and detail["required"]:
             update["retry_scan_id"] = child.id
             child_detail = raw.get(child.id) or {}
@@ -2681,9 +2701,9 @@ def _retry_history(rows: list[ScanRun], db: Session) -> dict[int, dict]:
 def _scan_out(scan: ScanRun, db: Session, retry: dict | None = None) -> ScanOut:
     creator = db.get(User, scan.created_by) if scan.created_by is not None else None
     if retry is None:
-        retry = _retry_history(
-            db.query(ScanRun).order_by(ScanRun.id.desc()).all(), db,
-        ).get(scan.id, {})
+        # 이 스캔 하나만 본다. 예전에는 상세 요청 한 번이 보관된 **모든** 스캔을 읽고
+        # 각 스캔 폴더의 사이드카·spec 까지 뒤졌다 - 이력이 쌓일수록 그대로 느려졌다.
+        retry = _retry_history([scan], db).get(scan.id, {})
     return ScanOut.model_validate(scan).model_copy(update={
         "summary": _scan_history_summary(scan),
         "created_by_name": (creator.display_name or creator.username) if creator else "",
@@ -2712,16 +2732,30 @@ def list_scans(_: User = Depends(current_user), db: Session = Depends(get_db)):
 
 def _findings_backed_by_other_scans(
     db: Session, finding_ids: list[int], deleting_scan_id: int,
-) -> dict[int, set[int]]:
-    """{발견 id: 그 발견을 아직 뒷받침하는 다른 스캔 id들}. 뒷받침이 없으면 아예 안 담는다.
+) -> dict[int, dict[int, datetime]]:
+    """{발견 id: {아직 뒷받침하는 다른 스캔 id: 그 스캔이 관측한 시각}}.
 
     근거는 두 가지다 - 그 발견에 달린 이력 이벤트가 가리키는 스캔, 그리고 같은
     finding_key 를 관측한 endpoint 스냅샷. 둘 다 지워지는 스캔의 것은 제외한다
     (스냅샷은 스캔 삭제 시 CASCADE 로 함께 사라진다).
+
+    **시각을 함께 돌려주는 이유**: 참조를 복구할 때 스캔 id 순서를 쓰면 안 된다. 과거
+    XML 을 나중에 가져오면 늦게 만들어진 스캔이 first_scan_id 가 되는 것이 정상이고
+    (ingest 가 명시적으로 그렇게 한다), id 로 최소/최대를 고르면 새 관측이 '첫 관측'
+    자리에 앉는다 - 발견 상세의 이력이 first_seen/last_seen 과 어긋난 채로 남는다.
     """
     if not finding_ids:
         return {}
-    backing: dict[int, set[int]] = {}
+    backing: dict[int, dict[int, datetime]] = {}
+
+    def note(finding_id: int, scan_id: int, when) -> None:
+        if not isinstance(when, datetime):
+            return
+        seen = backing.setdefault(finding_id, {})
+        current = seen.get(scan_id)
+        if current is None or when < current:   # 그 스캔의 가장 이른 관측 시각
+            seen[scan_id] = when
+
     keys: dict[str, list[int]] = {}
     for start in range(0, len(finding_ids), 500):
         chunk = finding_ids[start:start + 500]
@@ -2729,31 +2763,37 @@ def _findings_backed_by_other_scans(
             Finding.id.in_(chunk)
         ).all():
             keys.setdefault(key, []).append(finding_id)
-        for finding_id, other in db.query(
-            FindingEvent.finding_id, FindingEvent.scan_id,
+        for finding_id, other, when in db.query(
+            FindingEvent.finding_id, FindingEvent.scan_id, FindingEvent.created_at,
         ).filter(
             FindingEvent.finding_id.in_(chunk),
             FindingEvent.scan_id.isnot(None),
             FindingEvent.scan_id != deleting_scan_id,
-        ).distinct().all():
-            backing.setdefault(finding_id, set()).add(other)
+        ).all():
+            note(finding_id, other, when)
     key_list = list(keys)
     for start in range(0, len(key_list), 500):
         chunk = key_list[start:start + 500]
-        for key, other in db.query(
+        for key, other, when in db.query(
             EndpointObservation.finding_key, EndpointObservation.scan_id,
+            EndpointObservation.observed_at,
         ).filter(
             EndpointObservation.finding_key.in_(chunk),
             EndpointObservation.scan_id != deleting_scan_id,
-        ).distinct().all():
+        ).all():
             for finding_id in keys.get(key, ()):
-                backing.setdefault(finding_id, set()).add(other)
+                note(finding_id, other, when)
     # 이미 사라진 스캔을 가리키는 흔적은 근거가 아니다.
-    referenced = {sid for ids in backing.values() for sid in ids}
+    referenced = {sid for seen in backing.values() for sid in seen}
     alive = {
         row.id for row in db.query(ScanRun.id).filter(ScanRun.id.in_(list(referenced))).all()
     } if referenced else set()
-    return {fid: (ids & alive) for fid, ids in backing.items() if ids & alive}
+    result = {}
+    for finding_id, seen in backing.items():
+        kept = {sid: when for sid, when in seen.items() if sid in alive}
+        if kept:
+            result[finding_id] = kept
+    return result
 
 
 @router.delete("/{scan_id}")
@@ -2813,10 +2853,13 @@ def delete_scan(
     supported = _findings_backed_by_other_scans(db, owned_ids, scan_id)
     if supported:
         owned_ids = [fid for fid in owned_ids if fid not in supported]
-        for finding_id, scan_ids in supported.items():
-            # 스캔 id 는 시간순으로 늘어나므로 최소/최대가 첫/마지막 관측이다.
+        for finding_id, observed in supported.items():
+            # **관측 시각**으로 고른다. 스캔 id 순서가 아니다 - 과거 결과를 나중에 가져오면
+            # 늦게 만들어진 스캔이 첫 관측일 수 있고, id 로 고르면 새 관측이 '첫 관측'
+            # 자리에 앉아 first_seen 과 어긋난 이력이 남는다. 같은 시각이면 id 로 가른다.
+            ordered = sorted(observed, key=lambda sid: (observed[sid], sid))
             db.query(Finding).filter(Finding.id == finding_id).update(
-                {Finding.first_scan_id: min(scan_ids), Finding.last_scan_id: max(scan_ids)},
+                {Finding.first_scan_id: ordered[0], Finding.last_scan_id: ordered[-1]},
                 synchronize_session=False,
             )
     for start in range(0, len(owned_ids), 500):
@@ -3521,6 +3564,19 @@ def resume_scan(
     return scan
 
 
+_RETRY_CLAIMS: dict[int, threading.Lock] = {}
+
+
+def _retry_claim(source_id: int) -> threading.Lock:
+    """원본 스캔별 재스캔 생성 잠금 - '확인하고 만든다' 사이에 남이 끼어들지 못하게.
+
+    서버는 단일 프로세스(uvicorn, workers 지정 없음)로 돌고, 이 모듈은 이미 실행 중인
+    프로세스 표를 같은 방식으로 지킨다(`_LOCK`/`_PROCS`).
+    """
+    with _LOCK:
+        return _RETRY_CLAIMS.setdefault(source_id, threading.Lock())
+
+
 @router.post("/{scan_id}/retry-timeouts", response_model=ScanOut)
 def retry_timed_out_hosts(
     scan_id: int,
@@ -3537,59 +3593,63 @@ def retry_timed_out_hosts(
     if not engine_runner.is_engine_scan(source_dir):
         raise HTTPException(status_code=400, detail="단계 엔진 스캔만 확인 필요 대상을 재스캔할 수 있습니다.")
 
-    rows = db.query(ScanRun).order_by(ScanRun.id.desc()).all()
-    history = _retry_history(rows, db).get(source.id) or {}
-    if history.get("retry_status") == "running":
-        raise HTTPException(status_code=400, detail="확인 필요 대상 재스캔이 이미 진행 중입니다.")
-    if history.get("retry_status") == "resolved":
-        raise HTTPException(status_code=400, detail="확인 필요 대상 재스캔이 이미 완료되었습니다.")
-    retry = _durable_retry_detail(db, source.id)
-    if retry is None:
-        retry_evidence_dir = source_dir
-        child_id = history.get("retry_scan_id")
-        if history.get("retry_required") and isinstance(child_id, int):
-            child_dir = _settings.scans_dir / f"scan_{child_id}"
-            if engine_runner.gave_up_detail(child_dir)["required"]:
-                retry_evidence_dir = child_dir
-        retry = engine_runner.gave_up_detail(retry_evidence_dir)
-    if not retry["required"]:
-        raise HTTPException(status_code=400, detail="재스캔이 필요한 확인 대상이 없습니다.")
+    # 검사와 생성을 한 덩어리로 묶는다. 두 사람이 동시에 누르면 둘 다 '진행 중 아님' 을
+    # 보고 **같은 스캔을 두 번** 띄운다 - 대상 장비가 같은 부하를 두 배로 받고, 이슈에
+    # 남는 자식 id 는 하나뿐이라 나머지 하나가 끝나도 아무것도 해결되지 않는다.
+    # 두 번째 요청은 잠깐 기다렸다가 첫 번째가 만든 '진행 중' 을 보고 정상적으로 거절된다.
+    with _retry_claim(source.id):
+        history = _retry_history([source], db).get(source.id) or {}
+        if history.get("retry_status") == "running":
+            raise HTTPException(status_code=400, detail="확인 필요 대상 재스캔이 이미 진행 중입니다.")
+        if history.get("retry_status") == "resolved":
+            raise HTTPException(status_code=400, detail="확인 필요 대상 재스캔이 이미 완료되었습니다.")
+        retry = _durable_retry_detail(db, source.id)
+        if retry is None:
+            retry_evidence_dir = source_dir
+            child_id = history.get("retry_scan_id")
+            if history.get("retry_required") and isinstance(child_id, int):
+                child_dir = _settings.scans_dir / f"scan_{child_id}"
+                if engine_runner.gave_up_detail(child_dir)["required"]:
+                    retry_evidence_dir = child_dir
+            retry = engine_runner.gave_up_detail(retry_evidence_dir)
+        if not retry["required"]:
+            raise HTTPException(status_code=400, detail="재스캔이 필요한 확인 대상이 없습니다.")
 
-    try:
-        saved = _load_engine_spec(source_dir / "spec.json")
-        targets = list(retry["targets"])
-        nmap_runner.validate_targets(targets)
-        scope.check_scope(targets)
-        engine_runner.ensure_available()
-    except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    if not nmap_runner.find_nmap(_settings.nmap_path):
-        raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
+        try:
+            saved = _load_engine_spec(source_dir / "spec.json")
+            targets = list(retry["targets"])
+            nmap_runner.validate_targets(targets)
+            scope.check_scope(targets)
+            engine_runner.ensure_available()
+        except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if not nmap_runner.find_nmap(_settings.nmap_path):
+            raise HTTPException(status_code=400, detail="서버에서 nmap 을 찾을 수 없습니다.")
 
-    scan = ScanRun(
-        name=f"확인 필요 재스캔 #{source.id} · {len(targets)}대",
-        targets=" ".join(targets), status="running", created_by=user.id,
-    )
-    db.add(scan)
-    db.flush()
-    retry_stage_set = {
-        engine_runner.canonical_stage(stage)
-        for stage in retry["by_stage"] if isinstance(stage, str)
-    }
-    selected_issue_keys = [
-        issue.issue_key
-        for issue in db.query(ScanQualityIssue).filter(
-            ScanQualityIssue.scan_id == source.id,
-            ScanQualityIssue.resolved_by_scan_id.is_(None),
-        ).all()
-        if issue.host_ip in set(targets)
-        and engine_runner.canonical_stage(issue.stage) in retry_stage_set
-    ]
-    observability.set_quality_retry(
-        db, source.id, scan.id, issue_keys=selected_issue_keys,
-    )
-    db.commit()
-    db.refresh(scan)
+        scan = ScanRun(
+            name=f"확인 필요 재스캔 #{source.id} · {len(targets)}대",
+            targets=" ".join(targets), status="running", created_by=user.id,
+        )
+        db.add(scan)
+        db.flush()
+        retry_stage_set = {
+            engine_runner.canonical_stage(stage)
+            for stage in retry["by_stage"] if isinstance(stage, str)
+        }
+        selected_issue_keys = [
+            issue.issue_key
+            for issue in db.query(ScanQualityIssue).filter(
+                ScanQualityIssue.scan_id == source.id,
+                ScanQualityIssue.resolved_by_scan_id.is_(None),
+            ).all()
+            if issue.host_ip in set(targets)
+            and engine_runner.canonical_stage(issue.stage) in retry_stage_set
+        ]
+        observability.set_quality_retry(
+            db, source.id, scan.id, issue_keys=selected_issue_keys,
+        )
+        db.commit()
+        db.refresh(scan)
     out_dir = _settings.scans_dir / f"scan_{scan.id}"
     launch_paths = [out_dir / "spec.json", out_dir / "run-state.json", out_dir / "stop-requested"]
     try:
