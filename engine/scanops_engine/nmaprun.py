@@ -275,7 +275,7 @@ def xml_usable(base: Path) -> bool:
         return False
 
 
-def artifact_yield(xml_path) -> dict:
+def artifact_yield(xml_path, expects_services: bool = False) -> dict:
     """산출물이 실제로 **무엇을 담았는지** — 호스트 / 확정 열림 / 무응답 추정 / 버전 식별 수.
 
     소요만 적어 두면 107초를 돌고 빈 파일을 남긴 실행이 '성공' 과 구분되지 않는다. 실제로
@@ -304,8 +304,14 @@ def artifact_yield(xml_path) -> dict:
         "open_ports": confirmed,
         "inferred_open": inferred,
         "products": products,
-        # 볼 것이 있어서 돈 실행인데 아무것도 담지 못했다는 사실.
-        "empty": bool(hosts) and confirmed == 0 and inferred == 0,
+        # **볼 것이 있어서 돈 실행인데 아무것도 담지 못했다**는 사실. 서비스 probe 에만
+        # 해당한다 - 그쪽은 스윕이 이미 '열렸다' 고 증명한 포트만 다시 보므로, 빈손은
+        # 그 자체로 실패다.
+        #
+        # 발견(-sn)은 포트를 아예 안 보고, 스윕은 훑었는데 열린 게 없을 수 있다. 둘을
+        # 같은 기준으로 재면 정상 실행이 화면에서 '산출물 없음' 으로 뜨고, 도구가 거짓
+        # 경보를 내기 시작한다(실측: -sn 과 빈 스윕이 모두 empty=True 였다).
+        "empty": bool(expects_services) and bool(hosts) and confirmed == 0 and inferred == 0,
     }
 
 

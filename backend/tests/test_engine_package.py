@@ -2559,3 +2559,56 @@ def test_a_group_whose_fallback_did_not_recover_keeps_its_partial_evidence(tmp_p
     assert by_port[("udp", 53)]["service"] == "domain", (
         "부분 관측이 밝힌 식별을 버렸다 - 스윕의 정체 불명으로 되돌아간다"
     )
+
+
+def test_only_a_service_probe_calls_an_empty_result_a_failure(tmp_path):
+    """빈손이 곧 실패인 것은 서비스 probe 뿐이다.
+
+    그쪽은 스윕이 이미 '열렸다' 고 증명한 포트만 다시 보므로 빈손이 그 자체로 실패다.
+    발견(`-sn`)은 포트를 아예 안 보고, 스윕은 훑었는데 열린 게 없을 수 있다. 셋을 같은
+    기준으로 재면 정상 실행이 추적 패널에서 '산출물 없음' 으로 뜨고, 도구가 거짓 경보를
+    내기 시작한다 - 실측으로 `-sn` 과 빈 스윕이 모두 empty=True 였다.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import nmaprun
+
+    discovery = tmp_path / "stage0-discovery.xml"
+    discovery.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/></host></nmaprun>', encoding="utf-8")
+    swept = tmp_path / "stage-tcp-b0.xml"
+    swept.write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.2" addrtype="ipv4"/><ports>'
+        '<port protocol="tcp" portid="22"><state state="closed"/></port>'
+        '</ports></host></nmaprun>', encoding="utf-8")
+
+    assert nmaprun.artifact_yield(discovery)["empty"] is False, "정상 발견을 실패로 부른다"
+    assert nmaprun.artifact_yield(swept)["empty"] is False, "정상 빈 스윕을 실패로 부른다"
+    # 서비스 probe 가 빈손이면 그건 실제 실패다.
+    assert nmaprun.artifact_yield(swept, expects_services=True)["empty"] is True
+
+    # 생산자가 단계로 갈라 넘기는지 - 여기가 어긋나면 위 구분이 화면에 닿지 않는다.
+    src = (Path(__file__).resolve().parents[2]
+           / "engine" / "scanops_engine" / "pipeline.py").read_text(encoding="utf-8")
+    assert 'expects_services=meta["stage"].endswith("service")' in src, (
+        "빈손 판정이 단계와 무관하게 붙는다"
+    )
+
+
+def test_both_udp_retry_paths_use_a_temporary_output_base(tmp_path):
+    """묶음 경로만 고치면 호스트별 경로에서 같은 손실이 남는다.
+
+    재시도가 같은 `-oA` 를 쓰면 nmap 이 시작하자마자 첫 실행의 산출물을 자른다. 워치독이
+    끊은 뒤 복구해 둔 관측이 그때 사라지고, 재시도까지 실패하면 되찾은 것만 잃는다.
+    """
+    src = (Path(__file__).resolve().parents[2]
+           / "engine" / "scanops_engine" / "pipeline.py").read_text(encoding="utf-8")
+    retries = [block for block in src.split("_UDP_RETRY_ENGINE] + args")[1:]]
+    assert len(retries) == 2, f"UDP 재시도 경로가 둘이 아니다: {len(retries)}"
+    for index, block in enumerate(retries):
+        head = block.split("self.sink.emit")[0]
+        assert "alt_base" in head, f"{index + 1}번째 재시도가 첫 실행과 같은 base 를 쓴다"
+        assert "adopt_artifacts" in head and "discard_artifacts" in head, (
+            f"{index + 1}번째 재시도가 채택·폐기를 안 가른다"
+        )

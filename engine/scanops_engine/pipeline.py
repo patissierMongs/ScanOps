@@ -179,7 +179,11 @@ class Pipeline:
             retransmission_cap_hosts=cap_hosts,
             retransmission_cap_count=len(cap_hosts),
             phases=r.get("phases") or {},
-            **nmaprun.artifact_yield(Path(str(base) + ".xml")), **meta,
+            # 빈손이 곧 실패인 것은 서비스 probe 뿐이다 - 발견과 스윕은 정상적으로
+            # 아무것도 못 찾을 수 있다.
+            **nmaprun.artifact_yield(Path(str(base) + ".xml"),
+                                     expects_services=meta["stage"].endswith("service")),
+            **meta,
         )
         if r.get("stopped"):
             self.sink.emit(
@@ -763,9 +767,19 @@ class Pipeline:
         if not ok and not r.get("stopped") and proto == "udp" and not self.state.stopped():
             retry_started = time.time()
             failed_execution_id = r.get("execution_id")
-            r = self._nmap("service", ["--nsock-engine", _UDP_RETRY_ENGINE] + args, base,
+            # 묶음 경로와 **같은 규칙**이다 - 같은 -oA 를 쓰면 nmap 이 시작하자마자 첫
+            # 실행의 산출물을 잘라 버린다. 워치독이 끊은 뒤 복구해 둔 관측이 그때 사라지고,
+            # 재시도까지 실패하면 되찾은 것만 잃는다. 한 곳만 고치면 경로에 따라 결과가
+            # 달라지므로 여기도 임시 base 로 돌린다.
+            alt_base = nmaprun.retry_base(base)
+            r = self._nmap("service", ["--nsock-engine", _UDP_RETRY_ENGINE] + args, alt_base,
                            fatal=not isolate, targets=[ip])
-            ok = not r.get("stopped") and r["rc"] == 0
+            ok = (not r.get("stopped") and r["rc"] == 0
+                  and nmaprun.xml_usable(alt_base))
+            if ok:
+                nmaprun.adopt_artifacts(alt_base, base)
+            else:
+                nmaprun.discard_artifacts(alt_base)
             self.sink.emit(
                 "service_retry", stage="service", proto=proto, ip=ip, hosts=[ip],
                 ports=list(ports), port_spec=pspec, engine=_UDP_RETRY_ENGINE,
