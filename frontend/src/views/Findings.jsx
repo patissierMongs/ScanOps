@@ -63,6 +63,12 @@ export default function Findings({ user, focus = null, onFocusApplied }) {
   // 허용(조직 규칙이 '허용'으로 정한 발견)은 정상처리와 다른 축이다. 하나로 묶으면 둘 중
   // 무엇 때문에 안 보이는지 알 수 없어, 토글도 건수도 따로 둔다.
   const [hideAllowed, setHideAllowed] = useState(true);
+  // 확정되지 않은 관측은 평소 접어 둔다. 조치 대상 목록이 '아직 열렸는지도 모르는 건'과
+  // '열린 건 맞는데 정체를 모르는 건'으로 덮이면 진짜 노출이 묻힌다. 다만 접은 건수는
+  // 항상 옆에 적어 둔다 - 말없이 감추면 이 도구가 내내 막아 온 거짓 음성과 같은 모양이다.
+  const [hideUnconfirmed, setHideUnconfirmed] = useState(true);
+  const [hideTcpwrapped, setHideTcpwrapped] = useState(true);
+  const [hidden, setHidden] = useState({ unconfirmed: 0, tcpwrapped: 0 });
   const [selected, setSelected] = useState(() => new Set());
   const [confirmId, setConfirmId] = useState(null);
   const [rescanDrawer, setRescanDrawer] = useState(null);
@@ -87,11 +93,14 @@ export default function Findings({ user, focus = null, onFocusApplied }) {
     // 뒷 페이지에 남아 첫 페이지가 빈 것처럼 보이고, 건수·내보내기도 화면과 어긋난다.
     if (hideNormal) qs.set("hide_normal", "true");
     qs.set("hide_allowed", hideAllowed ? "true" : "false");
+    qs.set("hide_unconfirmed", hideUnconfirmed ? "true" : "false");
+    qs.set("hide_tcpwrapped", hideTcpwrapped ? "true" : "false");
     if (overdueOnly) qs.set("overdue_only", "true");
     // 마감초과 판정은 사용자 로컬 날짜 기준이어야 화면의 'N일 초과' 표시와 일치한다.
     if (overdueOnly) qs.set("today", localToday());
     return qs;
-  }, [match, cols, risk, status, q, colFilters, sort, hideNormal, hideAllowed, overdueOnly]);
+  }, [match, cols, risk, status, q, colFilters, sort, hideNormal, hideAllowed,
+      hideUnconfirmed, hideTcpwrapped, overdueOnly]);
 
   function load(targetPage = page) {
     const qs = new URLSearchParams(queryString);
@@ -99,7 +108,10 @@ export default function Findings({ user, focus = null, onFocusApplied }) {
     qs.set("offset", String(targetPage * pageSize));
     setLoading(true);
     api(`/findings?${qs.toString()}`, { raw: true })
-      .then(({ body, total: count }) => { setFindings(body); setTotal(count); })
+      .then(({ body, total: count, hidden: counts }) => {
+        setFindings(body); setTotal(count);
+        setHidden(counts || { unconfirmed: 0, tcpwrapped: 0 });
+      })
       .catch((e) => toast(e.message, { type: "err" }))
       .finally(() => setLoading(false));
   }
@@ -116,6 +128,8 @@ export default function Findings({ user, focus = null, onFocusApplied }) {
     setMatch(focus.match || "contains");
     setHideNormal(focus.hideNormal ?? true);
     setHideAllowed(focus.hideAllowed ?? true);
+    setHideUnconfirmed(focus.hideUnconfirmed ?? true);
+    setHideTcpwrapped(focus.hideTcpwrapped ?? true);
     setPage(0);
     onFocusApplied?.();
   }, [focus]);
@@ -135,7 +149,7 @@ export default function Findings({ user, focus = null, onFocusApplied }) {
 
   const filterCount = Object.values(colFilters).filter((v) => v.trim()).length
     + (q.trim() ? 1 : 0) + (risk ? 1 : 0) + (status ? 1 : 0) + (overdueOnly ? 1 : 0)
-    + (hideAllowed ? 0 : 1);
+    + (hideAllowed ? 0 : 1) + (hideUnconfirmed ? 0 : 1) + (hideTcpwrapped ? 0 : 1);
 
   function clearFilters() {
     setQ("");
@@ -144,6 +158,8 @@ export default function Findings({ user, focus = null, onFocusApplied }) {
     setStatus("");
     setOverdueOnly(false);
     setHideAllowed(true);
+    setHideUnconfirmed(true);
+    setHideTcpwrapped(true);
     setSort({ key: "", dir: "asc" });
     setPage(0);
   }
@@ -291,6 +307,18 @@ export default function Findings({ user, focus = null, onFocusApplied }) {
                  title="규칙에서 '허용'으로 정한 발견을 접습니다. 정상처리와는 다른 축입니다.">
             <input type="checkbox" checked={hideAllowed} onChange={(e) => setHideAllowed(e.target.checked)} />
             허용 제외
+          </label>
+          <label className="row" style={{ gap: 5 }}
+                 title="open|filtered 와 무응답으로 추정한 열림을 접습니다. 재확인해야 열림 여부를 말할 수 있는 건입니다.">
+            <input type="checkbox" checked={hideUnconfirmed}
+                   onChange={(e) => setHideUnconfirmed(e.target.checked)} />
+            미확정 제외{hidden.unconfirmed ? ` (${hidden.unconfirmed.toLocaleString()}건 접힘)` : ""}
+          </label>
+          <label className="row" style={{ gap: 5 }}
+                 title="tcpwrapped — 핸드셰이크는 됐지만 서비스가 정체를 밝히지 않은 건. 포트는 열려 있습니다.">
+            <input type="checkbox" checked={hideTcpwrapped}
+                   onChange={(e) => setHideTcpwrapped(e.target.checked)} />
+            tcpwrapped 제외{hidden.tcpwrapped ? ` (${hidden.tcpwrapped.toLocaleString()}건 접힘)` : ""}
           </label>
           <label className="row" style={{ gap: 5 }}>
             <input type="checkbox" checked={overdueOnly} onChange={(e) => setOverdueOnly(e.target.checked)} />

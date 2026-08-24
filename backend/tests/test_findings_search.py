@@ -307,3 +307,85 @@ def test_risk_sort_uses_operational_ordinal(client):
     assert [row["risk_level"] for row in ascending] == [
         "info", "low", "medium", "high", "banned",
     ]
+
+
+# ── 확정되지 않은 관측: 평소 접고, 몇 건을 접었는지는 항상 말한다 ──
+
+def _seed_unconfirmed():
+    """확정된 열림 하나 + 접혀야 할 두 축 하나씩."""
+    _add(host_ip="10.0.1.1", port=22, service="ssh", reason="syn-ack")
+    # 열림 여부 자체가 불확실한 건 - nmap 이 열림과 필터를 가르지 못했다.
+    _add(host_ip="10.0.1.2", port=161, proto="udp", state="open|filtered",
+         reason="no-response", service="snmp", finding_key="10.0.1.2|161|udp")
+    # 열린 것은 확실한데(핸드셰이크 성공) 서비스가 정체를 밝히지 않은 건.
+    _add(host_ip="10.0.1.3", port=8443, service="tcpwrapped", identification="tcpwrapped",
+         reason="syn-ack")
+
+
+def test_unconfirmed_observations_are_folded_away_by_default(client):
+    """평소 목록은 조치할 수 있는 건만 보여 준다.
+
+    'open|filtered' 는 열려 있는지 자체가 불확실하고, 'tcpwrapped' 는 열린 건 맞지만 뒤에
+    무엇이 있는지 모른다. 둘 다 그대로 섞어 두면 진짜 노출이 그 사이에 묻힌다.
+    """
+    auth = _auth(client)
+    _seed_unconfirmed()
+    rows = client.get("/api/findings", headers=auth).json()
+    assert _names(rows) == ["10.0.1.1:22"]
+
+
+def test_each_folded_axis_can_be_opened_on_its_own(client):
+    """두 축을 따로 켤 수 있어야 무엇 때문에 안 보였는지 알 수 있다(hide_allowed 와 같은 이유)."""
+    auth = _auth(client)
+    _seed_unconfirmed()
+    only_unconfirmed = client.get("/api/findings?hide_unconfirmed=false", headers=auth).json()
+    assert _names(only_unconfirmed) == ["10.0.1.1:22", "10.0.1.2:161"]
+    only_wrapped = client.get("/api/findings?hide_tcpwrapped=false", headers=auth).json()
+    assert _names(only_wrapped) == ["10.0.1.1:22", "10.0.1.3:8443"]
+    both = client.get("/api/findings?hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=auth).json()
+    assert _names(both) == ["10.0.1.1:22", "10.0.1.2:161", "10.0.1.3:8443"]
+
+
+def test_the_list_always_says_how_many_rows_it_folded(client):
+    """말없이 감추면 이 도구가 내내 막아 온 거짓 음성과 같은 모양이 된다.
+
+    화면이 '접힘 N건'을 적으려면 서버가 그 수를 줘야 한다. 펼친 축은 접은 게 없으므로 0 이다.
+    """
+    auth = _auth(client)
+    _seed_unconfirmed()
+    res = client.get("/api/findings", headers=auth)
+    assert res.headers["X-Total-Count"] == "1"
+    assert res.headers["X-Hidden-Unconfirmed"] == "1"
+    assert res.headers["X-Hidden-Tcpwrapped"] == "1"
+
+    opened = client.get("/api/findings?hide_unconfirmed=false", headers=auth)
+    assert opened.headers["X-Hidden-Unconfirmed"] == "0"
+    assert opened.headers["X-Hidden-Tcpwrapped"] == "1"
+
+
+def test_the_folded_count_only_counts_rows_the_other_filters_kept(client):
+    """다른 조건으로 어차피 빠졌을 행까지 세면 '보이는 것 + 접은 것' 이 안 맞는다."""
+    auth = _auth(client)
+    _seed_unconfirmed()
+    # 검색어가 snmp 한 건만 남기고, 그 한 건이 미확정이라 접힌다 -> 보이는 것 0, 접힘 1.
+    res = client.get("/api/findings?q=snmp", headers=auth)
+    assert res.headers["X-Total-Count"] == "0"
+    assert res.headers["X-Hidden-Unconfirmed"] == "1"
+    # tcpwrapped 건은 검색어에서 이미 빠졌으므로 '접혔다' 고 세면 안 된다.
+    assert res.headers["X-Hidden-Tcpwrapped"] == "0"
+
+
+def test_the_export_folds_exactly_what_the_table_folded(client):
+    """'표 = 내보내기' 불변식. 화면에서 접은 건이 파일에는 남아 있으면 두 증빙이 갈린다."""
+    auth = _auth(client)
+    _seed_unconfirmed()
+    body = client.get("/api/findings/export?fmt=csv&cols=host_ip,port", headers=auth).text
+    hosts = [r[0] for r in list(csv.reader(io.StringIO(body)))[1:] if r]
+    assert hosts == ["10.0.1.1"]
+
+    opened = client.get(
+        "/api/findings/export?fmt=csv&cols=host_ip,port"
+        "&hide_unconfirmed=false&hide_tcpwrapped=false", headers=auth).text
+    hosts = sorted(r[0] for r in list(csv.reader(io.StringIO(opened)))[1:] if r)
+    assert hosts == ["10.0.1.1", "10.0.1.2", "10.0.1.3"]

@@ -264,7 +264,9 @@ def _overdue_before(today: str):
 
 def _view_rows(db: Session, *, status=None, risk=None, host=None, q=None, state="open",
                dept=None, match="contains", filters="", sort="", direction="asc",
-               hide_normal=False, hide_allowed=False, overdue_only=False, today=""):
+               hide_normal=False, hide_allowed=False, hide_unconfirmed=False,
+               hide_tcpwrapped=False, overdue_only=False, today="",
+               hidden_counts: dict | None = None):
     """목록·내보내기 공통 뷰 — 표에 보이는 값 그대로 필터·정렬한다.
 
     '표 = 내보내기' 불변식을 지키려면 계산 컬럼(표시 식별·용도근거·컴플라이언스)도 같은 기준으로
@@ -273,6 +275,10 @@ def _view_rows(db: Session, *, status=None, risk=None, host=None, q=None, state=
     화면 토글(정상처리 제외·마감초과만)도 **여기서** 걸러야 한다. 페이지를 자른 뒤 화면에서
     걸러내면 조건에 맞는 행이 뒷 페이지에 남아 첫 페이지가 빈 것처럼 보이고, 건수·내보내기도
     화면과 어긋난다.
+
+    ``hidden_counts`` 를 주면 각 토글이 **몇 건을 접었는지** 이유별로 채워 준다. 열린 포트를
+    말없이 감추는 것은 이 도구가 내내 막아 온 거짓 음성과 같은 모양이라, 접은 건수는 화면이
+    항상 말할 수 있어야 한다. 목록만 쓰고 내보내기는 쓰지 않는다(파일에는 접은 결과만 담긴다).
     """
     rows = _filtered(db, status, risk, host, None, state, dept).all()
     if hide_normal:
@@ -295,6 +301,24 @@ def _view_rows(db: Session, *, status=None, risk=None, host=None, q=None, state=
     needle = (q or "").strip().casefold()
     if needle:
         rows = [f for f in rows if _matches(f, needle, match == "exact")]
+    # 확정되지 않은 관측 두 축. 다른 조건이 **모두 끝난 뒤** 접어야 화면의 '보이는 것 +
+    # 접은 것' 이 맞는다. 먼저 접으면 위험도·검색어로 어차피 빠졌을 행까지 세게 된다.
+    # 토글을 하나로 묶지 않는 이유는 hide_allowed 와 같다 - 열림 자체가 불확실한 것과,
+    # 열린 것은 확실한데 뒤에 뭐가 있는지 모르는 것은 다음에 할 일이 다르다.
+    unconfirmed = [f for f in rows if f.needs_confirmation]
+    # open|filtered 와 '무응답 추정' 열림. 재확인해야 열림 여부를 말할 수 있는 건이다
+    # (observation.needs_confirmation). open|filtered 만 접으면 근거가 똑같이 없는
+    # `open` + `no-response` 가 옆에 남아, 같은 불확실성이 두 모양으로 보인다.
+    # tcpwrapped 는 핸드셰이크가 된 건이라 포트는 확실히 열려 있다 - 정체만 모른다.
+    # 두 축이 겹치는 행은 '미확정' 으로만 세어 같은 건을 두 번 세지 않는다.
+    wrapped = [f for f in rows if f.identification == "tcpwrapped" and not f.needs_confirmation]
+    if hidden_counts is not None:
+        hidden_counts["unconfirmed"] = len(unconfirmed) if hide_unconfirmed else 0
+        hidden_counts["tcpwrapped"] = len(wrapped) if hide_tcpwrapped else 0
+    if hide_unconfirmed:
+        rows = [f for f in rows if not f.needs_confirmation]
+    if hide_tcpwrapped:
+        rows = [f for f in rows if f.identification != "tcpwrapped"]
     if sort:
         if sort not in _COL_MAP:
             raise HTTPException(status_code=400, detail=f"알 수 없는 정렬 컬럼: {sort}")
@@ -317,6 +341,8 @@ def list_findings(
     dir: str = "asc",
     hide_normal: bool = False,
     hide_allowed: bool = True,
+    hide_unconfirmed: bool = True,
+    hide_tcpwrapped: bool = True,
     overdue_only: bool = False,
     today: str = "",
     limit: int = 0,
@@ -337,11 +363,16 @@ def list_findings(
         raise HTTPException(status_code=400, detail="match 는 contains 또는 exact 여야 합니다.")
     if dir not in ("asc", "desc"):
         raise HTTPException(status_code=400, detail="dir 은 asc 또는 desc 여야 합니다.")
+    hidden: dict[str, int] = {}
     rows = _view_rows(db, status=status, risk=risk, host=host, q=q, state=state, dept=dept,
                       match=match, filters=filters, sort=sort, direction=dir,
                       hide_normal=hide_normal, hide_allowed=hide_allowed,
-                      overdue_only=overdue_only, today=today)
+                      hide_unconfirmed=hide_unconfirmed, hide_tcpwrapped=hide_tcpwrapped,
+                      overdue_only=overdue_only, today=today, hidden_counts=hidden)
     response.headers["X-Total-Count"] = str(len(rows))
+    # 접은 건수를 함께 돌려준다. 화면이 이 값을 말하지 않으면 열린 포트가 조용히 사라진다.
+    response.headers["X-Hidden-Unconfirmed"] = str(hidden.get("unconfirmed", 0))
+    response.headers["X-Hidden-Tcpwrapped"] = str(hidden.get("tcpwrapped", 0))
     if limit > 0:
         rows = rows[max(0, offset):max(0, offset) + limit]
     wanted = {c.strip() for c in cols.split(",") if c.strip()}
@@ -377,6 +408,8 @@ def export_findings(
     dir: str = "asc",
     hide_normal: bool = False,
     hide_allowed: bool = True,
+    hide_unconfirmed: bool = True,
+    hide_tcpwrapped: bool = True,
     overdue_only: bool = False,
     today: str = "",
     _: User = Depends(current_user),
@@ -391,6 +424,7 @@ def export_findings(
     rows = _view_rows(db, status=status, risk=risk, host=host, q=q, state=state,
                       match=match, filters=filters, sort=sort, direction=dir,
                       hide_normal=hide_normal, hide_allowed=hide_allowed,
+                      hide_unconfirmed=hide_unconfirmed, hide_tcpwrapped=hide_tcpwrapped,
                       overdue_only=overdue_only, today=today)
 
     if fmt == "xlsx":

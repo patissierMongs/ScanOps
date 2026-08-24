@@ -558,6 +558,42 @@ test("web scan can exclude ports, and the estimate sees the same value", () => {
   assert.equal((scans.match(/exclude_ports: excludePorts/g) || []).length, 3);
 });
 
+test("unconfirmed observations are folded away but never silently", () => {
+  const findings = source("../src/views/Findings.jsx");
+  // 두 축을 따로 켜고 끌 수 있어야 무엇 때문에 안 보였는지 알 수 있다(hideAllowed 와 같은 이유).
+  assert.match(findings, /const \[hideUnconfirmed, setHideUnconfirmed\] = useState\(true\)/,
+    "미확정 토글이 없거나 기본이 '보임' 이다");
+  assert.match(findings, /const \[hideTcpwrapped, setHideTcpwrapped\] = useState\(true\)/,
+    "tcpwrapped 토글이 없거나 기본이 '보임' 이다");
+
+  // 서버가 페이지를 자르기 전에 걸러야 한다 - 화면에서 걸러내면 건수·내보내기가 어긋난다.
+  const qs = findings.split("const queryString = useMemo")[1].split("}, [")[0];
+  assert.match(qs, /hide_unconfirmed/, "미확정 토글이 서버로 안 간다");
+  assert.match(qs, /hide_tcpwrapped/, "tcpwrapped 토글이 서버로 안 간다");
+  // 내보내기도 같은 queryString 을 쓰므로 표와 파일이 갈리지 않는다.
+  assert.match(findings, /new URLSearchParams\(queryString\)[\s\S]{0,200}findings\/export/);
+
+  // 접은 건수를 화면이 말해야 한다. 열린 포트를 말없이 감추는 것은 이 도구가 내내 막아 온
+  // 거짓 음성과 같은 모양이다 - 토글 존재만으로는 그 사실이 사용자에게 닿지 않는다.
+  assert.match(findings, /hidden\.unconfirmed \? `[^`]*접힘/,
+    "미확정 접힘 건수를 화면이 말하지 않는다");
+  assert.match(findings, /hidden\.tcpwrapped \? `[^`]*접힘/,
+    "tcpwrapped 접힘 건수를 화면이 말하지 않는다");
+
+  // [필터 제거]는 기본으로 되돌린다 - 접힘이 기본이므로 두 토글도 다시 켜져야 한다.
+  const clear = findings.split("function clearFilters()")[1].split("\n  }")[0];
+  assert.match(clear, /setHideUnconfirmed\(true\)/);
+  assert.match(clear, /setHideTcpwrapped\(true\)/);
+});
+
+test("the api helper hands back the counts the server folded", () => {
+  const api = source("../src/api.js");
+  assert.match(api, /X-Hidden-Unconfirmed/);
+  assert.match(api, /X-Hidden-Tcpwrapped/);
+  // 헤더가 없거나 숫자가 아니면 0 - 접힘 표시가 NaN 으로 새면 아무도 못 읽는다.
+  assert.match(api, /Number\.isFinite\(v\) \? v : 0/);
+});
+
 test("findings colour indicators are per-element and persist", async () => {
   const findings = source("../src/views/Findings.jsx");
   assert.match(findings, /COLOR_ELEMENTS/);

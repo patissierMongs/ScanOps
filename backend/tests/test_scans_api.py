@@ -1215,7 +1215,8 @@ def test_import_bundle_preserves_discovery_and_scopes_closure(client):
     assert r.json()["imported"] == 1
     assert r.json()["counts"]["closed"] == 1
 
-    findings = client.get("/api/findings?state=", headers=h).json()
+    # 미확정 관측은 평소 접혀 있다 - 여기서 볼 것은 인입이 상태를 보존하는가이므로 펼친다.
+    findings = client.get("/api/findings?state=&hide_unconfirmed=false", headers=h).json()
     by_port = {(f["proto"], f["port"]): f for f in findings}
     assert by_port[("tcp", 22)]["state"] == "open"
     assert by_port[("tcp", 80)]["state"] == "closed"
@@ -1495,7 +1496,8 @@ def test_udp_stage_import_does_not_close_existing_tcp(client):
     r = client.post("/api/scans/import", headers=h, files={"file": ("scan_a.udp_identify.xml", udp, "text/xml")})
     assert r.status_code == 200, r.text
 
-    findings = client.get("/api/findings?state=", headers=h).json()
+    # 미확정 관측은 평소 접혀 있다 - 여기서 볼 것은 인입이 상태를 보존하는가이므로 펼친다.
+    findings = client.get("/api/findings?state=&hide_unconfirmed=false", headers=h).json()
     by_port = {(f["proto"], f["port"]): f for f in findings}
     assert by_port[("tcp", 22)]["state"] == "open"
     assert by_port[("udp", 53)]["state"] == "open|filtered"
@@ -1518,7 +1520,8 @@ def test_limited_legacy_scan_only_closes_ports_in_scaninfo_scope(client):
     r = client.post("/api/scans/import", headers=h, files={"file": ("limited.xml", limited, "text/xml")})
     assert r.status_code == 200, r.text
     assert r.json()["counts"]["closed"] == 1
-    findings = client.get("/api/findings?state=", headers=h).json()
+    # 미확정 관측은 평소 접혀 있다 - 여기서 볼 것은 인입이 상태를 보존하는가이므로 펼친다.
+    findings = client.get("/api/findings?state=&hide_unconfirmed=false", headers=h).json()
     by_port = {f["port"]: f for f in findings}
     assert by_port[22]["state"] == "closed"
     assert by_port[80]["state"] == "open"

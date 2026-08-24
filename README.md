@@ -145,6 +145,17 @@ python scanner\scanops_scanner.py --sync --server http://<서버IP>:8770 --usern
   nmap의 product에는 `Samba smbd`처럼 서술 접미사가 붙고 CPE는 여러 개가 `;`로 이어져 저장되므로
   정확일치로는 실무에서 쓸 수 없다. 규칙 화면이 저장 전에 **매칭 발견 수**를 보여주므로 과매칭을
   눈으로 확인할 수 있다. 예: `cpe_rule`에 `openbsd:openssh`, `product_rule`에 `vsftpd`.
+- **확정되지 않은 관측은 발견 목록에서 평소 접혀 있다.** 두 축을 따로 접는다 — `open|filtered`
+  와 '무응답 추정' 열림(`observation.needs_confirmation`)은 [미확정 제외], `tcpwrapped` 는
+  [tcpwrapped 제외] 다. 하나로 묶지 않는 이유는 [허용 제외]와 같다: 열림 여부 자체가 불확실한
+  것과, 열린 것은 확실한데 뒤에 뭐가 있는지 모르는 것은 다음에 할 일이 다르다. 체크를 풀면
+  그대로 보이고, 인입·저장된 상태는 무엇도 바뀌지 않는다 — 표시만 접는다.
+
+  접은 건수는 **항상 체크박스 옆에 적힌다**(`X-Hidden-Unconfirmed` / `X-Hidden-Tcpwrapped`).
+  열린 포트를 말없이 감추는 것은 이 도구가 내내 막아 온 거짓 음성과 같은 모양이라, 접혔다는
+  사실 자체는 숨기지 않는다. 건수는 다른 조건(위험도·검색어·컬럼 필터)을 모두 적용한 뒤 세므로
+  '보이는 것 + 접은 것' 이 맞는다. 내보내기도 같은 파라미터를 쓴다 — 표에서 접은 건은 파일에도
+  없다. 기본값은 API 경계에 있어 부서 알림 화면도 같은 기준을 따른다.
 - `open`과 UDP의 `open|filtered`는 활성 finding이다. `closed`/`filtered` 행 자체는 새 finding으로
   인입하지 않는다. 정상 완료된 구조화 실행 단위(단계 스캔 전체 또는 레거시의 완료 배치)는
   **제외 후 유효 타깃 × 요청한 port/proto 범위**에서 미관측된 기존 finding도 닫는다. 제외한 타깃은
