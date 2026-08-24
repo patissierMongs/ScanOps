@@ -1146,6 +1146,19 @@ def _chunk_worker(scan_id: int) -> None:
             return
         xml_path = nmap_runner.xml_of(b_base)
         if rc == WATCHDOG_RC:
+            # 워치독이 끊기 전에 **끝난 호스트의 관측**은 살아 있다 - `_wait_scan_process`
+            # 가 그 XML 을 복구해 두는 이유가 그것이다. 그대로 실패로 마감하고 나가면
+            # 그 관측이 어디에도 안 남고, 이어가기가 같은 -oA base 로 다시 돌면서
+            # 복구본을 덮어써 영영 사라진다.
+            #
+            # 닫힘 권한은 주지 않는다(no_close=True). 워치독이 끊은 실행은 '못 본 것' 을
+            # 말할 자격이 없다 - 본 것만 가산한다.
+            if xml_path.exists():
+                try:
+                    _ingest_batch(scan_id, xml_path.read_bytes(), no_close=True)
+                except Exception:
+                    logger.exception(
+                        "failed to ingest repaired watchdog result for scan %s", scan_id)
             _fail(scan_id, "watchdog_exceeded")
             return
         if rc != 0:

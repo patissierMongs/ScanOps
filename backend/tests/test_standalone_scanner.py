@@ -3397,3 +3397,53 @@ def test_a_crash_before_the_deadline_is_not_reported_as_exceeding_it(monkeypatch
         f"끊긴 산출물이라는 사실까지 잃었다: {problems}"
     )
     assert marked, "원인과 무관하게 격리돼야 하는 산출물이 격리되지 않았다"
+
+
+def test_a_quarantined_stage_does_not_block_the_rest_of_the_bundle(tmp_path):
+    """격리된 산출물은 묶음 목록에 실리지 않아야 한다.
+
+    워치독이 끊고 복구한 XML 은 파싱이 되므로 '호스트가 있는 XML' 검사를 통과한다.
+    그런데 파일은 이미 interrupted/ 로 옮겨져 있고, 그 이름이 manifest 에 실리면
+    **서버가 묶음 전체를 거절한다** - UDP 단계 하나가 끊겼다고 같은 묶음의 멀쩡한 TCP
+    결과까지 못 넣게 된다.
+    """
+    import pathlib
+
+    scanner = _load_scanner()
+
+    good = tmp_path / "scan.tcp_discovery.xml"
+    good.write_text('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                    '<address addr="10.0.0.1" addrtype="ipv4"/></host>'
+                    '<runstats><finished exit="success"/></runstats></nmaprun>',
+                    encoding="utf-8")
+    # 격리 이름은 **생산 코드가 만든 그대로** 쓴다 - 손으로 지어내면 실제와 어긋난 채
+    # 통과하는 검사가 된다(처음에 .xml 뒤에 표식을 붙였다가 그렇게 됐다).
+    raw = tmp_path / "scan.udp_identify.xml"
+    raw.write_text('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                   '<address addr="10.0.0.1" addrtype="ipv4"/></host></nmaprun>',
+                   encoding="utf-8")
+    moved = scanner.mark_interrupted_outputs(tmp_path / "scan.udp_identify")
+    bad = pathlib.Path(next(p for p in moved if p.lower().endswith(".xml")))
+    assert bad.exists() and bad.name.lower().endswith(".xml"), (
+        f"격리본이 .xml 로 끝나지 않는다 - 이 검사는 아무것도 안 막는다: {bad.name}"
+    )
+    assert scanner.xml_has_hosts(bad), "복구본이 파싱되지 않는다 - 재현이 안 됐다"
+    assert scanner.is_interrupted_output(bad), "격리 표식이 없다 - 재현이 안 됐다"
+
+    clean_run = {"files": [str(good)], "returncode": 0, "stage_id": "tcp_discovery",
+                 "index": 0, "batch_index": 0,
+                 "scan_targets": ["10.0.0.1"], "scan_targets_complete": True}
+    broken_run = {"files": [str(bad)], "returncode": -1, "stage_id": "udp_identify",
+                  "index": 0, "batch_index": 0,
+                  "scan_targets": ["10.0.0.1"], "scan_targets_complete": True}
+
+    assert scanner.manifest_xml_files(clean_run) == [str(good)]
+    assert scanner.manifest_xml_files(broken_run) == [], (
+        "격리된 산출물을 묶음에 광고한다 - 서버가 묶음 전체를 거절한다"
+    )
+
+    # 같은 계획에 둘이 함께 있어도 멀쩡한 쪽은 살아야 한다.
+    plan = {"batches": [["10.0.0.1"]], "runs": [clean_run, broken_run]}
+    importable = scanner.importable_xml(plan)
+    assert str(good) in importable, "멀쩡한 단계까지 묶음에서 빠졌다"
+    assert str(bad) not in importable

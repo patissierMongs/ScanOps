@@ -2227,3 +2227,62 @@ def test_the_staged_watchdog_does_not_fail_a_scan_that_finished_in_the_gap(tmp_p
     assert not process.terminated, "이미 끝난 프로세스를 종료하려 했다"
     # 멀쩡한 XML 은 그대로여야 한다 - 복구본으로 격리되면 닫힘 권한을 잃는다.
     assert "<finished" in (tmp_path / "stage.xml").read_text(encoding="utf-8")
+
+
+def test_a_resumed_scan_reports_the_ports_it_found_before_the_stop(tmp_path):
+    """이어가기로 끝난 스캔의 단계 총계는 **중지 전에 찾은 것까지** 세야 한다.
+
+    이미 끝낸 배치는 건너뛰므로, 이 프로세스에서 훑은 것만 더하는 누산기를 쓰면 그
+    포트가 총계에서 빠진다. 서비스 단계만 남기고 이어가면 총계가 0 으로 마감돼,
+    타임라인과 영속 단계 요약이 그 스캔이 실제로 인입한 발견과 어긋난다.
+    """
+    spec_dict = {
+        "job_id": "r", "targets": ["10.0.0.1", "10.0.0.2"], "out_dir": str(tmp_path),
+        "batch_size": 1,
+        "stages": {"tcp": {"enabled": True, "ports": "22"}, "service": {"nse": []}},
+    }
+
+    def emitted_tcp_total(sink_events):
+        done = [e for e in sink_events
+                if e[0] == "stage_done" and e[1].get("stage") == "tcp"]
+        assert done, "tcp 단계가 마감되지 않았다 - 이 검사는 아무것도 안 보고 있다"
+        return done[-1][1]["counts"]
+
+    class _Recording:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event, **fields):
+            self.events.append((event, fields))
+
+    def fake(stage, args, base, fatal=True, targets=None):
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml(str(args[-1])))
+        return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
+
+    # 1차: 두 배치를 다 돌아 기준값을 만든다.
+    whole, _ = _pipeline(tmp_path / "whole", {**spec_dict, "out_dir": str(tmp_path / "whole")})
+    whole.sink = _Recording()
+    whole._nmap = fake
+    whole._scan_batches(["10.0.0.1", "10.0.0.2"])
+    expected = emitted_tcp_total(whole.sink.events)
+    assert expected["open_ports"] >= 1 and expected["hosts"] == 2, expected
+
+    # 2차: 한 번 다 돌린 뒤, 같은 out_dir 로 이어간다(모든 배치가 이미 done).
+    resumed_dir = tmp_path / "resumed"
+    first, _ = _pipeline(resumed_dir, {**spec_dict, "out_dir": str(resumed_dir)})
+    first._nmap = fake
+    first._scan_batches(["10.0.0.1", "10.0.0.2"])
+
+    again, _ = _pipeline(resumed_dir, {**spec_dict, "out_dir": str(resumed_dir)})
+    again.sink = _Recording()
+    ran = []
+    again._nmap = lambda *a, **k: ran.append(1) or fake(*a, **k)
+    again._scan_batches(["10.0.0.1", "10.0.0.2"])
+    assert not ran, "이어가기가 배치를 다시 돌았다 - 재현이 안 됐다"
+
+    assert emitted_tcp_total(again.sink.events) == expected, (
+        "이어가기가 중지 전에 찾은 포트를 총계에서 빠뜨렸다"
+    )
+    assert again.counts["open_tcp"] == whole.counts["open_tcp"], (
+        "영속 요약도 같은 수를 말해야 한다"
+    )

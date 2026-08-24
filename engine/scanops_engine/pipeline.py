@@ -411,17 +411,27 @@ class Pipeline:
                 started.add(stage)
 
         secs = {"tcp": 0.0, "udp": 0.0, "tcp_service": 0.0, "udp_service": 0.0}
-        opened = {"tcp": 0, "udp": 0}
         nsvc = {"tcp": 0, "udp": 0}
 
         def finish(stopped=False):
             for proto in sweeps:
-                nhosts = sum(1 for m in self.open_map.values() if m.get(proto))
-                self.counts["open_tcp" if proto == "tcp" else "open_udp"] = opened[proto]
+                # **이어가기가 건너뛴 배치까지 센다.** 예전에는 이 프로세스에서 실제로 훑은
+                # 배치만 더하는 누산기를 썼는데, 중지 후 이어가면 이미 끝낸 배치는
+                # `batch_done()` 으로 건너뛰므로 그 포트가 빠졌다. 서비스 단계만 남기고
+                # 이어가면 총계가 0 으로 마감돼, 타임라인과 영속 단계 요약이 그 실행이
+                # 실제로 인입한 발견·`open_map` 과 어긋났다.
+                #
+                # `open_map` 은 상태에 영속되어 이어가기 너머로 남는 **누적 기록**이고,
+                # 바로 아래 호스트 수도 이미 그것을 센다. 같은 근거에서 두 수를 뽑아
+                # 서로 어긋날 수 없게 한다.
+                hosts_open = [m for m in self.open_map.values() if m.get(proto)]
+                nhosts = len(hosts_open)
+                total_open = sum(len(m.get(proto) or []) for m in hosts_open)
+                self.counts["open_tcp" if proto == "tcp" else "open_udp"] = total_open
                 self.sink.emit(
                     "stage_done", stage=proto, seconds=round(secs[proto], 2),
                     counts={"stopped": True} if stopped
-                    else {"open_ports": opened[proto], "hosts": nhosts})
+                    else {"open_ports": total_open, "hosts": nhosts})
             if sp.enabled:
                 for proto in protos:
                     service_stage = f"{proto}_service"
@@ -458,7 +468,6 @@ class Pipeline:
                         batch=bi + 1, batch_total=total_batches,
                         current_hosts=[], current_host_count=0,
                     )
-                    opened[proto] += sum(len(v) for v in found.values())
                     self.state.mark_batch_done(f"{proto}:{bi}")
                     self._save()
                 if not sp.enabled or self.state.batch_done(f"svc-{proto}:{bi}"):

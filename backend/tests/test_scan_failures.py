@@ -2471,3 +2471,68 @@ def test_one_host_with_two_problems_is_still_one_host_in_the_retry_queue(
     source = (Path(__file__).resolve().parents[2]
               / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
     assert re.search(r"hosts\.length\}대", source), "화면 계약이 바뀌었다 - 이 검사가 낡았다"
+
+
+def test_a_watchdog_cut_batch_keeps_the_hosts_it_already_finished(client, monkeypatch):
+    """워치독이 끊기 전에 끝난 호스트의 관측은 남아야 한다.
+
+    `_wait_scan_process()` 가 끊긴 XML 을 복구하는 이유가 바로 그것인데, 예전에는 이
+    분기가 그 파일을 읽지 않고 실패로 마감하고 나갔다. 이어가기가 같은 -oA base 로
+    다시 돌면서 복구본을 덮어쓰므로, 그 관측은 ScanOps 어디에도 남지 않았다.
+
+    동시에 **닫힘 권한은 없다.** 끊긴 실행은 '못 봤다' 를 말할 자격이 없다.
+    """
+    from scanops.scanning import chunker
+
+    scans_api._settings.ensure_dirs()
+    db = SessionLocal()
+    try:
+        scan = ScanRun(name="watchdog batch", targets="127.0.0.1", status="running")
+        db.add(scan); db.commit()
+        scan_id = scan.id
+        # 이 스캔이 닫아서는 안 되는, 이미 있는 발견.
+        db.add(Finding(finding_key="127.0.0.1|9999|tcp", host_ip="127.0.0.1", port=9999,
+                       proto="tcp", state="open"))
+        db.commit()
+    finally:
+        db.close()
+    base = scans_api._basename(scan_id)
+    chunker.write_state(base, {
+        "batches": [["127.0.0.1"]], "cursor": 0, "stop": False,
+        "workflow": "manual", "preset": "quick", "ports": "18443", "nse": [],
+        "watchdog_seconds": 30,
+    })
+    # 워치독이 끊고 복구한 모양 - 끝난 호스트 하나가 남고 runstats 는 없다.
+    repaired = b"""<?xml version="1.0"?>
+<nmaprun><scaninfo type="syn" protocol="tcp" numservices="1" services="18443"/>
+<host><status state="up"/><address addr="127.0.0.1" addrtype="ipv4"/>
+  <ports><port protocol="tcp" portid="18443"><state state="open"/>
+    <service name="http" product="Uvicorn" version="0.30" method="probed"/></port></ports>
+</host></nmaprun>"""
+
+    def fake_popen(argv, _log_path):
+        Path(f"{Path(argv[argv.index('-oA') + 1])}.xml").write_bytes(repaired)
+        return _Proc(0)
+
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda _explicit="": "nmap")
+    monkeypatch.setattr(scans_api.nmap_runner, "popen", fake_popen)
+    monkeypatch.setattr(scans_api, "_wait_scan_process",
+                        lambda _scan_id, _proc, _watchdog=0, _out_base=None:
+                        scans_api.WATCHDOG_RC)
+
+    scans_api._chunk_worker(scan_id)
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        assert scan.status == "failed" and scan.failure_code == "watchdog_exceeded", (
+            "상한 초과는 그대로 실패여야 한다"
+        )
+        kept = db.query(Finding).filter_by(finding_key="127.0.0.1|18443|tcp").one_or_none()
+        assert kept is not None, "끊기 전에 끝난 호스트의 관측이 사라졌다"
+        assert kept.state == "open"
+        # 닫힘 권한은 없다 - 이 스캔이 보지 못한 포트를 닫아서는 안 된다.
+        untouched = db.query(Finding).filter_by(finding_key="127.0.0.1|9999|tcp").one()
+        assert untouched.state == "open", "끊긴 실행이 못 본 포트를 닫았다"
+    finally:
+        db.close()

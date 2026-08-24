@@ -2305,7 +2305,12 @@ def manifest_xml_files(run: dict) -> list[str]:
     nmap 이 일부 호스트를 스캔하고도 비정상 종료(host down/NSE 오류 등)한 경우 그 부분 결과를 살린다(QA-005)."""
     if run.get("skipped"):
         return []
-    xmls = [p for p in run.get("files", []) if str(p).lower().endswith(".xml")]
+    # 격리된 산출물은 광고하지 않는다. 워치독이 끊고 복구한 XML 은 파싱이 되므로
+    # 아래 `xml_has_hosts` 를 통과하는데, 파일은 이미 `interrupted/` 로 옮겨져 있다.
+    # 그 이름이 manifest 에 실리면 **서버가 묶음 전체를 거절한다** - UDP 단계 하나가
+    # 끊겼다고 같은 묶음의 멀쩡한 TCP 결과까지 못 넣게 된다.
+    xmls = [p for p in run.get("files", [])
+            if str(p).lower().endswith(".xml") and not is_interrupted_output(p)]
     if run.get("returncode") == 0:
         # 기록 당시 존재했어도 이후 삭제/유실됐을 수 있으므로 실제 존재하는 것만 광고한다(QA-041).
         return [p for p in xmls if Path(p).exists()]
