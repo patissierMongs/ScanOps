@@ -2412,6 +2412,18 @@ def _scan_history_summary(scan: ScanRun) -> dict:
     return scan_summary.summarize_command(command, scan.targets)
 
 
+# 재스캔으로 메울 수 있는 이슈 - 호스트가 붙어 있고 그 호스트를 다시 훑으면 해결되는 것들.
+# `artifact_missing`/`artifact_broken`/`command_error` 는 호스트가 없거나 다시 훑는다고
+# 해결되지 않으므로 여기 없다. **이력이 제안하는 것과 실행이 받아들이는 것이 같은 집합을
+# 써야 한다** - 갈리면 화면이 "N대 재스캔" 을 띄우는데 누르면 항상 400 이 난다.
+RETRYABLE_ISSUE_KINDS = frozenset({"host_timeout", "retransmission_cap", "service_degraded"})
+
+
+def _retryable_issues(issues) -> list:
+    return [row for row in issues
+            if row.host_ip and row.kind in RETRYABLE_ISSUE_KINDS]
+
+
 def _durable_retry_detail(db: Session, scan_id: int) -> dict | None:
     rows = db.query(ScanQualityIssue).filter(
         ScanQualityIssue.scan_id == scan_id,
@@ -2419,12 +2431,7 @@ def _durable_retry_detail(db: Session, scan_id: int) -> dict | None:
     ).order_by(ScanQualityIssue.id).all()
     if not rows:
         return None
-    retryable = [
-        row for row in rows
-        if row.host_ip and row.kind in {
-            "host_timeout", "retransmission_cap", "service_degraded",
-        }
-    ]
+    retryable = _retryable_issues(rows)
     by_stage: dict[str, list[str]] = {}
     reasons: dict[str, list[str]] = {}
     for row in retryable:
@@ -2483,15 +2490,19 @@ def _retry_history(rows: list[ScanRun], db: Session) -> dict[int, dict]:
                 retry_status = "resolved" if any(
                     issue.resolved_by_scan_id is not None for issue in durable
                 ) else "none"
-            hosts = {issue.host_ip for issue in unresolved if issue.host_ip}
-            stages = list(dict.fromkeys(issue.stage for issue in unresolved if issue.stage))
+            # 재스캔 제안은 **재시도로 메울 수 있는 이슈**에서만 나와야 한다. 품질 표시는
+            # 그것과 다른 축이라 unresolved 전체를 그대로 본다 - 호스트 없는 오류도
+            # '확인 필요' 로는 남아야 하고, 다만 재스캔 버튼을 띄우면 안 된다.
+            retryable = _retryable_issues(unresolved)
+            hosts = {issue.host_ip for issue in retryable}
+            stages = list(dict.fromkeys(issue.stage for issue in retryable if issue.stage))
             severe = any(
                 issue.kind in {"command_error", "artifact_missing", "artifact_broken"}
                 for issue in unresolved
             )
             result[scan.id] = {
-                "retry_required": bool(unresolved) and retry_status != "running",
-                "retry_count": len(hosts) or len(unresolved),
+                "retry_required": bool(retryable) and retry_status != "running",
+                "retry_count": len(hosts),
                 "retry_stages": stages,
                 "retry_status": retry_status,
                 "retry_scan_id": retry_scan_id,

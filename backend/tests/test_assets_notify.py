@@ -422,6 +422,9 @@ def _notification_query(dept: str) -> str:
 
     src = (pathlib.Path(__file__).resolve().parents[2]
            / "frontend" / "src" / "views" / "Notifications.jsx").read_text(encoding="utf-8")
+    # 주석을 먼저 걷어낸다. 왜 이 질의를 쓰는지 적어 둔 설명에도 백틱과 따옴표가 나와,
+    # 그대로 두면 설명 조각이 질의에 섞인다(이 세션에서 같은 실수를 네 번 했다).
+    src = re.sub(r"//[^\n]*", "", src)
     call = src.split("if (!dept) { setFindings([]); return; }")[1].split(".then(")[0]
     # `/findings?...${encodeURIComponent(dept)}` + "..." 형태를 실제 질의로 되살린다.
     pieces = re.findall(r"[`\"]([^`\"]*)[`\"]", call)
@@ -473,3 +476,39 @@ def test_the_notice_audit_trail_records_the_findings_it_actually_sent(client):
     recorded = set(history[0]["finding_ids"])
     assert recorded == set(ids)
     assert len(recorded) == 3, "통보 이력이 접힌 발견을 빠뜨렸다"
+
+
+def test_the_notice_screen_never_offers_a_status_the_server_rejects(client):
+    """화면이 고를 수 있는 상태와 서버가 받아들이는 상태가 같아야 한다.
+
+    `_open_findings_for_dept()` 는 `정상처리` 를 통보 대상에서 뺀다. 화면이 그것을 고를 수
+    있게 두면, 고르는 순간 preview 와 [기록] 이 그 ID 를 싣고 제출은 **항상 400** 이 난다.
+    통보는 남은 조치를 알리는 것이라 서버 쪽이 맞고, 화면을 거기에 맞춘다.
+    """
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "frontend" / "src" / "views" / "Notifications.jsx").read_text(encoding="utf-8")
+    shown = re.sub(r"//[^\n]*", "", src)
+    statuses = shown.split("const STATUSES = [")[1].split("]")[0]
+    assert "정상처리" not in statuses, "서버가 거절하는 상태를 화면이 고를 수 있게 둔다"
+    assert "미조치" in statuses and "처리중" in statuses
+
+    # 화면이 받는 집합도 서버 자격과 같아야 한다 - 정상처리·허용은 빼고 미확정은 포함.
+    h = _auth(client)
+    _dept_findings()
+    db = SessionLocal()
+    try:
+        row = db.query(Finding).filter(Finding.finding_key == "n-a").first()
+        row.status = "정상처리"
+        db.commit()
+    finally:
+        db.close()
+
+    preview = client.get("/api/notifications/preview?dept=영업부", headers=h).json()
+    rows = client.get("/api/" + _notification_query("영업부").lstrip("/"), headers=h).json()
+    assert len(rows) == preview["finding_count"], (
+        "정상처리를 뺀 뒤에도 화면 건수가 서버 preview 와 다르다"
+    )
+    assert all(f["status"] != "정상처리" for f in rows)

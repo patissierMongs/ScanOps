@@ -5,7 +5,9 @@ import { useToast } from "../ui/Toast.jsx";
 import { asDate, dday, RISK_LABEL, today } from "../lib/format.js";
 import { primaryServiceIdentity } from "../lib/columns.js";
 
-const STATUSES = ["미조치", "처리중", "정상처리"];
+// 통보는 **남은 조치**를 알리는 것이다. 서버(`_open_findings_for_dept`)가 `정상처리` 를
+// 통보 대상에서 빼므로, 화면에서 고를 수 있게 두면 고르는 순간 제출이 항상 400 이 난다.
+const STATUSES = ["미조치", "처리중"];
 const TPL_KEY = "scanops_notify_templates";
 const loadTpls = () => { try { return JSON.parse(localStorage.getItem(TPL_KEY)) || []; } catch { return []; } };
 
@@ -73,8 +75,11 @@ export default function Notifications({ user }) {
     // 통보는 다른 일이다 - 서버의 /notifications/preview 는 _open_findings_for_dept 로
     // 이 둘을 계속 포함하므로, 여기서 기본값을 물려받으면 화면이 서버 preview 와 어긋난다.
     // 특히 tcpwrapped 는 포트 열림이 확인된 건이라, 조치 통보에서 빠지면 거짓 음성이다.
+    // 서버의 통보 대상과 **같은 집합**을 받는다. `_open_findings_for_dept` 는 정상처리와
+    // 허용을 빼고 미확정·tcpwrapped 는 포함하므로, 화면도 그대로 맞춘다 - 어긋나면 건수가
+    // 서버 preview 와 달라지거나 제출이 거절된다.
     api(`/findings?state=open&dept=${encodeURIComponent(dept)}`
-        + "&hide_unconfirmed=false&hide_tcpwrapped=false")
+        + "&hide_normal=true&hide_unconfirmed=false&hide_tcpwrapped=false")
       .then((r) => { if (live) setFindings(r); })
       .catch((e) => toast(e.message, { type: "err" }));
     return () => { live = false; };

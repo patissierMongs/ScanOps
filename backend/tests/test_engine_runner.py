@@ -825,3 +825,37 @@ def test_engine_availability_error_is_actionable(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="배포 패키지") as exc:
         engine_runner.ensure_available()
     assert str(tmp_path) not in str(exc.value)
+
+
+def test_a_target_expression_is_never_recorded_as_a_host(tmp_path):
+    """저장된 spec 의 targets 는 **주소 표현**이지 호스트 목록이 아니다.
+
+    기본 단계 스캔은 `-sn` 발견을 쓰므로 `10.0.0.0/24` 같은 문자열이 spec 에 그대로 남는다.
+    그걸 호스트로 넣으면 그 토큰 자체가 가짜 관측 행이 되어 `not_responding` 으로 찍히고,
+    정작 응답하지 않은 실제 주소들은 행이 없다 - 없는 호스트를 하나 만들고 있는 호스트들을
+    빠뜨리는 셈이다. 이 행은 미관측 닫힘 판정이 읽는 데이터라 조용히 틀리면 안 된다.
+    """
+    import json
+
+    from scanops.scanning import engine_runner
+
+    out = tmp_path / "scan_1"
+    out.mkdir()
+    (out / "events.ndjson").write_text(
+        json.dumps({"event": "stage_start", "stage": "discovery"}) + "\n"
+        + json.dumps({"event": "stage_done", "stage": "discovery", "seconds": 1,
+                      "counts": {"live": 1}}) + "\n", encoding="utf-8")
+    (out / "run-state.json").write_text(
+        json.dumps({"live": ["10.0.0.5"], "coverage": []}), encoding="utf-8")
+
+    spec = {"targets": ["10.0.0.0/24", "10.0.0.1-50", "10.0.0.5"]}
+    hosts = engine_runner.terminal_observability(out, spec)["hosts"]
+    recorded = {row["host_ip"] for row in hosts}
+    assert recorded == {"10.0.0.5"}, f"주소 표현이 호스트로 기록됐다: {sorted(recorded)}"
+
+    # `--discovery pn` 경로는 실제 호스트 목록이 들어오므로 그쪽 미응답 기록은 남아야 한다.
+    concrete = {"targets": ["10.0.0.5", "10.0.0.9"]}
+    rows = {row["host_ip"]: row for row in
+            engine_runner.terminal_observability(out, concrete)["hosts"]}
+    assert set(rows) == {"10.0.0.5", "10.0.0.9"}
+    assert rows["10.0.0.9"]["discovery_status"] == "not_responding"

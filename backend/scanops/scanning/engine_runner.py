@@ -1273,8 +1273,17 @@ def terminal_observability(out_dir, spec: dict | None = None) -> dict:
             row.setdefault(field, "unknown" if stage in plan else "not_planned")
         return row
 
+    # 저장된 spec 의 targets 는 **주소 표현**이다. 기본 단계 스캔은 `-sn` 발견을 쓰므로
+    # `10.0.0.0/24` 같은 문자열이 그대로 들어 있다. 그걸 호스트로 넣으면 그 토큰 자체가
+    # 가짜 관측 행이 되어 `not_responding` 으로 찍히고, 정작 응답하지 않은 실제 주소들은
+    # 행이 없다 - 없는 호스트를 하나 만들고 있는 호스트들을 빠뜨리는 셈이다.
+    #
+    # 구체적인 IP 만 받는다. `--discovery pn` 경로는 실제 호스트 목록이 그대로 들어오므로
+    # 그쪽의 미응답 기록은 지금처럼 남는다. 범위를 펼치지는 않는다 - /16 하나가 65,536 개
+    # 행이 되고, 응답하지 않은 주소는 어차피 지금도 행이 없다.
     for host in saved.get("targets", []) if isinstance(saved.get("targets"), list) else []:
-        host_row(host)
+        if isinstance(host, str) and _is_ip(host):
+            host_row(host)
     live = {host for host in (state.get("live") or []) if isinstance(host, str)}
     for host in live:
         row = host_row(host)

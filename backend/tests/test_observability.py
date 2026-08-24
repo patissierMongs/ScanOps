@@ -311,3 +311,52 @@ def test_a_clean_retry_still_reaches_the_resolution_path(monkeypatch):
     clean = {"authority_missing": [], "authority_broken": []}
     scans_api._resolve_retry_observations(_DB(), 2, {"scanops": {"retry_of": 1}}, clean)
     assert reached, "authority 가 온전한데 판정 경로에 들어가지도 않았다"
+
+
+def _issue_scan(db, name, kinds):
+    from scanops.models import ScanQualityIssue, ScanRun
+
+    scan = ScanRun(name=name, targets="10.0.0.1", status="done", command="x")
+    db.add(scan)
+    db.commit()
+    for kind, host in kinds:
+        db.add(ScanQualityIssue(scan_id=scan.id, issue_key=f"{kind}|{host}", kind=kind,
+                                stage="tcp", host_ip=host, detail="d"))
+    db.commit()
+    return scan
+
+
+def test_the_retry_offer_matches_what_the_retry_endpoint_accepts(client):
+    """이력이 제안하는 재스캔과 실행이 받아들이는 재스캔은 같은 집합이어야 한다.
+
+    `retry_timed_out_hosts()` 는 `_durable_retry_detail()` 을 통해 **호스트가 붙은**
+    timeout/재전송/저하 이슈만 받는다. 이력이 unresolved 전체로 `retry_required` 를 세우면,
+    호스트 없는 `artifact_missing`/`command_error` 만 남은 스캔에서도 화면이 "N대 재스캔" 을
+    띄우고 누르면 **항상 400** 이 난다. 이슈 개수를 호스트 수 자리에 넣는 것도 같은 문제다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        hostless = _issue_scan(db, "hostless",
+                               [("artifact_missing", ""), ("command_error", "")])
+        mixed = _issue_scan(db, "mixed",
+                            [("host_timeout", "10.0.0.7"), ("artifact_missing", "")])
+        history = scans_api._retry_history([hostless, mixed], db)
+
+        offered = history[hostless.id]
+        assert offered["retry_required"] is False, "재스캔할 수 없는 스캔에 재스캔을 제안한다"
+        assert offered["retry_count"] == 0, "이슈 개수를 호스트 수로 보여 준다"
+        # 재스캔은 못 해도 '확인 필요' 로는 남아야 한다 - 다른 축이다.
+        assert offered["quality_status"] == "error"
+        assert offered["unresolved_issue_count"] == 2
+        assert (scans_api._durable_retry_detail(db, hostless.id) or {}).get("required") is not True
+
+        both = history[mixed.id]
+        assert both["retry_required"] is True, "재시도 가능한 이슈가 있는데 제안하지 않는다"
+        assert both["retry_count"] == 1, "재시도 대상 호스트만 세야 한다"
+        assert scans_api._durable_retry_detail(db, mixed.id)["required"] is True
+        assert both["quality_status"] == "error"      # 섞인 오류도 그대로 보인다
+    finally:
+        db.close()
