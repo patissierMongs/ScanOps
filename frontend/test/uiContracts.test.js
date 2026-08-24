@@ -622,6 +622,40 @@ test("the staged preview matches how the engine actually groups service probes",
   assert.doesNotMatch(raw, /const stagedScripts/, "프로토콜별로 나누지 않은 목록이 남아 있다");
 });
 
+test("an imported scan never reports the wait until upload as its runtime", () => {
+  const scans = source("../src/views/Scans.jsx").replace(/\/\/[^\n]*/g, "");
+  const fn = scans.split("function scanDuration(")[1].split("\n}")[0];
+  // 가져온 스캔은 started_at 이 XML 안의 과거 시각이고 finished_at 은 업로드 인입 시각이다.
+  // 빼면 '스캔한 뒤 가져오기까지 걸린 시간' 이 나온다 - 한 달 전 XML 이 한 달짜리 스캔이 된다.
+  assert.match(fn, /scanKind\(scan\)\.key === "import"/,
+    "가져온 스캔에도 두 시각의 차이를 소요시간으로 보여 준다");
+  const guard = fn.indexOf('key === "import"');
+  const subtract = fn.indexOf("finished_at).getTime()");
+  assert.ok(guard !== -1 && guard < subtract, "가져오기 판정이 계산보다 뒤에 있다");
+});
+
+test("recovery evidence uses the schema the stages API actually sends", () => {
+  const scans = source("../src/views/Scans.jsx").replace(/\/\/[^\n]*/g, "");
+  const block = scans.split("recoveries.map(")[1].split("</section>")[0];
+  // 서버(engine_runner.parse_events)는 type 을 "split" | "retry" 로 정규화하고 호스트를
+  // hosts 배열로 준다. 옛 이벤트 이름을 보면 포트 분할 복구가 전부 '대체 엔진 재시도' 로
+  // 표기되고, 어느 호스트에서 무엇이 돌았는지가 증거에서 통째로 빠진다.
+  assert.match(block, /recovery\.type === "split"/, "복구 종류를 옛 이벤트 이름으로 본다");
+  assert.doesNotMatch(block, /service_split/, "정규화 전 이름이 남아 있다");
+  assert.match(block, /recovery\.hosts/, "복구가 다룬 호스트를 안 보여 준다");
+});
+
+test("a stage that never ran is not called complete", () => {
+  const scans = source("../src/views/Scans.jsx").replace(/\/\/[^\n]*/g, "");
+  const chip = scans.split("const extra =")[1].split(";")[0];
+  // 생존 호스트가 0이면 뒤 단계는 돌 것이 없다. '완료' 로 부르면 훑고 온 단계와 구분되지
+  // 않고, 아무것도 안 붙이면 전체 100% 옆에 '대기' 칩이 영원히 남는다.
+  assert.match(chip, /counts\?\.skipped/, "생략된 단계를 훑고 온 단계와 같게 부른다");
+  const skipped = chip.indexOf("skipped");
+  const done = chip.indexOf('status === "done"');
+  assert.ok(skipped !== -1 && skipped < done, "생략 판정이 완료 판정보다 뒤에 있어 가려진다");
+});
+
 test("findings colour indicators are per-element and persist", async () => {
   const findings = source("../src/views/Findings.jsx");
   assert.match(findings, /COLOR_ELEMENTS/);

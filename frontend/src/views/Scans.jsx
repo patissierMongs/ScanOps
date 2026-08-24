@@ -59,6 +59,10 @@ function fmtElapsed(sec) {
 function scanDuration(scan, liveProgress) {
   if (liveProgress?.elapsed_seconds != null) return liveProgress.elapsed_seconds;
   if (!scan?.started_at || !scan?.finished_at) return null;
+  // 가져온 스캔은 `started_at` 이 **XML 안의 과거 스캔 시각**이고 `finished_at` 은 업로드를
+  // 인입한 시각이다. 빼면 실행 시간이 아니라 '스캔한 뒤 가져오기까지 걸린 시간' 이 나온다 -
+  // 한 달 전 XML 을 올리면 한 달짜리 스캔으로 보인다. 그 값은 없느니만 못하다.
+  if (scanKind(scan).key === "import") return null;
   const seconds = (new Date(scan.finished_at).getTime() - new Date(scan.started_at).getTime()) / 1000;
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
 }
@@ -836,7 +840,10 @@ function StageTimeline({ s }) {
       </div>
       <div className="stage-status-list">
         {list.map((st, index) => {
-          const extra = st.status === "running" ? ` ${Math.round(st.percent || 0)}%`
+          // 응답한 호스트가 없어 돌 것이 없던 단계다. '완료' 로 부르면 훑고 온 단계와
+          // 구분되지 않는다 - 돈 것과 돌 것이 없던 것은 다른 사실이다.
+          const extra = st.counts?.skipped ? " 생략"
+            : st.status === "running" ? ` ${Math.round(st.percent || 0)}%`
             : st.status === "done" ? " 완료"
             : st.status === "warning" ? " 확인 필요"
             : st.status === "stopped" ? " 중지"
@@ -961,15 +968,25 @@ function StageRecoveries({ recoveries }) {
     <section className="scan-detail-section">
       <h4>복구 시도</h4>
       <p className="muted">실패 범위를 줄이기 위해 대체 엔진 재시도 또는 개별 격리를 수행한 기록입니다. 미해결 문제와는 구분됩니다.</p>
-      {recoveries.map((recovery, index) => (
-        <div className="stage-recovery" key={`${recovery.type || "recovery"}-${recovery.host || recovery.ip || index}-${index}`}>
-          <b>{recovery.type === "service_split" ? "개별·격리 실행" : "대체 엔진 재시도"}</b>
-          <span>{STAGE_LABEL[recovery.stage] || recovery.stage || "서비스 프로브"}</span>
-          <code className="mono">
-            {[recovery.host || recovery.ip, recovery.proto, recovery.port_spec || recovery.ports].filter(Boolean).join(" · ")}
-          </code>
-        </div>
-      ))}
+      {/* 서버(engine_runner.parse_events)가 `type: "split" | "retry"` 와 `hosts` 배열로
+          정규화해 준다. 옛 이벤트 이름(`service_split`)이나 단수 `host` 를 보면 포트 분할
+          복구가 전부 '대체 엔진 재시도' 로 표기되고, 어느 호스트에서 무엇이 돌았는지가
+          증거에서 통째로 빠진다. */}
+      {recoveries.map((recovery, index) => {
+        const hosts = recovery.hosts?.length
+          ? recovery.hosts
+          : [recovery.host || recovery.ip].filter(Boolean);
+        return (
+          <div className="stage-recovery" key={`${recovery.type || "recovery"}-${hosts[0] || index}-${index}`}>
+            <b>{recovery.type === "split" ? "개별·격리 실행" : "대체 엔진 재시도"}</b>
+            <span>{STAGE_LABEL[recovery.stage] || recovery.stage || "서비스 프로브"}</span>
+            <code className="mono">
+              {[hosts.join(", "), recovery.proto,
+                recovery.port_spec || recovery.ports?.join(",")].filter(Boolean).join(" · ")}
+            </code>
+          </div>
+        );
+      })}
     </section>
   );
 }

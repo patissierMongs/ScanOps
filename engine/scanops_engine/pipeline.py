@@ -255,6 +255,14 @@ class Pipeline:
             plan.append("udp_service")
         return plan
 
+    def _skip_remaining_stages(self) -> None:
+        """생존 호스트가 0이라 돌지 않은 계획 단계를 끝난 것으로 닫는다."""
+        for stage in self._stage_plan():
+            if stage == "discovery":
+                continue
+            self.sink.emit("stage_done", stage=stage, seconds=0.0,
+                           counts={"skipped": True, "live": 0})
+
     # ── 진입 ──
     def run(self) -> dict:
         t0 = time.time()
@@ -279,6 +287,12 @@ class Pipeline:
                 if live and not self.state.stopped() and self.counts["errors"] == 0:
                     # 전체 스캔은 배치마다 sweep → 식별까지 끝내고 다음 배치로 간다.
                     self._scan_batches(live)
+                elif not live and not self.state.stopped() and self.counts["errors"] == 0:
+                    # 응답한 호스트가 없으면 뒤 단계는 **돌 것이 없다.** 계획에만 남겨 두면
+                    # 잡은 done 으로 끝나는데 그 단계들은 영원히 '대기' 로 남아, 전체 100%
+                    # 옆에 시작도 안 한 칩이 붙는다. 끝났다는 사실을 남기되 counts 로
+                    # '생략' 임을 밝힌다 - 돈 것과 돌 것이 없던 것은 다른 사실이다.
+                    self._skip_remaining_stages()
         secs = round(time.time() - t0, 2)
         status = ("stopped" if self.state.stopped()
                   else "failed" if self.counts["errors"] else "done")

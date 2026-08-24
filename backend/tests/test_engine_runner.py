@@ -7,6 +7,8 @@ import pytest
 
 from scanops.db import SessionLocal
 from scanops.models import Finding, FindingEvent, ScanRun
+from pathlib import Path as pathlib_Path
+
 from scanops.scanning import engine_runner, scan_options
 
 
@@ -859,3 +861,57 @@ def test_a_target_expression_is_never_recorded_as_a_host(tmp_path):
             engine_runner.terminal_observability(out, concrete)["hosts"]}
     assert set(rows) == {"10.0.0.5", "10.0.0.9"}
     assert rows["10.0.0.9"]["discovery_status"] == "not_responding"
+
+
+def test_stages_that_never_ran_do_not_stay_pending_forever(tmp_path):
+    """`-sn` 발견이 생존 0으로 끝나면 뒤 단계는 돌 것이 없다.
+
+    계획에만 남겨 두면 잡은 `done` 으로 끝나는데 그 단계들은 영원히 '대기' 로 남아, 전체
+    100% 옆에 시작도 안 한 칩이 붙는다. 끝났다는 사실을 남기되 `counts.skipped` 로
+    '생략' 임을 밝힌다 - 돈 것과 돌 것이 없던 것은 다른 사실이다.
+    """
+    import json
+
+    from scanops.scanning import engine_runner
+
+    out = tmp_path / "scan_1"
+    out.mkdir()
+    events = [
+        {"event": "job_start", "job_id": "scan_1", "targets": ["10.0.0.0/30"]},
+        {"event": "stage_plan", "stages": ["discovery", "tcp", "tcp_service"]},
+        {"event": "stage_start", "stage": "discovery"},
+        {"event": "stage_done", "stage": "discovery", "seconds": 1, "counts": {"live": 0}},
+        # 엔진이 남은 계획 단계를 닫는다.
+        {"event": "stage_done", "stage": "tcp", "seconds": 0.0,
+         "counts": {"skipped": True, "live": 0}},
+        {"event": "stage_done", "stage": "tcp_service", "seconds": 0.0,
+         "counts": {"skipped": True, "live": 0}},
+        {"event": "job_done", "status": "done", "seconds": 1, "counts": {}},
+    ]
+    (out / "events.ndjson").write_text(
+        "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+
+    parsed = engine_runner.parse_events(out)
+    stages = {s["stage"]: s for s in parsed["stages"]}
+    assert set(stages) >= {"discovery", "tcp", "tcp_service"}
+    for name in ("tcp", "tcp_service"):
+        assert stages[name]["status"] != "pending", f"{name} 단계가 대기로 남았다"
+        assert stages[name]["counts"].get("skipped") is True, f"{name} 이 생략으로 표시되지 않는다"
+    assert parsed["overall"]["status"] == "done"
+
+
+def test_the_engine_closes_the_plan_when_discovery_finds_nobody():
+    """생산자 쪽 - 파이프라인이 실제로 그 이벤트를 낸다."""
+    import sys
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import pipeline as pipeline_mod
+
+    src = (pathlib_Path(__file__).resolve().parents[2]
+           / "engine" / "scanops_engine" / "pipeline.py").read_text(encoding="utf-8")
+    assert "_skip_remaining_stages" in src
+    assert hasattr(pipeline_mod.Pipeline, "_skip_remaining_stages")
+
+    body = src.split("def _skip_remaining_stages")[1].split("\n    def ")[0]
+    assert '"skipped": True' in body, "생략 표식 없이 닫으면 훑고 온 단계와 구분되지 않는다"
+    assert 'stage == "discovery"' in body, "발견 단계까지 다시 닫으면 실제 결과를 덮는다"
