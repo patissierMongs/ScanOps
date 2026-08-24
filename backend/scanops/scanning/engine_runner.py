@@ -881,6 +881,11 @@ def parse_events(out_dir) -> dict:
     execution_order: list[str] = []
     recoveries: list[dict] = []
     quality_issues: list[dict] = []
+    # events.ndjson 은 append-only 라 재개하면 이전 시도의 이벤트가 그대로 남는다. 어느
+    # 시도에서 난 오류인지 알아야 '재개해서 성공한 단계' 와 '이번에도 실패한 단계' 를
+    # 가를 수 있다. job_start 마다 회차가 올라간다.
+    attempt = 0
+    superseded: set[tuple] = set()
     current: dict = {}
     overall = {"status": "running", "percent": None, "seconds": None, "counts": {}}
     if not path.exists():
@@ -929,7 +934,22 @@ def parse_events(out_dir) -> dict:
                         slot(name)
         elif e == "stage_start":
             s = slot(st)
-            if s.get("status") not in {"done", "stopped", "error"}:
+            # 재개해서 같은 단계를 다시 도는 경우, 이전 시도의 실패는 이번 시도가 대신한다.
+            # 안 걷어내면 stage_done 이 그 error 를 그대로 보존하고 옛 command_error 가
+            # 미해결 품질 이슈로 남아, 스캔은 done 인데 타임라인·품질은 실패로 보고한다.
+            #
+            # **같은 시도 안의 재시작은 건드리지 않는다.** 배치마다 stage_start 가 다시
+            # 나오므로(_scan_batches), 회차를 안 보고 지우면 배치 0 의 실패가 배치 1 시작에
+            # 조용히 사라진다.
+            if s.get("status") == "error" and s.get("_error_attempt", attempt) < attempt:
+                superseded.add((st, s.get("_error_attempt")))
+                s["issues"] = [issue for issue in s.get("issues", [])
+                               if issue.get("type") != "command_error"]
+                s["status"] = "running"
+                s["percent"] = s.get("percent") or 0
+                s.pop("error", None)
+                s.pop("_error_attempt", None)
+            elif s.get("status") not in {"done", "stopped", "error"}:
                 s["status"] = "running"
                 s["percent"] = s.get("percent") or 0
         elif e == "stage_activity":
@@ -1100,8 +1120,10 @@ def parse_events(out_dir) -> dict:
                 if isinstance(ev.get("execution_id"), str) else "",
             })
             s["status"] = "error" if fatal else "warning"
+            s["_error_attempt"] = attempt
             if fatal:
                 quality_issues.append({
+                    "_attempt": attempt,
                     "kind": "command_error", "stage": st, "host_ip": "",
                     "proto": ev.get("proto") if ev.get("proto") in {"tcp", "udp"} else "",
                     "port_spec": "", "message": s["error"],
@@ -1174,6 +1196,7 @@ def parse_events(out_dir) -> dict:
                     })
         elif e == "job_start":
             overall["status"] = "running"
+            attempt += 1
         elif e == "job_done":
             status = ev.get("status")
             if not isinstance(status, str) or status not in {"done", "stopped", "failed"}:
@@ -1220,7 +1243,16 @@ def parse_events(out_dir) -> dict:
             issue.get("kind") == "command_error"
             and issue.get("execution_key") in recovered_execution_keys
         )
+        # 재개가 대신한 시도의 실패는 남기지 않는다 - 남기면 성공한 스캔이 영영
+        # '확인 필요' 로 보이고 재시도 안내가 사라지지 않는다.
+        and (issue.get("kind"), issue.get("stage"), issue.get("_attempt")) not in {
+            ("command_error", stage, att) for stage, att in superseded
+        }
     ]
+    for issue in quality_issues:
+        issue.pop("_attempt", None)
+    for stage in stage_list:
+        stage.pop("_error_attempt", None)
     if recovered_execution_keys:
         for stage in stage_list:
             stage["issues"] = [

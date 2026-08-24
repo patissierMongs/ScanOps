@@ -915,3 +915,81 @@ def test_the_engine_closes_the_plan_when_discovery_finds_nobody():
     body = src.split("def _skip_remaining_stages")[1].split("\n    def ")[0]
     assert '"skipped": True' in body, "생략 표식 없이 닫으면 훑고 온 단계와 구분되지 않는다"
     assert 'stage == "discovery"' in body, "발견 단계까지 다시 닫으면 실제 결과를 덮는다"
+
+
+def _events(tmp_path, events):
+    import json
+
+    out = tmp_path / f"scan_{len(list(tmp_path.iterdir()))}"
+    out.mkdir()
+    (out / "events.ndjson").write_text(
+        "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    return out
+
+
+_FAILED_ATTEMPT = [
+    {"event": "job_start"},
+    {"event": "stage_plan", "stages": ["discovery", "tcp"]},
+    {"event": "stage_start", "stage": "discovery"},
+    {"event": "stage_done", "stage": "discovery", "seconds": 1, "counts": {"live": 1}},
+    {"event": "stage_start", "stage": "tcp"},
+    {"event": "error", "stage": "tcp", "execution_id": "e1", "fatal": True},
+    {"event": "job_done", "status": "failed", "seconds": 2, "counts": {"errors": 1}},
+]
+
+
+def test_a_resumed_stage_does_not_keep_reporting_the_first_attempts_failure(tmp_path):
+    """`events.ndjson` 은 append-only 라 재개해도 이전 시도의 오류가 그대로 남는다.
+
+    `stage_start` 가 error 상태를 되돌리지 못하면 뒤따르는 `stage_done` 이 그 error 를
+    보존하고, 옛 `command_error` 가 미해결 품질 이슈로 남는다. 스캔 행은 `done` 인데
+    타임라인과 품질 상태는 실패로 보고하고, 재시도 안내가 영영 사라지지 않는다.
+    """
+    from scanops.scanning import engine_runner
+
+    resumed = _FAILED_ATTEMPT + [
+        {"event": "job_start"},
+        {"event": "stage_start", "stage": "tcp"},
+        {"event": "stage_done", "stage": "tcp", "seconds": 1, "counts": {"open_ports": 2}},
+        {"event": "job_done", "status": "done", "seconds": 2, "counts": {}},
+    ]
+    parsed = engine_runner.parse_events(_events(tmp_path, resumed))
+    tcp = next(s for s in parsed["stages"] if s["stage"] == "tcp")
+    assert parsed["overall"]["status"] == "done"
+    assert tcp["status"] == "done", "재개해서 성공했는데 단계가 실패로 남았다"
+    assert not [i for i in tcp.get("issues", []) if i.get("type") == "command_error"]
+    assert not [i for i in parsed.get("quality_issues", [])
+                if i.get("kind") == "command_error"], "대체된 시도의 오류가 품질 이슈로 남았다"
+    # 내부 추적 키가 응답으로 새면 안 된다.
+    assert "_error_attempt" not in tcp
+    assert all("_attempt" not in i for i in parsed.get("quality_issues", []))
+
+
+def test_a_failure_that_was_never_retried_still_reports(tmp_path):
+    """반대 경계 - 재개하지 않았으면 실패는 그대로 남아야 한다."""
+    from scanops.scanning import engine_runner
+
+    parsed = engine_runner.parse_events(_events(tmp_path, _FAILED_ATTEMPT))
+    tcp = next(s for s in parsed["stages"] if s["stage"] == "tcp")
+    assert parsed["overall"]["status"] == "failed"
+    assert tcp["status"] == "error"
+    assert [i for i in parsed.get("quality_issues", []) if i.get("kind") == "command_error"]
+
+
+def test_a_batch_restart_inside_one_attempt_never_erases_the_failure(tmp_path):
+    """배치마다 `stage_start` 가 다시 나온다(`_scan_batches`).
+
+    회차를 보지 않고 지우면 배치 0 의 실패가 배치 1 시작에 조용히 사라진다 - 실패한 배치의
+    호스트들이 훑지도 않은 채 정상 완료로 넘어간다.
+    """
+    from scanops.scanning import engine_runner
+
+    same_attempt = _FAILED_ATTEMPT[:6] + [
+        {"event": "stage_start", "stage": "tcp"},         # 다음 배치 - 같은 시도다
+        {"event": "stage_done", "stage": "tcp", "seconds": 1, "counts": {}},
+        {"event": "job_done", "status": "failed", "seconds": 2, "counts": {"errors": 1}},
+    ]
+    parsed = engine_runner.parse_events(_events(tmp_path, same_attempt))
+    tcp = next(s for s in parsed["stages"] if s["stage"] == "tcp")
+    assert tcp["status"] == "error", "같은 시도의 배치 재시작이 실패를 지웠다"
+    assert [i for i in parsed.get("quality_issues", []) if i.get("kind") == "command_error"]
