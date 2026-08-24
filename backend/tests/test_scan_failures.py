@@ -2359,3 +2359,49 @@ def test_the_finished_retry_queue_still_says_why_each_host_needs_a_rescan(
     assert re.search(r"retry\?\.reasons_by_stage", source), (
         "화면이 읽는 이름이 바뀌었다 - 이 검사가 낡았다"
     )
+
+
+def test_the_finished_scan_offers_a_rescan_only_when_one_would_be_accepted(
+    client, monkeypatch, tmp_path,
+):
+    """재스캔 대기열은 재스캔이 실제로 받아 주는 것만 담아야 한다.
+
+    host 가 없는 artifact_missing·command_error 까지 넣으면 targets 는 빈 채로
+    '1대 재스캔' 이 뜨고, 눌러도 /retry-timeouts 가 그 종류를 거절해 **항상 400** 이다.
+    누를 수 없는 버튼을 띄우는 셈이다. 품질 보고는 다른 축이라 `issues` 에는 남는다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {"targets": ["10.0.0.6"], "out_dir": str(tmp_path)})
+    out_dir = tmp_path / "scans" / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "tcp"},
+        {"event": "command_start", "stage": "tcp", "execution_id": "e1",
+         "argv": ["nmap", "-sS", "10.0.0.6"], "hosts": ["10.0.0.6"], "ts": 1000.0},
+        {"event": "error", "stage": "tcp", "execution_id": "e1", "fatal": True,
+         "message": "nmap 이 시작하지 못했습니다", "ts": 1001.0},
+        {"event": "job_done", "status": "failed"},
+    ]) + "\n", encoding="utf-8")
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scans_api._materialize_engine_terminal(
+            db, scan, out_dir, {"targets": ["10.0.0.6"]},
+            {"authority_missing": [], "authority_broken": []}, [],
+        )
+        scan.status = "failed"
+        db.commit()
+    finally:
+        db.close()
+
+    stages = client.get(f"/api/scans/{scan_id}/stages", headers=_headers(client)).json()
+    assert stages["source"] == "db", "DB 투영으로 안 넘어가면 비교가 무의미하다"
+    assert stages["issues"], "품질 이슈까지 사라졌다 - 이건 남아야 한다"
+    retry = stages["retry"]
+    assert retry["required"] is False, "재스캔할 수 없는 스캔에 재스캔을 제안한다"
+    assert retry["count"] == 0, f"targets 는 비었는데 {retry['count']}대라고 말한다"
+    assert retry["targets"] == []
+
+    # 서버가 실제로 거절하는지 - 제안과 수락이 같은 집합이어야 한다는 것이 요점이다.
+    rejected = client.post(f"/api/scans/{scan_id}/retry-timeouts", headers=_headers(client))
+    assert rejected.status_code == 400, rejected.text

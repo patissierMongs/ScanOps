@@ -3911,18 +3911,25 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
             "udp_service_status": row.udp_service_status,
         } for row in durable_hosts]
         unresolved = [issue for issue in issues if issue["status"] != "resolved"]
+        # 재스캔 대기열은 **재스캔이 실제로 받아 주는 것**만 담는다. host 없는
+        # artifact_missing·command_error 까지 넣으면 targets 는 빈 채로 '1대 재스캔' 이
+        # 뜨고, 눌러도 /retry-timeouts 가 그 종류를 거절해 항상 400 이다. 없는 안내다.
+        # 품질 보고는 다른 축이라 `issues` 에는 전부 그대로 남긴다.
+        retryable = [
+            issue for issue in unresolved
+            if issue["host"] and issue["type"] in RETRYABLE_ISSUE_KINDS
+        ]
         retry = {
-            "required": bool(unresolved), "count": len({
-                issue["host"] for issue in unresolved if issue["host"]
-            }) or len(unresolved),
-            "targets": sorted({issue["host"] for issue in unresolved if issue["host"]}),
+            "required": bool(retryable),
+            "count": len({issue["host"] for issue in retryable}),
+            "targets": sorted({issue["host"] for issue in retryable}),
             # 화면(RetryQueue)이 읽는 이름은 `reasons_by_stage` 다 - 라이브 경로
             # (`gave_up_detail`)가 주는 그 이름. 여기서 `reasons` 로 두면 스캔이 끝나는
             # 순간 호스트는 대기열에 남는데 '시간 초과'·'재전송 상한' 같은 **이유 라벨만**
             # 사라진다. 무엇 때문에 다시 돌려야 하는지가 안 보이는 대기열이 된다.
             "by_stage": {}, "reasons_by_stage": {}, "issues": unresolved,
         }
-        for issue in unresolved:
+        for issue in retryable:
             retry["by_stage"].setdefault(issue["stage"], []).append(issue["host"])
             if issue["host"]:
                 stage_reasons = retry["reasons_by_stage"].setdefault(issue["stage"], {})

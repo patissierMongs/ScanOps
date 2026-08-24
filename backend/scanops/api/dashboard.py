@@ -17,8 +17,14 @@ router = APIRouter()
 
 @router.get("")
 def dashboard(_: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    open_q = db.query(Finding).filter(Finding.state.in_(ACTIVE_FINDING_STATES))
-    active = open_q.all()
+    # 이 지표들이 읽는 것은 아래 여섯 컬럼뿐이다. 예전에는 Finding 객체 전체를 실었는데,
+    # 거기에는 배너·NSE·컴플라이언스 JSON 같은 큰 필드가 딸려 온다. 화면을 옮길 때마다
+    # (App.jsx 가 매번 호출한다) 활성 발견 수만큼의 전송·할당이 반복됐다.
+    # 계산은 그대로 두고 **싣는 열만** 줄인다 - 그래서 결과가 달라질 수 없다.
+    active = db.query(
+        Finding.state, Finding.reason, Finding.status, Finding.allowed,
+        Finding.dept, Finding.risk_level,
+    ).filter(Finding.state.in_(ACTIVE_FINDING_STATES)).all()
     unresolved = [f for f in active if f.status != "정상처리" and not f.allowed]
     now = datetime.now(timezone.utc)
 
@@ -40,10 +46,13 @@ def dashboard(_: User = Depends(current_user), db: Session = Depends(get_db)) ->
         {"dept": dept, "count": count}
         for dept, count in sorted(by_dept_counts.items(), key=lambda item: (-item[1], item[0]))
     ]
-    overdue = (
-        open_q.filter(Finding.deadline.isnot(None), Finding.deadline < now,
-                      Finding.status != "정상처리", Finding.allowed == 0).count()
-    )
+    # 세는 것만 하는 자리다. `db.query(Finding)...count()` 는 엔티티 전체를 감싼
+    # 서브쿼리를 만든다 - 세는 데 필요 없는 열을 SQL 에 늘어놓는다.
+    overdue = db.query(func.count(Finding.id)).filter(
+        Finding.state.in_(ACTIVE_FINDING_STATES),
+        Finding.deadline.isnot(None), Finding.deadline < now,
+        Finding.status != "정상처리", Finding.allowed == 0,
+    ).scalar() or 0
     recent_runs = db.query(ScanRun).order_by(ScanRun.id.desc()).limit(5).all()
     creator_ids = {scan.created_by for scan in recent_runs if scan.created_by is not None}
     creators = {

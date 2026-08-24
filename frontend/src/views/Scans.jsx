@@ -609,7 +609,7 @@ export default function Scans({ user }) {
                       <span className={`pill ${st.cls}`}>{st.label}</span>
                       <RetryBadge scan={s} />
                       <QualityBadge scan={s} />
-                      {s.failure_message && <div className="scan-failure">{s.failure_message}</div>}
+                      <ScanNoticeLine scan={s} />
                     </td>
                     <td>
                       {stages[s.id]?.stages?.length
@@ -666,6 +666,19 @@ export default function Scans({ user }) {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+// 이력 표의 한 줄짜리 메시지. 상세와 **같은 판정**을 써야 한다 - 완료된 스캔의
+// nse_degraded·observation_incomplete 는 실패가 아니라 참고인데, 이력 행이 그걸
+// 실패와 같은 붉은 글씨로 그려서 펼쳐 보기 전까지는 실패한 스캔으로 읽혔다.
+function ScanNoticeLine({ scan }) {
+  const notice = scanNotice(scan);
+  if (!notice) return null;
+  return (
+    <div className={notice.tone === "notice" ? "scan-failure is-notice" : "scan-failure"}>
+      <b>{notice.title}</b> {notice.message}
     </div>
   );
 }

@@ -1135,3 +1135,23 @@ test("a UDP probe that only found inferred-open ports does not read as empty-han
   assert.match(folded, /"inferred_open"/,
     "서버가 그 이름으로 보내지 않는다 - 화면 검사만 통과하는 빈 검사가 된다");
 });
+
+test("a completed scan's advisory note is not dressed up as a failure in the history row", () => {
+  // nse_degraded·observation_incomplete 는 '실패'가 아니라 '참고'다(scanNotice 가 그렇게
+  // 판정한다). 상세는 그 판정을 쓰는데 이력 행은 모든 메시지를 실패 색으로 그려서,
+  // 펼쳐 보기 전까지 완료된 스캔이 실패한 것으로 읽혔다.
+  const notice = scanNotice({ failure_code: "nse_degraded", failure_message: "부가 정보 일부 누락" });
+  const failure = scanNotice({ failure_code: "nmap_launch_failed", failure_message: "실행 실패" });
+  assert.equal(notice.tone, "notice");
+  assert.equal(failure.tone, "failure");
+
+  // 이력 행이 그 판정을 실제로 쓰는가 - 안 쓰면 위 두 줄이 통과해도 화면은 그대로다.
+  const view = source("../src/views/Scans.jsx");
+  const line = view.slice(view.indexOf("function ScanNoticeLine("));
+  const body = line.slice(0, line.indexOf("\n}"));
+  assert.match(body, /scanNotice\(scan\)/, "이력 행이 상세와 다른 판정을 쓴다");
+  assert.match(body, /notice\.tone/, "판정을 받아 놓고 표시에 쓰지 않는다");
+  // 옛 방식(무조건 실패 색)이 남아 있지 않은가.
+  assert.ok(!/\{s\.failure_message && <div className="scan-failure">/.test(view),
+    "이력 행이 여전히 모든 메시지를 실패로 그린다");
+});
