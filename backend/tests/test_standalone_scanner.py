@@ -3283,3 +3283,66 @@ def test_an_adopted_retry_is_not_quarantined_as_the_first_attempt(monkeypatch, t
     # 격리 폴더로 옮겨지지 않아야 한다 - 옮기면 인입 대상에서 빠진다.
     for name in run.get("files", []):
         assert not scanner.is_interrupted_output(name), f"채택본이 격리됐다: {name}"
+
+
+def test_the_watchdog_does_not_fail_a_scan_that_already_finished(monkeypatch):
+    """상한 직전에 정상 종료한 nmap 을 워치독이 실패로 바꾸면 안 된다.
+
+    본체가 버퍼에 쌓인 stdout 을 마저 읽는 동안 타이머가 돌면, 예전에는 이미 끝난
+    프로세스에도 무조건 fired 를 세웠다. 그러면 성공한 rc 0 이 -1 로 바뀌어 멀쩡히
+    끝난 단독 스캔이 부분/실패로 남고 '이어하기' 대상이 된다 - 아무 문제가 없었는데.
+    """
+    import threading
+    import time as time_module
+
+    scanner = _load_scanner()
+    drained = threading.Event()
+
+    class _AlreadyExited:
+        """nmap 은 이미 끝났고(poll() → 0), 본체는 아직 출력을 읽는 중이다."""
+
+        returncode = 0
+
+        def __init__(self):
+            self.terminated = False
+            self.stdout = self._slow_output()
+
+        def _slow_output(self):
+            yield b"Starting Nmap\n"
+            time_module.sleep(1.4)       # 상한(1초)을 넘겨 워치독이 반드시 돈다
+            drained.set()
+            yield b"Nmap done: 1 IP address\n"
+
+        def poll(self):
+            return 0                      # 이미 끝났다
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+
+    process = _AlreadyExited()
+    monkeypatch.setattr(scanner.subprocess, "Popen", lambda *a, **k: process)
+
+    # 타이머가 실제로 울렸는지 본다 - 안 울리면 무엇을 되돌려도 통과하는 빈 검사가 된다.
+    fired_at: list[float] = []
+    real_timer = scanner.threading.Timer
+
+    def _watching_timer(interval, function):
+        def wrapped():
+            fired_at.append(interval)
+            return function()
+        return real_timer(interval, wrapped)
+
+    monkeypatch.setattr(scanner.threading, "Timer", _watching_timer)
+
+    problems: list[str] = []
+    rc = scanner.run_nmap_process(["nmap", "-sS", "10.0.0.1"], problems,
+                                  watchdog_seconds=1)
+
+    assert drained.is_set(), "출력을 읽는 동안 워치독이 돌지 않았다 - 재현이 안 됐다"
+    assert fired_at, "타이머가 아예 안 울렸다 - 이 검사는 아무것도 안 보고 있다"
+    assert rc == 0, f"정상 종료한 스캔이 워치독 때문에 rc={rc} 로 바뀌었다"
+    assert not process.terminated, "이미 끝난 프로세스를 종료하려 했다"
+    assert not problems, f"없던 문제를 보고했다: {problems}"

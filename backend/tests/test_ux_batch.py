@@ -1366,3 +1366,73 @@ def test_the_history_row_counts_a_range_without_unrolling_it():
         chunker.expand_targets = real_expand
 
     assert _target_bounds(["10.0.0.0/15"], []) is None, "cap 을 넘겼는데 개수를 지어냈다"
+
+
+def test_a_failed_reissue_leaves_the_installation_recoverable(monkeypatch):
+    """재발급이 커밋에서 실패해도 다음 기동이 다시 시도할 수 있어야 한다.
+
+    복구는 안내 파일이 **있을 때만** 들어간다. 실패 정리가 그 파일을 지워 버리면 다음
+    기동은 복구를 건너뛰고, 비밀번호 변경을 강제당한 admin 은 아무도 모르는 해시를
+    들고 남는다 - 설치가 영구히 잠긴다. 첫 부팅(계정도 함께 롤백)은 반대로 지워야 한다.
+    """
+    from scanops.seed import bootstrap
+    from scanops.seed.bootstrap import run_bootstrap
+    from scanops.security import hash_password, verify_password
+
+    cred = scans_api._settings.data_dir / "INITIAL_ADMIN.txt"
+    cred.write_text("ScanOps 최초 관리자 계정\n  비밀번호: 안맞는비밀번호12\n", encoding="utf-8")
+    db = SessionLocal()
+    try:
+        db.add(User(username="admin", password_hash=hash_password("unrecoverable12"),
+                    role="admin", display_name="관리자", must_change_password=1))
+        db.commit()
+    finally:
+        db.close()
+
+    # **비밀번호 파일을 쓴 뒤의 커밋**만 실패시킨다. 앞쪽 seed_categories 의 커밋을
+    # 때리면 재발급 경로에 들어가 보지도 못하고, 무엇을 되돌려도 통과하는 빈 검사가 된다.
+    wrote: list[str] = []
+    real_write = bootstrap._write_credentials
+    original = bootstrap.SessionLocal
+
+    def _watching_write(path, password):
+        real_write(path, password)
+        wrote.append(password)
+
+    class _FailsAfterWrite:
+        def __init__(self, session):
+            self._session = session
+
+        def __getattr__(self, name):
+            return getattr(self._session, name)
+
+        def commit(self):
+            if wrote:
+                raise RuntimeError("디스크가 잠깐 죽었다")
+            return self._session.commit()
+
+    monkeypatch.setattr(bootstrap, "_write_credentials", _watching_write)
+    monkeypatch.setattr(bootstrap, "SessionLocal", lambda: _FailsAfterWrite(original()))
+    try:
+        run_bootstrap()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("커밋 실패를 재현하지 못했다")
+    assert wrote, "재발급 경로에 들어가지도 못했다 - 이 검사는 아무것도 안 보고 있다"
+
+    assert cred.exists(), "복구 중 실패가 안내 파일을 지워 다음 기동이 복구를 못 한다"
+
+    # 다음 기동 - 이번엔 정상이다. 재발급이 실제로 되는지까지 본다.
+    monkeypatch.undo()
+    run_bootstrap()
+    line = next(line for line in cred.read_text(encoding="utf-8").splitlines()
+                if line.strip().startswith("비밀번호:"))
+    password = line.split(":", 1)[1].strip()
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.username == "admin").one()
+        assert verify_password(password, admin.password_hash), "재발급이 끝내 안 됐다"
+        assert admin.must_change_password == 1
+    finally:
+        db.close()

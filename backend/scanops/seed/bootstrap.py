@@ -44,13 +44,25 @@ def _write_credentials(path: Path, password: str) -> None:
 
 
 def _save_initial_password(db, user: User, path: Path, password: str) -> None:
-    """파일과 해시가 서로 다른 상태로 남지 않게 실패 시 둘 다 되돌린다."""
+    """파일과 해시가 서로 다른 상태로 남지 않게 실패 시 둘 다 되돌린다.
+
+    단, **이미 있는 계정을 복구하는 중**이면 파일을 남긴다. 복구는 `cred.exists()` 일
+    때만 시도하므로, 여기서 지워 버리면 다음 기동이 복구를 건너뛴다 - 비밀번호 변경을
+    강제당한 admin 은 아무도 모르는 해시를 들고 남고 설치가 영구히 잠긴다. 남은 파일은
+    해시와 안 맞는 상태 그대로라 다음 기동이 같은 복구를 다시 시도한다(원래 파일도
+    안 맞았기 때문에 복구에 들어온 것이라, 새로 노출되는 유효한 비밀번호는 없다).
+
+    첫 부팅은 반대다. 계정 자체가 롤백돼 사라지므로 안내 파일만 남으면 아무 계정과도
+    맞지 않는 평문이 남는다 - 그때는 지운다.
+    """
+    recovering = user.id is not None
     _write_credentials(path, password)
     try:
         db.commit()
     except Exception:
         db.rollback()
-        path.unlink(missing_ok=True)
+        if not recovering:
+            path.unlink(missing_ok=True)
         raise
 
 

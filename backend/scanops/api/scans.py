@@ -2730,6 +2730,53 @@ def list_scans(_: User = Depends(current_user), db: Session = Depends(get_db)):
     ]
 
 
+def _findings_possibly_seen_by_legacy_scans(
+    db: Session, finding_ids: list[int], deleting_scan_id: int,
+) -> dict[int, dict[int, datetime]]:
+    """관측 원장이 없던 시절의 스캔이 아직 뒷받침할 수 있는 발견들.
+
+    `EndpointObservation` 이 생기기 전 DB 에서는, 값이 그대로인 재관측이 **아무 흔적도**
+    남기지 않는다 - 인입은 새로 열림/닫힘/재개방/식별 변경에만 이벤트를 쓰고 나머지는
+    `unchanged` 로 세고 지나간다. 그래서 A·B·C 에서 관측된 발견이 있어도 B 가 그런
+    재관측이면 이벤트도 원장 행도 없다. C 와 A 를 지우면 '뒷받침하는 스캔이 없다' 로
+    보이고, B 의 XML 이 멀쩡히 남아 있는데도 발견과 사람이 달아 둔 상태·담당자·메모가
+    사라진다.
+
+    증명할 수 없으면 지우지 않는다. **관측 원장이 아예 없는** 스캔(= 그 스캔이 무엇을
+    봤는지 열거할 방법이 없는 스캔) 중 발견의 관측 구간에 걸치는 것을 근거로 삼는다.
+    틀려도 방향이 안전하다 - 남는 쪽이지 사라지는 쪽이 아니다.
+    """
+    if not finding_ids:
+        return {}
+    ledgered = {
+        row.scan_id for row in db.query(EndpointObservation.scan_id).distinct().all()
+    }
+    candidates = [
+        scan for scan in db.query(ScanRun).all()
+        if scan.id != deleting_scan_id and scan.id not in ledgered
+    ]
+    if not candidates:
+        return {}
+    out: dict[int, dict[int, datetime]] = {}
+    for start in range(0, len(finding_ids), 500):
+        chunk = finding_ids[start:start + 500]
+        for finding_id, first_seen, last_seen in db.query(
+            Finding.id, Finding.first_seen, Finding.last_seen,
+        ).filter(Finding.id.in_(chunk)).all():
+            for scan in candidates:
+                when = scan.started_at
+                if isinstance(when, datetime) and isinstance(first_seen, datetime) \
+                        and isinstance(last_seen, datetime):
+                    # 관측 구간 밖에서 돈 스캔은 이 발견을 봤을 수 없다.
+                    if when < first_seen or when > last_seen:
+                        continue
+                # 시각을 모르면 배제하지 못한다 - 그때는 발견의 첫 관측 시각으로 둔다.
+                out.setdefault(finding_id, {})[scan.id] = (
+                    when if isinstance(when, datetime) else first_seen
+                )
+    return out
+
+
 def _findings_backed_by_other_scans(
     db: Session, finding_ids: list[int], deleting_scan_id: int,
 ) -> dict[int, dict[int, datetime]]:
@@ -2851,6 +2898,13 @@ def delete_scan(
     # 상태·담당자·메모까지 지워진다. 그래서 지우기 전에 '살아 있는 다른 스캔이 이 발견을
     # 여전히 뒷받침하는가' 를 실제 관측으로 되묻고, 뒷받침하면 지우는 대신 참조를 고친다.
     supported = _findings_backed_by_other_scans(db, owned_ids, scan_id)
+    # 원장·이벤트 어느 쪽에도 안 잡힌 것들. 원장이 생기기 전 스캔이 아직 뒷받침할 수
+    # 있으므로, '흔적이 없다' 를 '근거가 없다' 로 읽지 않는다.
+    unproven = [fid for fid in owned_ids if fid not in supported]
+    for finding_id, seen in _findings_possibly_seen_by_legacy_scans(
+        db, unproven, scan_id,
+    ).items():
+        supported.setdefault(finding_id, {}).update(seen)
     if supported:
         owned_ids = [fid for fid in owned_ids if fid not in supported]
         for finding_id, observed in supported.items():
@@ -3679,11 +3733,29 @@ def retry_timed_out_hosts(
             proto for proto in ("tcp", "udp")
             if isinstance(stages.get(proto), dict) and stages[proto].get("enabled")
         }
-        scanops["scope_keys"] = [
+        kept = [
             key for key in original_keys
             if (isinstance(key, str) and key.split("|", 1)[0] in target_set
                 and key.rsplit("|", 1)[-1] in enabled_protocols)
         ]
+        # 원본이 **처음 찾아낸** endpoint 는 원본의 실행 전 scope_keys 에 있을 수 없다.
+        # 그 키를 안 넣으면 재스캔이 그것을 닫을 권한이 없어, 재시도가 '이제 닫혔다' 를
+        # 증명해도 발견은 열린 채로 남는다 - 게다가 품질 이슈는 해결 처리되므로 재스캔
+        # 안내마저 사라져, 손댈 방법이 없는 낡은 열린 포트가 된다.
+        #
+        # **원본이 실제로 열린 것으로 관측한 것만** 더한다. 그래야 이 재스캔이 실제로
+        # 훑는 포트 범위 안에 있다(재스캔은 원본 spec 의 포트를 그대로 쓴다). 다른
+        # 스캔이 더 넓은 범위에서 찾은 발견까지 넣으면, 훑지도 않을 포트에 닫힘 권한을
+        # 주게 된다 - 방향이 정반대로 위험하다.
+        discovered = {
+            row.finding_key for row in db.query(EndpointObservation.finding_key).filter(
+                EndpointObservation.scan_id == source.id,
+                EndpointObservation.evidence_kind == "positive",
+                EndpointObservation.host_ip.in_(list(target_set)),
+                EndpointObservation.proto.in_(list(enabled_protocols)),
+            ).all()
+        } if target_set and enabled_protocols else set()
+        scanops["scope_keys"] = kept + sorted(discovered.difference(kept))
         scanops.update({
             "retry_of": source.id, "retry_stages": list(retry["by_stage"]),
             "retry_targets": targets,

@@ -1223,6 +1223,12 @@ def run_nmap_process(cmd: list[str], problems: list[str] | None = None,
     timer = None
     if watchdog_seconds and watchdog_seconds > 0:
         def _fire():
+            # 이미 끝난 프로세스에는 발동하지 않는다. nmap 이 상한 직전에 정상 종료했는데
+            # 본체가 아직 버퍼에 쌓인 stdout 을 읽고 있으면, 여기서 무턱대고 fired 를
+            # 세우는 순간 성공한 rc 0 이 -1 로 바뀐다 - 멀쩡히 끝난 스캔이 부분/실패로
+            # 남고 '이어하기' 대상이 된다. 백엔드·엔진 워치독은 이미 같은 검사를 한다.
+            if proc.poll() is not None:
+                return
             fired.set()
             try:
                 proc.terminate()

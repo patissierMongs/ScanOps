@@ -3398,3 +3398,148 @@ def test_repaired_provenance_follows_observation_time_not_scan_id(client):
         )
     finally:
         db.close()
+
+
+def test_a_retry_can_close_what_the_original_scan_first_discovered(
+    client, monkeypatch, tmp_path,
+):
+    """원본이 처음 찾아낸 포트도 재스캔이 닫을 수 있어야 한다.
+
+    닫힘 권한(scope_keys)을 원본의 **실행 전** 목록에서만 가져오면, 그 스캔이 처음
+    발견한 endpoint 는 영원히 들어오지 못한다. 재시도가 '이제 닫혔다' 를 증명해도
+    발견은 열린 채 남고, 품질 이슈는 해결 처리되어 재스캔 안내까지 사라진다 - 손댈
+    방법이 없는 낡은 열린 포트가 된다.
+
+    동시에, 원본이 보지 **않은** 포트에는 권한을 주면 안 된다. 재스캔은 원본 spec 의
+    포트 범위를 그대로 쓰므로, 다른 스캔이 더 넓은 범위에서 찾은 발견까지 넣으면
+    훑지도 않을 포트를 닫게 된다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import EndpointObservation, ScanRun
+
+    h = _auth(client)
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scans_api._settings.scans_dir.mkdir(parents=True)
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    monkeypatch.setattr(scans_api.engine_runner, "ensure_available", lambda: None)
+
+    class NoopThread:
+        def __init__(self, *a, **k): pass
+        def start(self): pass
+
+    monkeypatch.setattr(scans_api.threading, "Thread", NoopThread)
+    db = SessionLocal()
+    source = ScanRun(name="원본", targets="10.0.0.1", status="done",
+                     command="단계스캔(엔진) · TCP 전체")
+    other = ScanRun(name="더 넓게 본 다른 스캔", targets="10.0.0.1", status="done")
+    db.add_all([source, other]); db.commit()
+    source_id = source.id
+    db.add_all([
+        # 원본이 **처음** 찾은 포트 - 실행 전 목록에는 없다.
+        EndpointObservation(scan_id=source.id, finding_key="10.0.0.1|8080|tcp",
+                            host_ip="10.0.0.1", port=8080, proto="tcp",
+                            state="open", evidence_kind="positive"),
+        # 원본이 닫힘으로 본 것 - 이미 권한이 있고 중복으로 들어오면 안 된다.
+        EndpointObservation(scan_id=source.id, finding_key="10.0.0.1|22|tcp",
+                            host_ip="10.0.0.1", port=22, proto="tcp",
+                            state="closed", evidence_kind="absence"),
+        # **다른** 스캔이 본 포트 - 이 재스캔의 범위가 아니다.
+        EndpointObservation(scan_id=other.id, finding_key="10.0.0.1|9999|tcp",
+                            host_ip="10.0.0.1", port=9999, proto="tcp",
+                            state="open", evidence_kind="positive"),
+    ])
+    db.commit(); db.close()
+
+    source_dir = scans_api._settings.scans_dir / f"scan_{source_id}"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "spec.json").write_text(json.dumps({
+        "job_id": f"scan_{source_id}", "targets": ["10.0.0.1"],
+        "out_dir": str(source_dir),
+        "stages": {"discovery": {"enabled": True, "mode": "sn"},
+                   "tcp": {"enabled": True, "ports": "1-65535"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": True, "version_all": False}},
+        "scanops": {"scope_keys": ["10.0.0.1|22|tcp"]},
+    }), encoding="utf-8")
+    (source_dir / "run-state.json").write_text(json.dumps({
+        "gave_up": ["10.0.0.1"], "gave_up_by_stage": {"tcp": ["10.0.0.1"]},
+    }), encoding="utf-8")
+
+    response = client.post(f"/api/scans/{source_id}/retry-timeouts", headers=h)
+    assert response.status_code == 200, response.text
+    child_id = response.json()["id"]
+    keys = json.loads((
+        scans_api._settings.scans_dir / f"scan_{child_id}" / "spec.json"
+    ).read_text(encoding="utf-8"))["scanops"]["scope_keys"]
+
+    assert "10.0.0.1|8080|tcp" in keys, "원본이 처음 찾은 포트를 재스캔이 닫을 수 없다"
+    assert "10.0.0.1|22|tcp" in keys and keys.count("10.0.0.1|22|tcp") == 1
+    assert "10.0.0.1|9999|tcp" not in keys, (
+        "이 재스캔이 훑지도 않을 포트에 닫힘 권한을 줬다"
+    )
+
+
+def test_a_finding_survives_a_scan_that_predates_the_observation_ledger(client):
+    """관측 원장이 없던 시절의 스캔도 근거다 - 흔적이 없다고 근거가 없는 게 아니다.
+
+    원장이 생기기 전 DB 에서는 값이 그대로인 재관측이 아무 흔적도 남기지 않는다.
+    인입은 새로 열림/닫힘/재개방/식별 변경에만 이벤트를 쓰고 나머지는 unchanged 로
+    세고 지나간다. A·B·C 에서 관측된 발견에서 B 가 그런 재관측이면, C 와 A 를 지웠을 때
+    '뒷받침하는 스캔이 없다' 로 보인다 - B 의 결과가 멀쩡히 남아 있는데도 발견과
+    사람이 달아 둔 상태·담당자·메모가 사라진다.
+    """
+    from datetime import datetime, timedelta
+    from scanops.db import SessionLocal
+    from scanops.models import EndpointObservation, Finding, FindingEvent, ScanRun
+
+    make_user("legacyboss", "boss-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'legacyboss', 'boss-pass-1234')}"}
+
+    base = datetime(2026, 2, 1)
+    db = SessionLocal()
+    first = ScanRun(name="A", status="done", started_at=base)
+    middle = ScanRun(name="B(원장 이전)", status="done", started_at=base + timedelta(days=5))
+    last = ScanRun(name="C", status="done", started_at=base + timedelta(days=10))
+    db.add_all([first, middle, last]); db.commit()
+    key = "10.7.7.7|1521|tcp"
+    finding = Finding(finding_key=key, host_ip="10.7.7.7", port=1521, proto="tcp",
+                      state="open", status="in_progress", owner="DBA",
+                      first_seen=base, last_seen=base + timedelta(days=10),
+                      first_scan_id=first.id, last_scan_id=last.id)
+    db.add(finding); db.commit()
+    # A 와 C 만 흔적을 남겼다. B 는 '값이 그대로인 재관측' 이라 이벤트도 원장도 없다.
+    db.add_all([
+        FindingEvent(finding_id=finding.id, scan_id=first.id, type="NEW_OPEN",
+                     created_at=base),
+        FindingEvent(finding_id=finding.id, scan_id=last.id, type="VERSION_CHANGED",
+                     created_at=base + timedelta(days=10)),
+        EndpointObservation(scan_id=first.id, finding_key=key, host_ip="10.7.7.7",
+                            port=1521, proto="tcp", state="open",
+                            evidence_kind="positive", observed_at=base),
+        EndpointObservation(scan_id=last.id, finding_key=key, host_ip="10.7.7.7",
+                            port=1521, proto="tcp", state="open",
+                            evidence_kind="positive",
+                            observed_at=base + timedelta(days=10)),
+    ])
+    db.commit()
+    ids = (first.id, middle.id, last.id, finding.id)
+    db.close()
+    first_id, middle_id, last_id, finding_id = ids
+
+    assert client.delete(f"/api/scans/{last_id}", headers=admin).status_code == 200
+    r = client.delete(f"/api/scans/{first_id}", headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["findings_deleted"] == 0, (
+        "원장이 없던 시절의 스캔이 아직 뒷받침하는데 발견을 지웠다"
+    )
+
+    db = SessionLocal()
+    try:
+        kept = db.get(Finding, finding_id)
+        assert kept is not None and kept.owner == "DBA" and kept.status == "in_progress"
+        assert kept.first_scan_id == kept.last_scan_id == middle_id, (
+            "참조가 살아남은 스캔으로 복구되지 않았다"
+        )
+    finally:
+        db.close()

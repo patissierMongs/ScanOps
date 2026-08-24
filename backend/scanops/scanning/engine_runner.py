@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -1372,6 +1373,21 @@ _TRACE_MAX_HOSTS = 12
 _TRACE_MAX_SLOWEST = 8
 
 
+def _elapsed(run: dict, spent: float, now: float) -> float:
+    """도는 중인 실행의 경과 시간. 시작 시각을 못 읽으면 이미 알던 값 그대로."""
+    if spent:
+        return spent
+    started = run.get("started_at")
+    if isinstance(started, bool):
+        return spent
+    if isinstance(started, (int, float)):
+        return round(max(now - started, 0.0), 1)
+    if isinstance(started, datetime):
+        stamp = started if started.tzinfo else started.replace(tzinfo=timezone.utc)
+        return round(max(now - stamp.timestamp(), 0.0), 1)
+    return spent
+
+
 def fold_trace(executions: list[dict], now: float | None = None) -> dict:
     """실행 기록을 '어디서 지연이 생기는가' 에 답하는 갈래로 접는다.
 
@@ -1400,7 +1416,11 @@ def fold_trace(executions: list[dict], now: float | None = None) -> dict:
         seconds = run.get("seconds")
         spent = seconds if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else 0.0
         if run.get("status") == "running":
-            running.append({**run, "elapsed_seconds": spent})
+            # 도는 중인 실행에는 `seconds` 가 없다(command_done 이 아직 안 왔다). 그것을
+            # 그대로 경과로 쓰면 '지금 실행 중' 표가 영원히 '0초 경과' 를 그리고, 오래
+            # 걸리는 실행을 짚어 주는 임계값도 절대 안 걸린다 - 지연이 어디서 나는지
+            # 보려고 만든 표가 정작 지연을 못 가리킨다. 시작 시각에서 직접 잰다.
+            running.append({**run, "elapsed_seconds": _elapsed(run, spent, now)})
         else:
             finished.append({**run, "seconds": spent})
         slot = by_stage.setdefault((stage, proto),

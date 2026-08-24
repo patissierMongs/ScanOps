@@ -2120,3 +2120,39 @@ def test_a_failed_udp_attempt_still_counts_toward_the_stage_time(tmp_path):
             f"{kind}: 단계 소요가 {elapsed} 초 - 실패한 첫 시도(720초)가 사라졌다"
         )
         assert nmaprun.retry_base(pathlib_Path(calls[0])).name == pathlib_Path(calls[1]).name
+
+
+def test_a_running_execution_reports_how_long_it_has_actually_been_running():
+    """'지금 실행 중' 표의 경과는 시작 시각에서 재야 한다.
+
+    도는 중인 실행에는 `seconds` 가 없다(command_done 이 아직 안 왔다). 그걸 그대로
+    경과로 쓰면 표가 영원히 '0초 경과' 를 그리고, 오래 걸리는 실행을 굵게 짚어 주는
+    임계값(ScanTrace.LONG_RUN_SECONDS)도 절대 안 걸린다 - 지연이 어디서 나는지 보려고
+    만든 표가 정작 지연을 못 가리킨다.
+    """
+    import re
+    from datetime import datetime, timezone
+    from scanops.scanning import engine_runner
+
+    now = 10_000.0
+    trace = engine_runner.fold_trace([
+        {"id": "a", "stage": "service", "status": "running", "seconds": None,
+         "started_at": now - 725.0, "hosts": ["10.0.0.1"], "label": "10.0.0.1"},
+        {"id": "b", "stage": "tcp", "status": "running", "seconds": None,
+         "started_at": datetime.fromtimestamp(now - 30.0, timezone.utc),
+         "hosts": ["10.0.0.2"], "label": "10.0.0.2"},
+        {"id": "c", "stage": "tcp", "status": "running", "seconds": None,
+         "started_at": None, "hosts": ["10.0.0.3"]},          # 시작 시각을 모르면 0
+    ], now=now)
+    elapsed = {run["id"]: run["elapsed_seconds"] for run in trace["running"]}
+    assert elapsed["a"] == 725.0, "경과가 시작 시각에서 나오지 않는다"
+    assert elapsed["b"] == 30.0, "영속 행(datetime)에서도 경과를 못 잰다"
+    assert elapsed["c"] == 0.0, "모르는 값을 지어냈다"
+
+    # 화면의 임계값이 실제로 걸리는가 - 이 값이 0 이면 굵게 짚어 주는 일이 영영 없다.
+    source = (pathlib_Path(__file__).resolve().parents[2]
+              / "frontend" / "src" / "ui" / "ScanTrace.jsx").read_text(encoding="utf-8")
+    threshold = int(re.search(r"LONG_RUN_SECONDS\s*=\s*(\d+)", source).group(1))
+    assert elapsed["a"] >= threshold, (
+        f"12분째 도는 실행이 화면 임계값({threshold}초)에 안 걸린다"
+    )
