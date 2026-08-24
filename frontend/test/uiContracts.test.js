@@ -406,7 +406,7 @@ test("timing controls and presets resolve to one backend-visible timing", () => 
   assert.match(toggle, /n\.add\(k\)/);
 });
 
-test("staged preview mirrors discovery, protocol sweeps, and per-host service probes", () => {
+test("staged preview mirrors discovery, protocol sweeps, and grouped service probes", () => {
   const scanOptions = source("../src/ui/ScanOptions.jsx").replace(/\r\n/g, "\n");
   const staged = scanOptions.slice(
     scanOptions.indexOf("if (staged) {"),
@@ -417,7 +417,7 @@ test("staged preview mirrors discovery, protocol sweeps, and per-host service pr
   }
   assert.match(staged, /"-sn", "-PE", DISCOVERY_PS, DISCOVERY_PA, "-n"/);
   assert.match(staged, /"-n",\s*timing, "--reason", "--max-retries", MAX_RETRIES/);
-  assert.match(staged, /"--reason", timing, "--max-retries", MAX_RETRIES, "-p", "T:/);
+  assert.match(staged, /"--reason", timing, "--max-retries", MAX_RETRIES,\s*"-p", "T:/);
   assert.match(staged, /versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing/);
   assert.match(staged, /const defeatRst = scanFlag === "-sS" \? "--defeat-rst-ratelimit" : ""/);
   const stagedSteps = staged.split("title:").slice(1);
@@ -451,10 +451,13 @@ test("staged preview mirrors discovery, protocol sweeps, and per-host service pr
   assert.match(scanOptions, /const THROUGHPUT = \["--min-hostgroup", "64", "--max-parallelism", "100"\]/);
   assert.match(scanOptions, /const MAX_RETRIES = "2"/);
   assert.match(scanOptions, /const UDP_MAX_RETRIES = "4"/);
-  assert.match(staged, /"T:<TCP 탐색에서 열린 포트>"/);
-  assert.match(staged, /"U:<UDP 탐색에서 열린 포트>"/);
+  // 식별은 배치 단위로 돈다 - TCP 는 열린 포트 합집합을 한 프로세스로, UDP 는 같은 포트가
+  // 열린 호스트끼리 묶어서. 호스트 1대짜리 자리표시자는 실제 실행과 어긋난다.
+  assert.match(staged, /"T:<배치에서 열린 TCP 합집합>"/);
+  assert.match(staged, /"U:<함께 열린 UDP 포트>"/);
   assert.match(staged, /versionFlag === "--version-light" && versionFlag/);
-  assert.match(staged, /"<호스트 1대>"/);
+  assert.doesNotMatch(staged.replace(/\/\/[^\n]*/g, ""), /"<호스트 1대>"/,
+    "식별을 호스트 1대 명령으로 보여 준다 - 실제 대상 규모를 낮춰 말한다");
   assert.match(source("../src/views/Scans.jsx"), /targets=\{targetList\} excludes=\{previewExcludes\} excludePorts=\{excludePorts\} staged=\{staged\}/);
   assert.match(source("../src/views/Scans.jsx"), /excludePorts=\{excludePorts\}/);
   assert.match(scanOptions, /excludePorts\s*=\s*""/);
@@ -592,6 +595,31 @@ test("the api helper hands back the counts the server folded", () => {
   assert.match(api, /X-Hidden-Tcpwrapped/);
   // 헤더가 없거나 숫자가 아니면 0 - 접힘 표시가 NaN 으로 새면 아무도 못 읽는다.
   assert.match(api, /Number\.isFinite\(v\) \? v : 0/);
+});
+
+test("the staged preview matches how the engine actually groups service probes", () => {
+  const raw = source("../src/ui/ScanOptions.jsx");
+  // 렌더되는 코드만 본다. 왜 이렇게 묶었는지 적어 둔 주석에도 같은 말이 나온다.
+  const opts = raw.replace(/\/\/[^\n]*/g, "");
+  const steps = opts.split("if (staged) {")[1].split("} else if")[0];
+  const tcpStep = steps.split('title: "TCP 서비스 식별"')[1].split("});")[0];
+  const udpStep = steps.split('title: "UDP 서비스 식별"')[1].split("});")[0];
+
+  // 엔진은 배치의 열린 포트 합집합을 한 프로세스로, UDP 는 같은 포트가 열린 호스트끼리 묶어
+  // 돈다(Pipeline._service_batch). 호스트 1대짜리 명령으로 보여 주면 대상 규모와 프로세스
+  // 수를 낮춰 말하게 되고, 운영자는 승인할 부하를 잘못 본다.
+  assert.doesNotMatch(tcpStep, /호스트 1대/, "TCP 식별을 호스트 1대 명령으로 보여 준다");
+  assert.doesNotMatch(udpStep, /호스트 1대/, "UDP 식별을 호스트 1대 명령으로 보여 준다");
+  assert.match(tcpStep, /sweepTargets/, "TCP 식별이 배치 대상을 안 싣는다");
+
+  // 선택한 NSE 는 백엔드가 프로토콜별로 나눠 싣는다(scan_options.filter_nse_proto).
+  // 나누지 않으면 돌지도 않을 TCP 전용 스크립트가 UDP 명령에, 그 반대도 그대로 보인다.
+  assert.match(tcpStep, /tcpScripts && "--script"/);
+  assert.match(udpStep, /udpScripts && "--script"/);
+  assert.doesNotMatch(tcpStep, /stagedScripts/, "TCP 미리보기가 UDP 전용 스크립트까지 보여 준다");
+  assert.doesNotMatch(udpStep, /stagedScripts/, "UDP 미리보기가 TCP 전용 스크립트까지 보여 준다");
+  // 나누지 않은 목록 자체가 남아 있으면 다음 사람이 다시 집어 든다.
+  assert.doesNotMatch(raw, /const stagedScripts/, "프로토콜별로 나누지 않은 목록이 남아 있다");
 });
 
 test("findings colour indicators are per-element and persist", async () => {

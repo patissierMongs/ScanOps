@@ -213,7 +213,6 @@ export default function ScanOptions({
       .join(",");
     const tcpScripts = scriptsFor("tcp");
     const udpScripts = scriptsFor("udp");
-    const stagedScripts = selectedScripts.join(",");
     const out = [];
 
     if (staged) {
@@ -245,13 +244,19 @@ export default function ScanOptions({
         });
         out.push({
           title: "TCP 서비스 식별",
-          desc: "호스트별 열린 TCP에만 서비스·제품·버전·NSE 단서를 확인합니다.",
+          // 엔진은 배치의 열린 포트 **합집합**을 한 프로세스로 돈다(Pipeline._service_batch).
+          // 호스트 1대짜리 명령으로 보여 주면 실제 대상 규모와 프로세스 수를 낮춰 말하게 되고,
+          // 운영자는 승인할 부하를 잘못 본다.
+          desc: "배치의 열린 TCP 합집합을 한 프로세스로 확인합니다(서비스·제품·버전·NSE).",
           cmd: commandText(["nmap", "--stats-every", "5s", scanFlag, "-Pn", "-sV", versionFlag, "--open",
-            "--reason", timing, "--max-retries", MAX_RETRIES, "-p", "T:<TCP 탐색에서 열린 포트>",
+            "--reason", timing, "--max-retries", MAX_RETRIES,
+            "-p", "T:<배치에서 열린 TCP 합집합>",
             ...THROUGHPUT, defeatRst,
-            stagedScripts && "--script", stagedScripts,
-            stagedScripts && "--script-timeout", stagedScripts && TCP_SCRIPT_TIMEOUT, ...excludeArgs,
-            "-oA", "scan_<id>.tcp_service_<host>", "<호스트 1대>"]),
+            // 선택한 NSE 는 백엔드가 프로토콜별로 나눠 싣는다(filter_nse_proto). 나누지 않으면
+            // 돌지도 않을 TCP 전용 스크립트가 UDP 명령에, 그 반대도 그대로 보인다.
+            tcpScripts && "--script", tcpScripts,
+            tcpScripts && "--script-timeout", tcpScripts && TCP_SCRIPT_TIMEOUT, ...excludeArgs,
+            "-oA", "scan_<id>.stage3-tcp-b<배치>-g0", ...sweepTargets]),
         });
       }
       if (sel.has("udp") && udp) {
@@ -264,14 +269,17 @@ export default function ScanOptions({
         });
         out.push({
           title: "UDP 서비스 식별",
-          desc: "호스트별 열린 UDP에 -sV와 UDP용 NSE 단서를 적용합니다(--version-all 제외).",
+          // UDP 는 **같은 포트가 열린 호스트끼리** 묶어 돈다(합집합을 다 던지면 응답 없는
+          // 프로브만 늘어난다). 그래서 묶음 수만큼 프로세스가 생긴다.
+          desc: "같은 포트가 열린 호스트끼리 묶어 -sV와 UDP용 NSE 를 적용합니다(--version-all 제외).",
           cmd: commandText(["nmap", "--stats-every", "5s", "-sU", "-Pn", "-n", "-sV",
             versionFlag === "--version-light" && versionFlag, "--open", "--reason", timing,
             "--max-retries", UDP_MAX_RETRIES, ...THROUGHPUT,
-            "-p", "U:<UDP 탐색에서 열린 포트>", stagedScripts && "--script", stagedScripts,
-            stagedScripts && "--script-timeout", stagedScripts && UDP_SCRIPT_TIMEOUT,
+            "-p", "U:<함께 열린 UDP 포트>",
+            udpScripts && "--script", udpScripts,
+            udpScripts && "--script-timeout", udpScripts && UDP_SCRIPT_TIMEOUT,
             ...excludeArgs,
-            "-oA", "scan_<id>.udp_service_<host>", "<호스트 1대>"]),
+            "-oA", "scan_<id>.stage3-udp-b<배치>-g0", "<그 포트가 열린 호스트들>"]),
         });
       }
       return out;
