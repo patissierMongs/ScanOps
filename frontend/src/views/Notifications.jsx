@@ -69,7 +69,12 @@ export default function Notifications({ user }) {
   useEffect(() => {
     if (!dept) { setFindings([]); return; }
     let live = true;
-    api(`/findings?state=open&dept=${encodeURIComponent(dept)}`)
+    // 두 축을 **명시적으로 펼친다.** /findings 의 기본값은 발견 목록 화면의 표시 정책이고,
+    // 통보는 다른 일이다 - 서버의 /notifications/preview 는 _open_findings_for_dept 로
+    // 이 둘을 계속 포함하므로, 여기서 기본값을 물려받으면 화면이 서버 preview 와 어긋난다.
+    // 특히 tcpwrapped 는 포트 열림이 확인된 건이라, 조치 통보에서 빠지면 거짓 음성이다.
+    api(`/findings?state=open&dept=${encodeURIComponent(dept)}`
+        + "&hide_unconfirmed=false&hide_tcpwrapped=false")
       .then((r) => { if (live) setFindings(r); })
       .catch((e) => toast(e.message, { type: "err" }));
     return () => { live = false; };

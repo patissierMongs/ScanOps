@@ -387,3 +387,89 @@ def test_asset_xlsx_sparse_dimension_bomb_is_rejected(client):
     )
 
     assert response.status_code == 413
+
+
+# ── 부서 통보는 발견 목록의 표시 정책을 물려받으면 안 된다 ──
+
+def _dept_findings(dept="영업부"):
+    """같은 부서에 확정 열림 · open|filtered · tcpwrapped 를 하나씩."""
+    base = dict(proto="tcp", status="미조치", risk_level="medium", dept=dept,
+                product="", version="", server="", hostname="")
+    db = SessionLocal()
+    try:
+        db.add(Finding(finding_key="n-a", host_ip="10.9.0.1", port=443, state="open",
+                       reason="syn-ack", service="https", **base))
+        db.add(Finding(finding_key="n-b", host_ip="10.9.0.2", port=161,
+                       state="open|filtered", reason="no-response", service="snmp",
+                       **{**base, "proto": "udp"}))
+        db.add(Finding(finding_key="n-c", host_ip="10.9.0.3", port=8443, state="open",
+                       reason="syn-ack", service="tcpwrapped",
+                       identification="tcpwrapped", **base))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _notification_query(dept: str) -> str:
+    """화면이 실제로 보내는 질의를 **소스에서 뽑는다.**
+
+    통보 화면이 무엇을 받는지는 그 화면이 만든 URL 이 정한다. 서버만 따로 검사하면 프런트가
+    다른 질의를 보내도 통과한다 - 이 결함이 정확히 그렇게 통과했다(발견 화면 테스트와 서버
+    preview 테스트가 각각 있었지만 둘을 잇는 이 경로를 아무도 안 봤다).
+    """
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "frontend" / "src" / "views" / "Notifications.jsx").read_text(encoding="utf-8")
+    call = src.split("if (!dept) { setFindings([]); return; }")[1].split(".then(")[0]
+    # `/findings?...${encodeURIComponent(dept)}` + "..." 형태를 실제 질의로 되살린다.
+    pieces = re.findall(r"[`\"]([^`\"]*)[`\"]", call)
+    query = "".join(pieces).replace("${encodeURIComponent(dept)}", dept)
+    assert query.startswith("/findings?"), f"통보 화면의 질의를 못 읽었다: {query!r}"
+    return query
+
+
+def test_the_department_notice_covers_every_finding_the_server_preview_counts(client):
+    """화면이 세는 건수와 서버 preview 가 세는 건수는 같아야 한다.
+
+    발견 목록은 확정되지 않은 관측을 평소 접지만, 그건 **그 화면의 표시 정책**이다. 통보는
+    다른 일이라 서버(`_open_findings_for_dept`)는 계속 포함한다. 통보 화면이 /findings 의
+    기본값을 물려받으면 둘이 어긋나고, 화면은 '부서 발견 1건' 으로 보이면서 통보 이력에도
+    ID 가 하나만 남는다. 특히 tcpwrapped 는 **포트 열림이 확인된** 건이라 조치 통보에서
+    빠지면 거짓 음성이다.
+    """
+    h = _auth(client)
+    _dept_findings()
+
+    preview = client.get("/api/notifications/preview?dept=영업부", headers=h).json()
+    assert preview["finding_count"] == 3
+
+    rows = client.get("/api/" + _notification_query("영업부").lstrip("/"), headers=h).json()
+    assert len(rows) == preview["finding_count"], (
+        "통보 화면이 받는 건수가 서버 preview 와 다르다 - 한쪽이 조용히 빠뜨리고 있다"
+    )
+    seen = {f"{r['host_ip']}:{r['port']}" for r in rows}
+    assert seen == {"10.9.0.1:443", "10.9.0.2:161", "10.9.0.3:8443"}
+
+
+def test_the_notice_audit_trail_records_the_findings_it_actually_sent(client):
+    """통보 이력의 finding_ids 는 본문이 다룬 발견 전부여야 한다.
+
+    화면은 받은 목록을 그대로 POST 한다(`filtered.map(f => f.id)`). 받는 단계에서 이미
+    빠졌다면 감사 스냅샷에도 그만큼만 남고, 나중에 '그때 무엇을 통보했나' 를 되짚을 수 없다.
+    """
+    h = _auth(client, role="admin")
+    _dept_findings()
+
+    rows = client.get("/api/" + _notification_query("영업부").lstrip("/"), headers=h).json()
+    ids = [r["id"] for r in rows]
+    body = client.get("/api/notifications/preview?dept=영업부", headers=h).json()["body"]
+    sent = client.post("/api/notifications", headers=h,
+                       json={"dept": "영업부", "body": body, "finding_ids": ids})
+    assert sent.status_code == 201, sent.text
+
+    history = client.get("/api/notifications", headers=h).json()
+    recorded = set(history[0]["finding_ids"])
+    assert recorded == set(ids)
+    assert len(recorded) == 3, "통보 이력이 접힌 발견을 빠뜨렸다"
