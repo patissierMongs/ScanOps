@@ -151,6 +151,14 @@ def run(nmap, args, out_base, sudo_mode="auto", progress=None, stats="5s",
                     terminate_owned(proc)
                     break
                 if deadline is not None and time.time() >= deadline:
+                    # 상한에 닿았을 때 **다시 확인한다.** 위 `while proc.poll() is None` 은
+                    # 이 지점보다 앞이고, 그 사이에 `stop_requested()` 가 파일을 읽는다 -
+                    # 그동안 nmap 이 정상 종료할 수 있다. 그때 상한 초과로 표시하면 아래
+                    # 강제 실패(rc 0 → -1)가 걸려 **완주한 스캔이 실패/부분으로 남고**,
+                    # 멀쩡한 XML 이 워치독 복구본으로 격리된다. 단독 스캐너 콜백에도
+                    # 같은 검사가 있다.
+                    if proc.poll() is not None:
+                        break
                     watchdog_fired = True
                     terminate_owned(proc)
                     break

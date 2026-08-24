@@ -2156,3 +2156,74 @@ def test_a_running_execution_reports_how_long_it_has_actually_been_running():
     assert elapsed["a"] >= threshold, (
         f"12분째 도는 실행이 화면 임계값({threshold}초)에 안 걸린다"
     )
+
+
+def test_the_staged_watchdog_does_not_fail_a_scan_that_finished_in_the_gap(tmp_path):
+    """단계 엔진 워치독도 이미 끝난 프로세스에 발동하면 안 된다.
+
+    루프 조건 `while proc.poll() is None` 과 상한 검사 사이에는 `stop_requested()` 가
+    있고, 그건 파일을 읽는다. 그 사이에 nmap 이 정상 종료하면 예전에는 그대로 상한
+    초과로 표시했고, 아래 강제 실패(rc 0 → -1)가 걸려 **완주한 스캔이 실패/부분으로**
+    남았다. 멀쩡한 XML 도 워치독 복구본으로 격리된다.
+    """
+    import sys
+    import time
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import nmaprun
+
+    polls = {"n": 0}
+    checked_stop = {"n": 0}
+    reached = {"deadline": False}
+
+    class _ExitsInTheGap:
+        """루프 조건에서는 살아 있고, 상한 검사 시점에는 이미 끝나 있다."""
+
+        def __init__(self):
+            self.stdout = iter([])
+            self.terminated = False
+
+        def poll(self):
+            polls["n"] += 1
+            return None if polls["n"] == 1 else 0     # 첫 확인 이후 종료
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+
+    process = _ExitsInTheGap()
+    base = tmp_path / "stage"
+    (tmp_path / "stage.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/>'
+        '</runstats></nmaprun>', encoding="utf-8")
+
+    def stop_requested():
+        checked_stop["n"] += 1
+        time.sleep(0.02)      # 파일을 읽는 자리 - 그 사이에 상한이 지나고 nmap 이 끝난다
+        reached["deadline"] = True   # 이 뒤가 곧 상한 검사다
+        return False
+
+    original_popen = nmaprun.popen_owned
+    original_terminate = nmaprun.terminate_owned
+    original_close = nmaprun.close_kill_job
+    nmaprun.popen_owned = lambda *a, **k: process
+    nmaprun.terminate_owned = lambda proc: proc.terminate()
+    nmaprun.close_kill_job = lambda proc: None
+    try:
+        result = nmaprun.run("nmap", ["-sS", "10.0.0.1"], base,
+                             stop_requested=stop_requested,
+                             poll_interval=0.01, watchdog_seconds=0.001)
+    finally:
+        nmaprun.popen_owned = original_popen
+        nmaprun.terminate_owned = original_terminate
+        nmaprun.close_kill_job = original_close
+
+    assert checked_stop["n"] >= 1, "상한 검사 앞의 자리를 지나지 않았다 - 재현이 안 됐다"
+    assert polls["n"] >= 2, "상한 지점에서 다시 확인하지 않았다 - 이 검사는 빈 검사다"
+    assert reached["deadline"], "상한 검사에 아예 닿지 않았다 - 이 검사는 빈 검사다"
+    assert result["rc"] == 0, f"완주한 스캔이 rc={result['rc']} 로 바뀌었다"
+    assert result["timed_out_by_watchdog"] is False, "상한을 넘기지 않았는데 넘겼다고 한다"
+    assert not process.terminated, "이미 끝난 프로세스를 종료하려 했다"
+    # 멀쩡한 XML 은 그대로여야 한다 - 복구본으로 격리되면 닫힘 권한을 잃는다.
+    assert "<finished" in (tmp_path / "stage.xml").read_text(encoding="utf-8")
