@@ -1121,3 +1121,17 @@ test("a retry badge never hides issues that retrying cannot fix", () => {
   // 위 네 가지가 다 통과해도 화면은 예전처럼 감춘다.
   assert.match(source("../src/views/Scans.jsx"), /function QualityBadge[\s\S]{0,200}qualityBadge\(scan\)/);
 });
+
+test("a UDP probe that only found inferred-open ports does not read as empty-handed", () => {
+  // UDP 식별은 대개 `open|filtered` 만 남긴다. 서버는 그것을 `inferred_open` 으로 따로
+  // 세고, 봤기 때문에 `empty` 로도 안 부른다. 그런데 화면이 그 수를 안 그리면 endpoint 를
+  // 실제로 담은 실행이 '열림 0 · 버전 0' 으로만 보인다 - 아무것도 못 한 실행처럼 읽힌다.
+  const panel = source("../src/ui/ScanTrace.jsx");
+  const yieldFn = panel.slice(panel.indexOf("function Yield("));
+  const body = yieldFn.slice(0, yieldFn.indexOf("\n}"));
+  assert.match(body, /run\.inferred_open/, "수확량 표시가 무응답 추정 열림을 빼놓는다");
+  // 서버가 그 이름으로 보내는지도 같이 못박는다 - 한쪽만 바뀌면 조용히 안 그려진다.
+  const folded = source("../../backend/scanops/scanning/engine_runner.py");
+  assert.match(folded, /"inferred_open"/,
+    "서버가 그 이름으로 보내지 않는다 - 화면 검사만 통과하는 빈 검사가 된다");
+});

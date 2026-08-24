@@ -3916,10 +3916,19 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
                 issue["host"] for issue in unresolved if issue["host"]
             }) or len(unresolved),
             "targets": sorted({issue["host"] for issue in unresolved if issue["host"]}),
-            "by_stage": {}, "reasons": {}, "issues": unresolved,
+            # 화면(RetryQueue)이 읽는 이름은 `reasons_by_stage` 다 - 라이브 경로
+            # (`gave_up_detail`)가 주는 그 이름. 여기서 `reasons` 로 두면 스캔이 끝나는
+            # 순간 호스트는 대기열에 남는데 '시간 초과'·'재전송 상한' 같은 **이유 라벨만**
+            # 사라진다. 무엇 때문에 다시 돌려야 하는지가 안 보이는 대기열이 된다.
+            "by_stage": {}, "reasons_by_stage": {}, "issues": unresolved,
         }
         for issue in unresolved:
             retry["by_stage"].setdefault(issue["stage"], []).append(issue["host"])
+            if issue["host"]:
+                stage_reasons = retry["reasons_by_stage"].setdefault(issue["stage"], {})
+                host_reasons = stage_reasons.setdefault(issue["host"], [])
+                if issue["type"] not in host_reasons:
+                    host_reasons.append(issue["type"])
     else:
         executions = derived.get("executions") or []
         # 라이브도 **같은 모양**으로 내보낸다. 예전에는 이 가지만 parse_events 의 원본

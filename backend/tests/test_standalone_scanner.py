@@ -3346,3 +3346,54 @@ def test_the_watchdog_does_not_fail_a_scan_that_already_finished(monkeypatch):
     assert rc == 0, f"정상 종료한 스캔이 워치독 때문에 rc={rc} 로 바뀌었다"
     assert not process.terminated, "이미 끝난 프로세스를 종료하려 했다"
     assert not problems, f"없던 문제를 보고했다: {problems}"
+
+
+def test_a_crash_before_the_deadline_is_not_reported_as_exceeding_it(monkeypatch, tmp_path):
+    """상한을 넘긴 것과 그냥 죽은 것은 다른 사실이다.
+
+    워치독이 켜져 있으면 끊긴 XML 을 복구하는데, 예전에는 **복구했다는 사실만으로**
+    '실행 상한을 넘겨 중단했습니다' 라고 적었다. 타이머가 울리지도 않았는데 그렇게
+    적으면 manifest 와 이어하기 진단이 진짜 원인(nmap 이 스스로 죽음)을 가린다.
+
+    동시에, 원인이 무엇이든 끊긴 산출물은 격리돼야 한다 - 그건 이유가 아니라 신뢰의
+    문제다. 라벨만 갈라지고 격리는 그대로여야 한다.
+    """
+    scanner = _load_scanner()
+
+    calls: list[dict] = []
+
+    def fake_run(cmd, problems=None, watchdog_seconds=0, outcome=None):
+        if outcome is not None:
+            outcome["watchdog_fired"] = False      # 타이머는 울리지 않았다
+        calls.append({"cmd": cmd})
+        return -11                                  # nmap 이 스스로 죽었다(SIGSEGV)
+
+    monkeypatch.setattr(scanner, "run_nmap_process", fake_run)
+    monkeypatch.setattr(scanner, "repair_truncated_xml", lambda path: True)  # 끊겨서 복구됨
+    monkeypatch.setattr(scanner, "existing_outputs", lambda base: [])
+    marked: list = []
+    monkeypatch.setattr(scanner, "mark_interrupted_outputs",
+                        lambda base: marked.append(base) or [])
+
+    plan = {
+        "batches": [["10.0.0.1"]], "watchdog_seconds": 60,
+        "out_dir": str(tmp_path), "stages": [], "runs": [],
+    }
+    monkeypatch.setattr(scanner, "build_command", lambda *a, **k: ["nmap", "-sS", "10.0.0.1"])
+    monkeypatch.setattr(scanner, "concrete_scan_targets", lambda *a, **k: (["10.0.0.1"], True))
+    monkeypatch.setattr(scanner, "output_base", lambda *a, **k: tmp_path / "stage")
+    monkeypatch.setattr(scanner, "_stage_xml_truncated", lambda base: False)
+
+    state_path = tmp_path / "state.json"
+    scanner.run_nmap_stage(plan, 0, state_path, stage_id="tcp_identify")
+
+    run = plan["runs"][-1]
+    problems = run.get("nmap_problems") or []
+    assert calls, "실행 자체가 안 됐다 - 이 검사는 아무것도 안 보고 있다"
+    assert not any("실행 상한을 넘겨" in p for p in problems), (
+        f"타이머가 울리지도 않았는데 상한 초과라고 적었다: {problems}"
+    )
+    assert any("끝맺지 못했습니다" in p for p in problems), (
+        f"끊긴 산출물이라는 사실까지 잃었다: {problems}"
+    )
+    assert marked, "원인과 무관하게 격리돼야 하는 산출물이 격리되지 않았다"

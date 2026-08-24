@@ -1203,7 +1203,7 @@ def repair_truncated_xml(path: Path) -> bool:
 
 
 def run_nmap_process(cmd: list[str], problems: list[str] | None = None,
-                     watchdog_seconds: int = 0) -> int:
+                     watchdog_seconds: int = 0, outcome: dict | None = None) -> int:
     """nmap 한 번 실행. 정지 신호를 받으면 곧바로 죽이지 않고 잠깐 기다린다.
 
     터미널 Ctrl+C 와 GUI [중지]는 프로세스 그룹 전체에 신호를 보내므로 nmap 도 같은 신호를
@@ -1248,6 +1248,11 @@ def run_nmap_process(cmd: list[str], problems: list[str] | None = None,
                 if any(marker in stripped for marker in NMAP_UNCLEAN_MARKERS):
                     problems.append(stripped[:200])
         rc = proc.wait()
+        if outcome is not None:
+            # 상한을 실제로 넘겼는지. 산출물이 끊긴 이유는 그것 말고도 있다(nmap 이
+            # 스스로 죽거나 밖에서 종료됨). 둘을 같은 표식으로 부르면 manifest 와
+            # 이어하기 진단이 원인을 잘못 말한다.
+            outcome["watchdog_fired"] = fired.is_set()
         if fired.is_set():
             if problems is not None and len(problems) < _UNCLEAN_KEEP:
                 problems.append(
@@ -2678,11 +2683,14 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     print(f"[{idx + 1}/{len(plan['batches'])}]{stage_label} {display_command(cmd)}", flush=True)
     interrupted = False
     watchdog_repaired = False
+    watchdog_fired = False
     problems: list[str] = []
     retried_engine = ""
     try:
         watchdog = int(plan.get("watchdog_seconds") or 0)
-        rc = run_nmap_process(cmd, problems, watchdog_seconds=watchdog)
+        outcome: dict = {}
+        rc = run_nmap_process(cmd, problems, watchdog_seconds=watchdog, outcome=outcome)
+        watchdog_fired = bool(outcome.get("watchdog_fired"))
         if watchdog:
             # 끊긴 XML 을 살려 둔다 - 안 그러면 '관측은 남는다'는 말이 거짓이 된다.
             # **복구했다는 사실을 기억한다.** 복구하고 나면 파일이 파싱되므로 뒤의
@@ -2709,8 +2717,10 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
                   f"한 번 다시 시도합니다.", flush=True)
             print(f"    {display_command(retry_cmd)}", flush=True)
             retry_problems: list[str] = []
+            retry_outcome: dict = {}
             retry_rc = run_nmap_process(retry_cmd, retry_problems,
-                                        watchdog_seconds=watchdog)
+                                        watchdog_seconds=watchdog,
+                                        outcome=retry_outcome)
             retry_repaired = bool(watchdog) and repair_truncated_xml(
                 Path(str(retry_base) + ".xml"))
             # 재시도가 더 나으면 그 결과를 채택한다. 아니면 원래 실패를 그대로 남긴다 —
@@ -2726,6 +2736,9 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
                 # 복구 사실이 남아 있으면, 멀쩡한 대체본이 중단본으로 격리되고 clean=false
                 # 로 기록되어 완주한 스캔이 '부분 결과, 재개 필요' 로 마감된다.
                 watchdog_repaired = retry_repaired
+                # 상한을 넘겼는지도 채택한 실행의 사실로 바꾼다 - 표식은 지금 자리에
+                # 있는 산출물을 설명해야 한다.
+                watchdog_fired = bool(retry_outcome.get("watchdog_fired"))
             else:
                 discard_artifacts(retry_base)
     except KeyboardInterrupt:
@@ -2743,7 +2756,7 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     # 뒤는 '이 실행 자체를 믿을 수 없다'. 섞으면 스크립트 소켓 하나가 실패한 정상 실행까지
     # 재실행 대상·닫힘 권한 박탈로 넘어간다.
     nse_degraded = bool(problems)
-    if watchdog_repaired:
+    if watchdog_repaired and watchdog_fired:
         problems.insert(0, "실행 상한을 넘겨 중단했습니다 - 끝난 호스트의 관측만 남았습니다.")
     elif truncated:
         problems.insert(0, "nmap 이 XML 을 끝맺지 못했습니다(파일이 중간에서 끊김).")

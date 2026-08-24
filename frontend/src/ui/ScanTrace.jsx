@@ -64,7 +64,12 @@ function Yield({ run }) {
   return (
     <span className={`trace-yield${run.empty ? " is-empty" : ""}`}
           title={run.empty ? EMPTY_HINT : undefined}>
-      호스트 {run.hosts_found} · 열림 {run.open_ports} · 버전 {run.products}
+      호스트 {run.hosts_found} · 열림 {run.open_ports}
+      {/* UDP 식별은 대개 `open|filtered` 만 남긴다. 그것을 안 그리면 endpoint 를
+          실제로 담은 실행이 '열림 0 · 버전 0' 으로 보이면서 '산출물 없음' 표시도
+          안 붙는다(서버는 봤으니까) - 아무것도 못 한 실행처럼 읽힌다. */}
+      {run.inferred_open > 0 && <> · 추정 {run.inferred_open}</>}
+      {" · 버전 "}{run.products}
       {run.empty && <b> 산출물 없음</b>}
     </span>
   );

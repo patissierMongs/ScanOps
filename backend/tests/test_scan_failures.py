@@ -2296,3 +2296,66 @@ def test_the_delay_panel_survives_the_scan_finishing(client, monkeypatch, tmp_pa
     )
     assert (slow["hosts_found"], slow["open_ports"], slow["products"]) == (1, 2, 2)
     assert slow["empty"] is False
+
+
+def test_the_finished_retry_queue_still_says_why_each_host_needs_a_rescan(
+    client, monkeypatch, tmp_path,
+):
+    """완료된 스캔의 재스캔 대기열도 '왜' 를 말해야 한다.
+
+    화면(RetryQueue)은 `reasons_by_stage` 를 읽는다 - 라이브 경로(gave_up_detail)가 주는
+    이름이다. 완료 응답이 `reasons` 로 주면 호스트는 대기열에 남는데 '시간 초과'·'재전송
+    상한' 같은 이유 라벨만 사라진다. 무엇 때문에 다시 돌려야 하는지가 안 보이는 대기열이다.
+    """
+    import re
+
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {"targets": ["10.0.0.4"], "out_dir": str(tmp_path)})
+    out_dir = tmp_path / "scans" / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "tcp"},
+        {"event": "command_start", "stage": "tcp", "execution_id": "e1",
+         "argv": ["nmap", "-sS", "10.0.0.4"], "hosts": ["10.0.0.4"], "ts": 1000.0},
+        {"event": "command_done", "stage": "tcp", "execution_id": "e1", "outcome": "done",
+         "seconds": 5.0, "rc": 0, "ts": 1005.0,
+         "timeout_count": 1, "timed_out": ["10.0.0.4"]},
+        {"event": "job_done", "status": "done"},
+    ]) + "\n", encoding="utf-8")
+    # 라이브 경로는 run-state 를 읽고, 완료 경로는 위 이벤트에서 만든 영속 이슈를 읽는다.
+    # 같은 사실이므로 두 쪽이 같은 답을 내야 한다.
+    (out_dir / "run-state.json").write_text(json.dumps({
+        "gave_up": ["10.0.0.4"], "gave_up_by_stage": {"tcp": ["10.0.0.4"]},
+    }), encoding="utf-8")
+
+    headers = _headers(client)
+    live = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()["retry"]
+    assert live["reasons_by_stage"], "라이브부터 비어 있으면 비교가 무의미하다"
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scans_api._materialize_engine_terminal(
+            db, scan, out_dir, {"targets": ["10.0.0.4"]},
+            {"authority_missing": [], "authority_broken": []}, [],
+        )
+        scan.status = "done"
+        db.commit()
+    finally:
+        db.close()
+
+    ended = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()
+    assert ended["source"] == "db", "DB 투영으로 안 넘어가면 비교가 무의미하다"
+    retry = ended["retry"]
+    assert retry["targets"] == ["10.0.0.4"], "대기열에서 호스트까지 사라졌다"
+    reasons = retry.get("reasons_by_stage") or {}
+    assert reasons, "끝나는 순간 재스캔 이유가 사라졌다"
+    assert "host_timeout" in [
+        kind for stage in reasons.values() for kinds in stage.values() for kind in kinds
+    ], f"이유가 라이브와 다르다: {reasons}"
+
+    # 화면이 실제로 이 이름을 읽는가 - 서버만 고치면 대기열은 그대로 빈 채로 남는다.
+    source = (Path(__file__).resolve().parents[2]
+              / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
+    assert re.search(r"retry\?\.reasons_by_stage", source), (
+        "화면이 읽는 이름이 바뀌었다 - 이 검사가 낡았다"
+    )
