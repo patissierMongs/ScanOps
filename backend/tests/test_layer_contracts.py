@@ -395,7 +395,7 @@ def test_a_staged_web_scan_runs_the_same_scripts_as_the_manual_path():
     # 웹에서 고른 스크립트가 프로토콜별로 걸러져 실제 TCP/UDP 식별 인자까지 가야 한다.
     recorded = {}
 
-    def fake_nmap(stage, args, base, fatal=True):
+    def fake_nmap(stage, args, base, fatal=True, targets=None):
         recorded["udp" if "-sU" in args else "tcp"] = args
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
 
@@ -673,7 +673,7 @@ def _stage_argvs(tmp_path):
     })
     seen = {}
 
-    def fake(stage, args, base, fatal=True):
+    def fake(stage, args, base, fatal=True, targets=None):
         seen[f"{stage}:{pathlib_Path(base).name}"] = list(map(str, args))
         pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1"))
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
@@ -779,7 +779,7 @@ def test_the_engine_records_what_each_nmap_process_covered(tmp_path):
         "stages": {"tcp": {"enabled": True, "ports": "22"}},
     })
 
-    def fake(stage, args, base, fatal=True):
+    def fake(stage, args, base, fatal=True, targets=None):
         pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1"))
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
 
@@ -1307,7 +1307,7 @@ def test_the_service_stage_probes_hosts_concurrently(tmp_path):
     lock = threading.Lock()
     live, peak = 0, 0
 
-    def fake(stage, args, base, fatal=True):
+    def fake(stage, args, base, fatal=True, targets=None):
         nonlocal live, peak
         with lock:
             live += 1
@@ -1344,7 +1344,7 @@ def test_a_rescan_still_probes_one_host_at_a_time(tmp_path):
     lock = threading.Lock()
     live, peak = 0, 0
 
-    def fake(stage, args, base, fatal=True):
+    def fake(stage, args, base, fatal=True, targets=None):
         nonlocal live, peak
         with lock:
             live += 1
@@ -1377,7 +1377,7 @@ def test_a_batch_is_finished_before_the_next_one_starts(tmp_path):
     })
     order = []
 
-    def fake(stage, args, base, fatal=True):
+    def fake(stage, args, base, fatal=True, targets=None):
         name = pathlib_Path(base).name
         order.append(name)
         host = str(args[-1])
@@ -1422,7 +1422,7 @@ def test_engine_reports_five_stages_and_the_hosts_active_inside_each_batch(tmp_p
     }).validate()
     pipe = Pipeline(spec, sink, "nmap")
 
-    def fake(stage, args, base, fatal=True):
+    def fake(stage, args, base, fatal=True, targets=None):
         host = str(args[-1])
         proto = "udp" if "-sU" in args else "tcp"
         port = 53 if proto == "udp" else 22
@@ -1480,7 +1480,7 @@ def test_tcp_service_probe_uses_one_batch_union_on_firewall_free_lan(tmp_path):
     }
     seen = []
 
-    def fake(stage, args, base, fatal=True):
+    def fake(stage, args, base, fatal=True, targets=None):
         seen.append((stage, list(args), pathlib_Path(base).name))
         selected = [host for host in hosts if host in args]
         xml_hosts = "".join(
@@ -1523,7 +1523,7 @@ def test_identify_only_covers_the_ports_that_batch_actually_found(tmp_path):
     })
     seen = {}
 
-    def fake(stage, args, base, fatal=True):
+    def fake(stage, args, base, fatal=True, targets=None):
         seen[pathlib_Path(base).name] = list(map(str, args))
         pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1", "tcp", 22))
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
@@ -1553,7 +1553,7 @@ def test_hosts_nmap_gave_up_on_are_collected_for_a_later_scan(tmp_path):
                    "service": {"enabled": False}},
     })
 
-    def timed_out(stage, args, base, fatal=True):
+    def timed_out(stage, args, base, fatal=True, targets=None):
         pathlib_Path(str(base) + ".xml").write_bytes(_timedout_only_xml("10.0.0.1"))
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
 
@@ -1565,7 +1565,7 @@ def test_hosts_nmap_gave_up_on_are_collected_for_a_later_scan(tmp_path):
     # 그 호스트는 이 실행에서 부재를 말할 자격도 없다.
     assert engine_runner.timed_out_hosts(tmp_path, "tcp") == {"10.0.0.1"}
 
-    def clean(stage, args, base, fatal=True):
+    def clean(stage, args, base, fatal=True, targets=None):
         pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml("10.0.0.1"))
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
 
@@ -1612,7 +1612,7 @@ def test_a_clean_udp_sweep_does_not_erase_a_tcp_timeout(tmp_path):
                    "service": {"enabled": False}},
     })
 
-    def mixed(stage, args, base, fatal=True):
+    def mixed(stage, args, base, fatal=True, targets=None):
         xml = (_timedout_only_xml("10.0.0.1") if stage == "tcp"
                else _clean_xml("10.0.0.1", "udp", 53))
         pathlib_Path(str(base) + ".xml").write_bytes(xml)
@@ -1636,7 +1636,7 @@ def test_discovery_and_service_timeouts_are_also_collected(tmp_path):
                    "tcp": {"enabled": False}, "service": {"enabled": False}},
     })
 
-    def timed_out(stage, args, base, fatal=True):
+    def timed_out(stage, args, base, fatal=True, targets=None):
         pathlib_Path(str(base) + ".xml").write_bytes(_timedout_only_xml("10.0.0.1"))
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
 
@@ -1650,7 +1650,7 @@ def test_discovery_and_service_timeouts_are_also_collected(tmp_path):
         "stages": {"service": {"nse": [], "udp_nse": ["dns-nsid"],
                                 "udp_host_timeout": "1m"}},
     })
-    def service_timed_out(stage, args, base, fatal=True):
+    def service_timed_out(stage, args, base, fatal=True, targets=None):
         pathlib_Path(str(base) + ".xml").write_bytes(_timedout_only_xml("10.0.0.2"))
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
 
@@ -1670,7 +1670,7 @@ def test_a_resumed_scan_skips_batches_it_already_finished(tmp_path):
     pipe, _ = _pipeline(tmp_path, spec_dict)
     calls = []
 
-    def fake(stage, args, base, fatal=True):
+    def fake(stage, args, base, fatal=True, targets=None):
         calls.append(pathlib_Path(base).name)
         pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml(str(args[-1])))
         return {"rc": 0, "seconds": 0.0, "cmd": args, "stopped": False}
@@ -2026,3 +2026,50 @@ def test_the_trace_panel_reads_the_fields_the_backend_actually_sends(tmp_path):
     for key in ("hosts", "label", "ports", "proto"):
         assert f'"{key}"' in started, f"파서가 {key} 를 실행 기록에 안 담는다"
     assert trace["by_host"], "호스트별 소요가 비었다 - 그 섹션은 화면에 안 나온다"
+
+
+def test_execution_metadata_records_only_the_real_targets(tmp_path):
+    """실행 기록의 `hosts` 는 **호출부가 알려 준 타깃**이어야 한다.
+
+    argv 에서 '옵션이 아닌 값' 을 골라내려 하면 재시도 수·묶음 크기·포트 스펙·스크립트
+    상한이 전부 걸린다(실측: `2`·`64`·`100`·`2m` 이 호스트로 잡혔다). 그러면 한 대짜리
+    실행이 '6대' 로 적히고, 호스트별 집계는 항목이 하나일 때만 세므로 그 표가 통째로 빈다 -
+    어느 호스트가 끌고 있는지가 지연 진단의 핵심인데.
+    """
+    import sys
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine.pipeline import Pipeline
+    from scanops_engine.spec import JobSpec
+
+    spec = JobSpec.from_dict({
+        "job_id": 1, "targets": ["10.0.0.1"], "out_dir": str(tmp_path),
+        "stages": {"discovery": {"mode": "pn"},
+                   "tcp": {"enabled": True, "ports": "22,443"},
+                   "udp": {"enabled": False, "ports": ""},
+                   "service": {"enabled": True, "nse": ["ssl-cert"]}},
+    })
+
+    class _Sink:
+        def emit(self, *_a, **_k):
+            pass
+
+    pipe = Pipeline(spec, _Sink(), "nmap")
+    args = ["-sS", "-Pn", "-n", "--open", "-T4", "--reason",
+            "--max-retries", "2", "--min-hostgroup", "64", "--max-parallelism", "100",
+            "-p", "T:22,443", "--script", "ssl-cert", "--script-timeout", "2m", "10.0.0.1"]
+
+    meta = pipe._execution_meta("service", args, tmp_path / "stage3-10_0_0_1-tcp",
+                                targets=["10.0.0.1"])
+    assert meta["hosts"] == ["10.0.0.1"], f"옵션 값이 호스트로 잡혔다: {meta['hosts']}"
+    assert meta["label"] == "10.0.0.1", f"한 대짜리 실행인데 라벨이 {meta['label']}"
+    assert meta["ports"] == "T:22,443"
+
+    # 여러 대면 개수로 적고, 호스트는 그대로 담는다.
+    many = pipe._execution_meta("tcp", args, tmp_path / "stage-tcp-b0",
+                                targets=["10.0.0.1", "10.0.0.2"])
+    assert many["hosts"] == ["10.0.0.1", "10.0.0.2"] and many["label"] == "2대"
+
+    # 호출부가 안 알려 주면 지어내지 않는다 - 빈 목록이 정직하다.
+    unknown = pipe._execution_meta("tcp", args, tmp_path / "stage-tcp-b0")
+    assert unknown["hosts"] == []

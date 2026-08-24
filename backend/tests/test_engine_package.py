@@ -2528,3 +2528,34 @@ def test_a_failed_group_never_overwrites_the_host_probe_that_replaced_it(tmp_pat
     assert by_port[("udp", 53)]["service"] == "domain", (
         f"실패한 묶음이 대체 실행의 식별을 덮었다: {by_port[('udp', 53)]['service']}"
     )
+
+
+def test_a_group_whose_fallback_did_not_recover_keeps_its_partial_evidence(tmp_path):
+    """대체가 **실패한** 묶음의 부분 관측은 버리면 안 된다.
+
+    실패한 묶음을 인입에서 빼는 것은 호스트별 대체가 그 자리를 채웠을 때만 옳다. 대체가
+    없거나 그것도 실패했으면 묶음의 부분 XML 이 그 호스트에 대한 **유일한** 증거다 -
+    워치독이 끊었어도 끝난 호스트의 서비스·NSE 는 그 안에 들어 있다. 버리면 식별이
+    스윕의 '정체 불명' 으로 되돌아간다.
+    """
+    (tmp_path / "run-state.json").write_text(json.dumps({
+        "open_map": {"10.0.0.1": {"udp": [53]}},
+        "coverage": [{"role": "enrichment", "artifact": "stage3-udp-b0-g0.xml",
+                      "proto": "udp", "finished": False,
+                      "hosts": ["10.0.0.1"], "ports": "U:53"}],
+    }), encoding="utf-8")
+    # 묶음은 죽었지만 정체를 밝힌 관측이 들어 있다.
+    (tmp_path / "stage3-udp-b0-g0.xml").write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/><ports>'
+        '<port protocol="udp" portid="53"><state state="open"/>'
+        '<service name="domain" product="BIND" method="probed"/></port>'
+        '</ports></host></nmaprun>', encoding="utf-8")
+    # 대체 실행이 **없다** - 되찾지 못했다.
+
+    findings, _hosts = engine_runner.collect_results(tmp_path)
+    by_port = {(f["proto"], f["port"]): f for f in findings}
+    assert ("udp", 53) in by_port, "복구 안 된 호스트의 관측이 통째로 사라졌다"
+    assert by_port[("udp", 53)]["service"] == "domain", (
+        "부분 관측이 밝힌 식별을 버렸다 - 스윕의 정체 불명으로 되돌아간다"
+    )

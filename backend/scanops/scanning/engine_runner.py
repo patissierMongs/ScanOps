@@ -1320,7 +1320,16 @@ def parse_events(out_dir) -> dict:
     }
 
 
-def _superseded_grouped(state: dict) -> set[str]:
+def _saved_spec(out: Path) -> dict:
+    """결과 폴더에 남은 실행 사양. 없거나 깨졌으면 빈 dict - 지어내지 않는다."""
+    try:
+        data = json.loads((out / "spec.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _superseded_grouped(out: Path, state: dict, confirm: bool) -> set[str]:
     """실패해서 호스트별 대체 실행에 자리를 넘긴 묶음 산출물 이름.
 
     묶음이 죽어도 파싱 가능한 **부분** XML 은 남는다. 그 파일을 그대로 읽으면 나중에
@@ -1335,7 +1344,26 @@ def _superseded_grouped(state: dict) -> set[str]:
         if not isinstance(entry, dict) or entry.get("role") != "enrichment":
             continue
         artifact = entry.get("artifact")
-        if isinstance(artifact, str) and not entry.get("finished"):
+        if not isinstance(artifact, str) or entry.get("finished"):
+            continue
+        proto = entry.get("proto")
+        if proto not in {"tcp", "udp"} or not artifact.startswith(f"stage3-{proto}-b"):
+            # 묶음이 아니다(호스트별 probe). 대체할 것이 없으므로 그 관측은 그대로 쓴다 -
+            # 워치독이 끊었어도 복구된 XML 에 끝난 호스트의 서비스·NSE 가 들어 있다.
+            continue
+        hosts = [h for h in (entry.get("hosts") or []) if isinstance(h, str)]
+        try:
+            ports = {int(port) for port in str(entry.get("ports")).split(":")[-1].split(",")}
+        except ValueError:
+            ports = set()
+        # **대체가 실제로 성공한 것만** 뺀다. 호스트별 실행이 그 호스트의 포트를 전부
+        # 되찾았을 때만 묶음이 대체된 것이다. 아니면 묶음의 부분 관측이 그 호스트에 대해
+        # 유일한 증거이므로 버리면 식별이 스윕의 '정체 불명' 으로 되돌아간다.
+        if hosts and ports and all(
+            _complete(_stage3_expected(out, host, f"{proto}{port}", confirm))
+            or _complete(_stage3_expected(out, host, proto, confirm))
+            for host in hosts for port in ports
+        ):
             superseded.add(artifact)
     return superseded
 
@@ -1559,7 +1587,11 @@ def collect_results(out_dir, scope_keys: set | None = None,
                     f["identity_observed"] = False
                     by_key.setdefault((f["host_ip"], f["port"], f["proto"]), f)
     # 대체된 묶음은 읽지 않는다 - 읽으면 부분 결과가 성공한 호스트별 probe 를 덮는다.
-    superseded = _superseded_grouped(state)
+    # confirm 여부는 state 가 들고 있는 spec 에서 읽는다 - collect_results 는 spec 을
+    # 받지 않는다(재개·재스캔이 같은 함수를 쓴다).
+    saved = _saved_spec(out)
+    svc = ((saved.get("stages") or {}).get("service") or {})
+    superseded = _superseded_grouped(out, state, bool(svc.get("confirm", False)))
     for x in sorted(out.glob("stage3-*.xml")):
         if x.name in superseded:
             continue

@@ -2671,6 +2671,7 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     stage_label = f" {run_stage_name(stage_id)}" if stage_id else ""
     print(f"[{idx + 1}/{len(plan['batches'])}]{stage_label} {display_command(cmd)}", flush=True)
     interrupted = False
+    watchdog_repaired = False
     problems: list[str] = []
     retried_engine = ""
     try:
@@ -2678,7 +2679,12 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
         rc = run_nmap_process(cmd, problems, watchdog_seconds=watchdog)
         if watchdog:
             # 끊긴 XML 을 살려 둔다 - 안 그러면 '관측은 남는다'는 말이 거짓이 된다.
-            repair_truncated_xml(Path(str(base) + ".xml"))
+            # **복구했다는 사실을 기억한다.** 복구하고 나면 파일이 파싱되므로 뒤의
+            # `_stage_xml_truncated()` 가 거짓이 되고, 그러면 이 산출물이 온전한 실행과
+            # 같은 이름으로 남아 `clean=True` 로 기록된다. manifest 없이 그 XML 만 올리면
+            # 화면의 중단본 필터도 통과하고, 서버 판정은 참고일 뿐이라 정상 인입 경로가
+            # **끊긴 자리 뒤의 발견을 닫는다.** 중단본과 같이 격리해야 한다.
+            watchdog_repaired = repair_truncated_xml(Path(str(base) + ".xml"))
         # UDP 식별이 죽으면 다른 nsock 엔진으로 한 번만 다시 시도한다.
         # nsock 은 epoll → kqueue → poll → iocp → select 순으로 고르므로(nsock_engines.c)
         # Windows 기본은 poll 이다. nmap#3138 의 poll 결함은 7.98 에서 고쳐졌지만, 같은
@@ -2720,12 +2726,16 @@ def run_nmap_stage(plan: dict, idx: int, state_path: Path, stage_id: str = "", t
     # 안 된다. 그런 파일이 결과 폴더에 남아 있으면 사람이 '결과가 나왔네' 하고 가져오려다
     # 오류를 만나고, 무엇보다 완주한 결과와 섞인다. 중단본과 같은 취급으로 격리한다 —
     # 사용자가 정한 규칙(부분 결과는 인입하지 않는다)이 원인과 무관하게 성립해야 한다.
-    truncated = not interrupted and _stage_xml_truncated(base)
+    # 워치독이 끊고 복구한 산출물도 '이 실행 자체를 믿을 수 없다' 쪽이다. 복구 뒤에는
+    # 파싱이 되므로 _stage_xml_truncated 만 보면 놓친다.
+    truncated = not interrupted and (_stage_xml_truncated(base) or watchdog_repaired)
     # 표식(problems)과 XML 미완결(truncated)은 다른 사실이다. 앞은 '부가 증거가 덜 찼다',
     # 뒤는 '이 실행 자체를 믿을 수 없다'. 섞으면 스크립트 소켓 하나가 실패한 정상 실행까지
     # 재실행 대상·닫힘 권한 박탈로 넘어간다.
     nse_degraded = bool(problems)
-    if truncated:
+    if watchdog_repaired:
+        problems.insert(0, "실행 상한을 넘겨 중단했습니다 - 끝난 호스트의 관측만 남았습니다.")
+    elif truncated:
         problems.insert(0, "nmap 이 XML 을 끝맺지 못했습니다(파일이 중간에서 끊김).")
     files = (mark_interrupted_outputs(base)
              if interrupted or truncated else existing_outputs(base))

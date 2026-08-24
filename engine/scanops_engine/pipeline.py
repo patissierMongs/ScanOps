@@ -26,10 +26,6 @@ _UDP_RETRY_ENGINE = "select"
 _MAX_SPLIT_UNITS = 32
 
 
-# 명령줄 맨 뒤의 타깃. 옵션과 구분하려면 시작 문자가 - 가 아니어야 한다.
-_TARGET_RE = re.compile(r"^(?!-)[0-9A-Za-z_.:/-]+$")
-
-
 class _LockedSink:
     """식별 단계를 동시에 돌리면 이벤트가 여러 스레드에서 나온다.
 
@@ -63,7 +59,7 @@ class Pipeline:
         self.open_map = self.state.get("open_map") or {}
 
     # ── 공통 ──
-    def _execution_meta(self, stage, args, base) -> dict:
+    def _execution_meta(self, stage, args, base, targets=None) -> dict:
         """Explain why this Nmap process is grouped or isolated."""
         name = Path(base).name
         proto = "udp" if "-sU" in args or stage == "udp" else "tcp"
@@ -92,8 +88,13 @@ class Pipeline:
             reason = "UDP 서비스 프로브 오류 뒤 nsock 엔진을 변경해 같은 범위를 복구합니다."
         # 지연 진단이 읽는 값들. 대상과 포트를 실을 자리가 없으면 화면의 '호스트별 소요'
         # 와 진행 중 표가 영원히 빈 채로 남는다 - 어느 호스트가 끌고 있는지가 이 도구를
-        # 쓰는 이유 중 하나다. argv 에서 되짚지 않고 실제로 올린 값을 그대로 적는다.
-        hosts = [a for a in args if _TARGET_RE.match(a)]
+        # 쓰는 이유 중 하나다.
+        #
+        # **타깃은 호출부가 알려 준 것만 쓴다.** argv 에서 '옵션이 아닌 값' 을 골라내려 하면
+        # 재시도 수·묶음 크기·포트 스펙·스크립트 상한이 전부 걸린다(실측: 2·64·100·2m 이
+        # 호스트로 잡혔다). 그러면 한 대짜리 실행이 '6대' 로 적히고, 호스트별 집계는 항목이
+        # 하나일 때만 세므로 그 표가 통째로 빈다.
+        hosts = [h for h in (targets or []) if isinstance(h, str)]
         try:
             ports = args[args.index("-p") + 1]
         except (ValueError, IndexError):
@@ -110,13 +111,13 @@ class Pipeline:
             "ports": ports,
         }
 
-    def _nmap(self, stage, args, base, fatal=True) -> dict:
+    def _nmap(self, stage, args, base, fatal=True, targets=None) -> dict:
         """``fatal=False`` 면 rc!=0 을 기록만 하고 counts["errors"] 를 올리지 않는다.
 
         run() 은 errors 로 job status 를 정하므로, 격리된 enrichment 실패까지 여기서 세면
         실패를 격리한 의미가 없어진다 — 실행 전체가 그대로 failed 가 된다.
         """
-        meta = self._execution_meta(stage, args, base)
+        meta = self._execution_meta(stage, args, base, targets)
         execution_id = f"{meta['artifact']}:{time.time_ns()}"
         argv = nmaprun.build_command(self.nmap, args, base, sudo_mode=self.spec.sudo)
         self.sink.emit("command_start", execution_id=execution_id, argv=argv, **meta)
@@ -357,7 +358,7 @@ class Pipeline:
         args += self._exclude_args()
         args += list(self.spec.targets)
         base = self.out / "stage0-discovery"
-        r = self._nmap("discovery", args, base)
+        r = self._nmap("discovery", args, base, targets=list(self.spec.targets))
         if r.get("stopped") or r["rc"] != 0:
             return []
         self._record_coverage("stage0-discovery.xml", "", "discovery",
@@ -497,7 +498,7 @@ class Pipeline:
         args += self._exclude_args()
         args += batch
         base = self.out / f"stage-{proto}-b{bi}"
-        r = self._nmap(proto, args, base)
+        r = self._nmap(proto, args, base, targets=list(batch))
         ok = not r.get("stopped") and r["rc"] == 0
         # 되짚기가 아니라 명령줄에 실제로 올린 batch 를 그대로 적는다.
         self._record_coverage(f"stage-{proto}-b{bi}.xml", proto, "authority",
@@ -694,7 +695,7 @@ class Pipeline:
         args = self._probe_args(proto, pspec, sp)
         args += list(targets)
         base = self.out / f"stage3-{proto}-b{bi}-g{group}"
-        r = self._nmap("service", args, base, fatal=not isolate)
+        r = self._nmap("service", args, base, fatal=not isolate, targets=list(targets))
         ok = not r.get("stopped") and r["rc"] == 0
         if not ok and not r.get("stopped") and proto == "udp" and not self.state.stopped():
             retry_started = time.time()
@@ -705,7 +706,7 @@ class Pipeline:
             # terminal 인입은 부분 stage3 산출물도 읽으므로 그 손실이 그대로 결과가 된다.
             alt_base = nmaprun.retry_base(base)
             r = self._nmap("service", ["--nsock-engine", _UDP_RETRY_ENGINE] + args,
-                           alt_base, fatal=not isolate)
+                           alt_base, fatal=not isolate, targets=list(targets))
             ok = not r.get("stopped") and r["rc"] == 0 and nmaprun.xml_usable(alt_base)
             if ok:
                 nmaprun.adopt_artifacts(alt_base, base)
@@ -752,7 +753,7 @@ class Pipeline:
         args.append(ip)
         suffix = tag or proto
         base = self.out / f"stage3-{ip.replace('.', '_')}-{suffix}{'-confirm' if confirm else ''}"
-        r = self._nmap("service", args, base, fatal=not isolate)
+        r = self._nmap("service", args, base, fatal=not isolate, targets=[ip])
         ok = not r.get("stopped") and r["rc"] == 0
         # UDP 식별이 죽었을 때 한 번만 다른 nsock 엔진으로 다시 시도한다.
         # nsock 은 epoll → kqueue → poll → iocp → select 순으로 고르므로(nsock_engines.c)
@@ -763,7 +764,7 @@ class Pipeline:
             retry_started = time.time()
             failed_execution_id = r.get("execution_id")
             r = self._nmap("service", ["--nsock-engine", _UDP_RETRY_ENGINE] + args, base,
-                           fatal=not isolate)
+                           fatal=not isolate, targets=[ip])
             ok = not r.get("stopped") and r["rc"] == 0
             self.sink.emit(
                 "service_retry", stage="service", proto=proto, ip=ip, hosts=[ip],

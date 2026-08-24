@@ -11,6 +11,7 @@ import sys
 import textwrap
 import zipfile
 from pathlib import Path
+import pathlib
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scanner" / "scanops_scanner.py"
 GUI_SCRIPT = Path(__file__).resolve().parents[2] / "scanner" / "scanops_scanner_gui.py"
@@ -3202,3 +3203,33 @@ def test_a_failed_udp_fallback_does_not_destroy_the_first_run_observations(tmp_p
     for suffix in scanner.NMAP_OUTPUT_SUFFIXES:
         assert (tmp_path / f"b0.udp_identify{suffix}").read_text(encoding="utf-8") == "better"
         assert not (tmp_path / f"retry~b0.udp_identify{suffix}").exists()
+
+
+def test_a_watchdog_repaired_artifact_is_quarantined_like_an_interrupted_one(tmp_path):
+    """복구했다고 온전한 실행처럼 남기면 안 된다.
+
+    복구하고 나면 XML 이 파싱되므로 `_stage_xml_truncated()` 가 거짓이 된다. 그것만 보면
+    이 산출물이 정상 실행과 **같은 이름**으로 남고 `clean=True` 로 기록된다. manifest 없이
+    그 XML 만 올리면 화면의 중단본 필터도 통과하고 서버 판정은 참고일 뿐이라, 정상 인입
+    경로가 **끊긴 자리 뒤의 발견을 닫는다** - 이 PR 이 내내 막아 온 미탐이다.
+    """
+    scanner = _load_scanner()
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "scanner" / "scanops_scanner.py").read_text(encoding="utf-8")
+
+    # 복구 여부를 실제로 기억하고, 그것을 격리 판정에 쓴다.
+    assert "watchdog_repaired = repair_truncated_xml(" in src, "복구 여부를 안 남긴다"
+    assert "_stage_xml_truncated(base) or watchdog_repaired" in src, (
+        "복구된 산출물이 격리 판정을 빠져나간다"
+    )
+
+    # 격리 대상이면 파일이 interrupted/ 로 옮겨지고 이름에 표식이 붙는다.
+    base = tmp_path / "scan.10_0_0_1.udp_identify"
+    for suffix in (".xml", ".nmap", ".gnmap"):
+        pathlib.Path(str(base) + suffix).write_text("partial", encoding="utf-8")
+    moved = scanner.mark_interrupted_outputs(base)
+    assert moved, "격리가 아무 파일도 옮기지 않았다"
+    for name in moved:
+        assert scanner.is_interrupted_output(name), f"격리 표식이 없다: {name}"
+    # 원래 자리에는 남지 않는다 - 남으면 온전한 결과와 섞인다.
+    assert not pathlib.Path(str(base) + ".xml").exists()
