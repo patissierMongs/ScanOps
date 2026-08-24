@@ -449,3 +449,96 @@ def test_an_execution_without_diagnostics_stores_nothing():
         assert row.diagnostics_json is None
     finally:
         db.close()
+
+
+def test_a_retry_that_proves_closure_stops_asking_for_another_retry(client):
+    """재시도가 '이제 닫혔다' 를 확인했으면 그 이슈는 끝난 것이다.
+
+    서비스 저하 이슈는 재시도의 서비스 단계가 done 이어야 해결로 쳤다. 그런데 재시도
+    훑기가 그 포트의 닫힘을 권위 있게 확인하면 열린 포트가 없어 **서비스 프로브 자체가
+    돌지 않는다** - 상태는 unknown 으로 남고, 이슈는 영원히 미해결로 남아 화면이 같은
+    재스캔을 계속 권한다. 재시도로는 절대 벗어날 수 없는 고리다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import (
+        EndpointObservation, ScanHostObservation, ScanQualityIssue, ScanRun,
+    )
+
+    db = SessionLocal()
+    try:
+        source = _issue_scan(db, "저하", [("service_degraded", "10.0.0.8")])
+        issue = db.query(ScanQualityIssue).filter_by(scan_id=source.id).one()
+        issue.stage = "tcp_service"
+        retry = ScanRun(name="재시도", targets="10.0.0.8", status="done", command="x")
+        db.add(retry); db.commit()
+        issue.retry_scan_id = retry.id
+        # 재시도: 훑기는 끝났고(done), 열린 포트가 없어 서비스 단계는 돌지 않았다(unknown).
+        db.add(ScanHostObservation(
+            scan_id=retry.id, host_ip="10.0.0.8", discovery_status="done",
+            tcp_sweep_status="done", tcp_service_status="unknown",
+        ))
+        # 그리고 그 닫힘을 권위 있게 기록했다.
+        db.add(EndpointObservation(
+            scan_id=retry.id, finding_key="10.0.0.8|8080|tcp", host_ip="10.0.0.8",
+            port=8080, proto="tcp", state="closed", evidence_kind="absence",
+        ))
+        db.commit()
+        source_id, retry_id = source.id, retry.id
+
+        count = scans_api._resolve_retry_observations(
+            db, retry_id, {"scanops": {"retry_of": source_id}},
+            {"authority_missing": [], "authority_broken": []},
+        )
+        db.commit()
+        assert count == 1, "닫힘을 확인한 재시도가 이슈를 해결하지 못했다"
+        assert db.query(ScanQualityIssue).filter_by(
+            scan_id=source_id).one().resolved_by_scan_id == retry_id
+        assert scans_api._retry_history(
+            [db.get(ScanRun, source_id)], db,
+        )[source_id]["retry_status"] != "required", "해결됐는데 또 재스캔을 권한다"
+    finally:
+        db.close()
+
+
+def test_a_retry_that_left_a_port_open_still_needs_the_service_probe(client):
+    """반대쪽 - 열린 것이 남았는데 식별을 안 했으면 해결이 아니다.
+
+    닫힘 확인을 해결로 인정하는 규칙이 '서비스 단계가 안 돌았으면 무조건 해결' 로
+    넓어지면, 식별에 실패한 재시도가 스스로를 성공이라 부르게 된다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal
+    from scanops.models import (
+        EndpointObservation, ScanHostObservation, ScanQualityIssue, ScanRun,
+    )
+
+    db = SessionLocal()
+    try:
+        source = _issue_scan(db, "저하2", [("service_degraded", "10.0.0.9")])
+        issue = db.query(ScanQualityIssue).filter_by(scan_id=source.id).one()
+        issue.stage = "tcp_service"
+        retry = ScanRun(name="재시도2", targets="10.0.0.9", status="done", command="x")
+        db.add(retry); db.commit()
+        issue.retry_scan_id = retry.id
+        db.add(ScanHostObservation(
+            scan_id=retry.id, host_ip="10.0.0.9", discovery_status="done",
+            tcp_sweep_status="done", tcp_service_status="unknown",
+        ))
+        # 열린 포트가 남아 있다 - 식별했어야 하는데 안 했다.
+        db.add(EndpointObservation(
+            scan_id=retry.id, finding_key="10.0.0.9|22|tcp", host_ip="10.0.0.9",
+            port=22, proto="tcp", state="open", evidence_kind="positive",
+        ))
+        db.commit()
+        source_id, retry_id = source.id, retry.id
+
+        assert scans_api._resolve_retry_observations(
+            db, retry_id, {"scanops": {"retry_of": source_id}},
+            {"authority_missing": [], "authority_broken": []},
+        ) == 0, "열린 포트를 식별하지 않은 재시도를 해결로 쳤다"
+        db.commit()
+        assert db.query(ScanQualityIssue).filter_by(
+            scan_id=source_id).one().resolved_by_scan_id is None
+    finally:
+        db.close()

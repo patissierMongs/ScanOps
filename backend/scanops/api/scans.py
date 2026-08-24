@@ -24,8 +24,8 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import SessionLocal, get_db
 from ..models import (
-    ACTIVE_FINDING_STATES, Finding, FindingEvent, ScanExecution, ScanHostObservation,
-    ScanQualityIssue, ScanRun, User,
+    ACTIVE_FINDING_STATES, EndpointObservation, Finding, FindingEvent, ScanExecution,
+    ScanHostObservation, ScanQualityIssue, ScanRun, User,
 )
 from ..schemas import IngestSummary, KnownResultsIn, RawCommandIn, ScanOut, ScanRunIn
 from ..uploads import read_limited
@@ -1517,13 +1517,35 @@ def _resolve_retry_observations(db: Session, retry_scan_id: int, saved_spec: dic
         "tcp_service": "tcp_service_status", "udp": "udp_sweep_status",
         "udp_service": "udp_service_status",
     }
+    # 재시도가 '이제 다 닫혔다' 를 권위 있게 확인하면 서비스 프로브는 **돌 이유가 없다** -
+    # 열린 포트가 없으니까. 그런데 서비스 단계 상태는 stage3 산출물이 있어야만 done 이 되어
+    # unknown 으로 남고, 아래 엄격한 done 검사가 그 이슈를 영원히 미해결로 붙잡아 끝없이
+    # 재스캔을 권했다. 재시도가 그 호스트/프로토콜에서 열린 것을 하나도 못 봤다면
+    # (positive 근거 0건) 그것이 곧 답이다.
+    open_after = {
+        (row.host_ip, row.proto) for row in db.query(
+            EndpointObservation.host_ip, EndpointObservation.proto,
+        ).filter(
+            EndpointObservation.scan_id == retry_scan_id,
+            EndpointObservation.evidence_kind == "positive",
+        ).distinct().all()
+    }
+    sweep_field = {"tcp_service": "tcp_sweep_status", "udp_service": "udp_sweep_status"}
     resolved = []
     for issue in source_issues:
         canonical = engine_runner.canonical_stage(issue.stage)
         field = stage_field.get(canonical)
         host = host_rows.get(issue.host_ip)
-        if not field or host is None or getattr(host, field) != "done":
+        if not field or host is None:
             continue
+        if getattr(host, field) != "done":
+            swept = sweep_field.get(canonical)
+            if not swept or getattr(host, swept) != "done":
+                continue
+            # 훑기는 끝났는데 식별 단계가 비어 있다. 열린 것이 남아 있으면 프로브가 돌았을
+            # 테니, 안 돌았다는 것은 남은 게 없다는 뜻이다. 그 경우에만 해결로 본다.
+            if (issue.host_ip, canonical.split("_", 1)[0]) in open_after:
+                continue
         if (issue.kind, canonical, issue.host_ip) in child_issues:
             continue
         resolved.append(issue.issue_key)
@@ -2688,6 +2710,52 @@ def list_scans(_: User = Depends(current_user), db: Session = Depends(get_db)):
     ]
 
 
+def _findings_backed_by_other_scans(
+    db: Session, finding_ids: list[int], deleting_scan_id: int,
+) -> dict[int, set[int]]:
+    """{발견 id: 그 발견을 아직 뒷받침하는 다른 스캔 id들}. 뒷받침이 없으면 아예 안 담는다.
+
+    근거는 두 가지다 - 그 발견에 달린 이력 이벤트가 가리키는 스캔, 그리고 같은
+    finding_key 를 관측한 endpoint 스냅샷. 둘 다 지워지는 스캔의 것은 제외한다
+    (스냅샷은 스캔 삭제 시 CASCADE 로 함께 사라진다).
+    """
+    if not finding_ids:
+        return {}
+    backing: dict[int, set[int]] = {}
+    keys: dict[str, list[int]] = {}
+    for start in range(0, len(finding_ids), 500):
+        chunk = finding_ids[start:start + 500]
+        for finding_id, key in db.query(Finding.id, Finding.finding_key).filter(
+            Finding.id.in_(chunk)
+        ).all():
+            keys.setdefault(key, []).append(finding_id)
+        for finding_id, other in db.query(
+            FindingEvent.finding_id, FindingEvent.scan_id,
+        ).filter(
+            FindingEvent.finding_id.in_(chunk),
+            FindingEvent.scan_id.isnot(None),
+            FindingEvent.scan_id != deleting_scan_id,
+        ).distinct().all():
+            backing.setdefault(finding_id, set()).add(other)
+    key_list = list(keys)
+    for start in range(0, len(key_list), 500):
+        chunk = key_list[start:start + 500]
+        for key, other in db.query(
+            EndpointObservation.finding_key, EndpointObservation.scan_id,
+        ).filter(
+            EndpointObservation.finding_key.in_(chunk),
+            EndpointObservation.scan_id != deleting_scan_id,
+        ).distinct().all():
+            for finding_id in keys.get(key, ()):
+                backing.setdefault(finding_id, set()).add(other)
+    # 이미 사라진 스캔을 가리키는 흔적은 근거가 아니다.
+    referenced = {sid for ids in backing.values() for sid in ids}
+    alive = {
+        row.id for row in db.query(ScanRun.id).filter(ScanRun.id.in_(list(referenced))).all()
+    } if referenced else set()
+    return {fid: (ids & alive) for fid, ids in backing.items() if ids & alive}
+
+
 @router.delete("/{scan_id}")
 def delete_scan(
     scan_id: int,
@@ -2737,6 +2805,20 @@ def delete_scan(
         ).all()
     ]
     owned_ids = list(dict.fromkeys(owned_ids + stranded_ids))
+    # 참조가 끊겼다고 근거가 없는 것은 아니다. 세 번 이상 관측된 발견에서 **마지막** 스캔을
+    # 먼저 지우면 last 가 NULL 이 되고, 이어서 **첫** 스캔을 지우면 위 두 조건이 모두 참이
+    # 된다 - 가운데 스캔과 그 관측이 멀쩡히 살아 있는데도 발견과 이력, 사람이 달아 둔
+    # 상태·담당자·메모까지 지워진다. 그래서 지우기 전에 '살아 있는 다른 스캔이 이 발견을
+    # 여전히 뒷받침하는가' 를 실제 관측으로 되묻고, 뒷받침하면 지우는 대신 참조를 고친다.
+    supported = _findings_backed_by_other_scans(db, owned_ids, scan_id)
+    if supported:
+        owned_ids = [fid for fid in owned_ids if fid not in supported]
+        for finding_id, scan_ids in supported.items():
+            # 스캔 id 는 시간순으로 늘어나므로 최소/최대가 첫/마지막 관측이다.
+            db.query(Finding).filter(Finding.id == finding_id).update(
+                {Finding.first_scan_id: min(scan_ids), Finding.last_scan_id: max(scan_ids)},
+                synchronize_session=False,
+            )
     for start in range(0, len(owned_ids), 500):
         chunk = owned_ids[start:start + 500]
         db.query(FindingEvent).filter(FindingEvent.finding_id.in_(chunk)).delete(
@@ -3675,6 +3757,12 @@ def scan_stages(scan_id: int, _: User = Depends(current_user), db: Session = Dep
             # 정보가 사라져 화면이 'undefined대' 를 그린다.
             "watchdog_seconds": 0, "timeout_count": 0, "timed_out": [],
             "retransmission_cap_count": 0, "retransmission_cap_hosts": [],
+            # 지연 추적이 읽는 자리도 라이브와 같은 모양으로 비워 둔다. 수확량
+            # (hosts_found…)은 일부러 넣지 않는다 - 화면이 그 부재로 '기록 없음' 을
+            # 가리므로, 0 을 채워 넣으면 이 기능 이전의 옛 행이 '아무것도 못 찾음' 으로
+            # 보인다. 안 찾은 것과 기록이 없는 것은 다르다.
+            "proto": "", "hosts": [], "label": "", "ports": "", "phases": {},
+            "empty": False,   # 저장은 True 일 때만 한다(위 _diagnostics) - 자리만 맞춘다.
             **(row.diagnostics_json or {}),
         } for row in durable_executions]
         issues = [_issue_out({

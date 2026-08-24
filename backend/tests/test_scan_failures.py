@@ -2241,3 +2241,58 @@ def test_a_quality_issue_names_the_same_host_while_running_as_after_it_ends(
     )
     assert {k: kept[k] for k in ("type", "host", "proto", "port_spec")} == \
            {k: issue[k] for k in ("type", "host", "proto", "port_spec")}
+
+
+def test_the_delay_panel_survives_the_scan_finishing(client, monkeypatch, tmp_path):
+    """지연 추적 패널은 스캔이 **끝난 뒤에** 더 많이 쓰인다.
+
+    완료된 스캔의 /stages 는 이벤트가 아니라 DB 투영으로 그린다. 영속 행이 워치독·시간
+    초과만 담고 proto/hosts/label/ports/phases/수확량을 버리면, 스캔이 종료되는 순간
+    호스트별 소요와 nmap 내부 단계가 통째로 사라지고 '오래 걸린 실행' 표가 전부 '—' 가
+    된다 - 하필 사람이 지연을 들여다보는 시점이 그때다.
+
+    그래서 라이브와 완료의 trace 를 **같은 스캔에서** 비교한다.
+    """
+    monkeypatch.setattr(scans_api._settings, "data_dir", tmp_path)
+    scan_id = _scan_with_spec(tmp_path, {"targets": ["10.0.0.7"], "out_dir": str(tmp_path)})
+    out_dir = tmp_path / "scans" / f"scan_{scan_id}"
+    (out_dir / "events.ndjson").write_text("\n".join(json.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "service"},
+        {"event": "command_start", "stage": "service", "execution_id": "x1",
+         "argv": ["nmap", "-sS", "-p", "T:22,443", "10.0.0.7"], "artifact": "stage3-10_0_0_7-tcp",
+         "proto": "tcp", "hosts": ["10.0.0.7"], "label": "10.0.0.7", "ports": "T:22,443",
+         "ts": 1000.0},
+        {"event": "command_done", "stage": "service", "execution_id": "x1", "outcome": "done",
+         "seconds": 612.0, "rc": 0, "ts": 1612.0,
+         "phases": {"Service scan": 600.0, "SYN Stealth Scan": 12.0},
+         "hosts_found": 1, "open_ports": 2, "inferred_open": 0, "products": 2, "empty": False},
+        {"event": "job_done", "status": "done"},
+    ]) + "\n", encoding="utf-8")
+
+    headers = _headers(client)
+    live = client.get(f"/api/scans/{scan_id}/stages", headers=headers).json()["trace"]
+    assert live["by_host"] and live["by_phase"], "라이브부터 비어 있으면 비교가 무의미하다"
+
+    db = SessionLocal()
+    try:
+        scan = db.get(ScanRun, scan_id)
+        scans_api._materialize_engine_terminal(
+            db, scan, out_dir, {"targets": ["10.0.0.7"]},
+            {"authority_missing": [], "authority_broken": []}, [],
+        )
+        scan.status = "done"
+        db.commit()
+    finally:
+        db.close()
+
+    ended = client.get(f"/api/scans/{scan_id}/stages", headers=headers)
+    assert ended.json()["source"] == "db", "DB 투영으로 안 넘어가면 비교가 무의미하다"
+    trace = ended.json()["trace"]
+    assert trace["by_host"] == live["by_host"], "끝나는 순간 호스트별 소요가 사라졌다"
+    assert trace["by_phase"] == live["by_phase"], "끝나는 순간 nmap 내부 단계가 사라졌다"
+    slow = trace["slowest"][0]
+    assert (slow["label"], slow["ports"], slow["proto"]) == ("10.0.0.7", "T:22,443", "tcp"), (
+        "오래 걸린 실행 표가 대상·포트 근거를 잃었다"
+    )
+    assert (slow["hosts_found"], slow["open_ports"], slow["products"]) == (1, 2, 2)
+    assert slow["empty"] is False

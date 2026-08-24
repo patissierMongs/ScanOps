@@ -32,6 +32,12 @@ _HOST_STATUS_FIELDS = (
 # 라이브 실행 뷰가 쓰는 진단 필드. 여기 없는 것은 화면도 안 그린다.
 _DIAGNOSTIC_INTS = ("watchdog_seconds", "timeout_count", "retransmission_cap_count")
 _DIAGNOSTIC_LISTS = ("timed_out", "retransmission_cap_hosts")
+# 지연 추적 패널(`fold_trace` → `ScanTrace.jsx`)이 실행 한 건에서 읽는 것들. 완료된 스캔은
+# 이벤트가 아니라 이 영속 행으로 그리므로, 여기 안 남기면 스캔이 끝나는 **순간** 호스트별
+# 소요와 nmap 내부 단계가 통째로 사라지고 '오래 걸린 실행' 표가 전부 '—' 가 된다.
+# 하필 지연을 들여다보는 시점이 그때다.
+_TRACE_TEXT = ("proto", "label", "ports")
+_TRACE_YIELD = ("hosts_found", "open_ports", "inferred_open", "products")
 
 
 def _diagnostics(raw: Mapping) -> dict | None:
@@ -47,6 +53,28 @@ def _diagnostics(raw: Mapping) -> dict | None:
             hosts = [item for item in value if isinstance(item, str)]
             if hosts:
                 out[key] = hosts
+    for key in _TRACE_TEXT:
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            out[key] = value[:256]
+    hosts = [item for item in (raw.get("hosts") or []) if isinstance(item, str)]
+    if hosts:
+        out["hosts"] = hosts
+    phases = raw.get("phases")
+    if isinstance(phases, Mapping):
+        kept = {name: float(spent) for name, spent in phases.items()
+                if isinstance(name, str)
+                and isinstance(spent, (int, float)) and not isinstance(spent, bool)}
+        if kept:
+            out["phases"] = kept
+    # 수확량은 0 도 뜻이 있다 - 화면은 `hosts_found == null` 로 '기록 없음' 을 가리므로,
+    # 0 을 떨어뜨리면 정상적으로 아무것도 못 찾은 실행이 '기록조차 없는' 실행이 된다.
+    for key in _TRACE_YIELD:
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            out[key] = value
+    if raw.get("empty") is True:
+        out["empty"] = True
     return out or None
 
 

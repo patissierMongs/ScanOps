@@ -3272,3 +3272,72 @@ def test_deleting_a_chunked_scan_takes_its_sibling_artifacts_with_it(client):
     assert not left, f"삭제한 스캔의 증거가 디스크에 남았다: {left}"
     assert neighbour.exists(), "접두사가 겹치는 다른 스캔의 파일을 지웠다"
     neighbour.unlink()
+
+
+def test_a_finding_survives_while_any_scan_still_observed_it(client):
+    """세 번 관측된 발견은 가운데 스캔이 살아 있는 한 지워지면 안 된다.
+
+    마지막 스캔을 먼저 지우면 last_scan_id 가 NULL 이 되고, 이어서 첫 스캔을 지우면
+    '이 발견을 가리키는 스캔이 하나도 없다' 는 조건이 참이 된다 - 가운데 스캔과 그
+    관측이 멀쩡한데도 발견·이력·사람이 달아 둔 상태와 메모가 함께 사라진다.
+
+    살아남을 때는 참조도 고쳐져야 한다. NULL 로 남으면 다음 삭제에서 같은 함정에
+    다시 걸리고, 그때는 정말 근거가 없어진 것과 구분되지 않는다.
+    """
+    from scanops.db import SessionLocal
+    from scanops.models import EndpointObservation, Finding, FindingEvent, ScanRun
+
+    make_user("threeboss", "boss-pass-1234", role="admin")
+    admin = {"Authorization": f"Bearer {token_for(client, 'threeboss', 'boss-pass-1234')}"}
+
+    db = SessionLocal()
+    first = ScanRun(name="1st", status="done")
+    middle = ScanRun(name="2nd", status="done")
+    last = ScanRun(name="3rd", status="done")
+    db.add_all([first, middle, last]); db.commit()
+    key = "10.9.9.9|8080|tcp"
+    finding = Finding(finding_key=key, host_ip="10.9.9.9", port=8080, proto="tcp",
+                      state="open", status="in_progress", owner="담당자",
+                      first_scan_id=first.id, last_scan_id=last.id)
+    db.add(finding); db.commit()
+    db.add_all([
+        FindingEvent(finding_id=finding.id, scan_id=first.id, type="NEW_OPEN"),
+        FindingEvent(finding_id=finding.id, scan_id=middle.id, type="SERVICE_CHANGED"),
+        FindingEvent(finding_id=finding.id, scan_id=last.id, type="VERSION_CHANGED"),
+        EndpointObservation(scan_id=middle.id, finding_key=key, host_ip="10.9.9.9",
+                            port=8080, proto="tcp", state="open", evidence_kind="observed"),
+    ])
+    db.commit()
+    ids = (first.id, middle.id, last.id, finding.id)
+    db.close()
+    first_id, middle_id, last_id, finding_id = ids
+
+    assert client.delete(f"/api/scans/{last_id}", headers=admin).status_code == 200
+    r = client.delete(f"/api/scans/{first_id}", headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["findings_deleted"] == 0, "가운데 스캔이 살아 있는데 발견을 지웠다"
+
+    db = SessionLocal()
+    try:
+        kept = db.get(Finding, finding_id)
+        assert kept is not None, "아직 관측이 남아 있는 발견이 사라졌다"
+        assert kept.status == "in_progress" and kept.owner == "담당자"
+        assert kept.first_scan_id == kept.last_scan_id == middle_id, (
+            "살아남은 근거로 참조가 복구되지 않았다 - 다음 삭제에서 같은 함정에 걸린다"
+        )
+        events = db.query(FindingEvent).filter_by(finding_id=finding_id).all()
+        # 이력은 감사 추적이라 스캔이 사라져도 남는다 - 다만 사라진 스캔을 가리키지는
+        # 않는다(유령 ID 방지). 살아 있는 스캔의 이벤트만 그 스캔을 계속 가리킨다.
+        assert len(events) == 3, "발견의 이력이 함께 지워졌다"
+        assert [e.type for e in events if e.scan_id is not None] == ["SERVICE_CHANGED"]
+        assert {e.scan_id for e in events if e.scan_id is not None} == {middle_id}
+    finally:
+        db.close()
+
+    # 이제 마지막 근거까지 지우면 그때는 발견도 함께 사라진다.
+    assert client.delete(f"/api/scans/{middle_id}", headers=admin).json()["findings_deleted"] == 1
+    db = SessionLocal()
+    try:
+        assert db.get(Finding, finding_id) is None
+    finally:
+        db.close()
