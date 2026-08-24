@@ -736,17 +736,34 @@ test("an allowed finding is folded on a different axis than a resolved one", () 
 test("a rule's match count leads to the findings it actually matched", () => {
   // 건수만 보여 주면 '그래서 어떤 건데?' 를 매번 손으로 찾아야 한다. 서버 _match_count 와
   // 같은 기준이어야 건수와 목록이 어긋나지 않는다.
+  const unfolded = {
+    hideNormal: false, hideAllowed: false, hideUnconfirmed: false, hideTcpwrapped: false,
+  };
   assert.deepEqual(matchFocus({ kind: "service_rule", service: "telnet" }), {
-    filters: { service: "telnet" }, match: "exact", hideNormal: false, hideAllowed: false,
+    filters: { service: "telnet" }, match: "exact", ...unfolded,
   });
   assert.deepEqual(matchFocus({ kind: "port_rule", port: 3389, service: "" }), {
-    filters: { port: "3389" }, match: "exact", hideNormal: false, hideAllowed: false,
+    filters: { port: "3389" }, match: "exact", ...unfolded,
   });
   assert.deepEqual(matchFocus({ kind: "product_rule", product: "vsftpd" }), {
-    filters: { product: "vsftpd" }, match: "contains", hideNormal: false, hideAllowed: false,
+    filters: { product: "vsftpd" }, match: "contains", ...unfolded,
   });
-  // 허용 규칙의 매칭은 기본으로 접혀 있다 - 그대로 이동하면 빈 목록만 보인다.
-  assert.equal(matchFocus({ kind: "cpe_rule", cpe: "openssh" }).hideAllowed, false);
+  // 목록 화면이 평소 접는 축은 **전부** 풀어야 한다. `_match_count` 는
+  // ACTIVE_FINDING_STATES(open + open|filtered)를 세고 상태·허용·식별로 거르지 않으므로,
+  // 하나라도 접힌 채로 이동하면 "3건" 을 눌렀는데 빈 목록이나 모자란 목록이 나온다.
+  for (const rule of [{ kind: "cpe_rule", cpe: "openssh" },
+                      { kind: "service_rule", service: "telnet" }]) {
+    const focus = matchFocus(rule);
+    for (const axis of Object.keys(unfolded)) {
+      assert.equal(focus[axis], false, `${rule.kind}: ${axis} 가 접힌 채로 이동한다`);
+    }
+  }
+  // 발견 화면은 없는 값을 '접힘' 으로 읽는다(`focus.hideUnconfirmed ?? true`) - 필드를
+  // 빠뜨리면 조용히 접힌다. 그래서 존재 자체를 확인한다.
+  const focusKeys = Object.keys(matchFocus({ kind: "service_rule", service: "x" }));
+  for (const axis of Object.keys(unfolded)) {
+    assert.ok(focusKeys.includes(axis), `matchFocus 가 ${axis} 를 안 보낸다`);
+  }
 
   const rules = source("../src/views/Rules.jsx");
   assert.match(rules, /onShowMatches\(matchFocus\(r\)\)/);

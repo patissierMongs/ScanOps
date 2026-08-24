@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from pathlib import Path as pathlib_Path
+
 from tests.conftest import make_user, token_for
 
 XML = "tests/fixtures/sample_scan.xml"
@@ -3054,6 +3056,30 @@ def test_identification_wins_only_for_the_keys_it_actually_reported(client):
     assert by_port[161]["service"] == "snmp"
     # 162 는 스윕만 봤다 - 열림은 증명됐지만 정체는 관측되지 않았다.
     assert by_port[162]["state"] == "open|filtered"
+
+
+def test_the_imported_timeline_shows_every_stage_that_actually_ran(client):
+    """발견으로는 인입되는데 타임라인에서는 사라지면 안 된다.
+
+    같은 배치에 같은 역할의 파일이 여럿이면 슬롯 접미사가 붙는다(`tcp_identify#g0`).
+    타임라인이 정확한 역할 이름만 찾으면 그 산출물들이 통째로 빠진다 - 실측으로 5개 파일을
+    올렸는데 `tcp_discovery` 한 줄만 남았다. 스캔이 무엇을 돌렸는지 화면이 거짓으로 말한다.
+    """
+    h = _auth(client)
+    r = _upload(client, h, _engine_files())        # 발견·TCP스윕·UDP스윕·TCP식별·UDP식별
+    assert r.status_code == 200, r.text
+    scan_id = r.json()["scans"][0]["scan_id"]
+    stages = client.get(f"/api/scans/{scan_id}", headers=h).json().get("stages_json") or []
+    assert [s["stage"] for s in stages] == [
+        "discovery", "tcp_discovery", "udp", "tcp_identify", "udp_identify"
+    ], f"타임라인에서 단계가 빠졌다: {[s['stage'] for s in stages]}"
+
+    # 화면이 이름을 아는 단계여야 한다 - 이름 없는 칩은 사용자에게 아무 말도 못 한다.
+    labels = (pathlib_Path(__file__).resolve().parents[2]
+              / "frontend" / "src" / "views" / "Scans.jsx").read_text(encoding="utf-8")
+    label_map = labels.split("const STAGE_LABEL = {")[1].split("};")[0]
+    for stage in {s["stage"] for s in stages}:
+        assert f"{stage}:" in label_map, f"화면이 모르는 단계 이름: {stage}"
 
 
 def test_a_whole_scans_folder_splits_into_one_row_per_actual_run(client):

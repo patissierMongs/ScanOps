@@ -2133,6 +2133,19 @@ def _stage_artifact_name(scan_id: int, stage: str, batch: int, many: bool) -> st
     return f"scan_{scan_id}.b{batch}.{slot}.xml" if many else f"scan_{scan_id}.{slot}.xml"
 
 
+# 역할 -> 화면이 이름을 아는 단계(Scans.jsx STAGE_LABEL). 여기 없는 역할은 그리지 않는다 -
+# 이름 없는 칩을 띄우느니 빼는 편이 낫다.
+_TIMELINE_STAGE = {
+    ENGINE_ROLE_DISCOVERY: "discovery",
+    "tcp_discovery": "tcp_discovery",
+    "udp_sweep": "udp",
+    "tcp_identify": "tcp_identify",
+    "udp_identify": "udp_identify",
+}
+# 실제로 도는 순서. dict 순서에 맡기면 배치마다 칩 순서가 달라진다.
+_TIMELINE_ORDER = ("discovery", "tcp_discovery", "udp", "tcp_identify", "udp_identify")
+
+
 def _import_timeline(batches: list[tuple[str, dict]], prepared: list[dict]) -> list[dict]:
     """가져온 실행의 단계 타임라인 — 웹에서 돌린 단계 스캔과 같은 모양으로 보이게 한다.
 
@@ -2141,18 +2154,30 @@ def _import_timeline(batches: list[tuple[str, dict]], prepared: list[dict]) -> l
     """
     timeline = []
     for index, (base, stages) in enumerate(batches):
-        for stage in ("tcp_discovery", "tcp_identify", "udp_identify"):
-            values = prepared[index].get(stage)
+        # 한 배치에 같은 역할의 파일이 여럿일 수 있다(엔진의 gN 식별 그룹·격리 재시도).
+        # 역할별로 **합쳐서** 한 줄로 그린다 - 정확한 슬롯 이름만 찾으면 그 산출물들이
+        # 발견으로는 인입되면서 타임라인에서는 통째로 사라진다(실측: 5개 파일 -> 1줄).
+        merged: dict[str, dict] = {}
+        for slot, values in prepared[index].items():
             if values is None:
                 continue
+            stage = _TIMELINE_STAGE.get(slot.split("#", 1)[0])
+            if stage is None:
+                continue
             _date, findings, hosts, _tcp, _udp = values
-            counts = {"live": len(hosts), "open_ports": len(findings)}
+            entry = merged.setdefault(stage, {"live": set(), "open_ports": 0})
+            entry["live"] |= set(hosts)
+            entry["open_ports"] += len(findings)
+        for stage in _TIMELINE_ORDER:
+            entry = merged.get(stage)
+            if entry is None:
+                continue
             timeline.append({
                 "stage": stage,
                 "status": "done",
                 "percent": 100,
                 "seconds": None,
-                "counts": counts,
+                "counts": {"live": len(entry["live"]), "open_ports": entry["open_ports"]},
                 "batch": index,
                 "base": Path(base.replace("\\", "/")).name,
             })
