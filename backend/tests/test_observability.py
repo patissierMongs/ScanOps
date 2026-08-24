@@ -542,3 +542,56 @@ def test_a_retry_that_left_a_port_open_still_needs_the_service_probe(client):
             scan_id=source_id).one().resolved_by_scan_id is None
     finally:
         db.close()
+
+
+def test_a_recovered_execution_leaves_no_issue_of_any_kind_behind(tmp_path):
+    """대체된 실행의 진단은 종류를 가리지 않고 사라져야 한다.
+
+    UDP 첫 시도가 재전송 상한을 찍고 비정상 종료한 뒤 select 폴백이 성공하면, 그
+    산출물은 대체본으로 교체된다. 예전에는 그 실행의 command_error 만 걷어내서
+    retransmission_cap 이 그대로 살아남았고, 대체 실행이 그 호스트를 성공적으로 다시
+    훑었는데도 호스트가 재스캔 대기열에 계속 남았다.
+
+    동시에, 실행에 매이지 않은 이슈(service_degraded)는 그대로 있어야 한다 - 그건
+    대체된 산출물의 진단이 아니다.
+    """
+    import json as json_module
+
+    from scanops.scanning import engine_runner
+
+    (tmp_path / "events.ndjson").write_text("\n".join(json_module.dumps(ev) for ev in [
+        {"event": "job_start", "stage": "service"},
+        {"event": "command_start", "stage": "udp_service", "execution_id": "first",
+         "argv": ["nmap", "-sU", "10.0.0.9"], "hosts": ["10.0.0.9"], "ts": 1000.0},
+        {"event": "command_done", "stage": "udp_service", "execution_id": "first",
+         "outcome": "error", "seconds": 400.0, "rc": 1, "ts": 1400.0,
+         "retransmission_cap_count": 1, "retransmission_cap_hosts": ["10.0.0.9"],
+         "timeout_count": 1, "timed_out": ["10.0.0.9"]},
+        {"event": "error", "stage": "udp_service", "execution_id": "first", "fatal": True,
+         "message": "UDP 식별 실패", "ts": 1400.0},
+        # 폴백이 성공해 그 산출물을 대체했다.
+        {"event": "command_start", "stage": "udp_service", "execution_id": "second",
+         "argv": ["nmap", "--nsock-engine", "select", "-sU", "10.0.0.9"],
+         "hosts": ["10.0.0.9"], "ts": 1401.0},
+        {"event": "command_done", "stage": "udp_service", "execution_id": "second",
+         "outcome": "done", "seconds": 30.0, "rc": 0, "ts": 1431.0},
+        {"event": "service_retry", "stage": "service", "proto": "udp",
+         "hosts": ["10.0.0.9"], "engine": "select", "outcome": "recovered",
+         "recovered": True, "recovery_of_execution_id": "first",
+         "execution_id": "second", "ts": 1431.0},
+        # 실행에 매이지 않은 이슈 - 살아 있어야 한다.
+        {"event": "service_degraded", "stage": "service", "proto": "udp",
+         "hosts": ["10.0.0.9"], "port_spec": "U:161", "message": "일부 미완료"},
+        {"event": "job_done", "status": "done"},
+    ]) + "\n", encoding="utf-8")
+
+    parsed = engine_runner.parse_events(tmp_path)
+    kinds = {issue["kind"] for issue in parsed["quality_issues"]}
+    assert "retransmission_cap" not in kinds, (
+        f"대체된 실행의 재전송 상한이 살아남아 호스트가 대기열에 남는다: {kinds}"
+    )
+    assert "host_timeout" not in kinds, f"대체된 실행의 시간 초과가 살아남았다: {kinds}"
+    assert "command_error" not in kinds, f"예전에 고친 것이 되돌아갔다: {kinds}"
+    assert "service_degraded" in kinds, (
+        f"실행에 매이지 않은 이슈까지 지웠다 - 그건 대체된 산출물의 진단이 아니다: {kinds}"
+    )

@@ -604,6 +604,7 @@ class Pipeline:
                 completed_hosts=sum(count == 0 for count in remaining.values()),
                 total_hosts=len(pending),
             )
+            wave_started = time.time()
             if len(wave) == 1:
                 gi, (hosts, ports) = wave[0]
                 results = [(gi, hosts, ports, *self._probe_batch_protocol(
@@ -619,8 +620,13 @@ class Pipeline:
                     ]
                     results = [(gi, hosts, ports, *future.result())
                                for gi, hosts, ports, future in futures]
-            for _gi, hosts, ports, seconds, found, ok in results:
-                elapsed += seconds
+            # 이 파도는 **동시에** 돈다. 각 명령의 소요를 더하면 10분짜리 16개가 도는
+            # 파도가 160분으로 남는다 - 그 값이 곧 서비스 단계의 seconds 로 나가므로,
+            # 지연을 보려고 읽는 숫자가 가장 크게 틀린다. 벽시계로 잰다(그룹 안에서
+            # 순차로 도는 재시도는 벽시계에 자연히 포함되고, 파도 밖의 순차 폴백은
+            # 아래에서 각자 더한다).
+            elapsed += round(max(time.time() - wave_started, 0.0), 2)
+            for _gi, hosts, ports, _seconds, found, ok in results:
                 rows += found
                 if ok:
                     probed.update(hosts)
@@ -974,6 +980,7 @@ class Pipeline:
                     current_hosts=list(group[:8]), current_host_count=len(group),
                     completed_hosts=completed_hosts, total_hosts=total_hosts,
                 )
+            group_started = time.time()
             if len(group) == 1:
                 done = [(group[0], *self._probe_host(group[0], targets[group[0]], sp,
                                                      isolate_failures=isolate))]
@@ -982,9 +989,11 @@ class Pipeline:
                     futures = [(ip, pool.submit(self._probe_host, ip, targets[ip], sp,
                                                 isolate_failures=isolate)) for ip in group]
                     done = [(ip, *future.result()) for ip, future in futures]
+            # 호스트별 묶음도 **동시에** 돈다 - 묶음 경로와 같은 이유로 벽시계로 잰다.
+            # 각 호스트의 소요를 더하면 16대가 10분씩 걸린 묶음이 160분으로 남는다.
+            secs += round(max(time.time() - group_started, 0.0), 2)
             # 상태 변경은 여기서만 한다 - 순서를 고정해야 재개·이벤트가 결정적으로 남는다.
-            for ip, elapsed, found, ok in done:
-                secs += elapsed
+            for ip, _elapsed, found, ok in done:
                 rows.extend(found)
                 probed.add(ip)
                 if not ok:

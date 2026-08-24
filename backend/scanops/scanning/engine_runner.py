@@ -1284,14 +1284,18 @@ def parse_events(out_dir) -> dict:
             execution["seconds"] = round(max(now - started_at, 0), 1)
     recovered_execution_keys = {
         recovery.get("recovery_of_execution_id") for recovery in recoveries
-        if recovery.get("recovered") is True
+        # 빈 값은 담지 않는다. 아래 검사가 `execution_key` 가 없는 이슈까지
+        # (service_degraded 처럼) 통째로 지워 버린다 - 예전에는 command_error 조건이
+        # 그것을 가리고 있었다.
+        if recovery.get("recovered") is True and recovery.get("recovery_of_execution_id")
     }
     quality_issues = [
         issue for issue in quality_issues
-        if not (
-            issue.get("kind") == "command_error"
-            and issue.get("execution_key") in recovered_execution_keys
-        )
+        # 대체된 실행에서 나온 것은 **종류를 가리지 않고** 뺀다. 예전에는 그 실행의
+        # command_error 만 뺐는데, 같은 실행이 남긴 retransmission_cap·host_timeout 은
+        # 그대로 살아남아 호스트가 재스캔 대기열에 계속 남았다 - 대체 실행이 그 호스트를
+        # 성공적으로 다시 훑었는데도. 대체된 산출물의 진단은 이미 사라진 파일의 것이다.
+        if issue.get("execution_key") not in recovered_execution_keys
         # 재개가 대신한 시도의 실패는 남기지 않는다 - 남기면 성공한 스캔이 영영
         # '확인 필요' 로 보이고 재시도 안내가 사라지지 않는다.
         and (issue.get("kind"), issue.get("stage"), issue.get("_attempt")) not in {
@@ -1306,10 +1310,7 @@ def parse_events(out_dir) -> dict:
         for stage in stage_list:
             stage["issues"] = [
                 issue for issue in stage.get("issues", [])
-                if not (
-                    issue.get("type") == "command_error"
-                    and issue.get("execution_key") in recovered_execution_keys
-                )
+                if issue.get("execution_key") not in recovered_execution_keys
             ]
             if stage.get("status") == "warning" and not stage["issues"]:
                 stage["status"] = "done" if stage.get("percent") == 100 else "running"

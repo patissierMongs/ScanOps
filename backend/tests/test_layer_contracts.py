@@ -2286,3 +2286,64 @@ def test_a_resumed_scan_reports_the_ports_it_found_before_the_stop(tmp_path):
     assert again.counts["open_tcp"] == whole.counts["open_tcp"], (
         "영속 요약도 같은 수를 말해야 한다"
     )
+
+
+def test_a_parallel_probe_wave_is_measured_by_the_clock_not_by_the_sum(tmp_path):
+    """동시에 도는 프로브의 소요를 더하면 안 된다.
+
+    UDP 배치가 여러 호스트 묶음으로 갈리면 그 묶음들은 **동시에** 돈다. 각 명령의 소요를
+    더하면 10분짜리 16개가 도는 파도가 '160분 걸린 단계' 로 남는다. 그 값이 곧 서비스
+    단계의 seconds 로 나가 화면에 그려지므로, 지연을 보려고 읽는 숫자가 가장 크게 틀린다.
+    """
+    import sys
+    import time as time_module
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+
+    spec_dict = {
+        "job_id": "w", "targets": ["10.0.0.1", "10.0.0.2"], "out_dir": str(tmp_path),
+        "stages": {"tcp": {"enabled": False}, "udp": {"enabled": True, "ports": "161,500"},
+                   "service": {"nse": [], "udp_nse": []}},
+    }
+    pipe, spec = _pipeline(tmp_path, spec_dict)
+    # 두 호스트가 서로 다른 포트 집합을 가져 묶음이 갈린다 → 한 파도에 두 명령.
+    pipe.open_map = {"10.0.0.1": {"udp": [161]}, "10.0.0.2": {"udp": [500]}}
+
+    started: list[float] = []
+
+    def slow(stage, args, base, fatal=True, targets=None):
+        started.append(time_module.time())
+        time_module.sleep(0.25)                     # 두 명령이 겹쳐 돈다
+        pathlib_Path(str(base) + ".xml").write_bytes(_clean_xml(str(args[-1])))
+        return {"rc": 0, "seconds": 600.0, "cmd": args, "stopped": False}
+
+    pipe._nmap = slow
+    wall_started = time_module.time()
+    elapsed, _rows, _probed, _failed = pipe._service_batch(
+        "udp", 0, ["10.0.0.1", "10.0.0.2"], spec.service, 1,
+    )
+    wall = time_module.time() - wall_started
+
+    assert len(started) >= 2, "명령이 하나만 돌았다 - 파도를 재현하지 못했다"
+    assert max(started) - min(started) < 0.2, "두 명령이 겹쳐 돌지 않았다 - 재현이 안 됐다"
+    assert elapsed < 900.0, (
+        f"동시에 돈 두 명령(각 600초)의 소요를 더했다: {elapsed}초"
+    )
+    # 벽시계에 가까워야 한다. 두 명령이 0.25초씩 겹쳐 돌았으니 1초를 넘을 수 없다.
+    assert elapsed <= wall + 0.5, f"벽시계({wall:.2f}초)보다 큰 값을 보고한다: {elapsed}"
+
+    # 같은 결함이 **묶음 경로**에도 있었다. 호스트들이 포트 집합을 공유하면 그쪽으로 간다.
+    grouped_dir = tmp_path / "grouped"
+    pipe2, spec2 = _pipeline(grouped_dir, {**spec_dict, "job_id": "g",
+                                           "out_dir": str(grouped_dir)})
+    pipe2.open_map = {"10.0.0.1": {"udp": [161, 500]}, "10.0.0.2": {"udp": [161]}}
+    started.clear()
+    pipe2._nmap = slow
+    grouped_elapsed, _r, _p, _f = pipe2._service_batch(
+        "udp", 0, ["10.0.0.1", "10.0.0.2"], spec2.service, 1,
+    )
+    assert len(started) >= 2, "묶음 경로를 재현하지 못했다"
+    assert max(started) - min(started) < 0.2, "묶음 경로에서 겹쳐 돌지 않았다"
+    assert grouped_elapsed < 900.0, (
+        f"묶음 경로가 동시에 돈 명령의 소요를 더했다: {grouped_elapsed}초"
+    )
