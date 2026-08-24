@@ -57,10 +57,10 @@ import 하면 빌드가 그 자리에서 멈추고(`verify_stdlib_drop`), 같은
 
 ```powershell
 python packaging\build_allinone.py --split-mb 10 --max-mb 10
-# -> ScanOps_allinone.zip.001 (10.0 MB), .002 (5.0 MB), JOIN.bat, .sha256
+# -> ScanOps_allinone.zip.001 (10.0 MB), .002 (5.0 MB), JOIN_ScanOps_allinone.bat, .sha256
 ```
 - 받는 쪽에서 **반디집/7-Zip 은 `.001` 을 그대로 열면** 됩니다(나머지 조각은 같은 폴더에 두세요).
-- 그런 도구가 없는 서버는 함께 들어 있는 **`JOIN.bat`** 을 실행하면 Windows 기본 `copy /b` 로
+- 그런 도구가 없는 서버는 함께 들어 있는 **`JOIN_<번들이름>.bat`** 을 실행하면 Windows 기본 `copy /b` 로
   되붙이고 SHA-256 까지 확인합니다. 값이 다르면 합친 파일을 지우고 멈춥니다 — USB 복사가
   중간에 잘린 채로 압축을 풀다 마는 사고를 막기 위해서입니다.
 - 형식은 zip 분할 볼륨(`.z01`)이 아니라 단순 바이트 분할입니다. 분할 볼륨은 전용 도구가 없으면

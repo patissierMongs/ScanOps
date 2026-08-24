@@ -9,7 +9,7 @@ Usage:
     python packaging/build_allinone.py                     # 3.13 (기본, ../ScanOps_allinone.zip)
     python packaging/build_allinone.py --python 3.12       # ../ScanOps_allinone_py312.zip
     python packaging/build_allinone.py --arch x86          # ../ScanOps_allinone_x86.zip
-    python packaging/build_allinone.py --split-mb 10       # 10 MB 조각 + JOIN.bat (반출 한도용)
+    python packaging/build_allinone.py --split-mb 10       # 10 MB 조각 + JOIN_*.bat (반출 한도용)
     python packaging/build_allinone.py --out /path/to/custom.zip
 
 wheelhouse 는 지원 타깃의 win_amd64/win32 휠을 담고 있어야 한다(pure 휠은 공용).
@@ -497,7 +497,7 @@ def split_archive(archive: Path, limit_mb: float) -> list[Path]:
 
     형식은 zip 의 분할 볼륨(.z01)이 아니라 **단순 바이트 분할**(.001, .002 …)이다.
     이유는 받는 쪽의 선택지를 넓히려는 것 하나다 — 반디집/7-Zip 은 .001 을 그대로 열고,
-    그런 도구가 아예 없는 서버에서도 함께 넣은 JOIN.bat 이 Windows 기본 `copy /b` 로
+    그런 도구가 아예 없는 서버에서도 함께 넣은 JOIN_<번들>.bat 이 Windows 기본 `copy /b` 로
     되붙인다. 분할 볼륨 zip 은 도구 없이는 손쓸 방법이 없고 파이썬 표준 라이브러리로
     만들 수도 없다.
 
@@ -524,9 +524,15 @@ def split_archive(archive: Path, limit_mb: float) -> list[Path]:
 
 
 def write_join_script(archive: Path, parts: list[Path], digest: str) -> Path:
-    """조각을 되붙이는 배치 파일. 반디집이 없는 서버를 위한 최후 수단이다."""
+    """조각을 되붙이는 배치 파일. 반디집이 없는 서버를 위한 최후 수단이다.
+
+    이름은 **번들마다 다르다**. x64 와 x86 을 같은 폴더에 내면 고정 이름은 뒤에 만든 것이
+    앞의 것을 덮어써서, 먼저 만든 번들은 조립 스크립트가 없는 채로 나간다 - 도구가 없는
+    서버를 위한 최후 수단이 바로 그 서버에서만 사라지는 셈이다.
+    """
     joined = "+".join(f'"{p.name}"' for p in parts)
-    script = archive.with_name("JOIN.bat")
+    # ScanOps_allinone_x86.zip -> JOIN_ScanOps_allinone_x86.bat
+    script = archive.with_name(f"JOIN_{archive.stem}.bat")
     script.write_text(
         "@echo off\r\n"
         "setlocal\r\n"
@@ -570,7 +576,7 @@ def main(argv: list[str] | None = None) -> None:
                     help="Fail the build if the archive exceeds this size in MB.")
     ap.add_argument("--split-mb", type=float, default=None, metavar="MB",
                     help="Split the archive into .001/.002 parts of at most MB each "
-                         "(Bandizip/7-Zip open the .001; JOIN.bat rejoins without them).")
+                         "(Bandizip/7-Zip open the .001; JOIN_<name>.bat rejoins without them).")
     args = ap.parse_args(argv)
     configure(args.python, Path(args.out) if args.out else None, args.arch)
 
@@ -600,7 +606,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.split_mb:
         parts = split_archive(OUT, args.split_mb)
-        log(f"split into {len(parts)} parts (+ JOIN.bat, {OUT.name}.sha256)")
+        log(f"split into {len(parts)} parts (+ JOIN_{OUT.stem}.bat, {OUT.name}.sha256)")
 
 
 if __name__ == "__main__":
