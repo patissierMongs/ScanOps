@@ -103,7 +103,9 @@ ENGINE_STAGE_RE = re.compile(
     r"|3-(?P<svc_proto>tcp|udp)-b(?P<svc_batch>\d+)-g(?P<svc_group>\d+)"  # 서비스 식별
     # 호스트 격리 재시도. 접미사는 프로토콜(tcp/udp)이거나 포트가 붙은 tag(tcp443·udp161)다.
     r"|3-(?P<iso_host>\d+_\d+_\d+_\d+)-(?P<iso_proto>[a-z]+[a-z0-9]*)"
-    r")(?:-confirm)?\.xml$", re.I)
+    # 확인(confirm) probe 는 기본 probe 가 아무것도 못 찾았을 때 **추가로** 도는 별개 파일이다
+    # (Pipeline._probe_unit). 소비만 하고 슬롯에 안 넣으면 둘이 같은 자리를 다퉈 하나가 사라진다.
+    r")(?P<confirm>-confirm)?\.xml$", re.I)
 # 누산기가 아는 역할 이름 - 단독 스캐너의 단계 이름과 같은 자리를 쓴다.
 ENGINE_ROLE_DISCOVERY = "engine_discovery"
 # 중단본 표식 — 스캐너(scanops_scanner.INTERRUPTED_*)와 같은 문자열이어야 한다.
@@ -494,7 +496,8 @@ def _engine_stage_info(filename: str | None) -> tuple[str, str, str] | None:
     # 파일명에 배치가 없으므로 b0 에 얹되, 슬롯으로 서로를 구분한다.
     suffix = (m.group("iso_proto") or "tcp").lower()
     role = "udp_identify" if suffix.startswith("udp") else "tcp_identify"
-    return run_key, "b0", f"{role}#iso-{m.group('iso_host')}-{suffix}"
+    confirm = "-confirm" if m.group("confirm") else ""
+    return run_key, "b0", f"{role}#iso-{m.group('iso_host')}-{suffix}{confirm}"
 
 
 def _scaninfo_scope(xml_bytes: bytes, proto: str) -> set[int] | None | set:

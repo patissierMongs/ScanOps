@@ -3058,6 +3058,50 @@ def test_identification_wins_only_for_the_keys_it_actually_reported(client):
     assert by_port[162]["state"] == "open|filtered"
 
 
+def test_a_confirm_probe_never_replaces_the_base_probe_it_followed(client):
+    """확인(confirm) probe 는 기본 probe 와 **별개 파일**이다.
+
+    `Pipeline._probe_unit()` 은 기본 격리 probe 가 아무것도 못 찾으면 같은 단위의 확인
+    probe 를 추가로 돌린다. 그래서 두 파일이 한 폴더에 함께 남는 것이 정상이다:
+
+        stage3-10_42_0_1-udp53.xml
+        stage3-10_42_0_1-udp53-confirm.xml
+
+    `-confirm` 을 정규식에서 소비만 하고 슬롯에 안 넣으면 둘이 같은 자리를 다투고, 프런트
+    정렬 순서상 confirm 이 먼저 와서 **기본 파일이 확인 파일을 덮는다.** 그러면 손상된
+    확인 산출물이 원자적 거절 계약에 닿기도 전에 사라져, 스캔이 `done` 으로 기록되고
+    감사 파일 목록에서도 실패가 없어진다 - 서비스 확인이 끝난 것처럼 보인다.
+    """
+    from scanops.api.scans import _engine_stage_info
+
+    base_name = "scan_confirm/stage3-10_42_0_1-udp53.xml"
+    confirm_name = "scan_confirm/stage3-10_42_0_1-udp53-confirm.xml"
+    base_info, confirm_info = _engine_stage_info(base_name), _engine_stage_info(confirm_name)
+    assert base_info[1:] != confirm_info[1:], (
+        f"기본과 확인이 같은 자리를 쓴다: {base_info[1:]}"
+    )
+
+    h = _auth(client)
+    udp = '<scaninfo type="udp" protocol="udp" numservices="1" services="53"/>'
+    good = _scan_xml(1782050001, udp, _port("udp", 53, service="domain"), host="10.42.0.1")
+    # 중간에서 끊긴 확인 산출물 - 원자적 거절 계약에 닿아야 한다.
+    broken = b'<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="10.42.0.1"'
+
+    # **프런트가 보내는 순서 그대로** 넣는다. confirm 이 먼저다.
+    ordered = sorted([(base_name, good), (confirm_name, broken)], key=lambda kv: kv[0])
+    assert ordered[0][0] == confirm_name, "정렬 가정이 깨졌다 - 순서가 바뀌면 결함이 안 드러난다"
+
+    r = _upload(client, h, ordered)
+    # 손상된 확인 산출물이 조용히 사라지면 안 된다 - 단위가 통째로 거절되어야 한다.
+    body = r.json()
+    assert r.status_code == 400, (
+        f"손상된 확인 산출물이 조용히 성공으로 바뀌었다: {body.get('scans') or body}"
+    )
+    assert "XML" in body["detail"]
+    # 거절된 단위는 스캔 행도 남기지 않는다 - '시작했다' 는 흔적만 남는 것이 더 나쁘다.
+    assert client.get("/api/scans", headers=h).json() == []
+
+
 def test_the_imported_timeline_shows_every_stage_that_actually_ran(client):
     """발견으로는 인입되는데 타임라인에서는 사라지면 안 된다.
 
