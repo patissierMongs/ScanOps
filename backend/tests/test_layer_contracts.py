@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 from pathlib import Path as pathlib_Path
 
 import openpyxl
@@ -1685,3 +1686,115 @@ def test_a_resumed_scan_skips_batches_it_already_finished(tmp_path):
     resumed._nmap = fake
     resumed._scan_batches(["10.0.0.1", "10.0.0.2"])
     assert calls == [], f"이미 끝낸 배치를 다시 돌았다: {calls}"
+
+
+def test_the_three_paths_repair_a_truncated_xml_the_same_way(tmp_path):
+    """끊긴 XML 복구는 세 경로가 각자 들고 있다 - 같은 입력에 같은 결과를 내야 한다.
+
+    엔진은 따로 설치되는 패키지라 백엔드가 import 할 수 없고(`ensure_available`), 단독
+    스캐너는 파일 하나로 복사되어 돈다. 그래서 구현이 셋이다. 한쪽만 고치면 같은 산출물이
+    돌린 경로냐 가져온 경로냐에 따라 다르게 복구된다.
+
+    핵심 성질은 **runstats 를 만들지 않는 것**이다. 완결성 검사가 그것을 요구하므로,
+    복구본은 관측만 제공하고 미관측 닫힘 권한은 얻지 못한다.
+    """
+    import importlib.util
+    import sys
+    import xml.etree.ElementTree as ET
+
+    sys.path.insert(0, str(pathlib_Path(__file__).resolve().parents[2] / "engine"))
+    from scanops_engine import nmaprun
+
+    from scanops.scanning import nmap_runner
+
+    spec = importlib.util.spec_from_file_location(
+        "standalone_for_repair",
+        pathlib_Path(__file__).resolve().parents[2] / "scanner" / "scanops_scanner.py",
+    )
+    standalone = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(standalone)
+
+    implementations = {
+        "engine": nmaprun._repair_truncated_xml,
+        "backend": nmap_runner.repair_truncated_xml,
+        "standalone": standalone.repair_truncated_xml,
+    }
+
+    host = ('<host><status state="up"/><address addr="10.0.0.%d" addrtype="ipv4"/>'
+            '<ports><port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/>'
+            '</port></ports></host>')
+    # 워치독이 두 번째 호스트를 쓰다 말고 끊은 모양.
+    truncated = ('<?xml version="1.0"?><nmaprun><scaninfo type="syn" protocol="tcp"/>'
+                 + (host % 1) + '<host><status state="up"/><address addr="10.0.0.2"')
+    complete = ('<?xml version="1.0"?><nmaprun>' + (host % 1)
+                + '<runstats><finished exit="success"/></runstats></nmaprun>')
+
+    for name, repair in implementations.items():
+        cut = tmp_path / f"{name}-cut.xml"
+        cut.write_text(truncated, encoding="utf-8")
+        assert repair(cut) is True, f"{name}: 끊긴 XML 을 복구하지 않았다"
+        root = ET.fromstring(cut.read_bytes())          # 표준 파서를 통과해야 한다
+        assert [h.find("address").get("addr") for h in root.findall("host")] == ["10.0.0.1"], name
+        assert root.find("runstats") is None, f"{name}: 복구본이 닫힘 권한을 얻었다"
+
+        # 이미 온전한 파일은 건드리지 않는다.
+        whole = tmp_path / f"{name}-whole.xml"
+        whole.write_text(complete, encoding="utf-8")
+        assert repair(whole) is False, f"{name}: 온전한 XML 을 건드렸다"
+        assert whole.read_text(encoding="utf-8") == complete, name
+
+        # 살릴 호스트가 없으면 손대지 않는다 - 빈 파일로 두는 편이 정직하다.
+        headless = tmp_path / f"{name}-headless.xml"
+        headless.write_text('<?xml version="1.0"?><nmaprun><scaninfo type="syn"', encoding="utf-8")
+        assert repair(headless) is False, f"{name}: 살릴 호스트가 없는데 손댔다"
+
+
+def test_the_legacy_watchdog_repairs_the_artifact_it_cut(tmp_path, monkeypatch):
+    """워치독이 끊은 산출물을 **레거시 경로도** 복구해야 한다.
+
+    복구가 단계 엔진과 단독 스캐너에만 있었을 때, 레거시/자동 워크플로에서 상한을 켜면
+    587바이트짜리 파싱 불가 XML 만 남았다(실측). 그런데 화면과 docstring 은 '그때까지 끝난
+    호스트의 관측은 남는다' 고 약속했다 - 제어를 네 표면에 다 달아 놓고 약속은 두 곳에서만
+    지킨 셈이다.
+    """
+    from scanops.api import scans as scans_api
+    from scanops.scanning import nmap_runner
+
+    base = tmp_path / "b0"
+    nmap_runner.xml_of(base).write_text(
+        '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+        '<address addr="10.0.0.1" addrtype="ipv4"/></host><host><status state="up"',
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        """상한에 걸려 밖에서 끝난 프로세스."""
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+    proc = _Proc()
+    monkeypatch.setattr(scans_api.chunker, "stop_requested", lambda _base: False)
+    fired = threading.Event()
+    original_terminate = proc.terminate
+
+    def _terminate():
+        original_terminate()
+        fired.set()
+
+    proc.terminate = _terminate
+    # 상한이 걸릴 때까지 실제로 기다린다 - 즉시 반환하면 타이머가 아직 안 터져 경합이 된다.
+    monkeypatch.setattr(nmap_runner, "wait_owned",
+                        lambda _p: -15 if fired.wait(5) else 0)
+
+    rc = scans_api._wait_scan_process(1, proc, watchdog_seconds=0.05, out_base=base)
+    assert rc == -15
+    assert getattr(proc, "terminated", False), "워치독이 프로세스를 끝내지 않았다"
+
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(nmap_runner.xml_of(base).read_bytes())
+    assert [h.find("address").get("addr") for h in root.findall("host")] == ["10.0.0.1"]
+    assert root.find("runstats") is None, "복구본이 닫힘 권한을 얻었다"

@@ -148,6 +148,49 @@ def normal_log_of(basename: Path) -> Path:
     return Path(str(basename) + ".nmap")
 
 
+def repair_truncated_xml(path: Path) -> bool:
+    """중간에 끊긴 nmap XML 을 **파싱 가능한 데까지만** 남기고 닫는다.
+
+    워치독이 프로세스를 끝내면 nmap 은 ``</nmaprun>`` 을 쓰지 못한다. 그 파일은 표준 파서가
+    통째로 거절하므로 이미 끝난 호스트의 관측까지 같이 버려진다 - 몇 시간짜리 스캔에서는
+    워치독을 둔 이유를 스스로 지우는 일이다(실측: 587바이트, ParseError).
+
+    마지막 완결 ``</host>`` 뒤를 잘라내고 루트만 닫는다. **``runstats`` 는 만들지 않는다** -
+    그것이 있어야 산출물 완결성 검사가 통과하므로, 없는 채로 두면 이 실행은 관측만 제공하고
+    미관측 닫힘 권한은 얻지 못한다. 그 성질이 이 함수의 존재 이유다.
+
+    단계 엔진(``scanops_engine.nmaprun``)과 단독 스캐너에도 같은 함수가 있다. 엔진은 따로
+    설치되는 패키지라 백엔드가 그것을 import 할 수 없어(``ensure_available``) 세 경로가 각자
+    들고 있고, 계약 테스트가 같은 입력에 같은 결과를 내는지 검사한다.
+
+    반환: 손봤으면 True. 이미 온전하거나 살릴 호스트가 없으면 손대지 않고 False.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if not raw.strip():
+        return False
+    try:
+        ET.fromstring(raw)
+        return False                      # 이미 온전하다 - 건드리지 않는다
+    except ET.ParseError:
+        pass
+    cut = raw.rfind("</host>")
+    if cut == -1:
+        return False                      # 살릴 호스트가 없다 - 빈 파일로 두는 편이 정직하다
+    repaired = raw[:cut + len("</host>")] + "\n</nmaprun>\n"
+    try:
+        ET.fromstring(repaired)
+    except ET.ParseError:
+        return False
+    try:
+        path.write_text(repaired, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def build_command(nmap: str, preset: str, targets: list[str], out_basename: Path,
                   ports: str = "", nse: list[str] | None = None) -> list[str]:
     if preset not in PRESETS:

@@ -864,7 +864,7 @@ def test_legacy_auto_applies_one_canonical_exclude_to_all_nmap_stages(monkeypatc
 
     captured = []
 
-    def write_stage(_scan_id, argv, _log_path, _watchdog=0):
+    def write_stage(_scan_id, argv, _log_path, _watchdog=0, _out_base=None):
         captured.append(argv)
         base = Path(argv[argv.index("-oA") + 1])
         if str(base).endswith(".udp_identify"):
@@ -1270,7 +1270,7 @@ def test_auto_discovery_fallback_preserves_existing_identity_and_evidence(
     finally:
         db.close()
 
-    def write_stage(_scan_id, argv, _log_path, _watchdog=0):
+    def write_stage(_scan_id, argv, _log_path, _watchdog=0, _out_base=None):
         base = Path(argv[argv.index("-oA") + 1])
         if str(base).endswith(".tcp_discovery"):
             xml = _scan_xml(

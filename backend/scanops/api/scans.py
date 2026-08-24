@@ -858,26 +858,35 @@ def _ingest_auto_findings(
         db.close()
 
 
-def _wait_scan_process(scan_id: int, proc, watchdog_seconds: int = 0) -> int:
+def _wait_scan_process(scan_id: int, proc, watchdog_seconds: int = 0,
+                      out_base: Path | None = None) -> int:
     """Register, honor a stop that raced with spawn, then release tree ownership.
 
     ``watchdog_seconds`` 는 nmap 프로세스당 상한이다(0 = 끔). 호스트 상한을 뺀 자리에
     두는 제어라 레거시/자동 워크플로에서도 켤 수 있어야 한다 - 한쪽 경로에만 달아 두면
     사용자는 보호만 잃고 대체는 못 얻는다.
 
-    ``--host-timeout`` 과 달리 프로세스를 밖에서 끝내므로, 그때까지 -oA 로 쓰인 관측은
-    남고(호출부가 잘린 XML 을 복구한다) 실행은 비정상 종료라 닫힘 권한을 얻지 못한다.
+    ``--host-timeout`` 과 달리 프로세스를 밖에서 끝내므로, 그때까지 ``-oA`` 로 쓰인 관측이
+    남는다. 다만 nmap 은 ``</nmaprun>`` 을 못 쓰고 죽어 표준 파서가 그 파일을 통째로
+    거절하므로(실측: 587바이트, ParseError) **여기서 복구까지 해야** 그 말이 성립한다.
+    ``out_base`` 를 주면 워치독이 끊었을 때 그 산출물을 복구한다 - 안 주면 복구하지
+    않으므로, 워치독을 켜는 호출부는 반드시 넘겨야 한다.
+
+    복구본에는 ``runstats`` 가 없어 완결성 검사가 그대로 실패한다. 관측은 살리되 미관측
+    닫힘 권한은 주지 않는다.
     """
     with _LOCK:
         _PROCS[scan_id] = proc
     if chunker.stop_requested(_basename(scan_id)) and proc.poll() is None:
         proc.terminate()
     timer = None
+    fired = threading.Event()
     if watchdog_seconds and watchdog_seconds > 0:
         def _fire():
             if proc.poll() is None:
                 logger.warning("scan %s: nmap exceeded %ss watchdog, terminating",
                                scan_id, watchdog_seconds)
+                fired.set()
                 proc.terminate()
         timer = threading.Timer(watchdog_seconds, _fire)
         timer.daemon = True
@@ -887,19 +896,23 @@ def _wait_scan_process(scan_id: int, proc, watchdog_seconds: int = 0) -> int:
     finally:
         if timer is not None:
             timer.cancel()
+        if fired.is_set() and out_base is not None:
+            if nmap_runner.repair_truncated_xml(nmap_runner.xml_of(out_base)):
+                logger.warning("scan %s: repaired watchdog-truncated XML at %s",
+                               scan_id, nmap_runner.xml_of(out_base))
         with _LOCK:
             if _PROCS.get(scan_id) is proc:
                 _PROCS.pop(scan_id, None)
 
 
 def _run_stage(scan_id: int, argv: list[str], log_path: Path,
-               watchdog_seconds: int = 0) -> int:
+               watchdog_seconds: int = 0, out_base: Path | None = None) -> int:
     _set_current_log(scan_id, log_path)
     try:
         proc = nmap_runner.popen(argv, log_path)
     except OSError:
         return -1
-    return _wait_scan_process(scan_id, proc, watchdog_seconds)
+    return _wait_scan_process(scan_id, proc, watchdog_seconds, out_base)
 
 
 class _WorkerFailure(RuntimeError):
@@ -909,8 +922,8 @@ class _WorkerFailure(RuntimeError):
 
 
 def _checked_stage(scan_id: int, argv: list[str], log_path: Path,
-                   watchdog_seconds: int = 0) -> None:
-    rc = _run_stage(scan_id, argv, log_path, watchdog_seconds)
+                   watchdog_seconds: int = 0, out_base: Path | None = None) -> None:
+    rc = _run_stage(scan_id, argv, log_path, watchdog_seconds, out_base)
     if rc == -1:
         raise _WorkerFailure("nmap_launch_failed")
     if rc != 0:
@@ -963,7 +976,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
             state.get("exclude"), state.get("exclude_ports", ""),
         )
         _mark_stage(scan_id, state, "tcp_discovery", len(batch))
-        _checked_stage(scan_id, argv, discovery_log, watchdog)
+        _checked_stage(scan_id, argv, discovery_log, watchdog, discovery_base)
         discovery_xml = nmap_runner.xml_of(discovery_base)
         if not discovery_xml.exists():
             raise _WorkerFailure("result_missing")
@@ -984,7 +997,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
                 state.get("exclude"), state.get("exclude_ports", ""),
             )
             _mark_stage(scan_id, state, "tcp_identify", len(discovery_live or batch))
-            _checked_stage(scan_id, argv, identify_log, watchdog)
+            _checked_stage(scan_id, argv, identify_log, watchdog, identify_base)
             identify_xml = nmap_runner.xml_of(identify_base)
             if not identify_xml.exists():
                 raise _WorkerFailure("result_missing")
@@ -1011,7 +1024,7 @@ def _run_auto_batch(scan_id: int, nmap: str, batch: list[str], b_base: Path, sta
         )
         _mark_stage(scan_id, state, "udp_identify",
                     len(batch if udp_all_targets else (discovery_live or batch)))
-        _checked_stage(scan_id, argv, udp_log, watchdog)
+        _checked_stage(scan_id, argv, udp_log, watchdog, udp_base)
         udp_xml = nmap_runner.xml_of(udp_base)
         if not udp_xml.exists():
             raise _WorkerFailure("result_missing")
@@ -1104,7 +1117,7 @@ def _chunk_worker(scan_id: int) -> None:
             logger.exception("failed to launch nmap for scan %s", scan_id)
             _fail(scan_id, "nmap_launch_failed")
             return
-        rc = _wait_scan_process(scan_id, proc, int(st.get("watchdog_seconds") or 0))
+        rc = _wait_scan_process(scan_id, proc, int(st.get("watchdog_seconds") or 0), b_base)
 
         # 중지로 종료됐으면 이 배치는 미완 → 커서 유지하고 canceled.
         if chunker.stop_requested(base):
