@@ -367,6 +367,23 @@ def test_the_retry_offer_matches_what_the_retry_endpoint_accepts(client):
         assert scans_api._durable_retry_detail(db, mixed.id)["required"] is True
         assert both["retry_status"] == "required"
         assert both["quality_status"] == "error"      # 섞인 오류도 그대로 보인다
+
+        # 섞였을 때 화면이 셀 수 있어야 하는 건 **재시도로 못 메우는 나머지**다. 화면은
+        # retry_status == "required" 면 재스캔 배지를 띄우고 품질 배지에서는 이 수만
+        # 말한다 - 이 값이 없으면(0 이면) artifact_missing 이 '재스캔 필요' 뒤에 묻혀,
+        # 재스캔 한 번으로 다 끝난다는 거짓 안내가 된다.
+        assert both["unresolved_issue_count"] == 2
+        assert both["unresolved_other_count"] == 1, (
+            "재시도로 사라지지 않는 이슈를 화면이 따로 셀 수 없다"
+        )
+        # 재시도 이슈만 있는 스캔은 나머지가 없어야 한다 - 같은 이슈를 두 배지가 두 번
+        # 말하면 그것대로 틀린다.
+        only_retryable = _issue_scan(db, "only-retryable", [("host_timeout", "10.0.0.9")])
+        only = scans_api._retry_history([only_retryable], db)[only_retryable.id]
+        assert only["retry_status"] == "required"
+        assert only["unresolved_other_count"] == 0
+        # 재시도할 수 없는 것만 있으면 배지가 전부를 말한다(재스캔 배지가 안 뜬다).
+        assert offered["unresolved_other_count"] == offered["unresolved_issue_count"] == 2
     finally:
         db.close()
 

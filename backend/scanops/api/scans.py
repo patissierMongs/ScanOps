@@ -2583,6 +2583,12 @@ def _retry_history(rows: list[ScanRun], db: Session) -> dict[int, dict]:
                 "retry_scan_id": retry_scan_id,
                 "quality_status": "error" if severe else "warning" if unresolved else "ok",
                 "unresolved_issue_count": len(unresolved),
+                # 재시도로 **못** 메우는 나머지. 화면은 재스캔 배지가 떠 있을 때 이 수만
+                # 따로 말한다 - 예전에는 재스캔 배지가 뜨면 품질 배지를 통째로 감춰서,
+                # 재스캔해도 사라지지 않는 artifact_missing/command_error 가 '재스캔 필요'
+                # 뒤에 묻혔다. severe 로 세는 세 종류는 모두 RETRYABLE_ISSUE_KINDS 밖이라
+                # 언제나 이쪽에 들어온다.
+                "unresolved_other_count": len(unresolved) - len(retryable),
                 "unresolved_host_count": len(hosts),
             }
             continue
@@ -2616,6 +2622,8 @@ def _retry_history(rows: list[ScanRun], db: Session) -> dict[int, dict]:
         update.update({
             "quality_status": "warning" if detail["required"] else "ok",
             "unresolved_issue_count": detail["count"],
+            # 레거시 사이드카는 재시도 대상 호스트만 세므로 나머지가 없다.
+            "unresolved_other_count": 0,
             "unresolved_host_count": detail["count"],
         })
         result[scan.id] = update

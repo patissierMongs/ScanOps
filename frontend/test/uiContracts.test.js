@@ -7,7 +7,7 @@ import {
   stateWithEvidence,
 } from "../src/lib/columns.js";
 import { deadlinePatchValue } from "../src/lib/findingPatch.js";
-import { SCAN_STATUS, scanKind, scanNotice, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
+import { SCAN_STATUS, qualityBadge, scanKind, scanNotice, scanStatus, shouldLoadStages } from "../src/lib/scanStatus.js";
 import { splitScanTokens } from "../src/lib/scanTargets.js";
 import { toastAnnouncement, toastDuration } from "../src/lib/toast.js";
 import { matchesFilter, parseNeedle } from "../src/lib/filterText.js";
@@ -1092,4 +1092,32 @@ test("the delay trace panel is present and collapsed by default", () => {
   }
   // 수확량이 있어야 '107초 돌고 빈 산출물' 이 정상 완료와 구분된다.
   assert.match(panel, /empty/, "빈 산출물 표시가 없다");
+});
+
+test("a retry badge never hides issues that retrying cannot fix", () => {
+  // 재시도 가능한 이슈(host_timeout 1대) + 재시도 불가 이슈(artifact_missing 1건).
+  // 백엔드는 retry_status="required", quality_status="error", 총 2건을 준다.
+  const mixed = {
+    retry_status: "required", retry_count: 1, quality_status: "error",
+    unresolved_issue_count: 2, unresolved_other_count: 1,
+  };
+  assert.deepEqual(qualityBadge(mixed), { count: 1, label: "품질 오류" });
+
+  // 재시도 이슈뿐이면 재스캔 배지가 이미 그것을 말하므로 품질 배지는 접는다.
+  assert.equal(qualityBadge({
+    retry_status: "required", quality_status: "warning",
+    unresolved_issue_count: 1, unresolved_other_count: 0,
+  }), null);
+
+  // 재스캔을 제안하지 않는 스캔에서는 전부를 말한다.
+  assert.deepEqual(qualityBadge({
+    retry_status: "none", quality_status: "error",
+    unresolved_issue_count: 2, unresolved_other_count: 2,
+  }), { count: 2, label: "품질 오류" });
+
+  assert.equal(qualityBadge({ retry_status: "none", unresolved_issue_count: 0 }), null);
+
+  // 배지를 그리는 쪽이 실제로 이 함수를 쓰는가 - 컴포넌트가 자체 계산으로 되돌아가면
+  // 위 네 가지가 다 통과해도 화면은 예전처럼 감춘다.
+  assert.match(source("../src/views/Scans.jsx"), /function QualityBadge[\s\S]{0,200}qualityBadge\(scan\)/);
 });

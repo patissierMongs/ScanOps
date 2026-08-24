@@ -5,7 +5,7 @@ import { splitScanTokens } from "../lib/scanTargets.js";
 import { formatScanPortScope } from "../lib/scanScope.js";
 import { useToast } from "../ui/Toast.jsx";
 import ScanOptions from "../ui/ScanOptions.jsx";
-import { scanKind, scanNotice, scanStatus, shouldLoadStages } from "../lib/scanStatus.js";
+import { qualityBadge, scanKind, scanNotice, scanStatus, shouldLoadStages } from "../lib/scanStatus.js";
 import ScanTrace from "../ui/ScanTrace.jsx";
 
 const isActive = (s) => s === "running" || s === "canceling";
@@ -688,10 +688,9 @@ function RetryBadge({ scan }) {
 }
 
 function QualityBadge({ scan }) {
-  const count = scan.unresolved_issue_count || 0;
-  if (!count || scan.retry_status === "required") return null;
-  const label = scan.quality_status === "error" ? "품질 오류" : "확인 필요";
-  return <span className="pill retry-required">{label} · {count}건</span>;
+  const badge = qualityBadge(scan);
+  if (!badge) return null;
+  return <span className="pill retry-required">{badge.label} · {badge.count}건</span>;
 }
 
 // 이력 표의 '스캔 범위' — 명령줄 대신 어디를·어떤 포트를·무슨 프로토콜로 봤는지만.

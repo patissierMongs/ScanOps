@@ -146,6 +146,7 @@ class ScanOut(BaseModel):
     created_by_name: str = ""
     quality_status: str = "ok"
     unresolved_issue_count: int = 0
+    unresolved_other_count: int = 0
     unresolved_host_count: int = 0
     retry_required: bool = False
     retry_count: int = 0
