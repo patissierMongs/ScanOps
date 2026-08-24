@@ -2834,10 +2834,13 @@ def test_every_artifact_the_engine_writes_is_recognised_as_part_of_its_run(clien
     """
     from scanops.api.scans import _engine_stage_info
 
+    # 스윕은 열림만 증명하므로 식별과 **다른 역할**이어야 한다 - 같으면 빈 식별이 스윕을 덮는다.
+    slots: dict[tuple, str] = {}
     for name, expected_role in (
         ("scan_7/stage0-discovery.xml", "engine_discovery"),
         ("scan_7/stage-tcp-b0.xml", "tcp_discovery"),
-        ("scan_7/stage-udp-b3.xml", "udp_identify"),
+        ("scan_7/stage-udp-b3.xml", "udp_sweep"),
+        ("scan_7/stage3-tcp-b0-g0.xml", "tcp_identify"),
         ("scan_7/stage3-tcp-b0-g2.xml", "tcp_identify"),
         ("scan_7/stage3-udp-b1-g0.xml", "udp_identify"),
         ("scan_7/stage3-10_0_0_5-tcp.xml", "tcp_identify"),
@@ -2847,9 +2850,14 @@ def test_every_artifact_the_engine_writes_is_recognised_as_part_of_its_run(clien
     ):
         info = _engine_stage_info(name)
         assert info is not None, f"엔진 산출물을 못 알아본다: {name}"
-        run_key, _batch, role = info
+        run_key, batch, role = info
         assert run_key == "scan_7"
         assert role == expected_role, name
+        # 자리가 겹치면 뒤에 온 파일이 앞엣것을 조용히 덮어쓴다.
+        assert (batch, role) not in slots, (
+            f"{name} 이 {slots.get((batch, role))} 와 같은 자리({batch}/{role})를 쓴다"
+        )
+        slots[(batch, role)] = name
 
     # 남의 것을 가져가면 안 된다 - 단독 스캐너 모양과 직접 돌린 nmap XML 은 각자 경로가 있다.
     for name in ("scan_3.b0.tcp_discovery.xml", "my_own_nmap.xml", "scan_5.xml",
@@ -2911,6 +2919,117 @@ def test_host_discovery_never_closes_a_port_it_did_not_look_at(client):
                       headers=h).json()
     assert {f["port"]: f["state"] for f in rows} == {22: "open", 80: "open"}
     assert all(f["status"] != "정상처리" for f in rows)
+
+
+def _udp_xml(start, ports, service="snmp", scanned="161,162"):
+    body = "".join(
+        f'<port protocol="udp" portid="{n}"><state state="open|filtered" reason="no-response"/>'
+        f'<service name="{service}" method="table" conf="3"/></port>' for n in ports
+    )
+    return _scan_xml(
+        start, f'<scaninfo type="udp" protocol="udp" numservices="2" services="{scanned}"/>',
+        body, host="10.42.0.1")
+
+
+def test_an_empty_identification_stage_never_closes_what_the_sweep_proved_open(client):
+    """식별은 **보강**이지 스윕에 대한 권한이 아니다.
+
+    스윕이 161 을 열린 것으로 증명했는데 같은 배치의 stage3 가 아무 응답도 못 받는 일은
+    흔하다(UDP 는 특히). 그때 스윕 증거까지 사라지면 이미 열려 있던 발견이 닫히고
+    '정상처리' 가 되어 감사 이력까지 망가진다 - 되돌리기 가장 어려운 미탐이다.
+
+    실제 실행 경로(`engine_runner.collect_results`)는 스윕을 fallback 으로 깔고 stage3 가
+    **보고한 키만** 덮어쓴다. 가져오기가 그 규칙과 갈리면 같은 산출물이 돌린 경로냐 가져온
+    경로냐에 따라 다른 결론을 낸다.
+    """
+    h = _auth(client)
+    # 1) 스윕만 먼저 인입해 열린 발견을 만든다.
+    first = _upload(client, h, [("scan_42/stage-udp-b0.xml", _udp_xml(1782050001, [161]))])
+    assert first.status_code == 200, first.text
+    before = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                        headers=h).json()
+    assert [(f["port"], f["state"]) for f in before] == [(161, "open|filtered")]
+
+    # 2) 같은 스윕 + 아무것도 못 찾은 stage3 를 함께 인입한다.
+    again = _upload(client, h, [
+        ("scan_42/stage-udp-b0.xml", _udp_xml(1782050001, [161])),
+        ("scan_42/stage3-udp-b0-g0.xml", _udp_xml(1782050002, [])),
+    ])
+    assert again.status_code == 200, again.text
+    assert again.json()["counts"]["closed"] == 0, "빈 식별 단계가 스윕의 양성 관측을 닫았다"
+    after = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                       headers=h).json()
+    assert [(f["port"], f["state"], f["status"]) for f in after] == [
+        (161, "open|filtered", "미조치")
+    ]
+
+
+def test_no_engine_artifact_is_dropped_when_another_shares_its_batch(client):
+    """같은 (배치, 역할) 자리에 두 파일이 들어오면 뒤엣것이 앞엣것을 조용히 덮어썼다.
+
+    엔진은 서비스 식별을 배치 안에서 여러 `gN` 으로 나눈다. 그 그룹들이 서로 다른 포트를
+    봤는데 하나만 남으면 나머지 관측이 통째로 사라진다 - 파일은 올렸고 오류도 없으니
+    사라졌다는 사실조차 안 보인다.
+    """
+    h = _auth(client)
+    files = [
+        ("scan_42/stage-udp-b0.xml", _udp_xml(1782050001, [161, 162])),
+        # 같은 배치의 서로 다른 식별 그룹이 각각 다른 포트를 밝힌다.
+        ("scan_42/stage3-udp-b0-g0.xml", _udp_xml(1782050002, [161], service="snmp")),
+        ("scan_42/stage3-udp-b0-g1.xml", _udp_xml(1782050003, [162], service="snmptrap")),
+    ]
+    r = _upload(client, h, files)
+    assert r.status_code == 200, r.text
+    assert r.json()["imported"] == 1
+    rows = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=h).json()
+    by_port = {f["port"]: f["service"] for f in rows}
+    assert by_port == {161: "snmp", 162: "snmptrap"}, (
+        f"식별 그룹이 서로를 덮었다: {by_port}"
+    )
+
+
+def test_the_sweep_never_overwrites_what_identification_found(client):
+    """스윕은 **열림만 증명**한다 - 서비스 정체는 식별 단계가 밝힌다.
+
+    두 단계를 같은 자리에 담으면 배치 키 정렬상 스윕이 뒤에 처리되어(`svc-b0-g0` <
+    `sweep-b0`) 식별이 밝힌 서비스명을 덮어쓴다. 실제 실행 경로
+    (`engine_runner.collect_results`)가 스윕 행에 `identity_observed=False` 를 붙이는 이유가
+    이것이다 - "Sweep proves openness only ... must not erase an existing identity".
+
+    서비스명을 서로 다르게 두어야 이 덮어쓰기가 보인다. 같은 이름이면 어느 쪽이 남든 표가
+    똑같아, 검사하지 않는 테스트가 된다(실제로 그렇게 놓쳤다).
+    """
+    h = _auth(client)
+    r = _upload(client, h, [
+        # 스윕은 정체를 모른 채 열림만 본다.
+        ("scan_42/stage-udp-b0.xml", _udp_xml(1782050001, [161], service="unknown")),
+        # 식별이 같은 포트를 snmp 로 밝힌다.
+        ("scan_42/stage3-udp-b0-g0.xml", _udp_xml(1782050002, [161], service="snmp")),
+    ])
+    assert r.status_code == 200, r.text
+    rows = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=h).json()
+    assert [f["service"] for f in rows] == ["snmp"], (
+        f"스윕이 식별을 덮어썼다: {[(f['port'], f['service']) for f in rows]}"
+    )
+
+
+def test_identification_wins_only_for_the_keys_it_actually_reported(client):
+    """식별이 다룬 포트만 서비스 정보를 얻고, 나머지는 스윕 증거 그대로 남아야 한다."""
+    h = _auth(client)
+    r = _upload(client, h, [
+        ("scan_42/stage-udp-b0.xml", _udp_xml(1782050001, [161, 162])),
+        ("scan_42/stage3-udp-b0-g0.xml", _udp_xml(1782050002, [161], service="snmp")),
+    ])
+    assert r.status_code == 200 and r.json()["counts"]["closed"] == 0
+    rows = client.get("/api/findings?state=&hide_unconfirmed=false&hide_tcpwrapped=false",
+                      headers=h).json()
+    by_port = {f["port"]: f for f in rows}
+    assert set(by_port) == {161, 162}, "식별이 안 다룬 포트가 사라졌다"
+    assert by_port[161]["service"] == "snmp"
+    # 162 는 스윕만 봤다 - 열림은 증명됐지만 정체는 관측되지 않았다.
+    assert by_port[162]["state"] == "open|filtered"
 
 
 def test_a_whole_scans_folder_splits_into_one_row_per_actual_run(client):

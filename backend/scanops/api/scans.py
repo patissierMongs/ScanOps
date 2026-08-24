@@ -100,7 +100,7 @@ ENGINE_STAGE_RE = re.compile(
     r"^stage(?:"
     r"(?P<discovery>0-discovery)"                             # -sn 호스트 발견
     r"|-(?P<sweep_proto>tcp|udp)-b(?P<sweep_batch>\d+)"       # 포트 스윕
-    r"|3-(?P<svc_proto>tcp|udp)-b(?P<svc_batch>\d+)-g\d+"     # 서비스 식별
+    r"|3-(?P<svc_proto>tcp|udp)-b(?P<svc_batch>\d+)-g(?P<svc_group>\d+)"  # 서비스 식별
     # 호스트 격리 재시도. 접미사는 프로토콜(tcp/udp)이거나 포트가 붙은 tag(tcp443·udp161)다.
     r"|3-(?P<iso_host>\d+_\d+_\d+_\d+)-(?P<iso_proto>[a-z]+[a-z0-9]*)"
     r")(?:-confirm)?\.xml$", re.I)
@@ -471,22 +471,27 @@ def _engine_stage_info(filename: str | None) -> tuple[str, str, str] | None:
     if not m:
         return None
     run_key = folder or name          # 폴더 없이 올라온 낱개 파일도 자기 이름으로 묶인다
+    # **배치 키는 파일마다 유일해야 한다.** 같은 (배치, 역할) 자리에 두 파일이 들어오면 뒤엣것이
+    # 앞엣것을 조용히 덮어쓴다. 실제로 그랬다: 스윕(stage-udp-b0)과 식별(stage3-udp-b0-g0)이
+    # 같은 자리를 다퉈 스윕 증거가 사라졌고, 아무것도 못 찾은 식별만 남아 열린 발견이 닫혔다
+    # (실측 counts.closed=1). 식별 그룹 g0·g1 과 격리 재시도 tcp/tcp443 도 서로를 덮었다.
     if m.group("discovery"):
-        return run_key, "b0", ENGINE_ROLE_DISCOVERY
+        return run_key, "discovery", ENGINE_ROLE_DISCOVERY
     if m.group("sweep_proto"):
         proto = m.group("sweep_proto").lower()
-        # 스윕이 닫힘 권한을 가진 단계다(요청한 포트 범위를 전부 훑는다).
-        # UDP 스윕도 식별과 같은 자리에 담는다 - findings() 주석 참고.
-        role = "tcp_discovery" if proto == "tcp" else "udp_identify"
-        return run_key, f"b{int(m.group('sweep_batch'))}", role
+        # 스윕은 **열림만 증명**한다. 식별과 다른 역할이어야 stage3 가 아무것도 못 찾았을 때
+        # 스윕 증거가 살아남는다 - 실제 실행 경로(engine_runner.collect_results)도 스윕을
+        # setdefault 로 깔고 stage3 가 보고한 키만 덮어쓴다.
+        role = "tcp_discovery" if proto == "tcp" else "udp_sweep"
+        return run_key, f"sweep-b{int(m.group('sweep_batch'))}", role
     if m.group("svc_proto"):
         proto = m.group("svc_proto").lower()
         role = "tcp_identify" if proto == "tcp" else "udp_identify"
-        return run_key, f"b{int(m.group('svc_batch'))}", role
+        return run_key, f"svc-b{int(m.group('svc_batch'))}-g{int(m.group('svc_group'))}", role
     # 호스트 격리 재시도 - 공통 실행이 실패한 뒤 그 호스트만 다시 돈 것이라 식별로 본다.
-    proto = (m.group("iso_proto") or "tcp").lower()
-    role = "udp_identify" if proto.startswith("udp") else "tcp_identify"
-    return run_key, f"iso-{m.group('iso_host')}", role
+    suffix = (m.group("iso_proto") or "tcp").lower()
+    role = "udp_identify" if suffix.startswith("udp") else "tcp_identify"
+    return run_key, f"iso-{m.group('iso_host')}-{suffix}", role
 
 
 def _scaninfo_scope(xml_bytes: bytes, proto: str) -> set[int] | None | set:
@@ -2152,6 +2157,9 @@ class _ImportAccumulator:
         self._discovery: list[dict] = []
         self._identified: list[dict] = []
         self._udp: list[dict] = []
+        # UDP 스윕은 **열림만 증명**한다. 식별과 같은 통에 담으면 stage3 가 아무것도 못 찾았을 때
+        # 스윕 증거가 남지 않아 이미 열려 있던 발견이 닫힌다(실측 counts.closed=1).
+        self._udp_sweep: list[dict] = []
 
     @staticmethod
     def _widen(current, incoming):
@@ -2168,6 +2176,7 @@ class _ImportAccumulator:
         for stage, bucket, is_udp in (
             ("tcp_discovery", self._discovery, False),
             ("tcp_identify", self._identified, False),
+            ("udp_sweep", self._udp_sweep, True),
             ("udp_identify", self._udp, True),
         ):
             values = prepared.get(stage)
@@ -2199,13 +2208,17 @@ class _ImportAccumulator:
             )
 
     def findings(self) -> list[dict]:
-        # 식별 결과가 있으면 그것을, 없으면 sweep 이 증명한 열림을 남긴다.
-        #
-        # UDP 는 따로 가르지 않는다. 단계 엔진은 UDP 도 '스윕 -> 식별' 두 단계라 같은 포트가
-        # 두 번 담기지만, ingest() 가 같은 finding_key 를 합칠 때 이미 식별 쪽을 지킨다
-        # (실측: 두 순서 모두 식별 서비스명이 남는다). TCP 처럼 버킷을 하나 더 두어도
-        # 결과가 같아, 검사할 수 없는 층을 만들지 않는다.
-        return [*_prefer_identified(self._identified, self._discovery), *self._udp]
+        """식별 결과가 있으면 그것을, 없으면 sweep 이 증명한 열림을 남긴다.
+
+        **두 프로토콜 모두 같은 규칙**이다. 한때 UDP 만 한 통에 담았는데, 그러면 식별이
+        아무것도 못 찾았을 때 스윕이 증명한 열림까지 함께 사라져 이미 열려 있던 발견이
+        닫혔다. 실제 실행 경로(``engine_runner.collect_results``)도 스윕을 fallback 으로
+        깔고 stage3 가 **보고한 키만** 덮어쓴다 - 여기가 그 규칙과 갈리면 같은 산출물이
+        돌린 경로냐 가져온 경로냐에 따라 다른 결론을 낸다. 단독 스캐너에는 UDP 스윕 단계가
+        없어 그쪽은 비어 있고, 그때는 식별이 그대로 통과한다.
+        """
+        return [*_prefer_identified(self._identified, self._discovery),
+                *_prefer_identified(self._udp, self._udp_sweep)]
 
 
 def _import_stage_bundle(db: Session, user: User, display: str,
