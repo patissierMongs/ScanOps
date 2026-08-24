@@ -29,6 +29,9 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import frontend_stamp  # noqa: E402  (같은 packaging/ 디렉터리)
+
 ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "packaging"
 CACHE = PKG / "_cache"
@@ -305,8 +308,11 @@ def copy_app(app: Path) -> None:
             shutil.copy2(p, dst)
     # 프론트 빌드 산출물
     dist = ROOT / "frontend" / "dist"
-    if not (dist / "index.html").exists():
-        sys.exit("frontend/dist not built. Run: cd frontend && npm run build")
+    # 있기만 하면 담던 자리. dist 는 커밋되는 산출물이라, 소스를 고치고 다시 빌드하지
+    # 않으면 코드와 다른 화면이 그대로 번들에 들어간다 - 한 번 그렇게 나갔다.
+    reason = frontend_stamp.stale()
+    if reason:
+        sys.exit(f"{reason}\n{frontend_stamp.REBUILD_HINT}")
     shutil.copytree(
         dist, app / "frontend" / "dist", ignore=_ignored_source_names,
     )
