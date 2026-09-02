@@ -857,9 +857,19 @@ def signal_stop(out_dir) -> None:
 
 def clear_stop(out_dir) -> None:
     _stop_path(out_dir).unlink(missing_ok=True)
-    data = _read_state(out_dir)
+    path = _rs_path(out_dir)
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict) or not data.get("stop"):
+        return
     data["stop"] = False
-    _rs_path(out_dir).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def stopped(out_dir) -> bool:
@@ -1262,6 +1272,11 @@ def parse_events(out_dir) -> dict:
             if not isinstance(counts, dict):
                 counts = {}
             overall.update({"status": status, "seconds": seconds, "counts": counts})
+            if status == "done":
+                for slot_state in stages.values():
+                    if slot_state.get("status") == "stopped":
+                        slot_state["status"] = "done"
+                        slot_state["percent"] = 100
 
     stage_list = [stages[s] for s in order]
     if overall["status"] == "done":

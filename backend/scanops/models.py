@@ -73,6 +73,7 @@ class Asset(Base):
 
 class ScanRun(Base):
     __tablename__ = "scan_runs"
+    __table_args__ = {"sqlite_autoincrement": True}
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(128), default="")
     targets: Mapped[str] = mapped_column(Text, default="")
@@ -235,7 +236,8 @@ class EndpointObservation(Base):
 
 class Finding(Base):
     __tablename__ = "findings"
-    __table_args__ = (UniqueConstraint("finding_key", name="uq_finding_key"),)
+    __table_args__ = (UniqueConstraint("finding_key", name="uq_finding_key"),
+                      {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(primary_key=True)
     finding_key: Mapped[str] = mapped_column(String(96), index=True)  # host_ip|port|proto
@@ -348,6 +350,7 @@ class Finding(Base):
 class FindingEvent(Base):
     """이력 타임라인 + 감사 추적 (누가·언제·무엇을)."""
     __tablename__ = "finding_events"
+    __table_args__ = {"sqlite_autoincrement": True}
     id: Mapped[int] = mapped_column(primary_key=True)
     finding_id: Mapped[int] = mapped_column(ForeignKey("findings.id", ondelete="CASCADE"), index=True)
     scan_id: Mapped[int | None] = mapped_column(ForeignKey("scan_runs.id"), nullable=True)
@@ -396,6 +399,7 @@ class Category(Base):
 
 class Notification(Base):
     __tablename__ = "notifications"
+    __table_args__ = {"sqlite_autoincrement": True}
     id: Mapped[int] = mapped_column(primary_key=True)
     dept: Mapped[str] = mapped_column(String(128), default="")
     finding_ids_json: Mapped[list | None] = mapped_column(JSON, default=list)
@@ -412,6 +416,7 @@ class AuditLog(Base):
     민감 도구이므로 누가 어떤 대역을 스캔했는지 남기는 게 운영·감사의 기본.
     """
     __tablename__ = "audit_logs"
+    __table_args__ = {"sqlite_autoincrement": True}
     id: Mapped[int] = mapped_column(primary_key=True)
     actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     actor_name: Mapped[str] = mapped_column(String(64), default="")  # 사용자 삭제 후에도 보존

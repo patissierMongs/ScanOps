@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { api, setToken } from "../api.js";
 import "./login.css";
 
@@ -16,6 +16,18 @@ export default function Login({ onLogin }) {
   const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [health, setHealth] = useState(null);
+
+  useEffect(() => {
+    let live = true;
+    fetch("/api/health", { headers: { Accept: "application/json" } })
+      .then((r) => r.json().then((body) => ({ ok: r.ok, ...body })))
+      .then((h) => { if (live) setHealth(h); })
+      .catch(() => { if (live) setHealth({ ok: false, ready: false, version: "", errors: ["unreachable"] }); });
+    return () => { live = false; };
+  }, []);
+  const state = health === null ? "…" : health.ready ? "READY" : "NOT READY";
+  const version = health?.version ? `v${health.version}` : "";
 
   function submit(e) {
     e.preventDefault();
@@ -50,11 +62,11 @@ export default function Login({ onLogin }) {
             <div className="lg-core" />
           </div>
           <div className="lg-hud">
-            <span className="lg-tag">● ACTIVE SCAN</span>
-            <div className="lg-hud-row"><span className="k">LINK</span><b>AIR-GAPPED</b><span className="bar" /></div>
-            <div className="lg-hud-row"><span className="k">ENGINE</span><b>nmap 7.99</b><span className="bar" /></div>
-            <div className="lg-hud-row"><span className="k">SCOPE</span><b>KISA · NIS</b><span className="bar" /></div>
-            <div className="lg-hud-row"><span className="k">STATE</span><b>READY</b><span className="bar" /></div>
+            <div className="lg-hud-row"><span className="k">기준</span><b>KISA · NIS</b><span className="bar" /></div>
+            <div className="lg-hud-row"><span className="k">서버</span><b>{state}</b><span className="bar" /></div>
+            {health && !health.ready && health.errors?.length > 0 && (
+              <div className="lg-hud-row"><span className="k">사유</span><b>{health.errors.join(", ")}</b><span className="bar" /></div>
+            )}
           </div>
         </aside>
 
@@ -94,8 +106,8 @@ export default function Login({ onLogin }) {
           </form>
 
           <div className="lg-foot">
-            <span className="lg-stat"><span className="lg-led" /> SYSTEM READY</span>
-            <span>v0.1 · LOCAL</span>
+            <span className="lg-stat"><span className={"lg-led" + (health && !health.ready ? " off" : "")} /> {state === "…" ? "확인 중" : state === "READY" ? "서버 준비됨" : "서버 준비 안 됨"}</span>
+            <span>{version}</span>
           </div>
         </main>
       </div>

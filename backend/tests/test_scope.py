@@ -107,10 +107,11 @@ def test_check_raw_scope_rejects_mixed_unverifiable_target(target):
     "-iR10", "-iR=10", "-iLhosts.txt", "-iL=hosts.txt",
     "--excludefile=hosts.txt", "--exclude-file=hosts.txt", "--resume=old.nmap",
 ])
-def test_check_raw_scope_blocks_compact_unscoped_target_sources(source):
+@pytest.mark.parametrize("spec", ["10.0.0.0/8", ""])
+def test_check_raw_scope_blocks_compact_unscoped_target_sources(source, spec):
     from scanops.scanning.scope import check_raw_scope
-    with pytest.raises(ValueError, match="scope"):
-        check_raw_scope(["-sV", source, "10.0.0.1"], spec="10.0.0.0/8")
+    with pytest.raises(ValueError, match="타겟"):
+        check_raw_scope(["-sV", source, "10.0.0.1"], spec=spec)
 
 
 @pytest.mark.parametrize("tokens", [
@@ -188,7 +189,7 @@ def test_check_raw_scope_distinguishes_known_option_values_from_targets():
 ])
 def test_check_raw_scope_rejects_dynamic_or_unmanaged_nse(tokens):
     from scanops.scanning.scope import check_raw_scope
-    with pytest.raises(ValueError, match="scope"):
+    with pytest.raises(ValueError, match="scope|직접 명령"):
         check_raw_scope(tokens, spec="10.0.0.0/8")
 
 
@@ -235,7 +236,8 @@ def test_run_command_rejects_nse_newtargets_before_persisting_or_starting(client
     })
 
     assert response.status_code == 400
-    assert "scope" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "scope" in detail or "직접 명령" in detail
     assert client.get("/api/scans", headers=headers).json() == []
 
 
@@ -671,3 +673,46 @@ def test_engine_and_chunk_resume_reject_invalid_saved_ports_before_side_effects(
         assert [db.get(ScanRun, scan_id).status for scan_id in ids] == ["canceled", "canceled"]
     finally:
         db.close()
+
+
+@pytest.mark.parametrize("tokens", [
+    ["-sL", "-n", "-iL", "/etc/passwd"],
+    ["-sV", "-iR", "10"],
+    ["-sV", "--excludefile", "/etc/hosts", "10.0.0.1"],
+    ["-sV", "--resume", "old.nmap"],
+    ["-sV", "--script", "http-put", "--script-args", "http-put.file=/data/secret.key", "10.0.0.1"],
+    ["-sV", "--script-args=x=1", "10.0.0.1"],
+    ["-sV", "--script-args-file", "/etc/hosts", "10.0.0.1"],
+    ["-sT", "--datadir", "/tmp", "--script", "/etc/hostname", "10.0.0.1"],
+    ["-sT", "--datadir=/tmp", "10.0.0.1"],
+    ["-sV", "--servicedb", "/etc/passwd", "10.0.0.1"],
+    ["-sV", "--versiondb=/etc/passwd", "10.0.0.1"],
+])
+def test_check_raw_scope_blocks_server_file_access_without_a_scope(tokens):
+    from scanops.scanning.scope import check_raw_scope
+    with pytest.raises(ValueError):
+        check_raw_scope(tokens, spec="")
+
+
+@pytest.mark.parametrize("tokens", [
+    ["-sV", "-p", "22,80", "--script", "http-title", "10.0.0.1"],
+    ["-sV", "--script=vuln", "--script-timeout", "2m", "scanme.example.com"],
+    ["-sT", "-p", "80", "--exclude", "10.0.0.5", "10.0.0.0/24"],
+])
+def test_check_raw_scope_without_a_scope_still_allows_ordinary_commands(tokens):
+    from scanops.scanning.scope import check_raw_scope
+    check_raw_scope(tokens, spec="")
+
+
+def test_run_command_rejects_file_target_list_even_without_a_scope(client, monkeypatch):
+    from scanops.api import scans as scans_api
+    from scanops.scanning import scope as scope_module
+
+    headers = _auditor_headers(client)
+    monkeypatch.setattr(scope_module.get_settings(), "scan_scope", "")
+    monkeypatch.setattr(scans_api.nmap_runner, "find_nmap", lambda explicit="": "nmap")
+    response = client.post("/api/scans/run-command", headers=headers, json={
+        "command": "nmap -sL -n -iL /etc/passwd",
+    })
+    assert response.status_code == 400, response.text
+    assert client.get("/api/scans", headers=headers).json() == []

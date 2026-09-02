@@ -108,21 +108,34 @@ def terminate_owned(process: subprocess.Popen, timeout: float = 2.0) -> None:
             process.wait(timeout=timeout)
             return
 
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    if not _signal_group(process.pid, signal.SIGTERM):
         return
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         pass
-    try:
-        # The private group may outlive its leader, so clear any remaining descendants.
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    if not _signal_group(process.pid, signal.SIGKILL):
         return
     if process.poll() is None:
         process.wait(timeout=timeout)
+
+
+def _signal_group(pgid: int, sig: int) -> bool:
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    try:
+        subprocess.run(
+            ["sudo", "-n", "kill", f"-{int(sig)}", "--", f"-{pgid}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return True
 
 
 def close_kill_job(process: subprocess.Popen | None) -> bool:

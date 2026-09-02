@@ -2612,3 +2612,78 @@ def test_both_udp_retry_paths_use_a_temporary_output_base(tmp_path):
         assert "adopt_artifacts" in head and "discard_artifacts" in head, (
             f"{index + 1}번째 재시도가 채택·폐기를 안 가른다"
         )
+
+
+def test_clear_stop_keeps_run_state_when_it_cannot_be_read(monkeypatch, tmp_path):
+    state_path = tmp_path / "run-state.json"
+    saved = RunState(state_path)
+    saved.set("live", ["10.0.0.1"])
+    saved.mark_done("tcp")
+    saved.set("open_map", {"10.0.0.1": {"tcp": [22]}})
+    saved.set("stop", True)
+    saved.save()
+    engine_runner.signal_stop(tmp_path)
+    before = json.loads(state_path.read_text(encoding="utf-8"))
+
+    real_read_text = Path.read_text
+
+    def denied(self, *args, **kwargs):
+        if self.name == "run-state.json":
+            raise PermissionError(5, "transient sharing violation")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    engine_runner.clear_stop(tmp_path)
+    monkeypatch.undo()
+
+    assert not engine_runner._stop_path(tmp_path).exists()
+    assert json.loads(state_path.read_text(encoding="utf-8")) == before
+
+    engine_runner.clear_stop(tmp_path)
+    after = json.loads(state_path.read_text(encoding="utf-8"))
+    assert after["stop"] is False
+    assert after["live"] == ["10.0.0.1"]
+    assert after["open_map"] == {"10.0.0.1": {"tcp": [22]}}
+    assert "tcp" in after["stages_done"]
+    assert list(tmp_path.glob(".run-state.json.*.tmp")) == []
+
+
+def test_clear_stop_does_not_invent_a_run_state(tmp_path):
+    engine_runner.signal_stop(tmp_path)
+    engine_runner.clear_stop(tmp_path)
+    assert not (tmp_path / "run-state.json").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
+def test_terminate_owned_escalates_through_sudo_when_the_group_is_root_owned(monkeypatch):
+    from scanops_engine import process_control
+
+    class Done:
+        pid = 4242
+        _polls = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    signals = []
+    commands = []
+
+    def denied(pgid, sig):
+        signals.append((pgid, sig))
+        raise PermissionError(1, "Operation not permitted")
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(process_control.os, "killpg", denied)
+    monkeypatch.setattr(process_control.subprocess, "run",
+                        lambda argv, **kwargs: commands.append(argv) or Result())
+
+    process_control.terminate_owned(Done())
+
+    assert signals[0] == (4242, process_control.signal.SIGTERM)
+    assert commands[0][:4] == ["sudo", "-n", "kill", f"-{int(process_control.signal.SIGTERM)}"]
+    assert commands[0][-1] == "-4242"

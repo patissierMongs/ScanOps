@@ -161,6 +161,9 @@ backend/scanops/
 - 비밀번호 해시 저장, 역할 기반 접근(스캔 실행=auditor↑, 사용자 관리=admin).
 - 토큰은 사용자 `auth_version`을 포함하며 비밀번호 변경·재설정 시 기존 토큰을 전부 무효화한다.
 - 스캔 결과는 민감정보(IP/배너) → 접근 인증 필수, 감사 로그 보존.
+- 직접 명령 스캔은 scope 설정과 무관하게 `-iL/-iR/--excludefile/--resume` 와 `--script-args/--script-args-file/--datadir/--servicedb/--versiondb` 를 거절한다 — 서버 파일을 nmap 에 읽히거나 NSE 에 서버 경로를 넘기는 통로라서다. scope 가 있으면 대역·NSE 화이트리스트 검증이 추가된다.
+- 남이 정해 준 비밀번호(`must_change_password`)로는 `/api/auth/me` 와 `/api/auth/change-password` 만 허용하고 나머지는 403 — 서버가 강제한다.
+- 로그인 실패는 계정당 5회/15분, 발신지당 30회/15분을 넘기면 5분 잠근다(429 + `Retry-After`). 없는 아이디도 더미 해시로 같은 시간을 소모한다.
 
 ## 7. 로드맵 (빌드 순서 — 루프가 이 순서로 진행)
 

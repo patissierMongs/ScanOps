@@ -9,6 +9,7 @@ os.environ["SCANOPS_DATA_DIR"] = _TMP
 import pytest
 from fastapi.testclient import TestClient
 
+from scanops import login_guard
 from scanops.db import Base, SessionLocal, get_engine, init_db
 from scanops.main import app
 from scanops.models import User
@@ -22,6 +23,7 @@ def _clean_db():
     eng = get_engine()
     Base.metadata.drop_all(eng)
     Base.metadata.create_all(eng)
+    login_guard.reset()
     yield
 
 

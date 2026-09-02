@@ -307,3 +307,96 @@ def test_a_corrupt_credential_file_still_reissues_the_bootstrap_password(client)
     finally:
         db.close()
     assert cred.exists() and "garbage" not in cred.read_text(encoding="utf-8")
+
+
+# ---- 초기 비밀번호 상태에서는 변경 외 API 를 막는다 ----
+
+def test_an_unchanged_initial_password_only_reaches_me_and_change_password(client):
+    from scanops.db import SessionLocal
+    from scanops.models import User
+    from scanops.security import hash_password
+
+    db = SessionLocal()
+    try:
+        db.add(User(username="fresh", password_hash=hash_password("issued-by-admin1"),
+                    role="admin", display_name="fresh", must_change_password=1))
+        db.commit()
+    finally:
+        db.close()
+    headers = {"Authorization": f"Bearer {token_for(client, 'fresh', 'issued-by-admin1')}"}
+
+    assert client.get("/api/auth/me", headers=headers).status_code == 200
+    for method, path in (("GET", "/api/findings"), ("GET", "/api/scans"),
+                         ("GET", "/api/dashboard"), ("GET", "/api/users"),
+                         ("POST", "/api/scans/import")):
+        r = client.request(method, path, headers=headers)
+        assert r.status_code == 403, (method, path, r.status_code, r.text)
+        assert "비밀번호" in r.json()["detail"]
+
+    changed = client.post("/api/auth/change-password", headers=headers,
+                          json={"current_password": "issued-by-admin1",
+                                "new_password": "chosen-by-owner2"})
+    assert changed.status_code == 200
+    fresh = {"Authorization": f"Bearer {token_for(client, 'fresh', 'chosen-by-owner2')}"}
+    assert client.get("/api/findings", headers=fresh).status_code == 200
+
+
+# ---- 로그인 무차별 대입 억제 ----
+
+def test_repeated_login_failures_lock_the_account_for_a_while(client):
+    from scanops import login_guard
+
+    make_user("bruted", "correct-horse-1")
+    for _ in range(login_guard.USER_MAX_FAILURES - 1):
+        assert client.post("/api/auth/login",
+                           json={"username": "bruted", "password": "nope"}).status_code == 401
+    locked = client.post("/api/auth/login", json={"username": "bruted", "password": "nope"})
+    assert locked.status_code == 429
+    assert int(locked.headers["Retry-After"]) > 0
+
+    still = client.post("/api/auth/login", json={"username": "bruted", "password": "correct-horse-1"})
+    assert still.status_code == 429
+
+    login_guard.reset()
+    assert client.post("/api/auth/login",
+                       json={"username": "bruted", "password": "correct-horse-1"}).status_code == 200
+
+
+def test_a_successful_login_clears_the_failure_count(client):
+    from scanops import login_guard
+
+    make_user("forgetful", "right-password-1")
+    for _ in range(login_guard.USER_MAX_FAILURES - 1):
+        client.post("/api/auth/login", json={"username": "forgetful", "password": "nope"})
+    assert client.post("/api/auth/login",
+                       json={"username": "forgetful", "password": "right-password-1"}).status_code == 200
+    for _ in range(login_guard.USER_MAX_FAILURES - 1):
+        r = client.post("/api/auth/login", json={"username": "forgetful", "password": "nope"})
+        assert r.status_code == 401
+
+
+def test_login_lock_expires_on_its_own():
+    from scanops import login_guard
+
+    login_guard.reset()
+    for i in range(login_guard.USER_MAX_FAILURES):
+        login_guard.record_failure("x", "1.2.3.4", now=1000.0 + i)
+    assert login_guard.retry_after("x", "1.2.3.4", now=1010.0) > 0
+    assert login_guard.retry_after("x", "1.2.3.4", now=1010.0 + login_guard.LOCK_SECONDS) == 0
+    assert login_guard.retry_after("other", "9.9.9.9", now=1010.0) == 0
+
+
+def test_an_unknown_username_is_hashed_like_a_real_one(client, monkeypatch):
+    from scanops.api import auth as auth_api
+
+    calls = []
+    real = auth_api.verify_password
+
+    def spy(password, stored):
+        calls.append(stored)
+        return real(password, stored)
+
+    monkeypatch.setattr(auth_api, "verify_password", spy)
+    r = client.post("/api/auth/login", json={"username": "ghost", "password": "whatever"})
+    assert r.status_code == 401
+    assert calls == [auth_api._DUMMY_HASH]

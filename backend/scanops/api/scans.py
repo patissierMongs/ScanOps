@@ -34,7 +34,7 @@ from ..scanning import (
     xml_verdict,
 )
 from ..scanning.presets import PRESETS
-from ..scanning.ingest import ingest
+from ..scanning.ingest import ingest, INGEST_LOCK
 from ..scanning.nmap_parse import (observed_at, parse_xml, probed_identity, scan_finished,
                                    scan_start, up_hosts)
 from .audit import record
@@ -178,7 +178,33 @@ def _validate_structured_scan(
             raise ValueError("자동 스캔에 사용할 TCP 또는 UDP 포트가 없습니다.")
     elif uses_manual_preset and not body.options and body.preset not in PRESETS:
         raise ValueError(f"알 수 없는 프리셋: {body.preset}")
+    _require_ports_after_exclusion(body)
     return hosts, excludes
+
+
+def _ports_remain(scope: set[int] | None, excluded: set[int] | None | set) -> bool:
+    if excluded is None:
+        return False
+    if scope is None:
+        return True
+    return bool(scope - excluded)
+
+
+def _require_ports_after_exclusion(body: ScanRunIn) -> None:
+    if not (body.exclude_ports or "").strip():
+        return
+    tcp_spec = nmap_runner.auto_tcp_port_spec(body.ports)
+    udp_spec = nmap_runner.auto_udp_port_spec(body.ports)
+    udp_active = bool(udp_spec) and (body.workflow == "auto" or "udp" in (body.options or []))
+    remaining = []
+    if tcp_spec:
+        remaining.append(_ports_remain(_port_scope(tcp_spec, "T"),
+                                       _excluded_port_scope(body.exclude_ports, "T")))
+    if udp_active:
+        remaining.append(_ports_remain(_port_scope(udp_spec, "U"),
+                                       _excluded_port_scope(body.exclude_ports, "U")))
+    if remaining and not any(remaining):
+        raise ValueError("제외 포트를 적용하니 스캔할 포트가 남지 않았습니다.")
 
 
 def _effective_hosts(hosts: list[str], excludes: list[str]) -> list[str]:
@@ -761,47 +787,48 @@ def _commit_ingest(db: Session, scan: ScanRun, findings: list[dict], scanned_hos
                    closure_hosts: set[str] | None = None,
                    closure_scope_keys: set[str] | None = None,
                    absence_at: dict | None = None) -> dict:
-    enriched = taxonomy.enrich_all(db, findings)
-    scope_keys = (
-        closure_scope_keys
-        if closure_scope_keys is not None
-        else _auto_scope_keys(
-            db,
-            scanned_hosts if closure_hosts is None else closure_hosts,
-            enriched,
-            tcp_scope,
-            udp_scope,
-            # 가져온 XML 은 파일 안의 시각이 곧 관측 시각이라, 지난 날짜의 XML 을 오늘 올리는
-            # 일이 정상 경로다. ingest() 는 _is_older 로 그 뒤 관측을 지키지만 후보 집합은
-            # 병합 XML 의 closed 목록에도 쓰이므로 여기서도 잘라야 둘이 같은 말을 한다.
-            as_of=scan_date,
+    with INGEST_LOCK:
+        enriched = taxonomy.enrich_all(db, findings)
+        scope_keys = (
+            closure_scope_keys
+            if closure_scope_keys is not None
+            else _auto_scope_keys(
+                db,
+                scanned_hosts if closure_hosts is None else closure_hosts,
+                enriched,
+                tcp_scope,
+                udp_scope,
+                # 가져온 XML 은 파일 안의 시각이 곧 관측 시각이라, 지난 날짜의 XML 을 오늘 올리는
+                # 일이 정상 경로다. ingest() 는 _is_older 로 그 뒤 관측을 지키지만 후보 집합은
+                # 병합 XML 의 closed 목록에도 쓰이므로 여기서도 잘라야 둘이 같은 말을 한다.
+                as_of=scan_date,
+            )
         )
-    )
-    # 인입을 먼저 하고 **실제로 닫힌 키만** 증거 XML 에 적는다. 후보 전체를 미리 닫힘으로
-    # 쓰면, 인입이 시각·커버리지를 근거로 살려 둔 발견까지 증거 파일에는 닫힘으로 남아
-    # DB 와 정반대로 증언한다.
-    closed_keys: set[str] = set()
-    applied_keys: set[str] = set()
-    counts = ingest(
-        db, scan.id, enriched, scanned_hosts, scope_keys=scope_keys,
-        scan_date=scan_date, absence_at=absence_at,
-        closed_keys=closed_keys, applied_keys=applied_keys, commit=False,
-    )
-    if raw_xml_path is not None:
-        applied = [f for f in enriched if _finding_key(f) in applied_keys]
-        _write_merged_xml(db, raw_xml_path, applied, scanned_hosts,
-                          {_finding_key(f) for f in applied} | closed_keys, scan_date)
-        scan.raw_xml_path = str(raw_xml_path)
-    from .assets import match_assets
-    match_assets(db, commit=False)
-    # '호스트' 는 이 스캔이 **관측한** 호스트 수다. 발견이 있는 호스트만 세면 열린 포트가
-    # 없던 호스트가 통째로 사라져, 같은 대역을 웹에서 돌렸을 때(engine 은 scanned 를 센다)와
-    # 숫자가 달라진다. 가져온 결과라고 해서 다르게 셀 이유가 없다.
-    scan.host_count = len(scanned_hosts) or len({f["host_ip"] for f in enriched})
-    scan.port_count = len(enriched)
-    scan.status = "done"
-    scan.finished_at = datetime.now(timezone.utc)
-    db.commit()
+        # 인입을 먼저 하고 **실제로 닫힌 키만** 증거 XML 에 적는다. 후보 전체를 미리 닫힘으로
+        # 쓰면, 인입이 시각·커버리지를 근거로 살려 둔 발견까지 증거 파일에는 닫힘으로 남아
+        # DB 와 정반대로 증언한다.
+        closed_keys: set[str] = set()
+        applied_keys: set[str] = set()
+        counts = ingest(
+            db, scan.id, enriched, scanned_hosts, scope_keys=scope_keys,
+            scan_date=scan_date, absence_at=absence_at,
+            closed_keys=closed_keys, applied_keys=applied_keys, commit=False,
+        )
+        if raw_xml_path is not None:
+            applied = [f for f in enriched if _finding_key(f) in applied_keys]
+            _write_merged_xml(db, raw_xml_path, applied, scanned_hosts,
+                              {_finding_key(f) for f in applied} | closed_keys, scan_date)
+            scan.raw_xml_path = str(raw_xml_path)
+        from .assets import match_assets
+        match_assets(db, commit=False)
+        # '호스트' 는 이 스캔이 **관측한** 호스트 수다. 발견이 있는 호스트만 세면 열린 포트가
+        # 없던 호스트가 통째로 사라져, 같은 대역을 웹에서 돌렸을 때(engine 은 scanned 를 센다)와
+        # 숫자가 달라진다. 가져온 결과라고 해서 다르게 셀 이유가 없다.
+        scan.host_count = len(scanned_hosts) or len({f["host_ip"] for f in enriched})
+        scan.port_count = len(enriched)
+        scan.status = "done"
+        scan.finished_at = datetime.now(timezone.utc)
+        db.commit()
     return counts
 
 
@@ -816,25 +843,26 @@ def _ingest_batch(
     no_close=True 면 닫힘 판정을 끈다(직접 명령처럼 스캔한 포트 범위를 알 수 없을 때 — 가산만)."""
     db = SessionLocal()
     try:
-        scan = db.get(ScanRun, scan_id)
-        findings = taxonomy.enrich_all(db, parse_xml(xml_bytes))
-        scanned_hosts = up_hosts(xml_bytes)
-        if no_close:
-            scope_keys = set()
-        else:
-            scope_keys = _auto_scope_keys(
-                db,
-                scanned_hosts if closure_hosts is None else closure_hosts,
-                findings,
-                _scaninfo_scope(xml_bytes, "tcp"),
-                _scaninfo_scope(xml_bytes, "udp"),
-            )
-        ingest(db, scan_id, findings, scanned_hosts, scope_keys=scope_keys, commit=False)
-        from .assets import match_assets
-        match_assets(db, commit=False)
-        scan.host_count = (scan.host_count or 0) + len({f["host_ip"] for f in findings})
-        scan.port_count = (scan.port_count or 0) + len(findings)
-        db.commit()
+        with INGEST_LOCK:
+            scan = db.get(ScanRun, scan_id)
+            findings = taxonomy.enrich_all(db, parse_xml(xml_bytes))
+            scanned_hosts = up_hosts(xml_bytes)
+            if no_close:
+                scope_keys = set()
+            else:
+                scope_keys = _auto_scope_keys(
+                    db,
+                    scanned_hosts if closure_hosts is None else closure_hosts,
+                    findings,
+                    _scaninfo_scope(xml_bytes, "tcp"),
+                    _scaninfo_scope(xml_bytes, "udp"),
+                )
+            ingest(db, scan_id, findings, scanned_hosts, scope_keys=scope_keys, commit=False)
+            from .assets import match_assets
+            match_assets(db, commit=False)
+            scan.host_count = (scan.host_count or 0) + len({f["host_ip"] for f in findings})
+            scan.port_count = (scan.port_count or 0) + len(findings)
+            db.commit()
     finally:
         db.close()
 
@@ -852,20 +880,21 @@ def _ingest_auto_findings(
         scan = db.get(ScanRun, scan_id)
         if scan is None:
             return
-        enriched = taxonomy.enrich_all(db, findings)
-        scope_keys = _auto_scope_keys(
-            db,
-            scanned_hosts if closure_hosts is None else closure_hosts,
-            enriched,
-            tcp_scope,
-            udp_scope,
-        )
-        ingest(db, scan_id, enriched, scanned_hosts, scope_keys=scope_keys, commit=False)
-        from .assets import match_assets
-        match_assets(db, commit=False)
-        scan.host_count = (scan.host_count or 0) + len({f["host_ip"] for f in enriched})
-        scan.port_count = (scan.port_count or 0) + len(enriched)
-        db.commit()
+        with INGEST_LOCK:
+            enriched = taxonomy.enrich_all(db, findings)
+            scope_keys = _auto_scope_keys(
+                db,
+                scanned_hosts if closure_hosts is None else closure_hosts,
+                enriched,
+                tcp_scope,
+                udp_scope,
+            )
+            ingest(db, scan_id, enriched, scanned_hosts, scope_keys=scope_keys, commit=False)
+            from .assets import match_assets
+            match_assets(db, commit=False)
+            scan.host_count = (scan.host_count or 0) + len({f["host_ip"] for f in enriched})
+            scan.port_count = (scan.port_count or 0) + len(enriched)
+            db.commit()
     finally:
         db.close()
 
@@ -1700,47 +1729,48 @@ def _engine_worker(scan_id: int, *, finalize_completed: bool = False) -> None:
             # '빠진 건수'를 셀 기준이 없다. 없는 숫자를 지어내지 않는다.
             unobserved = (0 if unfinished or legacy_scope
                           else len(scope_keys) - len(closing))
-            _commit_engine_ingest(
-                db, scan, out_dir,
-                closing,                               # 빈 집합 = 닫힘 후보 없음
-                force_scanned_hosts,
-                saved_spec,
-            )
-            _materialize_engine_terminal(
-                db, scan, out_dir, saved_spec, report, problems,
-            )
-            scan.status = "partial" if unfinished else "done"
-            scan.finished_at = datetime.now(timezone.utc)
-            if unfinished:
-                scan.failure_code = "nmap_xml_incomplete"
-                scan.failure_message = (
-                    "nmap 이 결과 XML 을 끝맺지 못했습니다 — 관측이 불완전해 닫힘 판정에서 "
-                    f"제외했습니다. ({', '.join(unfinished[:3])})"
+            with INGEST_LOCK:
+                _commit_engine_ingest(
+                    db, scan, out_dir,
+                    closing,                               # 빈 집합 = 닫힘 후보 없음
+                    force_scanned_hosts,
+                    saved_spec,
                 )
-            else:
-                # done 인데 failure_* 를 쓰는 자리가 아니다. 이 코드는 '실패'가 아니라
-                # '부가 증거가 덜 찼다'는 참고이며, UI 도 실패 원인과 다른 라벨로 그린다.
-                degraded = (report["enrichment_missing"] or report["enrichment_broken"]
-                            or problems)
-                scan.failure_code = "nse_degraded" if degraded else ""
-                scan.failure_message = (
-                    "NSE/소켓 오류 또는 서비스 상세 산출물 손상이 있었습니다 — 포트 결과는 "
-                    f"온전하지만 스크립트 결과는 일부 빠졌을 수 있습니다. ({str(degraded[0])[:120]})"
-                    if degraded else ""
+                _materialize_engine_terminal(
+                    db, scan, out_dir, saved_spec, report, problems,
                 )
-                if unobserved:
-                    # 미관측과 NSE 저하는 **다른 축**이다. 하나로 뭉치면 둘이 겹쳤을 때
-                    # '포트 결과는 온전하다'고 반대로 말하게 된다 — 실제로는 그 호스트의
-                    # 포트를 아예 못 봤다. 코드는 더 중요한 사실(포트 미관측)을 가리키고,
-                    # 메시지는 두 사실을 모두 싣는다.
-                    scan.failure_code = "observation_incomplete"
-                    note = (f"응답하지 않은 호스트가 있어 발견 {unobserved}건은 관측하지 "
-                            "못했습니다 - 관측하지 않은 포트는 닫지 않습니다.")
+                scan.status = "partial" if unfinished else "done"
+                scan.finished_at = datetime.now(timezone.utc)
+                if unfinished:
+                    scan.failure_code = "nmap_xml_incomplete"
                     scan.failure_message = (
-                        f"{note} 또한 NSE/서비스 상세 산출물도 일부 빠졌습니다."
-                        if degraded else note
+                        "nmap 이 결과 XML 을 끝맺지 못했습니다 — 관측이 불완전해 닫힘 판정에서 "
+                        f"제외했습니다. ({', '.join(unfinished[:3])})"
                     )
-            db.commit()
+                else:
+                    # done 인데 failure_* 를 쓰는 자리가 아니다. 이 코드는 '실패'가 아니라
+                    # '부가 증거가 덜 찼다'는 참고이며, UI 도 실패 원인과 다른 라벨로 그린다.
+                    degraded = (report["enrichment_missing"] or report["enrichment_broken"]
+                                or problems)
+                    scan.failure_code = "nse_degraded" if degraded else ""
+                    scan.failure_message = (
+                        "NSE/소켓 오류 또는 서비스 상세 산출물 손상이 있었습니다 — 포트 결과는 "
+                        f"온전하지만 스크립트 결과는 일부 빠졌을 수 있습니다. ({str(degraded[0])[:120]})"
+                        if degraded else ""
+                    )
+                    if unobserved:
+                        # 미관측과 NSE 저하는 **다른 축**이다. 하나로 뭉치면 둘이 겹쳤을 때
+                        # '포트 결과는 온전하다'고 반대로 말하게 된다 — 실제로는 그 호스트의
+                        # 포트를 아예 못 봤다. 코드는 더 중요한 사실(포트 미관측)을 가리키고,
+                        # 메시지는 두 사실을 모두 싣는다.
+                        scan.failure_code = "observation_incomplete"
+                        note = (f"응답하지 않은 호스트가 있어 발견 {unobserved}건은 관측하지 "
+                                "못했습니다 - 관측하지 않은 포트는 닫지 않습니다.")
+                        scan.failure_message = (
+                            f"{note} 또한 NSE/서비스 상세 산출물도 일부 빠졌습니다."
+                            if degraded else note
+                        )
+                db.commit()
     except Exception:
         logger.exception("failed to ingest staged scan %s result", scan_id)
         db.rollback()
@@ -3724,6 +3754,7 @@ def retry_timed_out_hosts(
         spec.update({
             "job_id": f"scan_{scan.id}", "targets": targets, "exclude": [],
             "out_dir": str(out_dir), "targets_ports": None, "rescan_units": None,
+            "watchdog_seconds": 0,
         })
         stages = spec.setdefault("stages", {})
         stages.setdefault("discovery", {}).update({"enabled": True, "mode": "pn"})
@@ -3777,7 +3808,7 @@ def retry_timed_out_hosts(
         (out_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
         scan.command = (
             f"{engine_runner.describe(spec)}  ·  {len(targets)}호스트"
-            f"  ·  확인 필요 재스캔 #{source.id} · --max-retries 4"
+            f"  ·  확인 필요 재스캔 #{source.id} · --max-retries 4 · 워치독 해제"
         )
         scan.batch_size = int(spec.get("batch_size") or 0)
         scan.batch_total = -(-len(targets) // scan.batch_size) if scan.batch_size else 0

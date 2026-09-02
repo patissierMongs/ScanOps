@@ -302,3 +302,65 @@ def test_chronological_close_and_reopen_still_update_current_state():
         assert event_types == ["NEW_OPEN", "CLOSED", "REOPENED"]
     finally:
         db.close()
+
+
+def test_two_workers_ingesting_the_same_new_endpoint_do_not_collide(monkeypatch):
+    import threading
+    import time as time_module
+
+    from scanops.api import scans as scans_api
+    from scanops.db import SessionLocal, init_db
+    from scanops.models import Finding, FindingEvent, ScanRun
+    from scanops.scanning import ingest as ingest_module
+
+    init_db()
+    db = SessionLocal()
+    try:
+        a = ScanRun(name="a", targets="10.9.9.9", status="running", created_by=None)
+        b = ScanRun(name="b", targets="10.9.9.9", status="running", created_by=None)
+        db.add_all([a, b])
+        db.commit()
+        ids = (a.id, b.id)
+    finally:
+        db.close()
+
+    real_identity = ingest_module.display_identity
+
+    def slow_identity(**kwargs):
+        time_module.sleep(0.3)
+        return real_identity(**kwargs)
+
+    monkeypatch.setattr(ingest_module, "display_identity", slow_identity)
+    finding = {
+        "host_ip": "10.9.9.9", "hostname": "", "port": 4444, "proto": "tcp", "state": "open",
+        "reason": "syn-ack", "service": "http", "product": "", "version": "", "server": "",
+        "banner": "", "cpe": "", "rtt": 0.0, "identification": "확인", "nse_json": None,
+        "remarks": "",
+    }
+    errors: list = []
+
+    def worker(scan_id):
+        try:
+            scans_api._ingest_auto_findings(
+                scan_id, [dict(finding)], {"10.9.9.9"}, {4444}, set(),
+                closure_hosts={"10.9.9.9"},
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in ids]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert errors == [], errors
+    db = SessionLocal()
+    try:
+        rows = db.query(Finding).filter(Finding.finding_key == "10.9.9.9|4444|tcp").all()
+        assert len(rows) == 1
+        opened = db.query(FindingEvent).filter(
+            FindingEvent.finding_id == rows[0].id, FindingEvent.type == "NEW_OPEN").count()
+        assert opened == 1
+    finally:
+        db.close()

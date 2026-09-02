@@ -461,11 +461,18 @@ def _pid_is_running(pid: int) -> bool:
             close_handle(handle)
     try:
         os.kill(pid, 0)
-        return True
     except PermissionError:
         return True
     except OSError:
         return False
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii", errors="replace") as status:
+            for line in status:
+                if line.startswith("State:"):
+                    return not line.split(":", 1)[1].strip().startswith("Z")
+    except OSError:
+        pass
+    return True
 
 
 def _windows_descendant_pids(root_pid: int) -> list[int]:
@@ -529,6 +536,24 @@ def _initial_admin_password(data_dir: Path) -> str:
     match = re.search(r"비밀번호:\s*(\S+)", text)
     require(match is not None, "INITIAL_ADMIN.txt password line could not be parsed")
     return match.group(1)
+
+
+def _adopt_issued_password(api: ApiClient, username: str, issued_password: str,
+                           chosen_password: str) -> str:
+    issued = _login(api, username, issued_password)
+    me = api.request("GET", "/api/auth/me", token=issued)
+    require(int(me.get("must_change_password") or 0) == 1,
+            f"{username} is not flagged must_change_password")
+    api.request("GET", "/api/scans/options", token=issued, expected=403)
+    api.request("POST", "/api/auth/change-password", token=issued, payload={
+        "current_password": issued_password, "new_password": chosen_password,
+    })
+    api.request("GET", "/api/auth/me", token=issued, expected=401)
+    return _login(api, username, chosen_password)
+
+
+def _adopt_initial_admin(api: ApiClient, initial_password: str, new_password: str) -> str:
+    return _adopt_issued_password(api, "admin", initial_password, new_password)
 
 
 def _login(api: ApiClient, username: str, password: str) -> str:
@@ -648,7 +673,12 @@ def _run_selected_rescan(
 
 
 def _findings(api: ApiClient, token: str) -> list[dict]:
-    return api.request("GET", f"/api/findings?host={HOST}&state=", token=token)
+    return api.request(
+        "GET",
+        f"/api/findings?host={HOST}&state=&hide_unconfirmed=false"
+        "&hide_tcpwrapped=false&hide_allowed=false",
+        token=token,
+    )
 
 
 def _finding(api: ApiClient, token: str, port: int, proto: str) -> dict:
@@ -1509,23 +1539,28 @@ def run(args: argparse.Namespace, report: dict) -> None:
         api = ApiClient(f"http://{HOST}:{api_port}")
         _wait_for_health(api, process, server_log)
 
-        admin_password = _initial_admin_password(data_dir)
+        initial_admin_password = _initial_admin_password(data_dir)
+        admin_password = "RuntimeAdmin-2026!"
         passwords = {
             "admin": admin_password,
             "auditor": "RuntimeAuditor-2026!",
             "viewer": "RuntimeViewer-2026!",
         }
-        admin_token = _login(api, "admin", passwords["admin"])
+        admin_token = _adopt_initial_admin(api, initial_admin_password, admin_password)
+        require(not (data_dir / "INITIAL_ADMIN.txt").exists(),
+                "INITIAL_ADMIN.txt survived the forced password change")
         api.request("POST", "/api/users", token=admin_token, expected=201, payload={
-            "username": "runtime-auditor", "password": passwords["auditor"],
+            "username": "runtime-auditor", "password": "IssuedAuditor-2026!",
             "role": "auditor", "display_name": "Runtime Auditor",
         })
         api.request("POST", "/api/users", token=admin_token, expected=201, payload={
-            "username": "runtime-viewer", "password": passwords["viewer"],
+            "username": "runtime-viewer", "password": "IssuedViewer-2026!",
             "role": "viewer", "display_name": "Runtime Viewer",
         })
-        auditor_token = _login(api, "runtime-auditor", passwords["auditor"])
-        viewer_token = _login(api, "runtime-viewer", passwords["viewer"])
+        auditor_token = _adopt_issued_password(
+            api, "runtime-auditor", "IssuedAuditor-2026!", passwords["auditor"])
+        viewer_token = _adopt_issued_password(
+            api, "runtime-viewer", "IssuedViewer-2026!", passwords["viewer"])
         api.request("GET", "/api/users", token=admin_token)
         api.request("GET", "/api/users", token=auditor_token, expected=403)
         api.request("GET", "/api/users", token=viewer_token, expected=403)

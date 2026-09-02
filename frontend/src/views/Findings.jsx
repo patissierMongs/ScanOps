@@ -102,18 +102,21 @@ export default function Findings({ user, focus = null, onFocusApplied }) {
   }, [match, cols, risk, status, q, colFilters, sort, hideNormal, hideAllowed,
       hideUnconfirmed, hideTcpwrapped, overdueOnly]);
 
+  const loadSeq = useRef(0);
   function load(targetPage = page) {
     const qs = new URLSearchParams(queryString);
     qs.set("limit", String(pageSize));
     qs.set("offset", String(targetPage * pageSize));
+    const seq = ++loadSeq.current;
     setLoading(true);
     api(`/findings?${qs.toString()}`, { raw: true })
       .then(({ body, total: count, hidden: counts }) => {
+        if (seq !== loadSeq.current) return;
         setFindings(body); setTotal(count);
         setHidden(counts || { unconfirmed: 0, tcpwrapped: 0 });
       })
-      .catch((e) => toast(e.message, { type: "err" }))
-      .finally(() => setLoading(false));
+      .catch((e) => { if (seq === loadSeq.current) toast(e.message, { type: "err" }); })
+      .finally(() => { if (seq === loadSeq.current) setLoading(false); });
   }
 
   // 다른 화면(규칙 등)이 조건을 싣고 넘어온 경우 한 번만 적용한다. 적용 후 즉시 비우지
@@ -480,23 +483,32 @@ function RescanDrawer({ targets, onClose, onDone, toast }) {
       .catch(() => toast("복사 실패 — 직접 선택하세요", { type: "err" }));
   }
 
+  const alive = useRef(true);
+  const pollTimer = useRef(null);
+  useEffect(() => () => {
+    alive.current = false;
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+  }, []);
+
   function poll(id) {
     api(`/scans/${id}`)
       .then((s) => {
+        if (!alive.current) return;
         if (s.status === "running" || s.status === "canceling") {
-          setTimeout(() => poll(id), 2000);
+          pollTimer.current = setTimeout(() => poll(id), 2000);
           return;
         }
         // 완료 → 각 타겟의 현재 상태 조회(닫힘이면 정상처리됨)
         Promise.all(targets.map((t) =>
           api(`/findings/${t.id}`).then((cur) => ({ prev: t, cur })).catch(() => ({ prev: t, cur: null }))
         )).then((rows) => {
+          if (!alive.current) return;
           setResults(rows);
           setPhase(s.status === "done" ? "done" : "failed");
           onDone && onDone();
         });
       })
-      .catch(() => setPhase("failed"));
+      .catch(() => { if (alive.current) setPhase("failed"); });
   }
 
   function start() {

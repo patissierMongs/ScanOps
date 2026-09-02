@@ -29,6 +29,7 @@ from runtime_e2e import (
     _capture_cleanup_error,
     _find_nmap,
     _initial_admin_password,
+    _adopt_initial_admin,
     _login,
     _port_is_bindable,
     _stop_process_tree,
@@ -292,7 +293,7 @@ def _smoke_artifact(kind: str, app: Path, run_root: Path,
         index = api.request("GET", "/")
         require(isinstance(index, bytes) and b'id="root"' in index,
                 f"{kind} launcher did not serve its packaged frontend")
-        token = _login(api, "admin", _initial_admin_password(data_dir))
+        token = _adopt_initial_admin(api, _initial_admin_password(data_dir), "PackageAdmin-2026!")
         started = api.request(
             "POST", "/api/scans/run-staged", token=token,
             payload={

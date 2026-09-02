@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from .. import login_guard
 from ..config import get_settings
 from ..db import get_db
 from ..models import User
@@ -29,15 +31,39 @@ def _record_failed_login(db: Session) -> None:
     )
 
 
+_DUMMY_HASH = hash_password("scanops-timing-equalizer")
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
+def _locked_response(seconds: int) -> JSONResponse:
+    return JSONResponse(
+        {"detail": f"로그인 실패가 반복되어 잠시 잠겼습니다. {seconds}초 뒤 다시 시도하세요."},
+        status_code=429, headers={"Retry-After": str(seconds)},
+    )
+
+
 @router.post("/login", response_model=TokenOut)
-def login(body: LoginIn, db: Session = Depends(get_db)) -> TokenOut:
+def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
+    client_ip = _client_ip(request)
+    wait = login_guard.retry_after(body.username, client_ip)
+    if wait:
+        return _locked_response(wait)
     user = db.query(User).filter(User.username == body.username).first()
-    if user is None or not verify_password(body.password, user.password_hash):
+    stored = user.password_hash if user is not None else _DUMMY_HASH
+    password_ok = verify_password(body.password, stored)
+    if user is None or not password_ok:
         _record_failed_login(db)
+        locked = login_guard.record_failure(body.username, client_ip)
+        if locked:
+            return _locked_response(locked)
         raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
     if not user.is_active:
         _record_failed_login(db)
         raise HTTPException(status_code=403, detail="비활성화된 계정입니다.")
+    login_guard.record_success(body.username, client_ip)
     token = make_token(user.id, _SECRET, _settings.token_ttl_hours, user.auth_version)
     record(db, user, "LOGIN", target=body.username)
     return TokenOut(token=token, role=user.role, display_name=user.display_name)
