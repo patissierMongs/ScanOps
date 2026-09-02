@@ -148,6 +148,10 @@ def check_scope(hosts: list[str], spec: str | None = None) -> None:
 # 붙여 쓴 형태(-iR10, -iL=hosts.txt)도 같은 옵션이다.
 _UNSCOPED_TARGET_OPTIONS = ("-iL", "-iR", "--excludefile", "--exclude-file", "--resume")
 
+_SERVER_FILE_OPTIONS = (
+    "--script-args", "--script-args-file", "--datadir", "--servicedb", "--versiondb",
+)
+
 # nmap 옵션 중 다음 토큰을 값으로 소비하는 항목. 이 값을 타겟으로 오인하면
 # `-p 22`, `--script http-title` 같은 정상 명령을 막게 된다. 알 수 없는 옵션의
 # 다음 값은 안전하게 위치 타겟으로 다룬다(비-IP면 거절되므로 fail-closed).
@@ -282,20 +286,41 @@ def _uses_scoped_unsafe_network_option(token: str) -> bool:
     return False
 
 
-def check_raw_scope(tokens: list[str], spec: str | None = None) -> None:
-    """직접 입력 명령용 scope 게이트. spec 비면 통과(무제한).
+def _uses_server_file_option(token: str) -> bool:
+    option_name = token.split("=", 1)[0]
+    for option in _SERVER_FILE_OPTIONS:
+        if option_name == option:
+            return True
+        if len(option_name) > 2 and option_name.startswith("--") \
+                and option.startswith(option_name) \
+                and option_name not in {"--script"}:
+            return True
+    return False
 
-    scope 설정 시: 파일/랜덤 타겟 플래그(-iL/-iR 등) 차단, IP/CIDR 타겟이 최소 1개 있어야 하고,
-    IP/CIDR 타겟은 전부 허용 대역 안이어야 한다. (호스트명만 있는 명령은 검증 불가 → 거절)"""
+
+def check_raw_server_access(tokens: list[str]) -> None:
+    if any(_matches_option(token, option) for token in tokens for option in _UNSCOPED_TARGET_OPTIONS):
+        raise ValueError(
+            "직접 명령에서는 파일/랜덤/이어하기 타겟(-iL, -iR, --excludefile, --resume)을 쓸 수 없습니다. "
+            "IP/CIDR 로 직접 지정하세요.")
+    if any(_uses_server_file_option(token) for token in tokens):
+        raise ValueError(
+            "직접 명령에서는 --script-args, --script-args-file, --datadir, --servicedb, --versiondb "
+            "를 쓸 수 없습니다.")
+
+
+def check_raw_scope(tokens: list[str], spec: str | None = None) -> None:
+    """직접 입력 명령용 게이트.
+
+    항상: 파일/랜덤 타겟 플래그(-iL/-iR 등)와 서버 파일에 닿는 옵션을 차단한다.
+    scope 설정 시 추가로: 외부 릴레이·프록시 차단, NSE 화이트리스트, IP/CIDR 타겟이 최소 1개
+    있어야 하고 전부 허용 대역 안이어야 한다. (호스트명만 있는 명령은 검증 불가 → 거절)"""
+    check_raw_server_access(tokens)
     if spec is None:
         spec = get_settings().scan_scope
     nets = parse_scope(spec)
     if not nets:
-        return  # scope 미설정 — 제한 없음
-    if any(_matches_option(token, option) for token in tokens for option in _UNSCOPED_TARGET_OPTIONS):
-        raise ValueError(
-            "스캔 대역(scope)이 설정된 환경에서는 직접 명령에서 파일/랜덤/이어하기 타겟을 쓸 수 없습니다. "
-            "IP/CIDR 로 직접 지정하세요.")
+        return
     if any(_uses_scoped_unsafe_network_option(token) for token in tokens):
         raise ValueError(
             "스캔 대역(scope)이 설정된 환경에서는 외부 릴레이/프록시/DNS 대상을 지정할 수 없습니다."

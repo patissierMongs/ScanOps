@@ -1,7 +1,7 @@
 """인증 의존성 — 토큰에서 현재 사용자, 역할 가드."""
 from __future__ import annotations
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -16,7 +16,11 @@ _SECRET = load_or_create_secret(_settings.secret_file)
 _RANK = {"viewer": 0, "auditor": 1, "admin": 2}
 
 
+PASSWORD_CHANGE_PATHS = frozenset({"/api/auth/me", "/api/auth/change-password"})
+
+
 def current_user(
+    request: Request,
     authorization: str = Header(default=""),
     db: Session = Depends(get_db),
 ) -> User:
@@ -34,6 +38,11 @@ def current_user(
         reason = "inactive" if not user.is_active else "auth_version_mismatch"
         record_once(db, user, "TOKEN_REJECTED", target=user.username, detail=reason, ok=False)
         raise HTTPException(status_code=401, detail="유효하지 않은 사용자입니다.")
+    if user.must_change_password and request.url.path not in PASSWORD_CHANGE_PATHS:
+        raise HTTPException(
+            status_code=403,
+            detail="비밀번호를 먼저 변경해야 합니다. 초기 비밀번호로는 다른 작업을 할 수 없습니다.",
+        )
     return user
 
 
