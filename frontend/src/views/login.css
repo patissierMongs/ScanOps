@@ -355,6 +355,11 @@
   box-shadow: 0 0 9px 1px oklch(0.8 0.16 152 / 0.8);
   animation: lg-pulse 2s ease-in-out infinite;
 }
+.lg-led.off {
+  background: oklch(0.65 0.2 25);
+  box-shadow: none;
+  animation: none;
+}
 
 /* ---- 키프레임 ---- */
 @keyframes lg-spin { to { transform: rotate(360deg); } }

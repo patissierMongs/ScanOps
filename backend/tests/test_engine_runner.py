@@ -1106,3 +1106,26 @@ def test_the_trace_survives_when_the_event_stream_says_nothing(tmp_path):
     assert trace["seconds_total"] == 0 and trace["runs_total"] == 0
     assert trace["by_stage"] == [] and trace["by_phase"] == [] and trace["slowest"] == []
     assert trace["by_host"] == [] and trace["running"] == []
+
+
+def test_parse_events_does_not_keep_a_stopped_stage_after_the_resumed_job_finishes(tmp_path):
+    lines = [
+        {"event": "job_start"},
+        {"event": "stage_done", "stage": "discovery", "seconds": 0.1, "counts": {"live": 1}},
+        {"event": "stage_start", "stage": "tcp"},
+        {"event": "stage_done", "stage": "tcp", "seconds": 0.7, "counts": {"open_ports": 2}},
+        {"event": "stage_start", "stage": "service", "hosts": 1},
+        {"event": "stage_done", "stage": "service", "seconds": 1.1, "counts": {"stopped": True}},
+        {"event": "job_done", "status": "stopped", "seconds": 2.0, "counts": {"services": 0}},
+        {"event": "job_start"},
+        {"event": "stage_start", "stage": "tcp_service", "hosts": 1},
+        {"event": "stage_done", "stage": "tcp_service", "seconds": 40.0, "counts": {"services": 2}},
+        {"event": "job_done", "status": "done", "seconds": 42.0, "counts": {"services": 2}},
+    ]
+    (tmp_path / "events.ndjson").write_text(
+        "\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+    res = engine_runner.parse_events(tmp_path)
+    assert res["overall"]["status"] == "done"
+    assert res["overall"]["percent"] == 100
+    assert all(s["status"] != "stopped" for s in res["stages"]), [
+        (s["stage"], s["status"]) for s in res["stages"]]

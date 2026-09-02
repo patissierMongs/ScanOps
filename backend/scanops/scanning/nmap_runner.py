@@ -81,10 +81,17 @@ def find_nmap(explicit: str = "") -> str | None:
     return which("nmap")
 
 
+_DOTTED_QUAD_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
 def validate_targets(targets: list[str]) -> list[str]:
     bad = [t for t in targets if not isinstance(t, str) or not _TARGET_RE.fullmatch(t)]
     if bad:
         raise ValueError(f"허용되지 않는 타겟 형식: {bad}")
+    invalid_ipv4 = [t for t in targets
+                    if _DOTTED_QUAD_RE.fullmatch(t) and any(int(o) > 255 for o in t.split("."))]
+    if invalid_ipv4:
+        raise ValueError(f"잘못된 IPv4 주소: {invalid_ipv4}. 각 옥텟은 0-255 여야 합니다.")
     ipv6 = [t for t in targets if ":" in t]
     if ipv6:
         raise ValueError(f"IPv6 대상은 아직 지원하지 않습니다: {ipv6}. IPv4 주소/대역으로 지정하세요.")

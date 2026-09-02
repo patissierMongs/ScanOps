@@ -1272,6 +1272,11 @@ def parse_events(out_dir) -> dict:
             if not isinstance(counts, dict):
                 counts = {}
             overall.update({"status": status, "seconds": seconds, "counts": counts})
+            if status == "done":
+                for slot_state in stages.values():
+                    if slot_state.get("status") == "stopped":
+                        slot_state["status"] = "done"
+                        slot_state["percent"] = 100
 
     stage_list = [stages[s] for s in order]
     if overall["status"] == "done":

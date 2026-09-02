@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -13,6 +14,8 @@ from ..identity import display_identity
 from ..models import ACTIVE_FINDING_STATES, Finding, FindingEvent
 from .nmap_parse import server_observed
 from .observability import record_endpoint_observations
+
+INGEST_LOCK = threading.RLock()
 
 
 def _now() -> datetime:

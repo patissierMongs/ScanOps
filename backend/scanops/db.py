@@ -42,6 +42,80 @@ def init_db() -> None:
     from . import models  # noqa: F401  (모델 등록)
     Base.metadata.create_all(_engine)
     _migrate()
+    _ensure_monotonic_ids()
+
+
+MONOTONIC_ID_TABLES = ("scan_runs", "findings", "finding_events", "notifications", "audit_logs")
+
+
+def _table_lacks_autoincrement(cur, table: str) -> bool:
+    row = cur.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    return bool(row) and "AUTOINCREMENT" not in (row[0] or "").upper()
+
+
+def _ensure_monotonic_ids() -> None:
+    raw = _engine.raw_connection()
+    try:
+        cur = raw.cursor()
+        pending = [t for t in MONOTONIC_ID_TABLES if _table_lacks_autoincrement(cur, t)]
+        if not pending:
+            return
+        cur.execute("PRAGMA foreign_keys=OFF")
+        cur.execute("BEGIN")
+        try:
+            for table in pending:
+                _rebuild_with_autoincrement(cur, table)
+            cur.execute("COMMIT")
+        except Exception:
+            cur.execute("ROLLBACK")
+            raise
+        finally:
+            cur.execute("PRAGMA foreign_keys=ON")
+    finally:
+        raw.close()
+
+
+def _fill_literal(column) -> str:
+    default = column.default.arg if column.default is not None and column.default.is_scalar else None
+    if default is None:
+        if column.nullable:
+            return "NULL"
+        default = 0 if column.type.python_type in (int, float, bool) else ""
+    if isinstance(default, bool):
+        return "1" if default else "0"
+    if isinstance(default, (int, float)):
+        return repr(default)
+    return "'" + str(default).replace("'", "''") + "'"
+
+
+def _rebuild_with_autoincrement(cur, table: str) -> None:
+    ddl = Base.metadata.tables[table]
+    from sqlalchemy.schema import CreateTable, CreateIndex
+
+    create_sql = str(CreateTable(ddl).compile(_engine)).strip()
+    tmp = f"{table}__autoinc"
+    create_tmp = create_sql.replace(f"CREATE TABLE {table} ", f"CREATE TABLE {tmp} ", 1)
+    assert create_tmp != create_sql
+    assert "AUTOINCREMENT" in create_tmp.upper()
+    existing = {r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+    targets, sources = [], []
+    for column in ddl.columns:
+        targets.append(column.name)
+        sources.append(column.name if column.name in existing else _fill_literal(column))
+    max_id = cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0]
+    cur.execute(create_tmp)
+    cur.execute(
+        f"INSERT INTO {tmp} ({', '.join(targets)}) SELECT {', '.join(sources)} FROM {table}"
+    )
+    cur.execute(f"DROP TABLE {table}")
+    cur.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
+    for index in ddl.indexes:
+        cur.execute(str(CreateIndex(index).compile(_engine)).strip())
+    if max_id:
+        cur.execute("DELETE FROM sqlite_sequence WHERE name=?", (table,))
+        cur.execute("INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)", (table, max_id))
 
 
 def _migrate() -> None:
