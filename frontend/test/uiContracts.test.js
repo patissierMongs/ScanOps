@@ -14,6 +14,7 @@ import { matchesFilter, parseNeedle } from "../src/lib/filterText.js";
 import { formatImportSummary } from "../src/lib/scanImports.js";
 import { formatScanPortScope } from "../src/lib/scanScope.js";
 import { matchFocus } from "../src/lib/ruleFocus.js";
+import { statsFocus } from "../src/lib/statsFocus.js";
 import { PAGE_SIZES } from "../src/lib/pageSize.js";
 
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
@@ -1154,4 +1155,40 @@ test("a completed scan's advisory note is not dressed up as a failure in the his
   // 옛 방식(무조건 실패 색)이 남아 있지 않은가.
   assert.ok(!/\{s\.failure_message && <div className="scan-failure">/.test(view),
     "이력 행이 여전히 모든 메시지를 실패로 그린다");
+});
+
+test("the stats page never merges confirmed and inferred into one number", () => {
+  // UDP 는 대부분 `open|filtered` 다. 두 수를 한 칸에 합치면 아무도 응답하지 않은 포트가
+  // 상위를 차지하면서 "우리 망에 SNMP 가 제일 많다" 는 거짓 결론이 나온다.
+  const view = source("../src/views/Stats.jsx");
+  assert.match(view, /r\.confirmed/, "응답 확인을 따로 그리지 않는다");
+  assert.match(view, /r\.inferred/, "무응답 추정을 따로 그리지 않는다");
+  assert.ok(!/r\.confirmed\s*\+\s*r\.inferred\s*\}/.test(view),
+    "두 수를 더해 한 칸에 그린다");
+  // 막대도 두 겹이어야 한다 - 표만 나누고 그림에서 합치면 도로 같은 실수다.
+  assert.match(view, /is-confirmed/);
+  assert.match(view, /is-inferred/);
+  const css = source("../src/styles.css");
+  assert.match(css, /\.stat-bar \.is-confirmed/);
+  assert.match(css, /\.stat-bar \.is-inferred/);
+});
+
+test("clicking a stats row opens the findings it actually counted", () => {
+  // 통계는 활성 상태를 세고 식별로 거르지 않는다. 발견 목록의 기본 접힘을 그대로 두고
+  // 넘어가면 "22번 12대" 를 눌렀는데 8건만 나와 통계가 틀린 것처럼 보인다.
+  const focus = statsFocus("ports", { port: 22, proto: "tcp" }, {});
+  assert.deepEqual(focus.filters, { port: "22", proto: "tcp" });
+  assert.equal(focus.hideUnconfirmed, false, "미확정이 접힌 채로 넘어간다");
+  assert.equal(focus.hideTcpwrapped, false);
+  assert.equal(focus.match, "exact");
+
+  // 정상처리·허용은 통계가 센 대로 따라가야 두 수가 맞는다.
+  assert.equal(statsFocus("ports", { port: 22 }, {}).hideNormal, true);
+  assert.equal(
+    statsFocus("ports", { port: 22 }, { include_resolved: true }).hideNormal, false);
+
+  // 제품은 부분일치(서버가 그렇게 센다), 미식별은 빈 값으로 넘긴다.
+  assert.equal(statsFocus("products", { product: "OpenSSH" }, {}).match, "contains");
+  assert.deepEqual(statsFocus("services", { service: "(미식별)" }, {}).filters,
+    { service: "" });
 });
