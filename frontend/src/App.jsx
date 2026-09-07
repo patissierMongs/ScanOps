@@ -7,6 +7,7 @@ import Login from "./views/Login.jsx";
 import Dashboard from "./views/Dashboard.jsx";
 import Findings from "./views/Findings.jsx";
 import Heatmap from "./views/Heatmap.jsx";
+import Stats from "./views/Stats.jsx";
 import Rules from "./views/Rules.jsx";
 import History from "./views/History.jsx";
 import Assets from "./views/Assets.jsx";
@@ -19,6 +20,7 @@ const NAV = [
   { k: "dashboard", label: "대시보드", ico: "▦" },
   { k: "findings", label: "발견 관리", ico: "⚑", badge: "open" },
   { k: "heatmap", label: "히트맵", ico: "▥" },
+  { k: "stats", label: "통계", ico: "▤" },
   { k: "rules", label: "규칙", ico: "⚠" },
   { k: "history", label: "이력", ico: "↻" },
   { k: "assets", label: "자산대장", ico: "▤" },
@@ -105,6 +107,7 @@ function Shell({ user, onLogout }) {
     dashboard: <Dashboard onNav={(next) => { setView(next); setNavOpen(false); }} />,
     findings: <Findings user={user} focus={findingsFocus} onFocusApplied={() => setFindingsFocus(null)} />,
     heatmap: <Heatmap />,
+    stats: <Stats onShowFindings={focusFindings} />,
     rules: <Rules user={user} onShowMatches={focusFindings} />,
     history: <History />,
     assets: <Assets user={user} />,
