@@ -99,10 +99,10 @@ CLOSED 이벤트에 "조치 완료 자동 확인"으로 기록(그 외는 단순
 검증 중 실제로 확인된 항목(심각도 순).
 
 ### [중] `/api/diff` 미구현 — 문서·구현 불일치
-`DESIGN.md §5` 에 `GET /api/diff?base=&target=`(스캔 간 변화)로 명시돼 있으나 실제 라우트는
+`docs/DESIGN.md §5` 에 `GET /api/diff?base=&target=`(스캔 간 변화)로 명시돼 있으나 실제 라우트는
 없고 **404 Not Found** 를 반환한다. diff 기능 자체는 (a) 가져오기 응답의 counts(new/closed/
 reopened…), (b) 히트맵의 "시점 비교" 시트, (c) FindingEvent 타임라인(CLOSED/REOPENED)으로
-제공된다. → DESIGN.md에서 `/api/diff` 항목을 실제 표면(heatmap/events)에 맞게 정정하거나,
+제공된다. → docs/DESIGN.md에서 `/api/diff` 항목을 실제 표면(heatmap/events)에 맞게 정정하거나,
 얇은 diff 엔드포인트를 추가할 것.
 
 ### [중] BOM 없는 UTF-8 CSV → 무경고 컬럼 매핑 실패
@@ -123,7 +123,7 @@ Excel 저장본(BOM 포함)은 정상. 실제로 본 검증에서 BOM 추가 후
 - 검색 대상이 **서비스명/호스트명**뿐이라 포트 번호(예: 8085)로는 검색되지 않는다.
 
 ### [정보] 발견별 수동 담당자(owner) 배정 UI 부재
-`DESIGN.md` 는 "담당 배정"을 라이프사이클 단계로 명시하고 모델에도 `owner_user_id` 가 있으나,
+`docs/DESIGN.md` 는 "담당 배정"을 라이프사이클 단계로 명시하고 모델에도 `owner_user_id` 가 있으나,
 발견 드로어의 편집 컨트롤은 **상태/마감/메모**뿐이다. 담당자는 자산대장 IP 매칭으로만 파생되며
 발견 단위로 특정 사용자를 수동 배정하는 UI는 없다. → 의도된 설계라면 DESIGN 문구 정합화,
 아니라면 드로어에 담당자 선택 추가 검토.

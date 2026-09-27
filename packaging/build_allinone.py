@@ -317,8 +317,10 @@ def copy_app(app: Path) -> None:
         dist, app / "frontend" / "dist", ignore=_ignored_source_names,
     )
     # 문서
-    for f in ("README.md", "DESIGN.md", "REBUILD.md", "HANDOFF.md", "THIRD_PARTY_NOTICES.md"):
+    for f in ("README.md", "README.en.md", "docs/DESIGN.md", "docs/REBUILD.md", "docs/HANDOFF.md",
+              "docs/PROGRESS.md", "docs/PROGRESS.en.md", "docs/SCAN_POLICY.md", "THIRD_PARTY_NOTICES.md"):
         if (ROOT / f).exists():
+            (app / f).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / f, app / f)
     # standalone 스캐너(에어갭 스캔 호스트용). CLI(scanops_scanner.py)는 stdlib 전용이라
     # 번들 임베디드 파이썬으로도 실행 가능. GUI 는 tkinter 필요(임베디드엔 없음 → 별도 풀파이썬).

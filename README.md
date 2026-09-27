@@ -4,7 +4,7 @@
 nmap 스캔 → 분류·위험등급·KISA/NIS 근거 → 발견 영속 → 담당/마감 배정 →
 **재스캔으로 조치 자동 검증** → 부서통보 → 감사 리포트까지 한 루프로 닫는다.
 
-설계·결정·데이터모델은 [`DESIGN.md`](./DESIGN.md) 참고.
+설계·결정·데이터모델은 [`docs/DESIGN.md`](./docs/DESIGN.md) 참고.
 
 ## 구성
 - **backend/** — FastAPI + SQLite (단일 진실원천). 스캔 실행·파싱·분류·라이프사이클 API.

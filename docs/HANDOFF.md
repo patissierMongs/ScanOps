@@ -85,5 +85,5 @@ TSnmap의 7개 뷰 **기능**이 ScanOps에 살아있고(특히 컬럼 빌더·�
 ## 11. 참고 경로
 - TSnmap 원본(이식 참고, 수정 금지): `<WORKSPACE>\TSnmap\Column Builder A.dc.html`, `support.js`, `작업정리.md`
 - nmapParser 원본(이식 참고, 수정 금지): `<WORKSPACE>\nmapParser1\nmapParser.py`, `categories.xlsx`
-- 기존 설계 근거: `ScanOps/DESIGN.md` (아키텍처·데이터모델·로드맵 A–J)
+- 기존 설계 근거: `docs/DESIGN.md` (아키텍처·데이터모델·로드맵 A–J)
 - 메모리 색인: `~/.claude/projects/<TSnmap 프로젝트>/memory/MEMORY.md`
