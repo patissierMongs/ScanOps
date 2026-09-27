@@ -4,11 +4,12 @@
 (데이터 유도는 이 스크립트에서 명시적으로 — 런타임 taxonomy 는 JSON 만 읽어 단순.)
 """
 import json
+import os
 from pathlib import Path
 
 import openpyxl
 
-SRC = Path(r"C:\Users\upica\claude\nmapParser1\categories.xlsx")
+SRC = Path(os.environ.get("NMAPPARSER_CATEGORIES_XLSX", "categories.xlsx"))
 OUT = Path(__file__).resolve().parents[1] / "backend" / "scanops" / "seed" / "categories.json"
 
 # 분류별 기본 위험등급

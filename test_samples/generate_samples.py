@@ -220,8 +220,8 @@ def main():
         (["telnet", "http"], 2), (["snmp", "ntp"], 1), (["mqtt"], 1),
         (["telnet", "vnc", "ftp"], 1),
     ], seed=4)
-    results.append(make_scan("scan_ot_network.xml", "192.168.50", ot,
-                             "nmap -sS -sV -sU -oX scan_ot_network.xml 192.168.50.0/24",
+    results.append(make_scan("scan_ot_network.xml", "10.40.50", ot,
+                             "nmap -sS -sV -sU -oX scan_ot_network.xml 10.40.50.0/24",
                              1753257600))
 
     # 5) 클라우드 VPC: 컨테이너/데이터스토어(redis/mongo/elastic/kafka)
@@ -246,7 +246,7 @@ def main():
         ("assets_hq.csv", "10.10.10", 320, ["정보보안팀", "인프라운영팀", "IT지원팀", "연구개발팀"], "hq-srv", 11, "HQ데이터센터"),
         ("assets_branch.csv", "10.20.30", 330, ["영업본부", "고객지원센터", "인사총무팀", "재무회계팀"], "branch-pc", 12, "지점PC"),
         ("assets_dmz.csv", "203.0.113", 305, ["정보보안팀", "인프라운영팀"], "dmz-pub", 13, "DMZ공개서버"),
-        ("assets_ot.csv", "192.168.50", 310, ["생산관리팀", "인프라운영팀"], "ot-node", 14, "OT산업설비"),
+        ("assets_ot.csv", "10.40.50", 310, ["생산관리팀", "인프라운영팀"], "ot-node", 14, "OT산업설비"),
         ("assets_cloud.csv", "172.31.10", 340, ["연구개발팀", "인프라운영팀", "IT지원팀"], "vpc-node", 15, "클라우드자산"),
     ]
     print("=== 자산대장 CSV ===")

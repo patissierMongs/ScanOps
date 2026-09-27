@@ -32,7 +32,7 @@
 | `assets_cloud.csv` | 172.31.10.x | 340 | 341 |
 | `assets_branch.csv` | 10.20.30.x | 330 | 331 |
 | `assets_hq.csv` | 10.10.10.x | 320 | 321 |
-| `assets_ot.csv` | 192.168.50.x | 310 | 311 |
+| `assets_ot.csv` | 10.40.50.x | 310 | 311 |
 | `assets_dmz.csv` | 203.0.113.x | 305 | 306 |
 
 가져오기 결과: 스캔 5건 → **발견 372건**(banned/high/medium/low 분포), 자산 **1,605건**,
