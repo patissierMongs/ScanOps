@@ -4,7 +4,7 @@ import {
   readWorkbook, unmergeFillWs, detectHeaderRow, assetColumnsFrom, computeAutoMap, buildAssetRecords,
 } from "../frontend/src/lib/assetImport.js";
 
-const buf = readFileSync("C:/Users/upica/OneDrive/Documents/SAMPLE1.xlsx");
+const buf = readFileSync(process.env.SAMPLE1_XLSX ?? "SAMPLE1.xlsx");
 const { wb, sheetNames } = readWorkbook(buf);
 const { aoa } = unmergeFillWs(wb.Sheets[sheetNames[0]]);
 const hr = detectHeaderRow(aoa);
