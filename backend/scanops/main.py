@@ -77,6 +77,7 @@ def _mount_routers() -> None:
     from .api import reports as reports_api
     from .api import rules as rules_api
     from .api import scans as scans_api
+    from .api import stats as stats_api
     from .api import users as users_api
     app.include_router(auth_api.router, prefix="/api/auth", tags=["auth"])
     app.include_router(users_api.router, prefix="/api/users", tags=["users"])
@@ -87,6 +88,7 @@ def _mount_routers() -> None:
     app.include_router(assets_api.router, prefix="/api/assets", tags=["assets"])
     app.include_router(notify_api.router, prefix="/api/notifications", tags=["notifications"])
     app.include_router(dashboard_api.router, prefix="/api/dashboard", tags=["dashboard"])
+    app.include_router(stats_api.router, prefix="/api/stats", tags=["stats"])
     app.include_router(reports_api.router, prefix="/api/reports", tags=["reports"])
     app.include_router(rules_api.router, prefix="/api/rules", tags=["rules"])
     app.include_router(events_api.router, prefix="/api/events", tags=["events"])

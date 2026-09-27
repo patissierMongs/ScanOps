@@ -661,3 +661,30 @@ button.sm.danger:hover { background: var(--high-bg); }
 .trace-yield.is-empty, .trace-yield.is-empty b { color: var(--medium); }
 .trace-runs tr.is-empty td { background: var(--medium-bg); }
 .trace-tbl tr.is-long td { background: var(--medium-bg); }
+
+/* ── 통계 화면 ─────────────────────────────────────────────────────────── */
+.stat-filters .row { flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }
+.stat-filters label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--ink-soft); }
+.stat-filters label.chk { flex-direction: row; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink); }
+.stat-note { font-size: 11.5px; margin-top: 8px; }
+
+/* 합치지 말라는 말을 화면에서도 한 번 한다 - 표만 보면 두 열의 뜻이 안 읽힌다. */
+.stat-hint { font-size: 12.5px; color: var(--ink-soft); line-height: 1.6; }
+.stat-hint b { color: var(--ink); }
+
+.panel-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+.panel-head h3 { margin: 0; }
+.panel-head button { margin-left: auto; }
+
+.stat-tbl td.num, .stat-tbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.stat-tbl .stat-proto { margin-left: 6px; font-size: 10.5px; color: var(--muted); letter-spacing: .04em; }
+.stat-tbl .stat-inferred { color: var(--medium); }
+.stat-tbl .linkbtn { font-size: inherit; background: none; border: 0; padding: 0; text-align: left; }
+.stat-bar-col { width: 34%; min-width: 120px; }
+
+/* 응답 확인과 무응답 추정을 **나란히** 쌓는다. 한 색으로 그리면 표가 애써 나눠 놓은
+   두 수가 그림에서 도로 합쳐진다. */
+.stat-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--surface-2); }
+.stat-bar i { display: block; height: 100%; }
+.stat-bar .is-confirmed { background: var(--accent-ink); }
+.stat-bar .is-inferred { background: var(--medium); opacity: .55; }
