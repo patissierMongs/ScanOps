@@ -318,7 +318,7 @@ def copy_app(app: Path) -> None:
     )
     # 문서
     for f in ("README.md", "README.en.md", "docs/DESIGN.md", "docs/REBUILD.md", "docs/HANDOFF.md",
-              "docs/PROGRESS.md", "docs/PROGRESS.en.md", "docs/SCAN_POLICY.md", "THIRD_PARTY_NOTICES.md"):
+              "docs/PROGRESS.md", "docs/PROGRESS.en.md", "docs/OPERATIONS.md", "THIRD_PARTY_NOTICES.md"):
         if (ROOT / f).exists():
             (app / f).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / f, app / f)

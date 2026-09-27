@@ -1,302 +1,156 @@
 # ScanOps
 
-사내 팀용 **네트워크 노출 점검 라이프사이클 플랫폼**.
-nmap 스캔 → 분류·위험등급·KISA/NIS 근거 → 발견 영속 → 담당/마감 배정 →
-**재스캔으로 조치 자동 검증** → 부서통보 → 감사 리포트까지 한 루프로 닫는다.
+nmap 스캔 결과를 발견(finding) 단위로 저장하고, 담당 배정부터 재스캔 조치 확인, 감사 리포트까지 한 화면에서 관리하는 사내 네트워크 노출 점검 도구입니다.
 
-설계·결정·데이터모델은 [`docs/DESIGN.md`](./docs/DESIGN.md) 참고.
+**한국어** | [English](README.en.md)
 
-## 구성
-- **backend/** — FastAPI + SQLite (단일 진실원천). 스캔 실행·파싱·분류·라이프사이클 API.
-- **frontend/** — React + Vite. 빌드된 `dist/` 를 FastAPI 가 한 포트로 서빙.
-- **packaging/** — 에어갭 설치용 wheelhouse + 설치/실행 스크립트.
-- **scanner/** — ScanOps 서버 없이 스캔 서버에서 단독 실행하는 nmap 래퍼.
-- **scripts/** — taxonomy 시드 생성 등.
+![XML 가져오기부터 재스캔 조치 확인까지](docs/images/scan-import-flow.gif)
 
-## 빠른 시작 (개발)
+위 화면은 저장소에 들어 있는 `samples/scanA.xml`(3000·8080·9000 포트 열림)을 가져오고, 3000 포트를 `처리중`으로 바꾼 뒤, 3000 포트가 닫힌 `samples/scanB.xml`을 가져와 자동으로 닫힘이 확인되는 과정입니다. 나머지 데이터는 `test_samples/`의 가상 스캔 결과와 자산대장입니다.
+
+## 주요 기능
+
+| 기능 | 설명 |
+|---|---|
+| 스캔 실행 | 대상 IP(Internet Protocol)·대역을 입력하면 서버가 nmap을 실행합니다. 기본은 단계 스캔(호스트 발견 → TCP(Transmission Control Protocol) 포트 찾기 → UDP(User Datagram Protocol) 포트 찾기 → 서비스 식별)이며, 중지·이어하기를 지원합니다. |
+| 결과 가져오기 | 다른 곳에서 돌린 nmap XML(Extensible Markup Language) 파일이나 단독 스캐너 결과 폴더를 그대로 업로드합니다. |
+| 발견 관리 | 포트마다 발견 하나가 생기고, 상태(미조치·처리중·정상처리)·마감·담당자를 지정합니다. 컬럼 빌더로 표 구성을 바꾸고 CSV(Comma-Separated Values)·XLSX(Excel 통합 문서)로 내보냅니다. |
+| 재스캔 조치 확인 | 다음 스캔에서 포트가 닫혀 있으면 발견을 자동으로 닫고 이력에 남깁니다. 선택한 발견만 다시 스캔할 수도 있습니다. |
+| 분류와 위험등급 | 서비스 105종 분류표로 위험등급과 KISA(한국인터넷진흥원)·국정원(NIS, National Intelligence Service) 근거를 붙입니다. 조직 규칙은 서비스·제품·CPE(Common Platform Enumeration)로 걸 수 있습니다. |
+| 시간축 히트맵 | 스캔 회차별로 포트가 새로 열렸는지, 계속 열려 있는지, 닫혔는지를 한 표로 봅니다. |
+| 자산대장·부서통보 | 엑셀/CSV 자산대장을 올리면 IP로 부서·담당자를 연결합니다. 부서별 통보문을 만들어 기록합니다(외부 전송은 하지 않습니다). |
+| 사용자·감사 | admin / auditor / viewer 세 역할, 로그인·스캔·규칙 변경 감사 로그, 감사 리포트(xlsx)를 제공합니다. |
+| 오프라인 설치 | 인터넷이 없는 Windows 서버에 wheel 묶음과 빌드된 화면을 함께 복사해 설치합니다. |
+| 단독 스캐너 | ScanOps 서버 없이 스캔 서버에서 `scanner/scanops_scanner.py`만으로 nmap을 돌리고, 결과를 나중에 가져옵니다. |
+
+### 화면
+
+| 대시보드 | 발견 관리 |
+|---|---|
+| ![대시보드](docs/images/dashboard.png) | ![발견 관리](docs/images/findings.png) |
+| **발견 상세** | **시간축 히트맵** |
+| ![발견 상세](docs/images/finding-detail.png) | ![시간축 히트맵](docs/images/heatmap.png) |
+| **스캔** | **자산대장** |
+| ![스캔](docs/images/scans.png) | ![자산대장](docs/images/assets.png) |
+| **부서통보** | **로그인** |
+| ![부서통보](docs/images/notify.png) | ![로그인](docs/images/login.png) |
+
+## 사용 방법
+
+### 1. 준비물
+
+- Python 3.11 이상(CI(Continuous Integration)는 3.11·3.12에서 테스트합니다)
+- nmap(스캔 실행에만 필요합니다. XML 가져오기는 nmap 없이 동작합니다)
+- Node.js 20.19+ 또는 22.12+(화면을 수정하거나 개발 서버를 띄울 때만 필요합니다. 빌드된 화면 `frontend/dist/`가 저장소에 들어 있습니다)
+
+### 2. 설치와 실행
+
+Linux/macOS:
+
+```bash
+cd backend
+python -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m uvicorn scanops.main:app --port 8770
+```
+
+Windows(PowerShell):
+
 ```powershell
-# 백엔드
 cd backend
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 .venv\Scripts\python -m uvicorn scanops.main:app --port 8770
-# 프론트 (Node.js 20.19+ 또는 22.12+, 개발 핫리로드, /api 는 8770 으로 프록시)
-cd frontend && npm install && npm run dev
 ```
 
-## 에어갭(오프라인) 배포
-일반 오프라인 ZIP은 `install.ps1` 이 요구하는 **Python 3.13 / 3.12 (x64)** 와 **nmap**이 필요합니다
-(3.13 을 먼저 찾습니다). Python을 설치할 수 없는 Windows x64/x86 서버는 Python 런타임이
-포함된 all-in-one ZIP을 사용하세요 — 기본 런타임은 **3.13** 입니다.
+백엔드가 API(Application Programming Interface)와 화면을 같은 포트로 제공합니다. 브라우저에서 `http://127.0.0.1:8770/`에 접속합니다. 다른 PC에서 접속하려면 `--host 0.0.0.0`을 붙입니다.
+
+### 3. 첫 로그인
+
+1. 처음 실행하면 저장소 최상위 `data/INITIAL_ADMIN.txt`에 `admin` 계정의 임시 비밀번호가 생깁니다. 데이터 폴더는 환경변수 `SCANOPS_DATA_DIR`로 바꿀 수 있습니다.
+2. `admin`으로 로그인하면 비밀번호 변경 창이 뜹니다. 변경하면 `INITIAL_ADMIN.txt`는 자동으로 지워집니다.
+3. `사용자` 메뉴에서 auditor(스캔·발견 운영)나 viewer(열람 전용) 계정을 만듭니다.
+
+### 4. 기본 사용 흐름
+
+1. **자산대장**에서 자산 목록(xlsx/xls/csv)을 올립니다. IP가 같은 발견에 부서와 담당자가 붙습니다. 예시 파일: `test_samples/assets_*.csv`
+2. **스캔**에서 대상을 입력하고 `스캔 실행`을 누르거나, `XML 가져오기`로 기존 결과를 올립니다. 예시 파일: `test_samples/scan_*.xml`, `samples/scanA.xml`
+3. **발견 관리**에서 검색·필터로 대상을 좁히고, 행을 눌러 상태·마감·담당자를 지정합니다.
+4. 조치가 끝나면 다시 스캔하거나(`마감·처리중 재검증`, `선택 재스캔`) 새 결과를 가져옵니다. 닫힌 포트는 자동으로 닫힘 처리됩니다.
+5. **히트맵**과 **이력**에서 변화를 확인하고, **부서통보**에서 부서별 통보문을 만듭니다.
+6. **대시보드**의 `감사 리포트(xlsx) 내보내기`로 증빙을 받습니다.
+
+데모 데이터를 API로 한 번에 넣으려면 서버를 띄우고 비밀번호를 바꾼 뒤 다음을 실행합니다. `samples/scanA.xml`과 `samples/scanB.xml`을 차례로 가져와 조치 확인 과정을 만듭니다.
+
+```bash
+python samples/seed_demo.py <변경한 admin 비밀번호>
+```
+
+### 5. 스캔 허용 대역
+
+`SCANOPS_SCAN_SCOPE`에 CIDR(Classless Inter-Domain Routing) 대역이나 IP를 공백·콤마로 지정하면 그 범위 밖 대상은 스캔 전에 거절합니다. 비워 두면 제한이 없습니다.
+
+```bash
+SCANOPS_SCAN_SCOPE="10.0.0.0/8 192.168.0.0/16" .venv/bin/python -m uvicorn scanops.main:app --port 8770
+```
+
+### 6. 오프라인(에어갭) 배포
+
+일반 오프라인 ZIP은 `install.ps1`이 요구하는 **Python 3.13 / 3.12 (x64)** 와 nmap이 대상 서버에 있어야 합니다.
 
 ```powershell
-python packaging\build_allinone.py                  # 3.13 → ..\ScanOps_allinone.zip
-python packaging\build_allinone.py --python 3.12    # 3.12 → ..\ScanOps_allinone_py312.zip
-python packaging\build_allinone.py --arch x86       # 3.13 x86 → ..\ScanOps_allinone_x86.zip
+powershell -ExecutionPolicy Bypass -File packaging\install.ps1   # wheelhouse에서 오프라인 설치
+packaging\start.bat                                             # 0.0.0.0:8770 으로 서버 실행
 ```
-세 번들 모두 압축만 풀고 `START.bat` 을 실행하면 됩니다(대상에 Python 설치 불필요). 앱 의존성
-버전은 동일하며 런타임과 바이너리 휠의 Python ABI/Windows 아키텍처만 다릅니다. x86은 검증된
-CPython 3.13 조합만 지원합니다. 스캔 실행에만 nmap이 따로 필요하고, XML 가져오기는 nmap 없이도
-동작합니다.
 
-빌드는 실행에 쓰이지 않는 것만 덜어냅니다(대화형/개발용 표준 라이브러리, 이 앱이 쓰지 않는
-SQLAlchemy 방언, 의존성이 함께 배포한 자기 테스트 코드). **기능을 없애는 절단은 하지 않습니다** —
-예를 들어 OpenSSL 은 로그인 해시(`hashlib.pbkdf2_hmac`)가 3.12+ 부터 순수 파이썬 대체 구현 없이
-`_hashlib` 만 쓰므로 빼면 아무도 로그인하지 못합니다. 덜어낸 이름을 앱이나 의존성이 실제로
-import 하면 빌드가 그 자리에서 멈추고(`verify_stdlib_drop`), 같은 검사가 CI 에서도 돕니다
-(`backend/tests/test_bundle_slim.py` — 덜어낸 모듈을 전부 막은 인터프리터로 로그인·조회·xlsx
-내보내기까지 실제로 태워 봅니다). `--max-mb` 로 산출물 크기 상한을 강제할 수 있습니다.
-
-크기 참고(3.13, 슬림 적용): **약 15 MB**. 이 중 임베디드 CPython 런타임만 약 9.8 MB
-(`python313.dll` 2.5 · 표준 라이브러리 2.9 · OpenSSL 2.2 · `sqlite3.dll` 0.85)이고, 나머지는
-`pydantic_core` 2.0 · SQLAlchemy 1.6 · 프론트 dist 0.5 입니다. 이 구성으로 한 파일 10 MB 밑은
-나오지 않습니다 — 위 항목은 모두 서버가 부팅하고 로그인하는 데 필요합니다.
-
-### 반출 한도에 맞춰 조각으로 나누기
-파일 하나의 크기 제한(USB·메일·반출 심사)이 있으면 **지우지 말고 나눕니다.**
+Python을 설치할 수 없는 서버에는 Python 런타임이 들어 있는 all-in-one ZIP을 만듭니다. 압축을 풀고 `START.bat`을 실행하면 됩니다.
 
 ```powershell
-python packaging\build_allinone.py --split-mb 10 --max-mb 10
-# -> ScanOps_allinone.zip.001 (10.0 MB), .002 (5.0 MB), JOIN_ScanOps_allinone.bat, .sha256
-```
-- 받는 쪽에서 **반디집/7-Zip 은 `.001` 을 그대로 열면** 됩니다(나머지 조각은 같은 폴더에 두세요).
-- 그런 도구가 없는 서버는 함께 들어 있는 **`JOIN_<번들이름>.bat`** 을 실행하면 Windows 기본 `copy /b` 로
-  되붙이고 SHA-256 까지 확인합니다. 값이 다르면 합친 파일을 지우고 멈춥니다 — USB 복사가
-  중간에 잘린 채로 압축을 풀다 마는 사고를 막기 위해서입니다.
-- 형식은 zip 분할 볼륨(`.z01`)이 아니라 단순 바이트 분할입니다. 분할 볼륨은 전용 도구가 없으면
-  손쓸 방법이 없지만, 바이트 분할은 도구가 없어도 `copy /b` 로 되돌릴 수 있습니다.
-- `--max-mb` 는 **조각 하나의** 한도로 판정합니다(분할하지 않으면 전체 크기).
-```powershell
-# 1) 프론트 빌드(Node.js 20.19+ 또는 22.12+, 인터넷 되는 PC에서 1회) → frontend/dist 생성
-cd frontend && npm install && npm run build
-# 2) ScanOps 폴더 전체를 대상 서버로 복사 후:
-powershell -ExecutionPolicy Bypass -File packaging\install.ps1   # wheelhouse 에서 오프라인 설치
-packaging\start.bat                                             # 서버 실행 (0.0.0.0:8770)
-```
-- 최초 실행 시 `backend/data/INITIAL_ADMIN.txt` 에 관리자(admin) 임시 비밀번호 생성.
-- 팀은 `http://<서버IP>:8770/` 브라우저 접속.
-
-### 폴더째 가져오기 — 세 종류를 한 번에 받는다
-
-`스캔 > 폴더째 가져오기`는 폴더에 섞여 있는 세 가지를 각각 **실행 하나 = 이력 한 줄**로 받는다.
-`.xml` 과 `*.manifest.json` 만 읽고 나머지(`run-state.json`, `-oA` 가 남긴 `.nmap`/`.gnmap`)는
-무시하므로, `data/scans/` 를 통째로 올려도 된다.
-
-| 산출물 | 묶는 기준 | 결과 |
-|---|---|---|
-| 단계 스캔 결과 폴더 (`scan_<id>/stage*.xml`) | **폴더** | 폴더당 한 줄 |
-| 단독 스캐너 (`<base>.<단계>.xml` + manifest) | 파일명 base, manifest 가 있으면 실행 전체 | 실행당 한 줄 |
-| 직접 돌린 nmap XML | 파일 하나 | 파일당 한 줄 |
-
-단계 엔진은 파일명에 실행 식별자를 넣지 않고 결과 폴더 하나를 실행 하나로 쓴다. 그래서 파일명
-base 로 묶는 규칙이 이 이름들(`stage0-discovery`, `stage-tcp-b0`, `stage3-tcp-b0-g0` …)에는
-하나도 맞지 않았고, 예전에는 **파일마다 별도 스캔 행**이 생겼다 — 결과 폴더를 통째로 가져오면
-이력이 아무 말도 하지 않는 줄로 찼다. 지금은 폴더로 묶는다.
-
-묶은 뒤 단계별 역할은 단독 스캐너와 같다: 스윕이 증명한 열림 위에 식별 결과를 얹고, **호스트
-발견(`-sn`)은 관측 전용**이다 — 그 산출물에는 `<scaninfo>` 자체가 없어 포트를 하나도 보지
-않았으므로 닫힘 범위에 넣지 않는다.
-
-**받지 않는 것**: 중단본(`*.interrupted.xml`, `interrupted/` 아래)은 부분 결과라 못 본 포트가
-미탐이 되고 끊긴 자리의 filtered 가 오탐이 되므로 거절한다. ScanOps 가 합성한 스냅샷
-(`scan_<id>.xml`)도 거절한다 — 여러 산출물을 합치며 개별 관측 시각이 사라져, 원본처럼 인입하면
-과거 관측이 최신 관측으로 둔갑한다.
-
-## 단독 스캐너
-스캔 서버에서 ScanOps 전체를 실행할 필요가 없으면 `scanner/scanops_scanner.py`만 복사해서 사용한다.
-Python 3.8+ 와 nmap 만 있으면 Windows/Linux/macOS에서 동작한다. 생성 폴더의 `.xml`과
-`*.manifest.json`을 ScanOps의 `스캔 > 폴더째 가져오기`로 함께 업로드하면 제외 대상과 성공한
-실행 단위의 미관측 범위까지 검증해 반영한다. XML만 올리는 구형 경로는 관측된 호스트만 닫힘 판정한다.
-```powershell
-python scanner\scanops_scanner_gui.py
-python scanner\scanops_scanner.py 10.0.0.10 --ports 22,80,443 --name branch-a
-python scanner\scanops_scanner.py --targets-file targets.txt --ports 1-1024 --batch-size 128 --name weekly
-python scanner\scanops_scanner.py --resume scanops_scans\weekly.state.json
-```
-자세한 사용법은 [`scanner/README.md`](./scanner/README.md) 참고.
-
-### 스캔 프리셋 (웹 ↔ 단독 스캐너 동기화)
-자주 쓰는 스캔 구성은 이름을 붙여 프리셋으로 저장한다. 프리셋 본문은 nmap 플래그가 아니라
-**웹 UI 와 같은 옵션 키**로 저장되므로 웹 스캐너와 단독 스캐너가 같은 파일을 해석할 수 있다.
-- 웹: 스캔 화면의 `프리셋 선택… / 현재 구성 저장` → 서버 `data/scan_presets.json` 에 저장(auditor 이상).
-- 단독 스캐너: `--save-preset`/`--preset` → 스캐너 폴더의 `scanops_presets.json` 에 저장.
-- 동기화: 단독 스캐너가 웹서버에 도킹해 **먼저 이름 충돌(같은 이름·다른 내용)을 확인**하고,
-  하나라도 있으면 양쪽 모두 그대로 둔 채 충돌 목록만 보고한다(종료 코드 3). 충돌이 없으면 합집합으로
-  맞춰 **같은 내용의 프리셋 파일이 두 곳에 존재**하게 된다.
-```powershell
-python scanner\scanops_scanner.py --sync --server http://<서버IP>:8770 --username auditor1
+python packaging\build_allinone.py                  # Python 3.13 x64
+python packaging\build_allinone.py --python 3.12    # Python 3.12 x64
+python packaging\build_allinone.py --arch x86       # Python 3.13 x86
 ```
 
-## 역할
-- **admin** — 사용자 관리 + 전체 권한 + 감사 로그 열람
-- **auditor** — 스캔 실행·발견 운영(상태/담당/마감)·통보
-- **viewer** — 열람 전용
+파일 크기 제한에 맞춰 나누는 방법(`--split-mb`), 번들 구성, 폴더째 가져오기 규칙은 [운영 상세](docs/OPERATIONS.md)에 있습니다.
 
-## 보안/운영
-- **스캔 허용 대역(scope)** — `SCANOPS_SCAN_SCOPE` 에 CIDR/IP 를 콤마·공백으로 지정하면
-  그 범위 밖 타겟은 스캔 시작 전에 거절된다(오타·잘못 붙여넣은 사외 대역 스캔 사고 방지).
-  **빈 값만** 제한 없음이며, 잘못된 토큰이나 정상+오류 혼합 설정은 health 503과 함께 전체가 거절된다.
-  예: `SCANOPS_SCAN_SCOPE="10.0.0.0/8 192.168.0.0/16"`.
-- **인증 토큰 폐기** — 본인 비밀번호 변경과 관리자 비밀번호 재설정은 해당 사용자의 기존 토큰을
-  모두 즉시 무효화한다. 계정 비활성화도 기존 토큰을 즉시 거절한다. 본인 변경 후에는 새 비밀번호로
-  다시 로그인해야 하며, 변경·재설정은 감사 로그에 남는다.
-- **업로드 한도** — XML/XLSX는 파일별·묶음별 한도를 청크 단위로 검사하고, 업로드 요청 본문도
-  multipart 파싱 완료 전에 상한을 적용한다. 인터넷 경계에 배치할 때는 프록시에도 동일하거나 더 작은
-  요청 본문 한도를 설정한다.
-- **감사 로그** — 로그인(성공/실패)·스캔 실행/중지/이어하기/가져오기·규칙 변경을
-  `누가·언제·무엇`으로 기록. `GET /api/audit`(admin 전용)로 조회.
-- **재시작 안전성** — 서버가 재시작되면 워커가 사라진 실행은 `interrupted` 로 정직하게
-  표기된다(좀비 '실행 중' 방지). 자동 복구는 하지 않으며, 필요 시 **[이어하기]** 로 수동 재개.
+### 7. 단독 스캐너
 
-## 스캔 결과 식별과 라이프사이클
-- Nmap `service`는 프로토콜 분류·taxonomy·위험 규칙의 안정 키로 유지한다.
-- HTTP/NSE의 자기신고 `Server`는 별도 관측 증거로 저장한다. 화면·검색·내보내기·감사 리포트의
-  표시 식별자는 **Server → product+version → service** 순서지만, Server가 taxonomy를 덮어쓰지는 않는다.
-- 다만 `service`로 **분류가 전혀 안 되는** 경우에 한해 Server 배너를 **보조 분류 키**로 쓴다.
-  Server 헤더가 나왔다는 것은 `http-server-header`/`http-headers`가 실제 HTTP 응답을 받아냈다는
-  뜻이라, nmap의 저신뢰 추측(`uniconv`·`apple-iphoto` 등)보다 강한 증거다. taxonomy는 제품명이
-  아니라 서비스명으로 키가 잡혀 있으므로 "이 포트는 HTTP로 말한다"는 사실만 되돌려 `http`
-  (TLS 증거가 있으면 `https`)로 분류한다. 이미 `service`로 분류되는 발견은 건드리지 않아 기존
-  위험등급이 흔들리지 않으며, 보조 키가 쓰인 건은 `관측근거` 항목으로 판정 이유를 남긴다.
-- **핑거프린트 시그니처** — `-sV`가 식별하지 못해 `unknown`으로 남은 포트는, `fingerprint-strings`가
-  남긴 원시 응답을 `backend/scanops/seed/fingerprint_signatures.json`의 표와 대조해 제품을 되돌린다.
-  nmap의 `nmap-service-probes`는 서구 소프트웨어 중심이라 Tibero 같은 국내 엔터프라이즈 제품은
-  match 줄이 없어 unknown으로 남는데, 응답 본문에는 제품명이 그대로 들어 있는 경우가 많다.
-  **이 표는 코드가 아니라 데이터다** — 파일을 고치고 서버를 재시작하면 반영되며, DB 시드와 달리
-  기존 설치에도 그대로 적용된다. 관측된 `service`/`product`가 있으면 **절대 덮어쓰지 않고**,
-  판정에 쓰인 시그니처는 비고에 `fingerprint=<id>`로 남는다. 표가 깨져도 스캔 인입은 계속된다.
-  제품이 채워지면 표시 식별자·검색·`product_rule`이 함께 살아난다.
-- **조직 위험규칙**은 `service`뿐 아니라 **제품(`product_rule`)·CPE(`cpe_rule`)**로도 걸 수 있다.
-  `service`가 저신뢰 추측이라 못 잡히는 포트도 제품/CPE로는 잡힌다. 두 규칙은 **부분일치**다 —
-  nmap의 product에는 `Samba smbd`처럼 서술 접미사가 붙고 CPE는 여러 개가 `;`로 이어져 저장되므로
-  정확일치로는 실무에서 쓸 수 없다. 규칙 화면이 저장 전에 **매칭 발견 수**를 보여주므로 과매칭을
-  눈으로 확인할 수 있다. 예: `cpe_rule`에 `openbsd:openssh`, `product_rule`에 `vsftpd`.
-- **확정되지 않은 관측은 발견 목록에서 평소 접혀 있다.** 두 축을 따로 접는다 — `open|filtered`
-  와 '무응답 추정' 열림(`observation.needs_confirmation`)은 [미확정 제외], `tcpwrapped` 는
-  [tcpwrapped 제외] 다. 하나로 묶지 않는 이유는 [허용 제외]와 같다: 열림 여부 자체가 불확실한
-  것과, 열린 것은 확실한데 뒤에 뭐가 있는지 모르는 것은 다음에 할 일이 다르다. 체크를 풀면
-  그대로 보이고, 인입·저장된 상태는 무엇도 바뀌지 않는다 — 표시만 접는다.
+스캔 서버에 ScanOps 전체를 설치하지 않고 `scanner/scanops_scanner.py`만 복사해 씁니다. Python 3.8 이상과 nmap만 있으면 됩니다.
 
-  접은 건수는 **항상 체크박스 옆에 적힌다**(`X-Hidden-Unconfirmed` / `X-Hidden-Tcpwrapped`).
-  열린 포트를 말없이 감추는 것은 이 도구가 내내 막아 온 거짓 음성과 같은 모양이라, 접혔다는
-  사실 자체는 숨기지 않는다. 건수는 다른 조건(위험도·검색어·컬럼 필터)을 모두 적용한 뒤 세므로
-  '보이는 것 + 접은 것' 이 맞는다. 내보내기도 같은 파라미터를 쓴다 — 표에서 접은 건은 파일에도
-  없다.
-
-  **부서 통보는 이 정책을 물려받지 않는다.** 접힘은 발견 목록 화면의 표시 정책이고 통보는
-  다른 일이라, 통보 화면은 두 축을 명시적으로 펼쳐서 부른다. 서버의
-  `/notifications/preview`(`_open_findings_for_dept`)가 이 둘을 계속 포함하므로, 기본값을
-  물려받으면 화면 건수와 서버 preview 가 어긋나고 통보 이력의 `finding_ids` 에도 그만큼만
-  남는다. 특히 `tcpwrapped` 는 **포트 열림이 확인된** 건이라 조치 통보에서 빠지면 거짓
-  음성이다. 회귀 테스트가 통보 화면의 질의를 소스에서 뽑아 서버 preview 와 대조한다.
-- `open`과 UDP의 `open|filtered`는 활성 finding이다. `closed`/`filtered` 행 자체는 새 finding으로
-  인입하지 않는다. 정상 완료된 구조화 실행 단위(단계 스캔 전체 또는 레거시의 완료 배치)는
-  **제외 후 유효 타깃 × 요청한 port/proto 범위**에서 미관측된 기존 finding도 닫는다. 제외한 타깃은
-  판정 범위 밖이라 열린 상태를 유지하고, 선택 재스캔은 선택한 키만 닫힘 후보로 삼는다. 실패·중지된
-  실행 단위의 결과는 닫힘에 쓰지 않으며, 그 전에 완료·인입된 레거시 배치의 판정은 유지된다. 단독
-  스캐너는 원본 XML을 바꾸지 않고 versioned manifest의 파일 크기·SHA-256·실제 target을 검증해 같은
-  계약을 전달한다. TCP 식별 단계와 `--host-timeout` 실행(구형 결과 폴더)은 관측 보강만 하며 미관측
-  닫힘 권한은 없다 — ScanOps 는 더 이상 상한을 걸지 않지만 예전 산출물의 판정은 그대로 지킨다.
-
-## 스캔 성능 정책
-
-### 호스트 상한(`--host-timeout`)만 쓰지 않는다
-`--host-timeout` 은 전 구간(웹 단계 엔진·자동 워크플로·단독 스캐너·명령 미리보기)에서
-제거했다. **`--script-timeout` 은 유지한다** — 성질이 다르기 때문이다. nmap 문서: *"Any
-script instance which exceeds that time will be terminated and no output will be shown."*
-초과한 스크립트 인스턴스만 죽고 포트 표는 그대로 남으므로(실측 A/B: 상한이 걸려도 rc=0 ·
-완결 XML · `port=open`), 관측 손실 없이 느린 NSE 꼬리만 자른다.
-
-호스트 상한은 다르다. 실측에서 소요는 거의 줄지 않은 반면, nmap 은 상한에 걸린 호스트의 포트
-표를 **아예 쓰지 않고** 실행은 `exit="success"` 로 끝낸다. 그래서 상한 하나가 '살아 있는데 열린
-포트가 없다'로 읽혀 그 호스트의 기존 발견을 전부 닫고 '정상처리'까지 만든다 — 되돌리기 가장
-어려운 미탐이다.
-
-읽는 쪽(`timed_out_hosts`, 가져오기 계약의 `host_timeout` 판정)은 그대로 둔다. 구형 결과 폴더와
-사용자가 직접 입력한 명령은 여전히 상한을 들고 오고, 그때 판정을 지우면 그 시절의 미탐이
-가져오기 경로로 되살아난다.
-
-### 대신 프로세스 워치독 (기본 꺼짐)
-호스트 상한을 빼면 실행을 끊는 수단이 [중지] 버튼뿐이다. 그래서 `watchdog_seconds` 를 둔다 —
-nmap 프로세스 하나가 그 시간을 넘기면 밖에서 끝낸다. `--host-timeout` 과 **성질이 정반대**다:
-
-| | `--host-timeout` | 워치독 |
-|---|---|---|
-| 걸린 호스트의 포트 표 | 버린다 | **남는다** (아래 복구 참고) |
-| 실행 종료 상태 | `exit="success"` | 비정상 종료 (rc ≠ 0) |
-| 미관측 닫힘 권한 | **얻는다** (미탐의 원인) | 얻지 못한다 |
-
-**끊긴 XML 은 복구해서 남긴다.** `-oA` 가 증분 기록이라는 것만으로는 부족하다 — 중간에 끊긴
-XML 은 `</nmaprun>` 이 없어 표준 파서가 통째로 거절하고, 그러면 이미 끝난 호스트의 관측까지
-함께 사라진다(실측: 킬 직후 547바이트, `no element found`). SIGTERM·SIGINT 로 바꿔도 nmap 은
-닫아 주지 않는다. 그래서 마지막 완결 `</host>` 까지만 남기고 루트를 닫는다. `runstats` 는
-만들지 않으므로 산출물 완결성 검사는 그대로 실패한다 — **관측은 살리되 닫힘 권한은 주지
-않는다.**
-
-기본이 0(끔)인 이유는 정상적인 전 포트 스캔이 몇 시간 걸리는 망이 실제로 있기 때문이다 —
-섣부른 값은 '느린 망'을 '실패'로 바꾼다. 켤 때는 그 망에서 관측한 값보다 넉넉히 잡는다.
-
-**켜는 방법은 모든 표면에 있다.** 웹은 세부 설정의 [실행 상한] 슬라이더 하나로 단계 스캔과
-한 번에 실행 **양쪽** 요청에 실리고, 단독 스캐너는 `--watchdog SECONDS` 다. 기본이 꺼짐인 것과
-제어가 아예 없는 것은 다른 문제라, 상한을 없앤 경로마다 대체를 켤 수 있게 두고 계약 테스트가
-두 요청 분기를 각각 검사한다.
-
-> ⚠️ **아직 인입되지 않고, 웹에서 회수할 수도 없다.** 상한에 걸린 실행은 실패로 마감되고,
-> `_engine_worker` 는 `rc != 0` 이면 인입 전에 반환한다. 그래서 복구된 XML 에 관측이
-> **파일로는 남지만** 발견으로 들어오지는 않는다.
->
-> 그 파일이 어디 있는지는 **실행 방식마다 다르다**. 단계 스캔만 `data/scans/scan_<id>/` 를
-> 디렉터리로 만들고 그 안에 넣는다(`out_dir`). 한 번에 실행은 같은 문자열을 **파일 접두사**로
-> 써서(`_basename` + `.b<배치>` + `.<단계>`) `data/scans/` 바로 아래에
-> `scan_<id>.b<배치>.<단계>.xml` 로 흩어 놓는다 — 스캔별 폴더를 만들지 않는다. 어느 쪽이든
-> `/api/scans` 에는 산출물을 내려받는 경로가 없다 — [가져오기]는
-> 브라우저가 있는 PC 의 로컬 파일만 받는다. 즉 원격으로 접속한 사용자는 그 폴더를 고를 수
-> 없고, **스캔 서버에 직접 접근할 수 있는 관리자만** 꺼낼 수 있다. 화면의 [실행 상한] 설명도
-> 이 접근 경계를 그대로 적고, 산출물 위치는 실행 방식별로 갈라서 안내한다.
->
-> 절대경로까지 보려면 [상세] → [실제 실행 명령]의 `-oA` 인자를 보면 되는데, **그 패널은 단계
-> 스캔에만 있다** — 한 번에 실행은 `ScanRun.command` 에서 `-oA` 와 타깃을 빼고 Nmap argv
-> 이벤트도 남기지 않는다. 그래서 화면도 그 안내를 단계 스캔에만 띄운다.
->
-> 남은 선택지는 (a) 닫힘 권한 없이 부분 관측을 인입하거나 (b) 권한 검증을 붙인 산출물
-> 다운로드/재인입 경로를 만드는 것이고, 둘 다 별도 작업이다.
-
-워치독이 끊은 실행은 [실제 실행 명령] 패널에 `실행 상한 초과` 로 따로 표시된다(nmap 이 죽은
-`오류 · rc N` 과 구분해야 상한을 늘릴지 대상을 줄일지 판단할 수 있다).
-
-### 처리량 정책 — 가속이 아니라 부하 상한이다
-`--min-hostgroup 64` · `--max-parallelism 100` 을 스윕과 식별 단계에 같은 값으로 싣고, 세
-경로(웹 옵션 레지스트리·엔진·단독 스캐너)가 같은 숫자를 쓰는지 계약 테스트가 검사한다.
-
-**이 둘은 스캔을 빠르게 하는 옵션이 아니다.** `--max-parallelism` 은 동시 프로브의 *상한*이고
-(하한이 아니다), `--min-hostgroup` 은 포트/버전 스캔 묶음 크기의 *하한*이다. 목적은 스캔
-서버와 대상 장비의 부하를 예측 가능하게 묶어 두는 것이다 — 빠른 LAN 에서는 nmap 의 적응형
-병렬성이 100 보다 높이 올라갈 수 있는데, 그것을 스스로 100 으로 묶는 쪽을 택했다.
-
-세 가지 예외가 있다.
-- `--min-hostgroup` 은 **호스트 발견 단계에 싣지 않는다.** nmap 문서가 이 옵션은 호스트 발견
-  (`-sn` 포함)에 효과가 없다고 명시한다. 없는 효과를 명령줄에 적어 두면 읽는 사람이 그
-  단계도 묶여 도는 줄 안다. (자동 워크플로의 `-sS` 발견은 포트 스캔이라 해당 없음.)
-- `--defeat-rst-ratelimit` 는 **SYN 스캔 전용**이다. nmap 은 `-sT`·`-sU`·`-sn` 과 함께 주면
-  fatal 로 끝내므로, connect 스캔·UDP·`-sn` 발견 단계에는 싣지 않는다. 이 플래그는 대상이
-  스스로 거는 RST 율제한 보호를 무시하므로 **부하를 올리는** 쪽이다.
-- 재전송 상한은 **TCP 2 / UDP 4** 로 갈린다. 닫힌 UDP 포트의 ICMP port-unreachable 을 대상 OS
-  스택이 율제한하므로(흔히 초당 1회), TCP 와 같은 값을 쓰면 실제로 닫힌 포트가 계속
-  `open|filtered` 로 남아 '닫혔다'가 아니라 '못 봤다'가 쌓인다.
-
-노후 장비가 섞인 대역에는 단독 스캐너의 `--intensity gentle`(`-T3`, RST 율제한 우회 없음,
-병렬 10 / 호스트그룹 16 / 재시도 1, `--max-rate 150`)을 쓴다 — 이제 그 축소가 식별 단계까지
-함께 적용된다(예전에는 스윕에만 걸려 지키려던 장비가 식별 단계에서 100 병렬로 맞았다).
-
-## 테스트
-```powershell
-cd backend && .venv\Scripts\python -m pip install -r requirements-dev.txt
-cd backend && .venv\Scripts\python -m pytest -q
+```bash
+python scanner/scanops_scanner.py 10.0.0.10 --ports 22,80,443 --name branch-a
+python scanner/scanops_scanner_gui.py
 ```
-CI(`.github/workflows/ci.yml`)에서 백엔드 pytest(Python 3.11/3.12) + 프론트
-`npm test`/`npm audit`/빌드를 PR마다 자동 검증한다. 별도 Runtime E2E와 Package Runtime Smoke는
-실제 Nmap·브라우저·오프라인 ZIP 실행 계약을 검증한다.
 
-## 자산 출처
-스캔·식별·분류 도메인 로직(서비스 taxonomy 105종, 추측/확인 식별, NSE 추출)은
-자매 프로젝트 `nmapParser` 의 검증된 로직을 포팅한 것. (원본 불변, 복제 사용)
+생성된 `.xml`과 `*.manifest.json`을 `스캔 > 폴더째 가져오기`로 올립니다. 자세한 옵션은 [scanner/README.md](scanner/README.md)를 보세요.
+
+### 8. 테스트
+
+```bash
+cd backend && python -m pip install -r requirements-dev.txt && python -m pytest -q
+cd frontend && npm ci && npm test
+```
+
+## 기술 스택
+
+| 영역 | 사용 기술 |
+|---|---|
+| 백엔드 | Python, FastAPI 0.115.6, Uvicorn 0.34.0, SQLAlchemy 2.0.36, Pydantic 2.10.4, pydantic-settings 2.7.1, python-multipart 0.0.20, openpyxl 3.1.5 |
+| 데이터베이스 | SQLite(파일 하나, `data/scanops.db`) |
+| 프론트엔드 | React 18.3.1, Vite 7.3.6, @vitejs/plugin-react 5.2.0, SheetJS(xlsx) 0.20.3(저장소에 동봉) |
+| 스캔 | nmap, 단계 스캔 엔진 `engine/`(Python 표준 라이브러리만 사용) |
+| 단독 스캐너 | Python 3.8+ 표준 라이브러리, GUI(Graphical User Interface)는 tkinter |
+| 테스트 | pytest 8.3.4, httpx 0.28.1, Node.js 내장 테스트 러너(`node --test`) |
+| 배포 | Windows용 wheelhouse(CPython 3.12/3.13), 임베디드 Python all-in-one ZIP, PowerShell 설치 스크립트 |
+| CI | GitHub Actions(`.github/workflows/`) |
+
+## 문서
+
+- [진행 기록](docs/PROGRESS.md): 최종 목표, 기능별 구현 상태, 작업 이력
+- [운영 상세](docs/OPERATIONS.md): 오프라인 배포, 폴더째 가져오기, 스캔 결과 식별, 스캔 성능 정책
+- [설계서](docs/DESIGN.md): 아키텍처, 데이터 모델, API 목록
+- [재구축 평가](docs/REBUILD.md), [인수인계](docs/HANDOFF.md)
+- [단계 스캔 엔진](engine/README.md), [단독 스캐너](scanner/README.md), [검증 랩](lab/README.md)
+- [서드파티 고지](THIRD_PARTY_NOTICES.md)
+
+분류표와 식별 로직은 자매 프로젝트 `nmapParser`에서 옮겨 왔습니다. 저장소에 별도 라이선스 파일은 없습니다.
