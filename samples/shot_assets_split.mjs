@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 
 const TOKEN = readFileSync("samples/.token", "utf8").trim();
 const BASE = "http://localhost:8770";
-const SAMPLE = "C:\\Users\\upica\\OneDrive\\Documents\\SAMPLE1.xlsx";
+const SAMPLE = process.env.SAMPLE1_XLSX ?? "SAMPLE1.xlsx";
 const c = await connect();
 await c.send("Network.setCacheDisabled", { cacheDisabled: true });
 await c.send("DOM.enable");

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE nmaprun>
 <?xml-stylesheet href="file:///usr/bin/../share/nmap/nmap.xsl" type="text/xsl"?>
-<!-- Nmap 7.94SVN scan initiated Tue Jun 16 13:11:53 2026 as: nmap -sV -p 22,80,443,3000,3306,8080,9000 -oX /mnt/c/Users/upica/claude/ScanOps/samples/scanB.xml 127.0.0.1 -->
-<nmaprun scanner="nmap" args="nmap -sV -p 22,80,443,3000,3306,8080,9000 -oX /mnt/c/Users/upica/claude/ScanOps/samples/scanB.xml 127.0.0.1" start="1781583113" startstr="Tue Jun 16 13:11:53 2026" version="7.94SVN" xmloutputversion="1.05">
+<!-- Nmap 7.94SVN scan initiated Tue Jun 16 13:11:53 2026 as: nmap -sV -p 22,80,443,3000,3306,8080,9000 -oX samples/scanB.xml 127.0.0.1 -->
+<nmaprun scanner="nmap" args="nmap -sV -p 22,80,443,3000,3306,8080,9000 -oX samples/scanB.xml 127.0.0.1" start="1781583113" startstr="Tue Jun 16 13:11:53 2026" version="7.94SVN" xmloutputversion="1.05">
 <scaninfo type="connect" protocol="tcp" numservices="7" services="22,80,443,3000,3306,8080,9000"/>
 <verbose level="0"/>
 <debugging level="0"/>

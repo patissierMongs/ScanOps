@@ -16,7 +16,7 @@
 - **Goal-Driven 검증.** 각 기능은 *동작까지* 확인: 백엔드 `pytest`, 프론트 CDP로 콘솔/예외/탭전환 빈화면 확인.
 
 ## 2. 현재 상태 — 무엇을 재사용하고 무엇을 다시 할지
-현재 작업 경로: `C:\Users\upica\claude2\portscan2\ScanOps`
+현재 작업 경로: `<WORKSPACE>\ScanOps`
 
 | 영역 | 상태 | 처리 |
 |---|---|---|
@@ -83,7 +83,7 @@ taxonomy 105종, 추측/확인 식별, NSE 추출, compute_remarks, phase1 프�
 TSnmap의 7개 뷰 **기능**이 ScanOps에 살아있고(특히 컬럼 빌더·위험규칙·전역이력·엑셀고급), 영속 백엔드에 연결되며, 완전 오프라인 설치/실행되고, 백엔드 테스트 + 프론트 E2E(빈화면0)가 통과하고, 한국어 UI로 팀이 브라우저에서 전 기능을 쓸 수 있을 때. **"형태만"이 아니라 "기능까지" 통합되어야 완료.**
 
 ## 11. 참고 경로
-- TSnmap 원본(이식 참고, 수정 금지): `C:\Users\upica\claude\TSnmap\Column Builder A.dc.html`, `support.js`, `작업정리.md`
-- nmapParser 원본(이식 참고, 수정 금지): `C:\Users\upica\claude\nmapParser1\nmapParser.py`, `categories.xlsx`
-- 기존 설계 근거: `ScanOps/DESIGN.md` (아키텍처·데이터모델·로드맵 A–J)
-- 메모리 색인: `~/.claude/projects/C--Users-upica-claude-TSnmap/memory/MEMORY.md`
+- TSnmap 원본(이식 참고, 수정 금지): `<WORKSPACE>\TSnmap\Column Builder A.dc.html`, `support.js`, `작업정리.md`
+- nmapParser 원본(이식 참고, 수정 금지): `<WORKSPACE>\nmapParser1\nmapParser.py`, `categories.xlsx`
+- 기존 설계 근거: `docs/DESIGN.md` (아키텍처·데이터모델·로드맵 A–J)
+- 메모리 색인: `~/.claude/projects/<TSnmap 프로젝트>/memory/MEMORY.md`
