@@ -1,8 +1,7 @@
-// 자산대장 엑셀 고급 임포트 — TSnmap 의 검증된 순수 로직을 그대로 포트.
+// 자산대장 엑셀 고급 임포트.
 //  · 병합 셀 해제: !merges 를 앵커값으로 채움(세로 forward-fill / 가로 헤더 전파)
 //  · 헤더 행 자동 감지: 별칭 매칭 수 최다 행(제목/단일값 행 제외), 동점이면 위쪽
 //  · 컬럼 자동 매핑: 정규화 후 별칭 부분일치
-// (원본: TSnmap "Column Builder A.dc.html" unmergeFillWs/detectHeaderRow/computeAutoMap)
 import * as XLSX from "xlsx";
 
 const MAX_SHEET_ROWS = 100000;

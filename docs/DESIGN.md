@@ -2,7 +2,6 @@
 
 > 사내 팀용 **네트워크 노출 점검 라이프사이클 플랫폼**.
 > nmap 스캔부터 발견(finding)의 영속·분류·배정·마감·재스캔 조치검증·감사까지 **한 루프로 닫는다.**
-> 기존 `TSnmap`(휘발성 UI 데모)·`nmapParser`(정적 CSV 생성기)의 빈틈 — *"기록 시스템(system-of-record)의 부재"* — 를 정면으로 해결한다.
 
 ## 0. 확정된 결정 (변경 시 이 표를 갱신)
 
@@ -16,7 +15,6 @@
 | 설치 | **완전 에어갭** — 인터넷 0. Python·의존성·프론트 dist 전부 동봉 |
 | nmap | 서버에 설치됨, 관리자 권한(-sS/-O 가능) |
 | 컴플라이언스 | **KISA + 국정원(NIS)** 근거 매핑 |
-| 재사용 | nmapParser의 **taxonomy + 식별 로직 + NSE 추출** 전부 포팅 (원본 불변, 복제) |
 | 서비스 식별 | `service`는 taxonomy 키로 유지, `server`는 별도 관측값, 표시만 `server → product/version → service` |
 | 완성 범위(v1) | **풀세트** — 핵심 루프 + 부서통보 + 자산대장 + 감사리포트 + 대시보드 |
 | UI 언어 | 한국어 |
@@ -76,7 +74,7 @@
 
 - `service`는 Nmap의 정규화된 프로토콜 이름이라 분류와 위험 규칙에 사용한다. HTTP `Server`는 더
   구체적일 수 있지만 프록시·위조 가능성이 있는 자기신고 값이므로 `server`에 증거로 분리한다.
-- 초기 포팅은 원본 `nmapParser`처럼 Nmap `service`와 taxonomy를 식별의 중심으로 삼았다.
+- 초기 구현은 Nmap `service`와 taxonomy를 식별의 중심으로 삼았다.
   HTTP NSE는 실행했지만 Server 값을 별도 컬럼·관측 상태로 모델링하지 않아 원문(이후에는 비고)에만
   머물렀다. Server를 의도적으로 낮게 평가한 결정이 아니라 서비스 중심 데이터 모델의 구현 누락이었다.
 - 표시·검색·통보·내보내기는 `server → product+version → service`를 공통으로 사용하되, taxonomy는
@@ -156,7 +154,7 @@ backend/scanops/
 
 ## 6. 보안 원칙
 
-- nmap 호출은 **`subprocess.Popen(list, shell=False)`** 만 — 명령 주입 차단(nmapParser 원칙 계승).
+- nmap 호출은 **`subprocess.Popen(list, shell=False)`** 만 — 명령 주입 차단.
 - 타겟·옵션 화이트리스트 검증, 출력 인자(-oX 등) 서버가 강제.
 - 비밀번호 해시 저장, 역할 기반 접근(스캔 실행=auditor↑, 사용자 관리=admin).
 - 토큰은 사용자 `auth_version`을 포함하며 비밀번호 변경·재설정 시 기존 토큰을 전부 무효화한다.

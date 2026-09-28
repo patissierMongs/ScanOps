@@ -63,7 +63,7 @@ Derived from `git log`; dates are in KST (Korea Standard Time, Asia/Seoul). The 
 
 | Period | Main work |
 |---|---|
-| 2026-06-18 | Initial commit. Reliability, security and CI hardening, raw command scans, nmapParser scan builder port, asset ledger change preview |
+| 2026-06-18 | Initial commit. Reliability, security and CI hardening, raw command scans, scan builder, asset ledger change preview |
 | 2026-06-19 | Staged scan engine (`engine/`) and backend integration (`run-staged`), vulnerable-port rescans moved to the background engine, stage timeline UI |
 | 2026-06-21 – 06-25 | Default scan profile tuning, purpose-evidence panel and timeline heatmap, repository size reduction, per-finding rescans with a result drawer, risk rule management merged |
 | 2026-06-29 | Eight QA (Quality Assurance) rounds on the standalone scanner (QA-031 to QA-059 fixed; round 8 found nothing new) |

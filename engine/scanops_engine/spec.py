@@ -54,10 +54,10 @@ _MAX_RETRIES_CAP = 10
 # '느려서 못 쓰는' 문제를 '서버가 죽는' 문제로 바꾸지 않도록 위쪽을 막아 둔다.
 _MAX_SERVICE_WORKERS = 32
 
-# nmapParser 기본 UDP 포트 집합(원본 one-liner 계승)
+# 기본 UDP 포트 집합
 DEFAULT_UDP_PORTS = ("7,53,67,68,69,88,111,123,135,137,138,139,161,162,389,400,500,"
                      "514,520,623,1900,2049,4500,5060,5353,5355,11211")
-# 서비스 probe 기본 NSE — 타겟형(portrule 안 맞으면 자동 skip). 원본의 20종 전수 대신 핵심만.
+# 서비스 probe 기본 NSE — 타겟형(portrule 안 맞으면 자동 skip). 핵심만.
 # DB 찌르는 스크립트(redis-info·oracle-tns-version·ms-sql-info 등)는 장애 위험으로 기본 제외.
 # spec 이 stages.service.nse 를 지정하지 않았을 때의 **폴백**이다. 운영 경로(웹)는
 # engine_runner.build_job_spec 이 scan_options.NSE_DEFAULT_KEYS 를 항상 채워 넣으므로 여기까지

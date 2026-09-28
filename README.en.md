@@ -149,8 +149,9 @@ cd frontend && npm ci && npm test
 - [Progress record](docs/PROGRESS.en.md): final goal, verified feature status, work history
 - [Operations details](docs/OPERATIONS.md) (Korean): offline deployment, folder import, result identification, scan performance policy
 - [Design](docs/DESIGN.md) (Korean): architecture, data model, API list
-- [Rebuild evaluation](docs/REBUILD.md) (Korean), [Handoff notes](docs/HANDOFF.md) (Korean)
 - [Staged scan engine](engine/README.md), [Standalone scanner](scanner/README.md), [Validation lab](lab/README.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
-The taxonomy and identification logic were ported from the sister project `nmapParser`. The repository has no separate license file.
+## License
+
+[MIT License](LICENSE)

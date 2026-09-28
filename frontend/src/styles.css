@@ -1,4 +1,4 @@
-/* ScanOps design system — TSnmap 의 OKLCH + IBM Plex 디자인 언어를 이식. */
+/* ScanOps design system — OKLCH + IBM Plex. */
 :root {
   --bg: oklch(0.962 0.004 258);
   --surface: oklch(0.995 0.001 262);

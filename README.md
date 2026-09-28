@@ -149,8 +149,9 @@ cd frontend && npm ci && npm test
 - [진행 기록](docs/PROGRESS.md): 최종 목표, 기능별 구현 상태, 작업 이력
 - [운영 상세](docs/OPERATIONS.md): 오프라인 배포, 폴더째 가져오기, 스캔 결과 식별, 스캔 성능 정책
 - [설계서](docs/DESIGN.md): 아키텍처, 데이터 모델, API 목록
-- [재구축 평가](docs/REBUILD.md), [인수인계](docs/HANDOFF.md)
 - [단계 스캔 엔진](engine/README.md), [단독 스캐너](scanner/README.md), [검증 랩](lab/README.md)
 - [서드파티 고지](THIRD_PARTY_NOTICES.md)
 
-분류표와 식별 로직은 자매 프로젝트 `nmapParser`에서 옮겨 왔습니다. 저장소에 별도 라이선스 파일은 없습니다.
+## 라이선스
+
+[MIT License](LICENSE)
