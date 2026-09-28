@@ -41,7 +41,7 @@ CREDENTIAL_ARTIFACT_SUFFIXES = {
 INCLUDE_TOP = {
     "backend", "engine", "frontend", "packaging", "samples", "scripts",
     "START.bat", "README.md", "README.en.md", "docs",
-    "THIRD_PARTY_NOTICES.md", ".gitignore",
+    "LICENSE", "THIRD_PARTY_NOTICES.md", ".gitignore",
 }
 # Inside frontend we keep src/dist/public + config, but never node_modules (in EXCLUDE_DIRS).
 

@@ -1,7 +1,6 @@
 """nmap XML → finding dict 파싱.
 
-식별 품질(확인/추측/tcpwrapped/미확인)·NSE 핵심줄 추출·비고 조립은
-nmapParser 의 검증된 로직을 포팅한 것.
+식별 품질(확인/추측/tcpwrapped/미확인)·NSE 핵심줄 추출·비고 조립.
 """
 from __future__ import annotations
 

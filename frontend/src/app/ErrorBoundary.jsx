@@ -1,7 +1,7 @@
 import React from "react";
 
 // 뷰별 크래시 격리 — App 에서 <ErrorBoundary key={view}> 로 감싸 한 탭의 예외가
-// 앱 전체를 빈 화면으로 만들지 않게 한다(HANDOFF 함정 대응).
+// 앱 전체를 빈 화면으로 만들지 않게 한다.
 export default class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
